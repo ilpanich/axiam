@@ -462,12 +462,7 @@ impl AuthnRequestParams {
 
         // G-B — `axiam_idp_hint`. Bounded like the cosmetic four, but silent:
         // see the field's docs for why an unusable hint is no error.
-        if let Some(v) = present(raw.axiam_idp_hint)
-            && v.len() <= MAX_HINT_LEN
-            && !v.contains(char::REPLACEMENT_CHARACTER)
-        {
-            out.idp_hint = Some(v.to_owned());
-        }
+        out.idp_hint = bound_idp_hint(raw.axiam_idp_hint).map(str::to_owned);
 
         out
     }
@@ -515,6 +510,25 @@ impl AuthnRequestParams {
             })
             .collect()
     }
+}
+
+/// G-B — the one rule an `axiam_idp_hint` passes before anything reads it, on
+/// either carrier: trimmed, non-blank, at most [`MAX_HINT_LEN`] bytes and free
+/// of U+FFFD; `None` otherwise — dropped, never truncated, never an error.
+///
+/// Trimming is [`str::trim`], which removes leading and trailing **Unicode**
+/// whitespace — CR, LF and TAB included — so `corp-okta%0A` and `%09corp-okta`
+/// name `corp-okta` (F4-W3-07). Interior control characters, NUL and
+/// zero-width characters are not folded; such a hint matches no slug and no
+/// UUID and is ignored. Nothing the hint contains reaches a URL either way:
+/// only a matched provider's id does.
+///
+/// The query string reaches this through [`AuthnRequestParams::parse`]; the
+/// PAR endpoint applies it at push time (F4-W3-09), so a pushed hint is stored
+/// already bounded and an over-long one is stored as no hint — answered, when
+/// the browser arrives, exactly as the same value on the query string is.
+pub fn bound_idp_hint(raw: Option<&str>) -> Option<&str> {
+    present(raw).filter(|v| v.len() <= MAX_HINT_LEN && !v.contains(char::REPLACEMENT_CHARACTER))
 }
 
 /// A parameter counts as present only when it is there and not blank.
@@ -1193,6 +1207,40 @@ mod tests {
             assert!(p.parse_error().is_none(), "{label}: never a parse error");
             assert_eq!(p, AuthnRequestParams::default(), "{label}: as if unsent");
         }
+    }
+
+    /// F4-W3-07 / F4-W3-09 — the shared bound: what the query parse keeps is
+    /// exactly what `bound_idp_hint` keeps, and trimming is `str::trim`, so
+    /// CR, LF and TAB at the ends are folded while interior ones are not.
+    #[test]
+    fn the_shared_idp_hint_bound_trims_unicode_whitespace_and_matches_the_parse() {
+        let long = "x".repeat(MAX_HINT_LEN + 1);
+        for value in [
+            "corp-okta",
+            " corp-okta ",
+            "corp-okta\n",
+            "\tcorp-okta",
+            "\r\ncorp-okta",
+            "corp\nokta",
+            long.as_str(),
+            "corp\u{FFFD}okta",
+            "   ",
+        ] {
+            let parsed = parse(RawAuthnParams {
+                axiam_idp_hint: Some(value),
+                ..Default::default()
+            });
+            assert_eq!(
+                parsed.idp_hint.as_deref(),
+                bound_idp_hint(Some(value)),
+                "{value:?}: the push-time bound and the query bound agree"
+            );
+        }
+        assert_eq!(bound_idp_hint(Some("corp-okta\n")), Some("corp-okta"));
+        assert_eq!(bound_idp_hint(Some("\tcorp-okta")), Some("corp-okta"));
+        assert_eq!(bound_idp_hint(Some("corp\nokta")), Some("corp\nokta"));
+        assert_eq!(bound_idp_hint(Some(&long)), None);
+        assert_eq!(bound_idp_hint(None), None);
     }
 
     /// G-B (#817) — the hint is not one of the nine: it is not `present`, so

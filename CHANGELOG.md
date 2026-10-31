@@ -61,16 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /api/v1/auth/federation/providers` shows — and the sign-in page receives
   only the matched provider's id (`/login?…&idp=<uuid>`). The hint overrides
   the default; a hint that names nothing (unknown, disabled, another tenant's)
-  is ignored and the response is byte-identical to one without it; a default
+  is ignored and the response is byte-identical to one without it (apart from
+  the hint's own echo inside `return_to`); a default
   whose provider was later disabled is ignored, never an error. A
   `default_idp` the tenant cannot see is refused with `400` on create and on
   update. Read on every `authn_request_params` lane and for `fapi2` clients;
   it changes nothing that is issued, and with a live session no sign-in page
   is shown. Dynamic registration and CIMD cannot set `default_idp`. The sign-in
   page starts the matched provider by itself after 1.5 seconds (3 with reduced
-  motion), behind a "Choose another way to sign in" control, and never loops
-  (no redirect after a failed provider leg, for an unlisted id, or for a
-  provider already started in the last ten minutes); the console client form
+  motion) once the user has entered their workspace, behind a "Choose another
+  way to sign in" control, and never loops (a failed provider leg links back
+  without the provider id; nothing starts for an unlisted id or a provider
+  already started or declined in the last ten minutes); on a re-authentication
+  hop (`prompt=login`, `max_age`, a step-up) it only highlights the provider
+  and waits for a click (#833). A pushed hint is bounded at push time like
+  the query one; the console client form
   gains a "Default identity provider" select. A provider sign-in started from
   the login hop — automatically or with a provider button — now returns to the
   relying party's authorization request when it completes (OIDC, OAuth2, SAML

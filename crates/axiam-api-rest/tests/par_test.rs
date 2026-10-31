@@ -837,6 +837,69 @@ async fn a_push_with_neither_carrier_binds_no_key() {
     );
 }
 
+/// Read back the provider hint the endpoint actually stored.
+async fn stored_idp_hint(f: &Fixture, request_uri: &str) -> Option<String> {
+    let repo = SurrealPushedAuthRequestRepository::new(f.db.clone());
+    repo.consume(f.tenant_id, &hash_request_uri(request_uri))
+        .await
+        .unwrap()
+        .expect("the pushed request must exist")
+        .params
+        .axiam_idp_hint
+}
+
+/// F4-W3-09 — a pushed `axiam_idp_hint` is bounded at push time by the same
+/// rule as the query string's (`MAX_HINT_LEN`, trimmed, U+FFFD refused): an
+/// over-long one is accepted and stored as no hint — exactly as the push treats
+/// an over-long `login_hint`, which it also never refuses — and a usable one is
+/// stored trimmed.
+#[actix_web::test]
+async fn a_pushed_idp_hint_is_bounded_at_push_time_and_never_refused() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let max = axiam_oauth2::authn_params::MAX_HINT_LEN;
+
+    let (status, body) = par!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        format!("&login_hint={}", "a".repeat(max + 1))
+    );
+    assert_eq!(
+        status, 201,
+        "an over-long pushed login_hint is not refused at push: {body}"
+    );
+
+    let (status, body) = par!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        format!("&axiam_idp_hint={}", "a".repeat(max + 1))
+    );
+    assert_eq!(status, 201, "nor is an over-long pushed hint: {body}");
+    assert_eq!(
+        stored_idp_hint(&f, body["request_uri"].as_str().unwrap()).await,
+        None,
+        "an over-long hint is stored as no hint, never truncated"
+    );
+
+    let (status, body) = par!(
+        app,
+        f,
+        f.client_id,
+        f.client_secret,
+        format!("&axiam_idp_hint=%20{}%09", "a".repeat(max))
+    );
+    assert_eq!(status, 201, "body: {body}");
+    assert_eq!(
+        stored_idp_hint(&f, body["request_uri"].as_str().unwrap()).await,
+        Some("a".repeat(max)),
+        "a hint at the bound is kept, trimmed like the query's"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The authorization endpoint answers a person in a language they can read
 // ---------------------------------------------------------------------------

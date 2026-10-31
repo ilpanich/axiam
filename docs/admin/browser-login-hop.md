@@ -100,7 +100,10 @@ sign-in page should start with — resolved on the server from the request's
 lane, to the first hop and to the re-authentication hop alike. It is a validated
 UUID of a provider the tenant's public list already shows, never the relying
 party's string, and when nothing resolves the URL is byte-identical to one
-built without the feature. It is never put on a `/consent` redirect. The
+built without the feature, apart from the hint's own echo inside `return_to`
+(the request's query string, carried verbatim as always). It is never put on a
+`/consent` redirect. The sign-in page acts on it only after the person has
+entered their workspace, and never by itself on a re-authentication hop. The
 resolution rules, `default_idp` and the page's auto-redirect behaviour are in
 [Choosing the provider](oidc-authn-parameters.md#choosing-the-provider-axiam_idp_hint-and-default_idp).
 

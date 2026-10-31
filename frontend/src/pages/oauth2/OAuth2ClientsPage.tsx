@@ -728,7 +728,8 @@ function ClientFormFields({
         >
           When a sign-in starts with no <code>axiam_idp_hint</code>, the login
           page goes straight to this provider. Users can still choose another
-          way to sign in.
+          way to sign in. The list is a convenience; the server checks that the
+          provider is one this client&apos;s tenant can sign in with.
         </p>
       </div>
 

@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { StrictMode } from "react";
-import { act, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { apiMock, res } from "@/test/apiMock";
@@ -22,6 +22,7 @@ vi.mock("react-router", async (importOriginal) => {
 });
 
 import { LoginPage } from "./LoginPage";
+import { SsoCallbackPage } from "./auth/SsoCallbackPage";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import { markAutoRedirect } from "@/services/ssoLogin";
 
@@ -182,8 +183,10 @@ describe("LoginPage — idp auto-redirect", () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
-  it.each(["error", "error_description", "sso_error"])(
-    "never redirects when the page carries %s (a failed SSO leg)",
+  // Defence in depth only (F4-W3-04): nothing AXIAM builds puts these on
+  // `/login`. The guard that operates on a real failure is the next describe.
+  it.each(["error", "error_description"])(
+    "never redirects when the page carries %s (defence in depth)",
     async (param) => {
       await setup(`?${param}=access_denied&idp=${IDP}`);
       expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
@@ -259,6 +262,125 @@ describe("LoginPage — idp auto-redirect", () => {
     await advance(2000);
     expect(startCalls()).toHaveLength(0);
     await advance(1200);
+    expect(startCalls()).toHaveLength(1);
+  });
+});
+
+/**
+ * #833 (F4-W3-03, D-N26) — a re-authentication is never started for the
+ * person: the provider is highlighted and waits for a click.
+ */
+describe("LoginPage — idp on a re-authentication hop", () => {
+  const authorize = (q: string) => encodeURIComponent(`/oauth2/authorize?client_id=rp&${q}`);
+
+  it.each([
+    ["reauth=1", `?return_to=${authorize("x=1")}&reauth=1&idp=${IDP}`],
+    ["a step-up acr", `?return_to=${authorize("x=1")}&acr=urn:axiam:acr:mfa&idp=${IDP}`],
+    ["prompt=login in return_to", `?return_to=${authorize("prompt=login")}&idp=${IDP}`],
+    ["prompt=consent login in return_to", `?return_to=${authorize("prompt=consent%20login")}&idp=${IDP}`],
+    ["max_age=0 in return_to", `?return_to=${authorize("max_age=0")}&idp=${IDP}`],
+  ])("does not auto-start on %s, and highlights the provider", async (_label, query) => {
+    const user = await setup(query);
+    const suggested = await screen.findByRole("button", { name: "Sign in with Acme SSO" });
+    await advance(5000);
+    expect(screen.queryByTestId("idp-auto-redirect")).not.toBeInTheDocument();
+    expect(startCalls()).toHaveLength(0);
+    expect(suggested).toHaveAttribute("data-suggested", "true");
+    expect(screen.getByRole("button", { name: "Sign in with Other" })).not.toHaveAttribute(
+      "data-suggested",
+    );
+
+    // One click away: the person's click is what starts it.
+    await user.click(suggested);
+    expect(startCalls()).toHaveLength(1);
+    expect(startCalls()[0][1]).toEqual(expect.objectContaining({ federation_config_id: IDP }));
+  });
+
+  it("still auto-starts for an ordinary max_age", async () => {
+    await setup(`?return_to=${authorize("max_age=3600")}&idp=${IDP}`);
+    await screen.findByTestId("idp-auto-redirect");
+    await advance(1600);
+    expect(startCalls()).toHaveLength(1);
+  });
+});
+
+/**
+ * #833 (F4-W3-02) — providers load only after the person submits the
+ * workspace step. A workspace taken from the URL never loads them, so it can
+ * never start one: loading them from URL parameters would make `/login` a
+ * redirector to any tenant operator's identity provider.
+ */
+describe("LoginPage — idp with a workspace in the URL", () => {
+  it.each([
+    ["org", `?org=acme&idp=${IDP}`],
+    ["org and tenant", `?org=acme&tenant=eu&idp=${IDP}`],
+    ["tenant", `?tenant=eu&idp=${IDP}`],
+  ])("loads no providers and starts nothing from ?%s=", async (_label, query) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderWithProviders(<LoginPage />, { route: `/login${query}` });
+    expect(await screen.findByLabelText("Username or email")).toBeInTheDocument();
+    await advance(5000);
+    expect(apiMock.get.mock.calls.filter(([url]) => url === PROVIDERS_PATH)).toHaveLength(0);
+    expect(screen.queryByTestId("idp-auto-redirect")).not.toBeInTheDocument();
+    expect(startCalls()).toHaveLength(0);
+    expect(assign).not.toHaveBeenCalled();
+  });
+});
+
+/** #833 (F4-W3-11) — "choose another way" survives a reload. */
+describe("LoginPage — cancel and reload", () => {
+  it("records the cancel, so a reload does not restart the countdown", async () => {
+    const query = `?return_to=${encodeURIComponent("/oauth2/authorize?x=1")}&idp=${IDP}`;
+    const user = await setup(query);
+    await screen.findByTestId("idp-auto-redirect");
+    await user.click(screen.getByRole("button", { name: "Choose another way to sign in" }));
+    expect(sessionStorage.getItem("axiam.sso.auto")).toContain(IDP);
+
+    // The reload: a fresh page, the same tab's storage.
+    cleanup();
+    vi.useRealTimers();
+    await setup(query);
+    expect(await screen.findByRole("button", { name: "Sign in with Acme SSO" })).toBeInTheDocument();
+    await advance(5000);
+    expect(screen.queryByTestId("idp-auto-redirect")).not.toBeInTheDocument();
+    expect(startCalls()).toHaveLength(0);
+  });
+});
+
+/**
+ * #833 (F4-W3-04) — the real failure path, end to end: the page starts the
+ * provider, the provider fails, `SsoCallbackPage` renders its "Back to sign in"
+ * link, and the page that link opens starts nothing — because the link carries
+ * no `idp`, even with the ten-minute storage guard gone.
+ */
+describe("LoginPage — the return from a failed provider leg", () => {
+  it("follows SsoCallbackPage's own failure link and does not start again", async () => {
+    const returnTo = "/oauth2/authorize?client_id=rp&x=1";
+    await setup(`?return_to=${encodeURIComponent(returnTo)}&idp=${IDP}`);
+    await screen.findByTestId("idp-auto-redirect");
+    await advance(1600);
+    expect(startCalls()).toHaveLength(1);
+    cleanup();
+
+    renderWithProviders(<SsoCallbackPage />, {
+      route: "/auth/sso/callback?error=access_denied",
+    });
+    await screen.findByRole("alert");
+    const href = screen.getByRole("link", { name: "Back to sign in" }).getAttribute("href") ?? "";
+    cleanup();
+
+    const url = new URL(href, "https://spa.example");
+    expect(url.pathname).toBe("/login");
+    expect(url.searchParams.get("return_to")).toBe(returnTo);
+    expect(url.searchParams.has("idp")).toBe(false);
+
+    // Not the storage guard doing the work: remove it.
+    sessionStorage.removeItem("axiam.sso.auto");
+    vi.useRealTimers();
+    await setup(url.search);
+    expect(await screen.findByRole("button", { name: "Sign in with Acme SSO" })).toBeInTheDocument();
+    await advance(5000);
+    expect(screen.queryByTestId("idp-auto-redirect")).not.toBeInTheDocument();
     expect(startCalls()).toHaveLength(1);
   });
 });

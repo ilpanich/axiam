@@ -98,8 +98,33 @@ interface LoginResponse {
   setup_token?: string;
 }
 
-/** Query parameters a failed SSO leg may leave on `/login`; any one vetoes the auto-redirect. */
-const SSO_ERROR_PARAMS = ["error", "error_description", "sso_error"] as const;
+/**
+ * Error parameters that veto the auto-redirect when `/login` carries one.
+ *
+ * Defence in depth only (#833, F4-W3-04): nothing AXIAM builds puts either on
+ * `/login` — a failed provider leg ends on `SsoCallbackPage`, whose "Back to
+ * sign in" link carries no `idp` — so this is not the guard that stops a loop.
+ * It is kept because it costs nothing and covers a hand-made or third-party
+ * link back to the page.
+ */
+const SSO_ERROR_PARAMS = ["error", "error_description"] as const;
+
+/**
+ * Whether the authorization request in `return_to` asks for a fresh
+ * authentication (`prompt=login`, or `max_age=0`).
+ *
+ * The re-authentication hop says so with `reauth=1`; a first hop does not,
+ * because there was no session to distrust — but the relying party's request
+ * may still demand fresh credentials, and the page can read that from the
+ * request it is about to resume. Under PAR those parameters are in the pushed
+ * request, not in `return_to`, and only `reauth`/`acr` can say so.
+ */
+function demandsFreshLogin(returnTo: string | null): boolean {
+  if (!returnTo) return false;
+  const q = new URLSearchParams(returnTo.slice(returnTo.indexOf("?") + 1));
+  const prompt = q.get("prompt") ?? "";
+  return prompt.split(" ").includes("login") || q.get("max_age") === "0";
+}
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -208,12 +233,31 @@ export function LoginPage() {
   // returned: it is never used to build a URL, so a hand-written
   // `/login?idp=…` can at worst start a provider this tenant already shows as a
   // button. Anything that is not a UUID is dropped here.
+  //
+  // That claim rests on *which* tenant: the providers are loaded only when the
+  // person submits the workspace step, never from `?org=`/`?tenant=` or from
+  // anything in `return_to` (#833, F4-W3-02). Loading them from the URL would
+  // let a hand-made `/login?org=<theirs>&idp=<their provider>` send a visitor
+  // to any tenant operator's identity provider with no click — an open
+  // redirect on AXIAM's origin. Binding the workspace to the hop has to be done
+  // server-side, never through a URL parameter.
   const [idpHint] = useState(() => parseIdpHint(searchParams.get("idp")));
-  // Whether this page load is the *return* from a failed SSO leg, or a second
-  // visit for the same provider (Back button, a relying party restarting the
-  // request). Either way the person already saw that provider; sending them
-  // there again is the loop. Evaluated once, before this page records its own
-  // attempt, so it cannot see itself.
+  // #833 (F4-W3-03, D-N26) — a re-authentication is never started for the
+  // person. `prompt=login` and `max_age` are not forwarded to the upstream
+  // provider (a later item), so a provider that still holds a session would
+  // answer at once and AXIAM would record a fresh authentication nobody
+  // performed. On such a hop the matching provider is only *suggested* —
+  // highlighted among the buttons — and the person has to click it.
+  const [freshAuthRequired] = useState(
+    () => reauthRequested || requiredAcr !== null || demandsFreshLogin(returnTo),
+  );
+  // Whether this page load is a second visit for the same provider (Back
+  // button, a relying party restarting the request, a reload after "choose
+  // another way"), or carries an error parameter (defence in depth; see
+  // `SSO_ERROR_PARAMS`). Either way the person already saw that provider;
+  // sending them there again is the loop. Evaluated once, before this page
+  // records its own attempt, so it cannot see itself. The return from a failed
+  // leg is quiet for a simpler reason: its link carries no `idp`.
   const [autoSuppressed] = useState(
     () =>
       SSO_ERROR_PARAMS.some((k) => searchParams.has(k)) ||
@@ -548,10 +592,14 @@ export function LoginPage() {
   // loaded provider, the person has not declined, and nothing says we have been
   // here before. No match (unknown, disabled, other tenant, garbled) is simply
   // "no auto-redirect": the page is the ordinary one.
-  const autoProvider =
-    !autoSuppressed && !autoCancelled && idpHint !== null && providers
+  const hintedProvider =
+    idpHint !== null && providers
       ? (providers.find((p) => p.id.toLowerCase() === idpHint) ?? null)
       : null;
+  const autoProvider =
+    !autoSuppressed && !autoCancelled && !freshAuthRequired ? hintedProvider : null;
+  // On a re-authentication hop the hinted provider is highlighted, not started.
+  const suggestedProviderId = freshAuthRequired ? (hintedProvider?.id ?? null) : null;
   const autoPending = autoProvider !== null && !loopBlocked;
   const autoProviderId = autoPending ? autoProvider.id : null;
 
@@ -865,7 +913,12 @@ export function LoginPage() {
               variant="ghost"
               className="mt-4"
               autoFocus
-              onClick={() => setAutoCancelled(true)}
+              onClick={() => {
+                // #833 (F4-W3-11) — recorded like a start, so a reload does
+                // not restart the countdown the person just declined.
+                markAutoRedirect(autoProvider.id.toLowerCase());
+                setAutoCancelled(true);
+              }}
             >
               {m.ssoChooseAnother}
             </Button>
@@ -1103,6 +1156,7 @@ export function LoginPage() {
                         provider={p}
                         onSelect={handleSsoSelect}
                         busy={ssoBusyId === p.id}
+                        suggested={p.id === suggestedProviderId}
                         disabled={
                           isLoading || passkeyBusy || ssoBusyId !== null
                         }

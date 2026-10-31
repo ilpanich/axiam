@@ -655,6 +655,40 @@ async fn t493_an_ignored_hint_is_byte_identical_to_no_hint() {
     }
 }
 
+/// F4-W3-08 — a repeated `axiam_idp_hint` is refused exactly as a repeated
+/// `login_hint` is: by the query parser, before any hint is read (RFC 6749
+/// §3.1 forbids repeated parameters). The one way the hint parameter changes the
+/// outcome, and it turns on the repetition, never on a value — a repeat of two
+/// providers the tenant lists is answered the same as a repeat of nonsense.
+#[actix_rt::test]
+async fn a_repeated_hint_is_refused_like_a_repeated_login_hint() {
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+    let (_, client_id) = client(&app, &jwt, json!({})).await;
+
+    let login_hint =
+        snapshot(hop(&app, f.tenant_id, &client_id, "&login_hint=a&login_hint=b").await).await;
+    assert_ne!(
+        login_hint.0, 302,
+        "a repeated parameter is not a sign-in hop"
+    );
+    for extra in [
+        "&axiam_idp_hint=a&axiam_idp_hint=b".to_owned(),
+        format!(
+            "&axiam_idp_hint={}&axiam_idp_hint={}",
+            f.own, f.org_inherited
+        ),
+    ] {
+        let repeated = snapshot(hop(&app, f.tenant_id, &client_id, &extra).await).await;
+        assert_eq!(
+            repeated, login_hint,
+            "a repeated hint ({extra}) is answered as a repeated login_hint"
+        );
+    }
+}
+
 /// **T-493, the enumeration property.** The lookup is permissible only because
 /// the list it consults is already public for the tenant: the endpoint must
 /// answer no question the providers listing does not already answer. Stated

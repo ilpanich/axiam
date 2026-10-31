@@ -303,20 +303,39 @@ Rules that follow from that:
   that is also another provider's id, matches nothing.
 - The value is trimmed and bounded to 256 bytes (`MAX_HINT_LEN`, as
   `login_hint`); a longer value, or one that is not valid UTF-8, is dropped, not
-  truncated.
+  truncated. Trimming is Rust's `str::trim`: leading and trailing **Unicode**
+  whitespace is removed, CR, LF and TAB included, so `corp-okta%0A` and
+  `%09corp-okta` name `corp-okta`. Control characters, NUL or zero-width
+  characters *inside* the value are not folded; such a hint matches nothing and
+  is ignored. Nothing of the value reaches a URL either way — only a matched
+  provider's id does.
+- **A repeated `axiam_idp_hint` is refused like a repeated `login_hint`.**
+  `?axiam_idp_hint=a&axiam_idp_hint=b` is rejected by the query parser before
+  any hint is read, with the same response a repeated `login_hint` gets (RFC
+  6749 §3.1: parameters must not repeat). It is the one way the hint parameter
+  changes the outcome, and it depends on the repetition, not on any value.
 
 ### A hint that names nothing is a no-op
 
 An unknown hint, a disabled provider, a provider that exists only in another
 tenant, a URL, an ambiguous name: all are **silently ignored**, and the response
-is **byte-identical** to the request without a hint — the client's `default_idp`
+is **byte-identical** to the request without a hint *apart from the hint's own
+echo inside `return_to`* — the client's `default_idp`
 (below) then applies as it would have, or the ordinary chooser is shown. There is
 no error and no distinguishable status, so the hint cannot be used to probe
 which providers exist. This is a lookup, unlike `login_hint`'s no-lookup rule,
 and that is permissible only because the list it consults is already public for
 the tenant (T-493).
 
-What reaches the sign-in page is a type, never the string: the redirect gains
+The echo is the one exception, and it is not new: `return_to` carries the
+relying party's query string verbatim, as it carries every unknown parameter,
+so the raw hint is inside it — opaque to the sign-in page, which never parses
+it and only navigates back to it, after which the server resolves the hint
+again. A hint long enough to push `return_to` past its 4096-byte limit turns
+the hop into the ordinary refusal for a request with nothing safe to come back
+to, exactly as any long unknown parameter always has.
+
+What the sign-in page *acts on* is a type, never the string: the redirect gains
 `&idp=<uuid>` (see [the browser login hop](browser-login-hop.md#the-idp-parameter)).
 `idp` is never sent to `/consent`.
 
@@ -328,12 +347,18 @@ What reaches the sign-in page is a type, never the string: the redirect gains
   body of `POST /oauth2/par` and is **authoritative**; the authorization
   endpoint reads it from the stored request. A copy on the query string beside a
   `request_uri` is ignored (RFC 9126 §4). The push itself never refuses a hint:
-  one that names nothing is answered as no hint when the browser arrives.
+  it is bounded **at push time** by the same rule as the query string (trimmed,
+  `MAX_HINT_LEN`, valid UTF-8), so an over-long pushed hint is stored as no hint
+  — just as the push never refuses an over-long `login_hint` — and one that
+  names nothing is answered as no hint when the browser arrives. The only thing
+  of the pushed hint the front channel ever sees is the id it resolved to, on
+  the `/login` redirect.
 - **A live session means no hop and no hint.** When the browser already holds an
   OP session the authorization endpoint answers with a code and never builds a
   sign-in URL; the hint selects nothing (the same as Keycloak).
 - **Re-authentication.** The `reauth=1` hop (`prompt=login`, `max_age`, `acr_values`)
-  carries the resolved `idp` like the first hop does.
+  carries the resolved `idp` like the first hop does, but the sign-in page
+  **does not start it by itself** (D-N26): see below.
 
 ### `default_idp` — a per-client default
 
@@ -345,12 +370,25 @@ what the tenant offers.*
 | | |
 |---|---|
 | **Precedence** | A hint that resolves beats `default_idp`; `default_idp` beats the chooser. |
-| **Set with** | `POST /api/v1/oauth2-clients` (`default_idp`: a federation config id) and `PUT /api/v1/oauth2-clients/{id}` (omit to leave, `null` to clear, an id to set). The admin console has a **Default identity provider** select on the client form. |
+| **Set with** | `POST /api/v1/oauth2-clients` (`default_idp`: a federation config id) and `PUT /api/v1/oauth2-clients/{id}` (omit to leave, `null` to clear, an id to set). The admin console has a **Default identity provider** select on the client form; its options are a convenience drawn from the sign-in page's provider listing, and the server's validation below is what decides. |
 | **Validation** | Must name a provider the client's tenant can sign in with — its own enabled configs or the organization's enabled, inheritable, unshadowed ones — or the request is refused with `400 validation_error` naming `default_idp`. The rule runs on **create and on the merged update path**, so a PATCH cannot set what a POST could not. |
 | **A stale default** | If the provider is later disabled or deleted, the default is **ignored at the authorization endpoint** — the chooser is shown — and is never an error. The stored value is still echoed by the admin API. |
 | **Dynamic registration** | Neither RFC 7591 (`dcr`) nor client ID metadata documents (`cimd`) can set it: a self-registering client does not get to choose what an operator's sign-in page does. Only the administrator API sets it. |
 
 ### What the sign-in page does with `idp`
+
+**The person names the workspace first.** The login hop carries no organization
+or tenant, so the sign-in page loads its providers only when the person submits
+the workspace step — never from `?org=`/`?tenant=` and never from anything in
+`return_to` — and `idp` does nothing until then. Every hinted sign-in therefore
+asks for the organization first, and the redirect below begins after
+**Continue**. This is load-bearing, not an omission: the page cannot tell a
+server-built `/login` URL from a hand-made one, and any tenant operator on a
+shared deployment controls their own provider's endpoint, so a page that loaded
+providers from URL parameters would make `/login?org=<theirs>&idp=<theirs>` a
+link on AXIAM's origin that sends a visitor to an operator-chosen URL with no
+click (T-493). Binding the workspace to the hop, if it is ever wanted, has to be
+done server-side, not through a URL parameter.
 
 When `/login?idp=<uuid>` matches a provider the page has loaded, it starts that
 provider **by itself**, for OIDC, OAuth2, SAML and Apple providers alike:
@@ -358,14 +396,34 @@ provider **by itself**, for OIDC, OAuth2, SAML and Apple providers alike:
 - It first shows "Redirecting to *{provider}*…" with a visible **Choose another
   way to sign in** button, and waits **1.5 seconds** (**3 seconds** when the
   person's system asks for reduced motion). Cancelling shows the ordinary
-  chooser and the redirect never fires.
-- **No loop.** The page never auto-redirects when `/login` carries an error
-  parameter (`error`, `error_description`, `sso_error`) — the return from a failed
-  provider leg; when the `idp` value is not a UUID matching a loaded provider;
-  more than once per page load; or for a provider it already started in this tab
-  within the last 10 minutes (a `sessionStorage` guard, recorded *before*
-  navigating away so Back from the provider is quiet, and cleared on a
-  successful sign-in). A start that fails shows the ordinary page and its error.
+  chooser and the redirect never fires; the cancel is remembered in the tab
+  like a start (below), so reloading the page does not restart the countdown.
+- **Not on a re-authentication** (D-N26). When the hop asks for a fresh
+  authentication — `reauth=1` (from `prompt=login`, `max_age` or
+  `acr_values`), a step-up `acr`, or a `return_to` whose request carries
+  `prompt=login` or `max_age=0` — the page does not start the provider: it
+  highlights that provider's button and the person has to click it. AXIAM does
+  not yet forward `prompt=login`/`max_age` to an OIDC provider or `ForceAuthn`
+  to a SAML identity provider, so a provider that still holds a session would
+  answer at once, and an unattended start would record a fresh authentication
+  nobody performed. Forwarding them upstream is a later item; a provider that
+  ignores them (several social providers do) cannot give a real
+  re-authentication even then. Under PAR the request's `prompt`/`max_age` are
+  in the pushed request rather than in `return_to`, so there only `reauth` and
+  `acr` mark the hop.
+- **No loop.** What stops a loop on a real failure: the failed leg ends on the
+  SSO callback page, whose **Back to sign in** link carries no `idp`, so the
+  page it opens has nothing to start; a relying party that restarts the request
+  produces a fresh `/login?…&idp=`, which a `sessionStorage` guard suppresses
+  for a provider already started (or declined) in this tab within the last 10
+  minutes — recorded *before* navigating away, so Back from the provider is
+  quiet, and cleared on a successful sign-in; the page starts at most once per
+  load; and every start needs the person to submit the workspace step, so
+  nothing repeats unattended even where storage is unavailable. The page also
+  declines when `/login` carries an `error` or `error_description` parameter,
+  as defence in depth only — nothing AXIAM builds puts one there. When the `idp`
+  value is not a UUID matching a loaded provider, nothing starts. A start that
+  fails shows the ordinary page and its error.
 - **Back to the relying party** (#832). A provider sign-in started from the
   login hop — by this redirect or by a provider button on the hop page —
   carries the hop's `return_to` with it (in the tab's `sessionStorage`, as the

@@ -132,9 +132,12 @@ pub struct PushedRequest {
     /// protocol error — instead of surfacing in a browser after a sign-in the
     /// user should never have been asked for.
     pub resource: Option<String>,
-    /// G-B (#817) — `axiam_idp_hint`, stored as pushed and resolved (or
-    /// ignored) at the authorization endpoint. Not validated here: a hint that
-    /// names nothing is answered as no hint, never refused, on either carrier.
+    /// G-B (#817) — `axiam_idp_hint`, resolved (or ignored) at the
+    /// authorization endpoint. Bounded at push time by
+    /// [`crate::authn_params::bound_idp_hint`] (F4-W3-09): an over-long,
+    /// blank or garbled value is stored as no hint. Never validated against a
+    /// provider here and never refused: a hint that names nothing is answered
+    /// as no hint on either carrier.
     pub axiam_idp_hint: Option<String>,
 }
 
@@ -283,7 +286,14 @@ where
                     claims_locales: req.claims_locales,
                     dpop_jkt: req.dpop_jkt,
                     resource,
-                    axiam_idp_hint: req.axiam_idp_hint,
+                    // F4-W3-09 — the query string's bound, applied before
+                    // storage rather than only at use, so the stored row never
+                    // holds more than a hint can be. Silent, as on the query:
+                    // an unusable hint is no hint, never an error at push.
+                    axiam_idp_hint: crate::authn_params::bound_idp_hint(
+                        req.axiam_idp_hint.as_deref(),
+                    )
+                    .map(str::to_owned),
                 },
                 expires_at,
             })
@@ -376,6 +386,12 @@ where
     /// hint authorizes nothing and is resolved against the tenant's public
     /// provider list before any of it is used, so handing it out keeps the
     /// property above: nothing returned here can stand in for `consume`.
+    ///
+    /// What becomes observable is only the *resolved* provider id, on the
+    /// `/login` redirect the holder of the `request_uri` is sent to — a
+    /// tenant-public id the browser would show anyway (F4-W3-09). The pushed
+    /// string itself is never echoed: a PAR authorization request's
+    /// `return_to` carries `client_id` and `request_uri`, not the hint.
     pub async fn peek(
         &self,
         tenant_id: Uuid,
@@ -416,9 +432,12 @@ where
 /// deliberately nothing that could be used to authorize (see `peek`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PeekedRequest {
-    /// G-B (#817) — the pushed `axiam_idp_hint`, unresolved and unbounded
-    /// here; the caller runs it through `authn_params` and the provider
-    /// resolver exactly as the inline one.
+    /// G-B (#817) — the pushed `axiam_idp_hint`, unresolved; bounded at push
+    /// time (F4-W3-09), and run by the caller through `authn_params` and the
+    /// provider resolver exactly as the inline one. It never reaches a page
+    /// as a string: what crosses into the front channel is only the id of
+    /// the provider it resolved to (`/login?…&idp=<uuid>`), a provider the
+    /// tenant's public listing already shows, or nothing.
     pub axiam_idp_hint: Option<String>,
 }
 

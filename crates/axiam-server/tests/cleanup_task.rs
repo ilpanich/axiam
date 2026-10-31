@@ -877,6 +877,7 @@ async fn seed_client(
             allowed_resources: Vec::new(),
             managed_by,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .expect("seed client");
@@ -1175,6 +1176,7 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
         allowed_resources: Vec::new(),
         managed_by: ManagedBy::Cimd,
         ciba: Default::default(),
+        default_idp: None,
     };
     let client_repo = axiam_db::SurrealOAuth2ClientRepository::new(db.clone());
     let before = client_repo
@@ -1514,6 +1516,7 @@ fn the_sweep_decision_reads_last_authorized_then_created() {
         created_at: now - chrono::Duration::days(created_days),
         updated_at: now,
         ciba: Default::default(),
+        default_idp: None,
     };
 
     let window = |days| DcrSweepWindow {
@@ -1600,6 +1603,7 @@ fn the_second_clock_reads_never_authorized_in_anonymous_mode_only() {
         created_at: now - chrono::Duration::seconds(age_secs),
         updated_at: now,
         ciba: Default::default(),
+        default_idp: None,
     };
     let hour = i64::from(DCR_UNAUTHORIZED_CLIENT_TTL_SECS);
     let window = |mode| DcrSweepWindow { days: 30, mode };

@@ -638,6 +638,7 @@ pub fn validate(
             // client, because this value is built here rather than echoed.
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Dcr,
             ciba,
+            default_idp: None,
         },
     })
 }
@@ -1391,6 +1392,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             ciba: Default::default(),
+            default_idp: None,
         }
     }
 

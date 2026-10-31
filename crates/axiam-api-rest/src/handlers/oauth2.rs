@@ -172,6 +172,22 @@ pub struct AuthorizeQuery {
     /// protocol outcome rather than an abandoned tab.
     #[serde(rename = "axiam_user_declined")]
     pub user_declined: Option<String>,
+    /// G-B (#817) — which federation provider the sign-in page should start
+    /// with: a provider's `provider_slug` or its UUID.
+    ///
+    /// `axiam_`-prefixed by the vendor-namespace rule `axiam_login_hop` states
+    /// (`axiam_oauth2::login_hop::LOGIN_HOP_MARKER`); there is no
+    /// `kc_idp_hint` alias (D-N3). Read on every lane, because it is not one
+    /// of the OIDC parameters `authn_request_params` governs and it changes
+    /// nothing that is issued. Resolved on the server against the request
+    /// tenant's effective, enabled provider list — the list
+    /// `GET /api/v1/auth/federation/providers` already shows — and only the
+    /// matched provider's id reaches the sign-in page (`idp=<uuid>`). A hint
+    /// that matches nothing, or matches more than one provider, is ignored:
+    /// the response is byte-identical to a request without one. Beside a
+    /// `request_uri` the pushed copy is used and this one is ignored. Moot when
+    /// the browser already holds an OP session and no sign-in is needed.
+    pub axiam_idp_hint: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -1009,6 +1025,7 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // own OIDC Core §3.1.2.6 code, owned by `classify_request_object` in the
     // handler; turning either into `invalid_request` here would lose the code a
     // conformance suite matches on.
+    let mut pushed_idp_hint = None;
     if classify_request_object(q.request.as_deref(), q.request_uri.as_deref()).is_none()
         && let Some(request_uri) = q.request_uri.as_deref()
         && let Err(refusal) = state
@@ -1016,6 +1033,9 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             .par_service
             .peek(tenant_id, &q.client_id, request_uri)
             .await
+            // G-B — the one value `peek` hands back: the pushed provider hint,
+            // for the sign-in page this browser is about to be sent to.
+            .map(|peeked| pushed_idp_hint = peeked.axiam_idp_hint)
     {
         // RFC 6749 §4.1.2.1, answered exactly as the `prompt=none` arm above
         // does: redirected only to a `redirect_uri` this client registered,
@@ -1078,11 +1098,29 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         Some(_) => tenant_default_locale(state, tenant_id).await,
         None => None,
     };
-    let cosmetic = authn_params
+    let mut cosmetic = authn_params
         .as_ref()
         .map_or(axiam_oauth2::login_hop::Cosmetic::NONE, |params| {
             axiam_oauth2::login_hop::Cosmetic::from_params(params, tenant_default)
         });
+    // G-B (#817) — the provider to start with, on **every** lane: the hint is
+    // AXIAM's own parameter, not one of the nine `authn_request_params`
+    // governs, and it changes nothing that is issued. A client that sends no
+    // hint and registered no default does no lookup and gets the URL it got
+    // before. Beside a `request_uri` the pushed copy is the hint (RFC 9126
+    // §4), and the query string's copy is ignored.
+    let raw_hint = if q.request_uri.is_some() {
+        pushed_idp_hint.as_deref()
+    } else {
+        q.axiam_idp_hint.as_deref()
+    };
+    cosmetic.idp = resolve_login_idp(
+        state,
+        tenant_id,
+        bounded_idp_hint(raw_hint),
+        client.default_idp,
+    )
+    .await;
     let location =
         axiam_oauth2::login_hop::build_login_redirect_for(&return_to, stale, None, &cosmetic);
 
@@ -1103,6 +1141,100 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         ));
     }
     Err(Box::new(builder.finish()))
+}
+
+/// G-B (#817) — an `axiam_idp_hint` as `authn_params` bounds it: blank, longer
+/// than `MAX_HINT_LEN` or repaired from non-UTF-8 input is no hint at all.
+///
+/// One parse for both carriers and both arms, so the bound cannot differ
+/// between the first leg and an interaction hop.
+fn bounded_idp_hint(raw: Option<&str>) -> Option<String> {
+    AuthnRequestParams::parse(&RawAuthnParams {
+        axiam_idp_hint: raw,
+        ..Default::default()
+    })
+    .idp_hint
+}
+
+/// G-B (#817) — which provider the sign-in page starts with, if any.
+///
+/// The hint, when it names exactly one provider; otherwise the client's
+/// `default_idp`, when that still names one; otherwise none. "Names" is
+/// decided against **one** list: the request tenant's effective, enabled
+/// providers — its own plus the organization's inheritable, unshadowed ones —
+/// from the resolver `list_providers_public` uses, so the answer can only ever
+/// be a provider that endpoint already shows this tenant's sign-in page.
+///
+/// # Why a lookup is permissible here when `login_hint` forbids one (T-493)
+///
+/// `login_hint`'s rule is that nothing looks it up, because a lookup on an
+/// account identifier is an enumeration oracle. A provider is not an account,
+/// and the list consulted is public for the tenant: whatever a hint could
+/// distinguish — exists, enabled, inherited, another tenant's — can already be
+/// read from that listing, or is invisible because the hint matches only
+/// within it. So the response does not need to stay equal *by construction*;
+/// it is equal by the one rule below, which the authorize tests pin byte for
+/// byte:
+///
+/// * a hint that matches nothing (unknown, disabled, not inheritable,
+///   shadowed, another tenant's, or a URL) is treated as **no hint**, so the
+///   client default then applies exactly as it would have without the hint;
+/// * a hint that matches more than one provider (a slug shared by two kinds)
+///   is ambiguous and treated the same way;
+/// * a default that no longer matches (its provider was disabled or deleted
+///   after registration) is ignored, never an error — the registration was
+///   valid when written, and the user still gets a sign-in page;
+/// * a datastore failure is ignored too: a sign-in page without a preselected
+///   provider is always a correct answer.
+///
+/// A slug is compared exactly (slugs are lower-case by validation); a UUID is
+/// compared as a UUID, so any spelling `Uuid::parse_str` accepts names the same
+/// provider. Only the matched config's own `id` is returned — a type, never
+/// the hint.
+///
+/// No hint and no default: no read at all, so a request that uses neither
+/// costs what it cost before G-B.
+async fn resolve_login_idp<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    hint: Option<String>,
+    default_idp: Option<Uuid>,
+) -> Option<Uuid> {
+    if hint.is_none() && default_idp.is_none() {
+        return None;
+    }
+    let organization_id = match state.tenant_repo.get_by_id(tenant_id).await {
+        Ok(tenant) => tenant.organization_id,
+        Err(e) => {
+            tracing::warn!(error = %e, %tenant_id, "could not read the tenant to resolve a sign-in provider; showing the chooser");
+            return None;
+        }
+    };
+    let effective = match crate::handlers::federation_login::effective_providers(
+        state,
+        crate::handlers::federation_login::Workspace {
+            organization_id,
+            tenant_id,
+        },
+    )
+    .await
+    {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = ?e, %tenant_id, "could not list the tenant's providers to resolve a sign-in provider; showing the chooser");
+            return None;
+        }
+    };
+    if let Some(hint) = hint.as_deref() {
+        let as_id = Uuid::parse_str(hint).ok();
+        let mut matched = effective.iter().filter(|p| {
+            Some(p.config.id) == as_id || p.config.provider_slug.as_deref() == Some(hint)
+        });
+        if let (Some(only), None) = (matched.next(), matched.next()) {
+            return Some(only.config.id);
+        }
+    }
+    default_idp.filter(|id| effective.iter().any(|p| p.config.id == *id))
 }
 
 /// W7 — the tenant's fallback UI language, for the last step of W5's
@@ -1611,6 +1743,10 @@ pub async fn authorize<C: Connection + Clone>(
                     display: q.display.as_deref(),
                     ui_locales: q.ui_locales.as_deref(),
                     claims_locales: q.claims_locales.as_deref(),
+                    // Not one of the nine, and not counted by `is_empty`
+                    // either way: a query-string copy beside a `request_uri`
+                    // is ignored (the pushed copy wins), never refused.
+                    axiam_idp_hint: None,
                 })
                 .is_empty();
 
@@ -1685,6 +1821,7 @@ pub async fn authorize<C: Connection + Clone>(
                 display: q.display.as_deref(),
                 ui_locales: q.ui_locales.as_deref(),
                 claims_locales: q.claims_locales.as_deref(),
+                axiam_idp_hint: q.axiam_idp_hint.as_deref(),
             });
             // Cloned into the scrutinee so the else-arm can still read
             // `q.redirect_uri`: a `let`-else MOVES what it destructures, and
@@ -1894,6 +2031,11 @@ pub async fn authorize<C: Connection + Clone>(
         let c = axiam_oauth2::login_hop::Cosmetic::from_params(&req.authn_params, tenant_default);
         (c.login_hint.map(str::to_owned), c.display, c.ui_locale)
     };
+    // G-B (#817) — the provider hint, from whichever carrier delivered the
+    // request (the pushed copy for PAR), for a sign-in hop below. Resolved
+    // only if one is built: with a live session and no interaction there is
+    // no sign-in page, and the hint is moot.
+    let idp_hint = req.authn_params.idp_hint.clone();
 
     // T21.6 — see `resolve_authorize_principal`'s use of the same value: an
     // interaction hop comes back to the endpoint the request arrived at.
@@ -1985,10 +2127,27 @@ pub async fn authorize<C: Connection + Clone>(
                 );
             }
             let (login_hint, display, ui_locale) = &cosmetic_owned;
+            // G-B (#817) — a re-authentication hop is a sign-in page too, so
+            // the hint (or the client's default) applies there exactly as on
+            // the first leg. The consent page starts no sign-in and is not
+            // asked: `build_interaction_redirect` drops `idp` for it anyway,
+            // and skipping the lookup keeps that arm's cost unchanged.
+            let idp = if interaction.reason.requires_reauthentication() {
+                let default_idp = state
+                    .oauth2_client_repo
+                    .get_by_client_id(user.tenant_id, &authorized_client_id)
+                    .await
+                    .ok()
+                    .and_then(|c| c.default_idp);
+                resolve_login_idp(&state, user.tenant_id, idp_hint, default_idp).await
+            } else {
+                None
+            };
             let cosmetic = axiam_oauth2::login_hop::Cosmetic {
                 login_hint: login_hint.as_deref(),
                 display: *display,
                 ui_locale: *ui_locale,
+                idp,
             };
             let location = axiam_oauth2::login_hop::build_interaction_redirect(
                 &return_to,
@@ -5705,6 +5864,10 @@ pub struct PushedAuthorizationRequest {
     /// client as a protocol error rather than surfacing in a browser after a
     /// sign-in the user should never have been asked for.
     pub resource: Option<String>,
+    /// G-B (#817) — AXIAM's provider hint, pushed like `login_hint`; see the
+    /// authorization endpoint's `axiam_idp_hint`. Never refused: a hint that
+    /// names nothing is answered as no hint.
+    pub axiam_idp_hint: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -6047,6 +6210,7 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
             claims_locales: req.claims_locales,
             dpop_jkt,
             resource: req.resource,
+            axiam_idp_hint: req.axiam_idp_hint,
         })
         .await
     {

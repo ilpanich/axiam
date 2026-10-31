@@ -11,7 +11,7 @@ use axiam_core::models::oauth2_client::{
 };
 use axiam_core::repository::{
     AuditLogRepository, DeviceGrantRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
-    RefreshTokenRepository,
+    RefreshTokenRepository, TenantRepository,
 };
 use axiam_oauth2::client_grants::ClientGrantStores;
 use chrono::{DateTime, Utc};
@@ -187,6 +187,17 @@ pub struct CreateOAuth2ClientRequest {
     /// code to verify.
     #[serde(default)]
     pub backchannel_user_code_parameter: Option<bool>,
+    /// G-B (#817) — the federation provider (a federation config `id`) this
+    /// client's sign-in page starts with when an authorization request carries
+    /// no `axiam_idp_hint`; a hint that names a provider overrides it.
+    ///
+    /// Must name a provider this tenant can sign in with — its own enabled
+    /// configs, or the organization's enabled ones it inherits — or the
+    /// registration is refused with `400`. If that provider is later disabled
+    /// or deleted the default is ignored at the authorization endpoint (the
+    /// provider chooser is shown), never an error. Omit for none.
+    #[serde(default)]
+    pub default_idp: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -236,6 +247,12 @@ pub struct UpdateOAuth2ClientRequest {
     pub backchannel_authentication_request_signing_alg: Option<String>,
     /// G-7 — `true` refused, as on create.
     pub backchannel_user_code_parameter: Option<bool>,
+    /// G-B (#817) — see [`CreateOAuth2ClientRequest::default_idp`]. Omitted
+    /// leaves it; `null` clears it; an id is held to the create rule (`400`
+    /// unless it names a provider this tenant can sign in with).
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<Uuid>, nullable)]
+    pub default_idp: Option<Option<Uuid>>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -314,6 +331,12 @@ pub struct OAuth2ClientResponse {
     /// requests with; absent for a client sending plain requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backchannel_authentication_request_signing_alg: Option<CibaRequestSigningAlg>,
+    /// G-B (#817) — the provider this client's sign-in page starts with when
+    /// a request carries no hint; absent for none. Echoed as stored: a value
+    /// whose provider has since been disabled is shown, and ignored at the
+    /// authorization endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_idp: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -353,6 +376,7 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
                 .ciba
                 .backchannel_authentication_request_signing_alg,
             require_par: c.require_par,
+            default_idp: c.default_idp,
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -461,6 +485,53 @@ fn validate_ciba(
 ) -> Result<CibaClientMetadata, AxiamApiError> {
     axiam_oauth2::ciba::validate_client_registration(view)
         .map_err(|e| validation_err(e.to_string()))
+}
+
+/// G-B (#817), T-494 — refuse a `default_idp` that names no provider the
+/// client's tenant can sign in with.
+///
+/// "Can sign in with" is the authorization endpoint's own rule: the tenant's
+/// effective, enabled providers (`effective_providers` — its own enabled
+/// configs plus the organization's enabled, inheritable, unshadowed ones). So
+/// another tenant's provider, a disabled one, an organization provider that is
+/// not inheritable or that this tenant shadows, and an id that names nothing
+/// are all one refusal; the message does not say which, because the listing an
+/// operator can read already does.
+///
+/// Run on create and on update whenever the patch sets an id (T-241: a gate
+/// that only runs on create is a gate with a PATCH around it). The field has
+/// no interaction with any other field of the row, so the value the patch
+/// sets *is* the merged value; a patch that leaves the field alone does not
+/// re-check a default whose provider was disabled since, because that state
+/// is already handled where it matters (the endpoint ignores it) and refusing
+/// an unrelated rename over it would be a trap.
+async fn validate_default_idp<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    default_idp: Uuid,
+) -> Result<(), AxiamApiError> {
+    let organization_id = state
+        .tenant_repo
+        .get_by_id(tenant_id)
+        .await?
+        .organization_id;
+    let effective = crate::handlers::federation_login::effective_providers(
+        state,
+        crate::handlers::federation_login::Workspace {
+            organization_id,
+            tenant_id,
+        },
+    )
+    .await?;
+    if effective.iter().any(|p| p.config.id == default_idp) {
+        Ok(())
+    } else {
+        Err(validation_err(
+            "default_idp must name a federation provider this tenant can sign in with: one \
+             of its own enabled providers, or an enabled provider its organization lets it \
+             inherit (see GET /api/v1/auth/federation/providers)",
+        ))
+    }
 }
 
 fn validation_err(msg: impl Into<String>) -> AxiamApiError {
@@ -959,7 +1030,14 @@ pub async fn create<C: Connection + Clone>(
         // this is the one handler entitled to assert `admin`.
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         ciba,
+        default_idp: req.default_idp,
     };
+
+    // G-B (#817), T-494 — the registration decides which provider is the
+    // default, and only among those the tenant offers.
+    if let Some(id) = create.default_idp {
+        validate_default_idp(&state, user.tenant_id, id).await?;
+    }
 
     // X5.1 — refuse a registration that could not satisfy the profile it
     // declares, BEFORE it is written. A `fapi2` client missing PAR or mTLS
@@ -1376,7 +1454,14 @@ pub async fn update<C: Connection + Clone>(
         browser_sso: req.browser_sso,
         allowed_resources,
         ciba,
+        default_idp: req.default_idp,
     };
+
+    // G-B (#817), T-494 — the same rule as on create, on the update path
+    // (T-241). `Some(None)` clears and needs no check.
+    if let Some(Some(id)) = update.default_idp {
+        validate_default_idp(&state, user.tenant_id, id).await?;
+    }
 
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to
     // `fapi2` on a client that has none of the rest is a perfectly well-formed

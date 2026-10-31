@@ -257,6 +257,7 @@ async fn client(
         allowed_resources: Vec::new(),
         managed_by: ManagedBy::Admin,
         ciba: Default::default(),
+        default_idp: None,
     };
     tweak(&mut c);
     let (row, secret) = SurrealOAuth2ClientRepository::new(f.db.clone())

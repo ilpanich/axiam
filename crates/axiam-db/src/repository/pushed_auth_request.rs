@@ -122,6 +122,10 @@ struct PushedAuthParamsRow {
     /// and such a row named no resource.
     #[surreal(default)]
     resource: Option<String>,
+    /// G-B (#817) — the pushed `axiam_idp_hint`. No migration, for the reason
+    /// `resource` needs none; an older row pushed no hint.
+    #[surreal(default)]
+    axiam_idp_hint: Option<String>,
 }
 
 impl From<PushedAuthParams> for PushedAuthParamsRow {
@@ -145,6 +149,7 @@ impl From<PushedAuthParams> for PushedAuthParamsRow {
             claims_locales: p.claims_locales,
             dpop_jkt: p.dpop_jkt,
             resource: p.resource,
+            axiam_idp_hint: p.axiam_idp_hint,
         }
     }
 }
@@ -170,6 +175,7 @@ impl From<PushedAuthParamsRow> for PushedAuthParams {
             claims_locales: p.claims_locales,
             dpop_jkt: p.dpop_jkt,
             resource: p.resource,
+            axiam_idp_hint: p.axiam_idp_hint,
         }
     }
 }

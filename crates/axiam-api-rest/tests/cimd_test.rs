@@ -823,6 +823,7 @@ async fn a_document_cannot_rewrite_an_administrators_client() {
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Cimd,
             ciba: Default::default(),
+            default_idp: None,
         },
         20,
     )

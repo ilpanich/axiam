@@ -504,6 +504,23 @@ pub struct Cosmetic<'a> {
     /// that this field can be a five-value enum. See that module for why the
     /// raw value must never reach the SPA.
     pub ui_locale: Option<crate::locale::Locale>,
+    /// G-B (#817) — the federation provider the sign-in page should start
+    /// with, **already resolved**: the id of a provider in the request
+    /// tenant's effective, enabled provider list — the list the public
+    /// providers endpoint already shows that page.
+    ///
+    /// A type, never the relying party's string, by this module's rule. The
+    /// `axiam_idp_hint` that selected it (a slug or a UUID) stops at the REST
+    /// layer's resolver; a hint that resolved to nothing, and a client
+    /// `default_idp` that no longer names an offered provider, leave this
+    /// `None`, so the `/login` URL is byte-identical to the one a request
+    /// without a hint gets (T-493). [`Cosmetic::from_params`] never sets it:
+    /// resolving needs the provider list, which this crate cannot read.
+    ///
+    /// Moot when the browser already holds an OP session: no `/login` URL is
+    /// built at all, so the hint selects nothing and the authorization
+    /// proceeds on the session it has (as in Keycloak).
+    pub idp: Option<uuid::Uuid>,
 }
 
 impl Cosmetic<'_> {
@@ -513,11 +530,15 @@ impl Cosmetic<'_> {
         login_hint: None,
         display: None,
         ui_locale: None,
+        idp: None,
     };
 
     /// Whether anything at all was asked for.
     pub const fn is_empty(&self) -> bool {
-        self.login_hint.is_none() && self.display.is_none() && self.ui_locale.is_none()
+        self.login_hint.is_none()
+            && self.display.is_none()
+            && self.ui_locale.is_none()
+            && self.idp.is_none()
     }
 }
 
@@ -563,6 +584,9 @@ impl<'a> Cosmetic<'a> {
                 params.ui_locales.as_deref(),
                 tenant_default,
             ),
+            // Resolved by the caller, against the tenant's provider list; see
+            // [`Cosmetic::idp`]. `params.idp_hint` is deliberately not read.
+            idp: None,
         }
     }
 }
@@ -624,6 +648,12 @@ pub fn build_login_redirect_for(
         location.push_str("&ui_locale=");
         location.push_str(&encode(locale.as_tag()));
     }
+    // G-B. A UUID's hyphenated form needs no encoding; it is encoded anyway,
+    // for the reason given above.
+    if let Some(idp) = cosmetic.idp {
+        location.push_str("&idp=");
+        location.push_str(&encode(&idp.to_string()));
+    }
     location
 }
 
@@ -664,6 +694,9 @@ pub const CONSENT_PATH: &str = "/consent";
 /// which language are questions the consent page really does have to answer,
 /// and both are closed vocabularies (`crate::authn_params::Display`,
 /// `crate::locale::Locale`) rather than relying-party strings.
+///
+/// Nor `idp` (G-B): the consent page starts no sign-in, so a provider to
+/// start with means nothing there.
 pub fn build_interaction_redirect(
     return_to: &str,
     reason: crate::honour::Reason,
@@ -1172,6 +1205,7 @@ mod tests {
                 login_hint: Some("ada"),
                 display: Some(Display::Popup),
                 ui_locale: Some(Locale::Italian),
+                idp: None,
             },
         );
         assert!(location.contains("&display=popup"), "{location}");
@@ -1312,6 +1346,7 @@ mod tests {
                 login_hint: Some("ada"),
                 display: Some(Display::Touch),
                 ui_locale: Some(Locale::German),
+                idp: None,
             },
         );
         let order: Vec<usize> = [
@@ -1453,5 +1488,52 @@ mod tests {
             Err(ReturnToError::NotTheAuthorizeEndpoint),
             "the un-suffixed validator still accepts only the root path"
         );
+    }
+
+    /// G-B (#817) — a resolved provider crosses as `idp=<uuid>`, after the
+    /// W5 parameters; without one the URL is the W5 URL byte for byte.
+    #[test]
+    fn a_resolved_provider_is_carried_as_a_typed_id() {
+        let id = uuid::Uuid::parse_str("5f0c2f4e-3b1a-4c8e-9a7d-0e2b6c1d9f10").unwrap();
+        let without = build_login_redirect_for(GOOD, false, None, &Cosmetic::NONE);
+        let with = build_login_redirect_for(
+            GOOD,
+            false,
+            None,
+            &Cosmetic {
+                idp: Some(id),
+                ..Cosmetic::NONE
+            },
+        );
+        assert_eq!(
+            with,
+            format!("{without}&idp=5f0c2f4e-3b1a-4c8e-9a7d-0e2b6c1d9f10"),
+            "the only difference is the typed id"
+        );
+        assert!(
+            !Cosmetic {
+                idp: Some(id),
+                ..Cosmetic::NONE
+            }
+            .is_empty()
+        );
+    }
+
+    /// G-B (#817) — the consent page is not a sign-in page: no provider is
+    /// started from it, so `idp` does not reach it.
+    #[test]
+    fn the_consent_page_never_receives_an_idp() {
+        let id = uuid::Uuid::new_v4();
+        let location = build_interaction_redirect(
+            GOOD,
+            crate::honour::Reason::ConsentRequired,
+            None,
+            &Cosmetic {
+                idp: Some(id),
+                ..Cosmetic::NONE
+            },
+        );
+        assert!(location.starts_with(CONSENT_PATH), "{location}");
+        assert!(!location.contains("idp="), "{location}");
     }
 }

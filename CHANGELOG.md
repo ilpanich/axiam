@@ -49,6 +49,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threat-model entries T-489 to T-492. It is not token exchange: X4 still
   refuses ID tokens. (G-A, #816)
 
+- Provider hint and per-client default provider for browser sign-in (#817):
+  `/oauth2/authorize` (and `/oauth2/par`) accept `axiam_idp_hint`, a
+  federation provider's `provider_slug` or UUID, and an OAuth2 client may
+  register `default_idp` (a provider id) on the administrator API
+  (`POST`/`PUT /api/v1/oauth2-clients`, `null` clears). Both are resolved on
+  the server against the tenant's effective, enabled providers — the list
+  `GET /api/v1/auth/federation/providers` shows — and the sign-in page receives
+  only the matched provider's id (`/login?…&idp=<uuid>`). The hint overrides
+  the default; a hint that names nothing (unknown, disabled, another tenant's)
+  is ignored and the response is byte-identical to one without it; a default
+  whose provider was later disabled is ignored, never an error. A
+  `default_idp` the tenant cannot see is refused with `400` on create and on
+  update. Read on every `authn_request_params` lane and for `fapi2` clients;
+  it changes nothing that is issued, and with a live session no sign-in page
+  is shown. Dynamic registration and CIMD cannot set `default_idp`. Schema
+  v113 (`oauth2_client.default_idp`, additive).
+
 ### Changed
 
 - A refused refresh-token replay now revokes the session the replayed token

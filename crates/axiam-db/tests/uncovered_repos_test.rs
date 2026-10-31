@@ -1063,6 +1063,7 @@ async fn oauth2_client_crud() {
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();
@@ -1137,6 +1138,7 @@ async fn oauth2_client_secret_hash_is_upgraded_with_a_compare_and_swap() {
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();

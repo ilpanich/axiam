@@ -193,6 +193,7 @@ impl Fixture {
                 allowed_resources: Vec::new(),
                 managed_by: ManagedBy::Admin,
                 ciba: Default::default(),
+                default_idp: None,
             })
             .await
             .unwrap();

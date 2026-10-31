@@ -593,6 +593,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_id_token_replay",
         sql: SCHEMA_V112,
     },
+    Migration {
+        version: 113,
+        name: "oauth2_client_default_idp",
+        sql: SCHEMA_V113,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5747,9 +5752,60 @@ DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_expires_at
     ON TABLE federation_id_token_replay COLUMNS expires_at;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v113 — a client's default sign-in provider (G-B, #817)
+// -----------------------------------------------------------------------
+//
+// `oauth2_client.default_idp`: the federation provider (a `federation_config`
+// id, stored as its UUID string like `tenant_id`) the sign-in page starts with
+// when an authorization request carries no `axiam_idp_hint`. One optional
+// column with **no `DEFAULT` and no backfill**: an older row reads `NONE`, a
+// client with no default, which is what it already was. Validated by the
+// administrator API when set; ignored at the authorization endpoint when it no
+// longer names a provider the tenant offers.
+//
+// The pushed request's `axiam_idp_hint` needs no statement:
+// `pushed_auth_request.params` is `TYPE object FLEXIBLE`.
+//
+// No index: the column is read from the client row the authorization endpoint
+// already loads by `(tenant_id, client_id)`.
+const SCHEMA_V113: &str = "\
+DEFINE FIELD IF NOT EXISTS default_idp ON TABLE oauth2_client TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G-B (#817) — v113 is the one optional `default_idp` column on
+    /// `oauth2_client`, and nothing else: no `DEFAULT`, no backfill, no index.
+    #[test]
+    fn v113_adds_only_the_client_default_idp_column() {
+        let statements: Vec<&str> = SCHEMA_V113
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS default_idp ON TABLE oauth2_client TYPE option<string>"],
+            "v113 defines the default_idp column and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT ",
+            "INDEX",
+        ] {
+            assert!(
+                !SCHEMA_V113.contains(forbidden),
+                "v113 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V113));
+    }
 
     /// #551, T-117 — v85 is the rule's window column and the window table,
     /// and nothing else.
@@ -7813,9 +7869,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&112),
-            "v112 is the newest migration (G-A, #816, D-N10 — the `federation_id_token_replay` \
-             table, the native sign-in replay store, additive); v111 was G-A, #816 — \
+            Some(&113),
+            "v113 is the newest migration (G-B, #817 — `oauth2_client.default_idp`, a \
+             client's default sign-in provider, optional, absent reading as none); v112 was \
+             G-A, #816, D-N10 — the `federation_id_token_replay` \
+             table, the native sign-in replay store, additive; v111 was G-A, #816 — \
              `federation_config.native_login_enabled`, \
              `native_login_client_ids` and `native_login_max_token_age_secs`, the native \
              sign-in trust block, absent reading as disabled; v110 was G-C, #818 — \

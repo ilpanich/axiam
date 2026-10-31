@@ -283,6 +283,7 @@ fn ping_client(tenant_id: Uuid, endpoint: &str) -> CreateOAuth2Client {
             backchannel_client_notification_endpoint: Some(endpoint.to_owned()),
             ..Default::default()
         },
+        default_idp: None,
     }
 }
 

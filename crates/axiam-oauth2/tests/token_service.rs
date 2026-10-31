@@ -824,6 +824,7 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         last_authorized_at: None,
         ciba: Default::default(),
+        default_idp: None,
     })
 }
 

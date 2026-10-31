@@ -560,6 +560,7 @@ async fn setup(keycloak_user_id: Uuid) -> Fixture {
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();

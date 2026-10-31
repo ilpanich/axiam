@@ -415,6 +415,7 @@ async fn a_revoked_leaf_is_refused_at_the_token_endpoint_under_tls_client_auth()
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();

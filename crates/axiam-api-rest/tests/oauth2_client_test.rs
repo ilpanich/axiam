@@ -717,6 +717,7 @@ async fn deleting_a_client_voids_its_device_grants_and_ciba_requests() {
                 allowed_resources: Vec::new(),
                 managed_by: ManagedBy::Cimd,
                 ciba: Default::default(),
+                default_idp: None,
             },
             20,
         )
@@ -1909,6 +1910,7 @@ async fn an_update_that_does_not_touch_the_backchannel_logout_uri_leaves_a_legac
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();
@@ -1983,6 +1985,7 @@ async fn seed_managed_client_holding(
             allowed_resources: resources.iter().map(|r| (*r).to_owned()).collect(),
             managed_by,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();

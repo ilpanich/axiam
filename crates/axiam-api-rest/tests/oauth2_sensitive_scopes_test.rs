@@ -1986,6 +1986,7 @@ async fn t23_1_5_consent_recorded_in_one_tenant_releases_nothing_in_another() {
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();

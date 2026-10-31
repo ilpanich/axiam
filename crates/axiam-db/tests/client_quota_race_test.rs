@@ -85,6 +85,7 @@ fn client(tenant_id: Uuid, managed_by: ManagedBy, name: &str) -> CreateOAuth2Cli
         allowed_resources: vec!["https://mcp.example.com/mcp".into()],
         managed_by,
         ciba: Default::default(),
+        default_idp: None,
     }
 }
 

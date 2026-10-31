@@ -87,6 +87,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   threat-model entries T-493 and T-494; OpenAPI regenerated. Schema
   v113 (`oauth2_client.default_idp`, additive). (G-B, #817)
 
+- Administrator OAuth2 client writes are audited (#834): `POST`, `PUT` and
+  `DELETE /api/v1/oauth2-clients` write `oauth2.client_created`,
+  `oauth2.client_updated` and `oauth2.client_deleted` rows naming the
+  administrator, the tenant and the client. An update lists the *names* of the
+  members it changed (`changed_fields`, against the stored row) and, when
+  `default_idp` moved, its new provider id or `null`. Only successful writes are
+  recorded; no row carries the client secret or its hash. Dynamic registration,
+  RFC 7592 and the conversion to public keep their own rows.
+
 ### Changed
 
 - A refused refresh-token replay now revokes the session the replayed token

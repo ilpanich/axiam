@@ -1345,3 +1345,168 @@ async fn authorize_as(
         .to_request();
     test::call_service(app, req).await
 }
+
+/// The audit rows of the administrator's writes to the client `client_id`
+/// (#834), oldest first.
+async fn client_write_rows(f: &Fixture, client_id: &str) -> Vec<Value> {
+    use axiam_api_rest::handlers::oauth2_clients::{
+        CLIENT_CREATED_ACTION, CLIENT_DELETED_ACTION, CLIENT_UPDATED_ACTION,
+    };
+    let mut result =
+        f.db.query(
+            "SELECT action, outcome, actor_id, actor_type, tenant_id, resource_id, metadata, \
+             timestamp FROM audit_log \
+             WHERE action IN $actions AND metadata.client_id = $client_id \
+             ORDER BY timestamp ASC",
+        )
+        .bind((
+            "actions",
+            vec![
+                CLIENT_CREATED_ACTION.to_owned(),
+                CLIENT_UPDATED_ACTION.to_owned(),
+                CLIENT_DELETED_ACTION.to_owned(),
+            ],
+        ))
+        .bind(("client_id", client_id.to_owned()))
+        .await
+        .unwrap();
+    result.take(0).unwrap()
+}
+
+/// **T-494, the record (#834, F4-W3-05, D-N27).** Every administrator write to
+/// a client leaves one audit row — created, updated, deleted — naming the
+/// actor, the tenant and the client. An update names the members it changed,
+/// measured against the stored row, and records the new `default_idp` (a
+/// tenant-public provider id) when it moved: set, and cleared to `null`. A
+/// refused write leaves no row, and no row ever carries the one-time secret or
+/// the stored secret hash.
+#[actix_rt::test]
+async fn t494_client_writes_are_audited_by_field_name_and_never_carry_a_secret() {
+    use axiam_api_rest::handlers::oauth2_clients::{
+        CLIENT_CREATED_ACTION, CLIENT_DELETED_ACTION, CLIENT_UPDATED_ACTION,
+    };
+    let f = setup().await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let jwt = admin_jwt(&auth, &f);
+
+    let (status, created) = post_client(
+        &app,
+        &jwt,
+        json!({
+            "name": "Audited Client",
+            "redirect_uris": [REDIRECT_URI],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "scopes": ["openid"],
+            "browser_sso": true,
+            "default_idp": f.own,
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+    let client_id = created["client_id"].as_str().unwrap().to_owned();
+    let secret = created["client_secret"].as_str().unwrap().to_owned();
+    assert!(!secret.is_empty());
+    let mut hash =
+        f.db.query("SELECT VALUE client_secret_hash FROM oauth2_client WHERE client_id = $c")
+            .bind(("c", client_id.clone()))
+            .await
+            .unwrap();
+    let hash: Vec<String> = hash.take(0).unwrap();
+    let hash = hash.into_iter().next().expect("the stored row");
+    assert!(!hash.is_empty());
+
+    // Set to another provider, together with a rename.
+    let (status, body) = put_client(
+        &app,
+        &jwt,
+        &id,
+        json!({"default_idp": f.org_inherited, "name": "Renamed"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    // Cleared.
+    let (status, body) = put_client(&app, &jwt, &id, json!({"default_idp": null})).await;
+    assert_eq!(status, 200, "{body}");
+    // A member repeated unchanged changes nothing, and is not listed.
+    let (status, body) = put_client(&app, &jwt, &id, json!({"name": "Renamed"})).await;
+    assert_eq!(status, 200, "{body}");
+    // Refused: no row.
+    let (status, body) = put_client(&app, &jwt, &id, json!({"default_idp": f.foreign})).await;
+    assert_eq!(status, 400, "{body}");
+
+    let req = test::TestRequest::delete()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/oauth2-clients/{id}"))
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    let rows = client_write_rows(&f, &client_id).await;
+    let actions: Vec<&str> = rows.iter().map(|r| r["action"].as_str().unwrap()).collect();
+    assert_eq!(
+        actions,
+        [
+            CLIENT_CREATED_ACTION,
+            CLIENT_UPDATED_ACTION,
+            CLIENT_UPDATED_ACTION,
+            CLIENT_UPDATED_ACTION,
+            CLIENT_DELETED_ACTION,
+        ],
+        "one row per successful write, none for the refused one: {rows:?}"
+    );
+    for row in &rows {
+        assert_eq!(row["outcome"], "Success", "{row}");
+        assert_eq!(row["actor_id"], json!(f.user_id.to_string()), "{row}");
+        assert_eq!(row["actor_type"], "User", "{row}");
+        assert_eq!(row["tenant_id"], json!(f.tenant_id.to_string()), "{row}");
+        assert_eq!(row["resource_id"], json!(id), "{row}");
+        assert_eq!(row["metadata"]["client_id"], json!(client_id), "{row}");
+        let text = row.to_string();
+        assert!(!text.contains(&secret), "no row carries the secret: {row}");
+        assert!(
+            !text.contains(&hash),
+            "no row carries the secret hash: {row}"
+        );
+        assert!(!text.contains("secret_hash"), "{row}");
+    }
+
+    assert_eq!(rows[0]["metadata"]["default_idp"], json!(f.own));
+    assert_eq!(rows[0]["metadata"]["name"], "Audited Client");
+
+    let mut set: Vec<&str> = rows[1]["metadata"]["changed_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    set.sort_unstable();
+    assert_eq!(set, ["default_idp", "name"]);
+    assert_eq!(rows[1]["metadata"]["default_idp"], json!(f.org_inherited));
+
+    assert_eq!(
+        rows[2]["metadata"]["changed_fields"],
+        json!(["default_idp"])
+    );
+    assert!(
+        rows[2]["metadata"]
+            .as_object()
+            .unwrap()
+            .get("default_idp")
+            .is_some_and(Value::is_null),
+        "a cleared default is recorded as null: {}",
+        rows[2]
+    );
+
+    assert_eq!(rows[3]["metadata"]["changed_fields"], json!([]));
+    assert!(
+        rows[3]["metadata"].get("default_idp").is_none(),
+        "an unchanged default is not restated: {}",
+        rows[3]
+    );
+
+    assert_eq!(rows[4]["metadata"]["name"], "Renamed");
+}

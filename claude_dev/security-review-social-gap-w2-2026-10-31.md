@@ -438,3 +438,160 @@ redeemed through a second grant-holding client (F4-W2-04).
   or the per-config scope recorded as a residual of T-490.
 - **F4-W2-01** is a fix, not a decision — but whether it blocks the W2 merge
   should be stated, given SEC-095 was graded blocking.
+
+---
+
+## Addendum 1 — sweep 1 re-check (2026-10-31)
+
+**Against:** `e2c0be9..2ba70c7` on `claude/social-gap-w2`. The commits are
+`81d0dee` (#828, F4-W2-01), `34f2e14` (#829, F4-W2-02/03; D-N16, D-N17),
+`a12dbe5` (#830, F4-W2-04 … 10; D-N18, D-N19) and `2ba70c7` (wording: the
+D-N18 per-client binding is not part of 1.2.0). The range touches 26 files and
+adds about 1 350 lines. I re-checked each finding against the code, not
+against the commit messages. One throw-away probe ran and was kept out of the
+tree (F4-W2-11). The following were run and were green:
+
+- `cargo test -p axiam-federation --lib -- native_login token_shape token_exchange`: 72 passed.
+- `cargo test -p axiam-db --lib -- schema::tests`: 94 passed, including
+  `every_migration_since_1_1_0_is_additive`,
+  `v112_adds_only_the_native_sign_in_replay_table` and
+  `every_tenant_scoped_table_is_purged`.
+- `cargo test -p axiam-db --test federation_id_token_replay_test`: 4 passed.
+- `cargo test -p axiam-oauth2 --lib -- provider_id_token token_exchange fapi`: 123 passed.
+- `cargo test -p axiam-api-rest --no-default-features --test provider_id_token_test`: 21 passed.
+- `scripts/check-crate-layering.py`: OK, with 19 crates and 62 edges.
+- `scripts/check-spec-digest.py`: OK.
+
+**The spec was checked by regeneration**, not only by its digest:
+`cargo build -p axiam-server --no-default-features`, then `--dump-openapi`,
+gives output byte-identical to the committed `sdks/openapi.json`.
+
+### C.1 Verdicts
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| **F4-W2-01** | **Closed** | **Placement.** `native_login_post_auth` (`crates/axiam-api-rest/src/handlers/oauth2.rs:5111`) is called at `:5035`. That is after `verify_native_id_token` (`:5010`) has returned a resolved, `account_may_act`-checked subject, and before consent, `issue_provider_id_token_grant` and the session write. The handler is the grant's only call site (`grep`: no gRPC or AMQP path issues it), so no exit path skips the gate. **Adapter.** It calls the shared `intercept_federated_login_post_auth`, which turns `requires_mfa` into `ReactorDenied`, and every `Err` becomes `reactor_denied` → the generic `invalid_grant`. A user re-read failure is `server_error`. Nothing is read as an allow. **Organization.** `grant.organization_id()` is `tenant.organization_id` of the *requesting* tenant (`provider_id_token.rs:436`). An inherited provider can only be an organization provider of that same organization, so the value is right. It is also better than the browser path, which still passes `Uuid::nil()` (`federation.rs:2179`, T19.15 TODO). **Spend.** The token is spent by then (D-N14). That does not matter: a vetoed user's retry would be vetoed again, and the spent token is worthless to anyone else. **Audit.** `federation.native_login` records `reactor_denied` with the subject. **Tests.** `a_login_post_auth_veto_refuses_the_native_grant` covers both `Deny` and `RequireMfa`: no token, no session row, the gate asked exactly once with the tenant, user and IP, and no `token.pre_issue`. Its counterpart is `an_allowing_login_post_auth_gate_passes_the_native_grant`. CONTRACT §22 now lists the grant. |
+| **F4-W2-02** | **Closed** | `check_shape` (`native_login.rs:472`) does one constant-time `ct_eq` of the claim against `sha256_hex(request_nonce)`. The raw arm is gone. Pinned by `a_raw_nonce_equal_to_the_claim_is_refused`, `a_presenter_who_copies_the_nonce_claim_is_refused` (the attack, by name) and the REST test `a_raw_or_copied_nonce_is_refused_and_does_not_spend_the_token`, where the genuine presentation still signs in afterwards. The module doc, docs page, website, OpenAPI text, `TokenRequest` rustdoc and T-490/T-491 are all corrected. **Case.** Only lower-case hex is accepted. Apple's sample code, Firebase's guides and Google's Credential Manager sample all format with `%02x`, so they produce lower-case. Some platform helpers produce upper-case (.NET `Convert.ToHexString`, Java `HexFormat.of().withUpperCase()`, `printHexBinary`). That is an interoperability trap that fails closed, not a security gap (F4-W2-14). The length leak of `ct_eq` on unequal lengths reveals only that the claim is not 64 bytes, which the attacker already knows. |
+| **F4-W2-03** | **Closed** | `issued_to` (`native_login.rs:414`) works azp-first as D-N17 decided. **Does admitting the web `client_id` (`:599`) let anything through that should be refused?** No. That admission only widens the *decoder's* "`aud` contains one of" check. `issued_to` then runs unconditionally, and the web client can satisfy it only as the `aud` of a token whose `azp` is a *listed* native ID. Checked case by case: **(a) Browser flow.** Either `azp` is the web client (unlisted, so `AuthorizedPartyRefused`) or it is absent with a single `aud` equal to the web client (unlisted, so `WrongAudience`). **(b) Multiple audiences without `azp`.** Refused even when every member is listed. **(c) `azp` that is not a string** (`null`, a number). Refused. **(d) Another provider.** The web `client_id` added is the resolved config's own, so another config's web client is never admitted, and the issuer must still match exactly. **(e) No configured web client** (`""`). Matches nothing. **(f) Listed `azp` with `aud` = [web, foreign].** Accepted. That is correct, because only the listed app can be the `azp` (the provider enforces the app identity). The browser path still passes exactly `[config.client_id]` through `verify_id_token_full`, unchanged. If the web client is listed explicitly, browser-flow tokens are admitted. The docs, the admin UI and T-489 say so and advise against it. Pinned by `the_audience_rule_is_azp_first` and the four end-to-end shape tests. |
+| **F4-W2-04** | **Closed as decided (residual)** | D-N18: no code change. The residual is recorded in T-489 (both copies) and in `docs/api/native-sign-in.md` ("The trust is per tenant, not per AXIAM client"), with the operator mitigation (register the grant only on the listed native apps; separate privilege by tenant or provider). After `2ba70c7` it no longer says the binding ships in 1.2.0. |
+| **F4-W2-05** | **Closed** | (1) The docs now say an omitted or empty `scope` means *no* scopes and no ID token. (2) The "claims only access tokens carry" clause was dropped, and the remaining text says only `typ` is read. (3) The sensitive-scope switch moved into code before verification (`oauth2.rs:4993`, `refuse_switched_off_sensitive_scopes`), with the same wording as `decide_consent`, which is kept as the TOCTOU backstop. Pinned by `a_switched_off_sensitive_scope_does_not_spend_the_token`. (4) CONTRACT §22 lists the grant. |
+| **F4-W2-06** | **Closed** (see F4-W2-11) | The key is now (`issuer`, `token_hash`) (v112 changed in place, D-N19). `issuer` is the token's own `iss` *after* the exact-match issuer check (`native_login.rs:629`, `:654`). Any configuration that accepts a given token has, by construction, the same issuer string. A trailing-slash or case variant in another config's discovery document makes that config refuse the token (`wrong_issuer`), not record it under a second key. Entra's templated issuer is keyed by the token's concrete `iss`, not the template. **Retention** is `exp + 2 × 60 s` (`:649`), pinned by `the_replay_row_is_kept_to_exp_plus_twice_the_leeway`. **Cross-config** single use is pinned by `a_token_is_single_use_across_two_configurations_of_its_issuer`. **Additivity.** v112 is still all `DEFINE … IF NOT EXISTS` with no `OVERWRITE`. `every_migration_since_1_1_0_is_additive` passes. No tag contains `9b733e4`, so v112 is unreleased (F4-W2-15 covers branch databases). **Purge.** Removing the table from `TENANT_PURGE_ORDER` is consistent with `every_tenant_scoped_table_is_purged`, whose schema scan keys on a `tenant_id`/`scope_id` field, which the table no longer has. No document under `docs/compliance` or elsewhere lists the table as tenant data. The rows hold an issuer and a token hash, live at most a few minutes past `exp`, and the docs and T-490 explain why the purge leaves them. Stale: `website/src/docs/operate.ts` still says "a minute" (F4-W2-13). Single use is still per *token string*, and for ECDSA providers one token has two strings (F4-W2-11). |
+| **F4-W2-07** | **Closed** | The key is `oauth2_provider_id_token:{tenant_id}:{client_ip}` (`oauth2.rs` near `:4942`). `client_ip` already falls back to the peer, and a request with neither forwarded address nor peer is now `invalid_request`, not the shared `unknown` bucket. Pinned by `the_grant_bucket_is_per_tenant` and `a_request_without_an_address_is_refused`. The latter accepts either an `Err` from the route limiter or the handler's 400, which is honest about which layer fires. `rate-limit-sizing.md` gains the CGNAT note. **Side effect, noted:** one address now gets `login_per_min` per tenant it can name, if that tenant has a grant-holding client. Before, it got that budget once, deployment-wide. The bucket protects nothing secret (a signed token cannot be guessed), and the JWKS refetch keeps its own per-provider cooldown, so this is acceptable. |
+| **F4-W2-08** | **Closed** | Recorded as T-491 amendment (b). No code change was recommended. |
+| **F4-W2-09** | **Closed** | `MAX_NONCE_BYTES = 512`, counted in bytes, inclusive, refused as `invalid_request` in `native_request` (`provider_id_token.rs:158`). That is before the limiter-protected verification, so nothing is spent. Pinned by `the_nonce_is_bounded` (including a multi-byte case) and `an_over_long_nonce_is_invalid_request_and_spends_nothing`. |
+| **F4-W2-10** | **Partially closed** | The 500 is gone. `user_repo.create`'s `AlreadyExists` becomes `FederationError::ProvisioningConflict` (`oidc.rs:1061`), then `NativeLoginError::ProvisioningConflict`, then the generic `invalid_grant` with audit `provisioning_conflict`. **The new variant changes no browser or X4 behaviour.** `From<FederationError> for AxiamError` sends it to `Internal` through the `other =>` arm, exactly as `ProvisioningFailed`, with the same `Display` text. No `match` over `FederationError` elsewhere names either variant (the SAML provisioning path still builds only `ProvisioningFailed`). X4 never provisions. **The oracle itself remains** (F4-W2-12): my original recommendation was wrong to say the mapping closes it. |
+
+### C.2 Invariants
+
+| # | Invariant | Verdict | Evidence |
+|---|---|---|---|
+| 1 | X4 refuses ID tokens by name and by shape; its tests unchanged | **Holds** | Neither `crates/axiam-oauth2/src/token_exchange.rs` nor `crates/axiam-federation/src/token_exchange.rs` is in the range. Their tests pass, and so does `the_token_exchange_still_refuses_the_same_id_token` (REST). |
+| 2 | No refresh token from token exchange | **Holds** | No exchange code in the range. |
+| 3 | fapi2 grace unchanged | **Holds** | `crates/axiam-oauth2/src/fapi.rs` is not in the range. |
+| 4 | Crate layering | **Holds** | "19 crates, 62 internal production edge(s), all pointing inward; 4 declared test-only inversion(s)". |
+| 5 | `missing_docs` on axiam-authz / axiam-directory | **Holds (untouched)** | Neither crate is in the range. |
+| 6 | Spec current | **Holds** | Regenerated, byte-identical. The digest and `management-registry.json` follow. CONTRACT §22 and `openapi.json` changed, so the eleven SDK repositories need the usual re-sync. |
+
+### C.3 New findings
+
+| ID | Severity | Where | Finding |
+|---|---|---|---|
+| **F4-W2-11** | Low | `crates/axiam-federation/src/native_login.rs:654` | The replay key hashes the whole token string. An ES256/ES384 signature has a second valid encoding (`s → n − s`), so one token can be spent twice, through one configuration or two. |
+| **F4-W2-12** | Informational | `native_login.rs:244`; T-491 amendment (d); `docs/api/native-sign-in.md` (Errors) | The account-existence oracle of F4-W2-10 is intrinsic: *refusal* versus *success* still answers whether a mapped email or username is taken. The text now claims the grant "does not answer whether an address has an account". |
+| **F4-W2-13** | Informational | `website/src/docs/operate.ts:1641` | The sweep description still says rows go at "`exp` plus a minute". It is now plus two minutes. |
+| **F4-W2-14** | Informational | `native_login.rs:472`; `docs/api/native-sign-in.md` (Nonce rules) | Upper-case hex of the right hash is refused as a generic `nonce_mismatch`. |
+| **F4-W2-15** | Informational | `crates/axiam-db/src/schema.rs` (`SCHEMA_V112`) | A database that ran the branch's first v112 keeps the old required `tenant_id`/`provider_id` fields and the old unique index. Every native sign-in there fails closed. |
+
+**F4-W2-11 (Low) — ECDSA signature malleability defeats single use.**
+*Scenario.* A provider is configured with `ES256` (or `ES384`) in
+`allowed_algorithms`. That is a generic OIDC provider such as Keycloak or an
+ES-signing IdP; Google, Apple, Facebook and Entra sign with RS256. Someone
+holds a spent token *and* its raw nonce, for example:
+
+- a TLS-terminating proxy or WAF that logs request bodies on the AXIAM side,
+- a compromised or instrumented copy of the app,
+- the user themselves.
+
+They decode the signature, replace `s` with `n − s`, re-encode, and present
+it. `jsonwebtoken` 11 with the `rust_crypto` backend accepts the twin.
+**Probe-confirmed:** a throw-away integration test in `axiam-federation`
+signed an ES256 JWT, built the high-S twin (a different string), and
+`jsonwebtoken::decode` returned `Ok` for both. The probe is not in the tree.
+The twin's SHA-256 differs, so `insert_id_token` records it as new, and the
+token signs in a second time. With D-N19 that second time can also be through
+a different tenant or configuration. Applying the swap again gives back the
+original string, so the gain is exactly one extra redemption. It must happen
+within `max_token_age_secs`, and the raw nonce is required, which keeps this
+Low.
+
+This predates the sweep (W2.2's key hashed the same bytes). My first pass
+missed it. *Recommendation.* Fix size **XS**: hash the JWS *signing input*
+(`header.payload`, the bytes the signature covers) instead of the whole
+compact token. Changing either part breaks the signature, and the signature
+part no longer counts. Alternatively, refuse high-S ECDSA signatures before
+verification, but the signing-input key is simpler and covers any future
+malleable algorithm. Update "the SHA-256 of the token's exact bytes" in T-490
+and the docs to match, and add a test that presents the high-S twin of a spent
+ES256 token.
+
+**F4-W2-12 (Informational) — the provisioning oracle is intrinsic; the text
+over-claims.** The attacker holds a provider identity whose email they control
+(an unverified email at a generic OIDC provider). They present its token and
+read the answer:
+
+- `invalid_grant` means the mapped email or username belongs to an existing
+  account;
+- `200` means it did not, and a new account was just provisioned.
+
+They control every other input, so any refusal means "taken". Mapping the
+collision to `invalid_grant` instead of 500 removed an alerting-noise and
+error-shape problem, not the oracle. Each probe costs one fresh, unlinked
+provider subject and one rate-limit slot, and leaves a junk account behind on
+every "free" answer. The browser path has the same property.
+*Recommendation.* Fix size **XS** (text): correct the `ProvisioningConflict`
+rustdoc ("not an account-existence oracle"), T-491 amendment (d) ("does not
+answer whether an address has an account") and the docs' error paragraph. Say
+that the refusal is indistinguishable from other refusals but not from
+success, and record the residual. Removing the oracle would need a design
+change: on an email collision, provision without adopting the email, or refuse
+JIT for unverified emails. That is a maintainer decision and outside 1.2.0
+scope.
+
+**F4-W2-13 (Informational) — stale sweep text.** `website/src/docs/operate.ts`
+describes `federation_id_token_replay` rows as "removed once past their `exp`
+plus a minute of clock margin". Since `a12dbe5` it is plus twice the leeway
+(120 s). Fix size **XS**.
+
+**F4-W2-14 (Informational) — upper-case hex nonce.** An app built on a helper
+that emits upper-case hex gives the provider `ABCD…`. The claim then fails the
+`ct_eq` against `sha256_hex` (lower-case) and the user sees only the generic
+`invalid_grant`. Common examples are .NET `Convert.ToHexString`, Java
+`HexFormat.of().withUpperCase()` and `DatatypeConverter.printHexBinary`. The
+docs say "lower-case hex" in step 2 but do not say that upper-case is refused.
+Either sentence costs nothing in security, because the comparison is still
+against a SHA-256 preimage. *Recommendation.* Fix size **XS**: add "upper-case
+hex is refused" to the Nonce rules. Or compare against the claim
+ASCII-lower-cased, still in constant time over a fixed 64-byte value, so
+the claim must remain exactly 64 hex characters.
+
+**F4-W2-15 (Informational) — v112 changed in place.** `DEFINE … IF NOT EXISTS`
+never redefines. A database that applied the W2.2 v112 (dev or staging run
+from this branch) keeps `tenant_id`/`provider_id` as required `TYPE string`
+fields and the old index. It also has v112 stamped as applied, so the new
+definition never runs. Every `CREATE` without those fields is then rejected,
+which gives `ReplayGuardUnavailable` and `server_error` on every native
+sign-in. That fails closed and no release is affected. *Recommendation.* No
+code change. A one-line note in the PR description: drop
+`federation_id_token_replay` and the v112 stamp on any database that ran the
+pre-sweep branch.
+
+### C.4 Needs a maintainer decision
+
+- **F4-W2-12:** accept the provisioning oracle as a recorded residual (text
+  fix only), or schedule a JIT design change, such as not adopting a
+  colliding email or refusing JIT on unverified emails, for a later release.
+- **F4-W2-11** is a fix, not a decision. It is Low and does not block on its
+  own, but it is XS and sits in the guarantee D-N19 just widened, so it should
+  land in this wave's second sweep.
+- Nothing else is open. F4-W2-01 (the High) is closed, and with it the
+  SEC-095 regression.

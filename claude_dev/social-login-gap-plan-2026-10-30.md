@@ -589,6 +589,74 @@ guidance; say "either case" at the next regeneration).
 **Not run:** OIDF conformance suite; a real Google/Apple token (the stub IdP
 mints the shapes); `npm run test:a11y` (CI step).
 
+#### W3 — IdP hint (`claude/social-gap-w3`, closed 2026-10-31)
+
+**Base** `ad1430f` (the plan branch after W2). **PR:** none (single PR after
+W5); the plan branch was fast-forwarded to the wave head. **Commits**, each
+signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `01b4f43` | W3.1 | `axiam_idp_hint` on `/oauth2/authorize` and the PAR body, resolved server-side to `idp=<uuid>` on the login hop, unresolvable ⇒ byte-identical to no hint; `OAuth2Client.default_idp` (schema **v113**), validated on create/update, stale default ignored, not settable by DCR/CIMD |
+| `787836d` | orchestrator | D-N22…D-N24 |
+| `3b4b0bd` | W3.1b | kind name (`google`, `github`, `facebook`, `apple`, `microsoft`) as a third hint form (D-N24); slug beats kind; ambiguous ignored; generic kinds refused |
+| `d78a6f9` | W3.2 | SPA auto-redirect (1.5 s; 3 s with reduced motion) with cancel and loop guards; admin "Default identity provider" select |
+| `bd520e6` | W3.3 | OpenAPI + management registry regenerated (also the deferred W2 "either case" nonce wording); `docs/admin/oidc-authn-parameters.md`, `browser-login-hop.md`; website block; T-493, T-494 (494 threats); `CLAUDE.md` line |
+| `19490dd` | F4 | `security-review-social-gap-w3-2026-10-31.md`: 1 Medium, 4 Low, 6 Info; server half holds |
+| `a151491` | orchestrator | D-N25…D-N27 |
+| `b42318c` `30f5b84` `d1c6f40` | sweep 1 | #832, #833, #834 |
+| `2e13c33` | F4 addendum 1 | 01–11 closed; 1 Low + 4 Info new → #835 |
+| `a15573e` | orchestrator | D-N28, D-N29 |
+| `4588b12` | sweep 2 | #835 |
+| `6d095e3` | F4 addendum 2 | 12–16 closed; 17–19 open → #836 |
+
+**Deltas against §4 and §3.2.**
+- **Hint forms (D-N24):** UUID, slug and branded kind name; §3.2 named only
+  the first two.
+- **Lanes (D-N22):** the hint and `default_idp` apply on every
+  `authn_request_params` lane; **PAR (D-N23):** the pushed hint is
+  authoritative, read through a narrow `ParService::peek`.
+- **The SSO round trip (D-N25, #832):** an SSO leg started from a login hop
+  now returns to the relying party — pre-existing gap, made the main path by
+  G-B. The stored hop is bound to its start's `state` (D-N29); SAML and Apple
+  handoff redirects now carry the spent start `state` (server change).
+- **Re-authentication (D-N26, D-N28):** no auto-start on a re-authentication
+  hop; the server marks a first-leg hop that demands a fresh authentication
+  with `fresh=1` (honour lane, query and PAR), using the predicate the honour
+  lane already decides with.
+- **Beyond scope, decided by the maintainer (D-N27, #834):** admin OAuth2
+  client create/update/delete are now audited (`oauth2.client_created`,
+  `_updated` with `changed_fields`, `_deleted`); an audit-write failure is
+  logged and the write stands, as every REST admin audit does.
+- **OpenAPI** regenerated in W3.3; W4 re-vendors `openapi.json` and
+  `management-registry.json`.
+
+**Tests**, before → after: `axiam-oauth2` lib 648 → 659; `axiam-api-rest` lib
+315 → 324; new `oauth2_idp_hint_test` 19; `oauth2_honour_lane_test` 39 → 42;
+`par_test` 30 → 31; `axiam-db` schema +1 (v113); frontend 2416 → 2486 (line
+coverage 96.64 %). Unchanged and green: `oauth2_flow_test`,
+`oauth2_client_test`, `oauth2_login_hop_test`, `oauth2_cosmetic_params_test`,
+`federation_login_providers_test`, `provider_id_token_test`,
+`token_exchange_test`, `external_token_exchange_test`, `axiam-server` lib.
+
+**Issues filed:** [#832](https://github.com/ilpanich/axiam/issues/832),
+[#833](https://github.com/ilpanich/axiam/issues/833),
+[#834](https://github.com/ilpanich/axiam/issues/834),
+[#835](https://github.com/ilpanich/axiam/issues/835) — fixed in-wave, close
+with the 1.2.0 PR. **Open after two sweeps:**
+[#836](https://github.com/ilpanich/axiam/issues/836) — F4-W3-17 (Low: a
+reload of a stripped interaction hop auto-starts the provider; proposed as the
+first W4 item), F4-W3-18 (Info: CONTRACT §12 note on the handoff `state`;
+W4.1), F4-W3-19 (Info: `Referrer-Policy` on the form-post error redirect; with
+F4-W3-17). **Outside the plan, filed:**
+[#837](https://github.com/ilpanich/axiam/issues/837) (federated state not
+bound to the browser — pre-existing login CSRF),
+[#838](https://github.com/ilpanich/axiam/issues/838) (forward
+`prompt=login`/`max_age`/`ForceAuthn` upstream — the later item of D-N26).
+
+**Not run:** OIDF conformance suite; a real upstream IdP;
+`npm run test:a11y` (CI step).
+
 **Expected cost**, in executor sessions: W1 3 (3 Opus), W2 6 (4 Opus), W3 4
 (2 Opus), W4 13 (1 Opus), W5 3 (1 Opus) — roughly **29 sessions, 11 Opus**,
 plus the orchestrator. W2.2 is the long pole; W4's eleven run in parallel.

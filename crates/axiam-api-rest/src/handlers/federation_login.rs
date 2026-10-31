@@ -16,7 +16,6 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::federation::{FederationConfig, FederationProtocol};
-use axiam_core::models::tenant::TenantKind;
 use axiam_core::repository::{
     FederationConfigRepository, FederationLoginState, FederationLoginStateRepository,
     OrganizationRepository, SSO_HANDOFF_TTL_SECS, SsoHandoffCode, SsoHandoffCodeRepository,
@@ -145,88 +144,26 @@ pub(crate) async fn resolve_workspace<C: Connection + Clone>(
 // ---------------------------------------------------------------------------
 
 /// A provider that is effective for a tenant, and where it came from.
-#[derive(Debug, Clone)]
-pub(crate) struct EffectiveProvider {
-    pub config: FederationConfig,
-    /// `true` when the config lives in the organization-scope tenant and this
-    /// tenant is using it by inheritance.
-    pub inherited: bool,
-}
+///
+/// The rule lives in `axiam-federation` since G-A (#816), so native sign-in
+/// reaches exactly the providers the browser login does.
+pub(crate) use axiam_federation::provider_resolution::EffectiveProvider;
 
-/// Every provider a tenant may sign in with.
-///
-/// The rule, restated from the design doc because this function is the only
-/// place it exists in code:
-///
-/// * the tenant's own **enabled** configs, plus
-/// * the organization tenant's **enabled** configs with
-///   `allow_tenant_inheritance`, minus any whose override key the tenant
-///   already uses.
-///
-/// The subtraction deliberately uses the tenant's configs **including disabled
-/// ones**. A tenant administrator who created a Google config and disabled it
-/// has said something about Google in this tenant, and the something is "no";
-/// falling back to the inherited config there would make "disable" mean
-/// "re-enable the organization's".
+/// Every provider a tenant may sign in with — see
+/// [`axiam_federation::provider_resolution::effective_providers`] for the rule
+/// (own enabled configs, plus the organization's enabled, inheritable,
+/// unshadowed ones; a disabled own config still shadows).
 pub(crate) async fn effective_providers<C: Connection + Clone>(
     state: &AppState<C>,
     workspace: Workspace,
 ) -> Result<Vec<EffectiveProvider>, AxiamApiError> {
-    let own_all = state
-        .federation
-        .federation_config_repo
-        .list_all(workspace.tenant_id)
-        .await?;
-
-    let mut effective: Vec<EffectiveProvider> = own_all
-        .iter()
-        .filter(|c| c.enabled)
-        .cloned()
-        .map(|config| EffectiveProvider {
-            config,
-            inherited: false,
-        })
-        .collect();
-
-    // An organization-scope tenant has nothing to inherit *from*; it is the
-    // thing others inherit from.
-    let org_tenant = match state
-        .tenant_repo
-        .get_organization_tenant(workspace.organization_id)
-        .await
-    {
-        Ok(t) => t,
-        // A deployment that predates organization scope has no organization
-        // tenant, and therefore no inheritance. That is what such a deployment
-        // has always had, so it is not an error.
-        Err(_) => return Ok(effective),
-    };
-    if org_tenant.id == workspace.tenant_id || org_tenant.kind != TenantKind::Organization {
-        return Ok(effective);
-    }
-
-    let shadowed: Vec<String> = own_all.iter().map(FederationConfig::override_key).collect();
-
-    let inherited = state
-        .federation
-        .federation_config_repo
-        .list_all(org_tenant.id)
-        .await?;
-
-    for config in inherited {
-        if !config.enabled || !config.allow_tenant_inheritance {
-            continue;
-        }
-        if shadowed.contains(&config.override_key()) {
-            continue;
-        }
-        effective.push(EffectiveProvider {
-            config,
-            inherited: true,
-        });
-    }
-
-    Ok(effective)
+    Ok(axiam_federation::provider_resolution::effective_providers(
+        &state.federation.federation_config_repo,
+        &state.tenant_repo,
+        workspace.organization_id,
+        workspace.tenant_id,
+    )
+    .await?)
 }
 
 /// Resolve one config id for a login, honouring inheritance.

@@ -2960,6 +2960,45 @@ pub trait AmqpNonceRepository: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Provider ID-token replay (G-A, #816, D-N10)
+// ---------------------------------------------------------------------------
+
+/// Repository recording the provider-issued ID tokens a native sign-in has
+/// consumed, so each is a sign-in exactly once.
+///
+/// A trait and a table of its own (`federation_id_token_replay`) rather than a
+/// fifth [`ProofKind`]: every replay store in AXIAM has its own trait over its
+/// own table ([`AssertionReplayRepository`], [`AmqpNonceRepository`],
+/// [`ProofReplayRepository`]), and widening `oauth2_proof_replay.kind` would
+/// need a non-additive `DEFINE FIELD OVERWRITE` migration (#729, D-N10).
+///
+/// Same insert-or-conflict semantics as the others: the UNIQUE index on
+/// `(tenant_id, provider_id, token_hash)` decides, with no read in the path.
+/// The caller records a token only **after** its signature verified, so a
+/// forged token can neither fill the table nor spend a genuine token's hash.
+pub trait ProviderIdTokenReplayRepository: Send + Sync {
+    /// Record a consumed ID token by its hash.
+    ///
+    /// `tenant_id` is the tenant that **owns the provider** (for an inherited
+    /// organization provider, the organization tenant), so a token is spent
+    /// once across every tenant that inherits the provider. `token_hash` is
+    /// the lowercase hex SHA-256 of the token as presented — never the token.
+    ///
+    /// Returns `Err(AxiamError::ReplayDetected)` when the tuple was recorded
+    /// before.
+    fn insert_id_token(
+        &self,
+        tenant_id: Uuid,
+        provider_id: Uuid,
+        token_hash: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired rows across all tenants. Returns the number deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
 // OAuth2 proof-of-possession replay (X5.1)
 // ---------------------------------------------------------------------------
 

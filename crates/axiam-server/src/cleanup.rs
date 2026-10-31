@@ -29,9 +29,10 @@ use axiam_core::repository::{
     AmqpNonceRepository, AssertionReplayRepository, AuditLogFilter, AuditLogRepository,
     ConsentRepository, ErasureProofRepository, ExportJobRepository, FederationLinkRepository,
     FederationLoginStateRepository, GroupRepository, MailPublisher, Pagination,
-    PasswordHistoryRepository, PendingSamlRequestRepository, RoleRepository,
-    SamlLogoutRunRepository, SamlSpSessionRepository, SessionRepository, SsfEventBufferRepository,
-    SsoHandoffCodeRepository, TenantRepository, UserRepository, WebauthnCredentialRepository,
+    PasswordHistoryRepository, PendingSamlRequestRepository, ProviderIdTokenReplayRepository,
+    RoleRepository, SamlLogoutRunRepository, SamlSpSessionRepository, SessionRepository,
+    SsfEventBufferRepository, SsoHandoffCodeRepository, TenantRepository, UserRepository,
+    WebauthnCredentialRepository,
 };
 use axiam_db::repository::PurgeClaimOutcome;
 use axiam_db::{
@@ -108,6 +109,9 @@ pub struct CleanupTask<C: Connection> {
     saml_logout_run_repo: Arc<axiam_db::SurrealSamlLogoutRunRepository<C>>,
     // NEW-4: AMQP nonce replay store sweep.
     amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
+    // G-A (#816, D-N10): the native sign-in replay store. Rows live until the
+    // consumed ID token's `exp` plus skew; the sweep is what bounds the table.
+    id_token_replay_repo: Arc<axiam_db::SurrealProviderIdTokenReplayRepository<C>>,
     // GDPR purge sweep (D-05/D-06/D-08).
     user_repo: Arc<SurrealUserRepository<C>>,
     auth_svc: Arc<AuthSvc<C>>,
@@ -3187,6 +3191,9 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
         saml_participant_repo: Arc<axiam_db::SurrealSamlSpSessionRepository<C>>,
         saml_logout_run_repo: Arc<axiam_db::SurrealSamlLogoutRunRepository<C>>,
         amqp_nonce_repo: Arc<SurrealAmqpNonceRepository<C>>,
+        // G-A (#816): required, not a builder step — a forgotten setter would
+        // leave the table growing with nothing to say so.
+        id_token_replay_repo: Arc<axiam_db::SurrealProviderIdTokenReplayRepository<C>>,
         user_repo: Arc<SurrealUserRepository<C>>,
         auth_svc: Arc<AuthSvc<C>>,
         audit_repo: Arc<SurrealAuditLogRepository<C>>,
@@ -3242,6 +3249,7 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             saml_participant_repo,
             saml_logout_run_repo,
             amqp_nonce_repo,
+            id_token_replay_repo,
             user_repo,
             auth_svc,
             audit_repo,
@@ -3518,6 +3526,17 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
             &self.job_health,
             "amqp_nonce_replay",
             self.amqp_nonce_repo.cleanup_expired().await,
+            tracing::Level::DEBUG,
+        );
+
+        if self.stop_requested() {
+            return;
+        }
+        // G-A (#816, D-N10): consumed provider ID tokens past `exp` + skew.
+        Self::record(
+            &self.job_health,
+            "federation_id_token_replay",
+            self.id_token_replay_repo.cleanup_expired().await,
             tracing::Level::DEBUG,
         );
 
@@ -5053,6 +5072,9 @@ mod w1_failure_arm_tests {
             Arc::new(axiam_db::SurrealSamlSpSessionRepository::new(db.clone())),
             Arc::new(axiam_db::SurrealSamlLogoutRunRepository::new(db.clone())),
             Arc::new(axiam_db::SurrealAmqpNonceRepository::new(db.clone())),
+            Arc::new(axiam_db::SurrealProviderIdTokenReplayRepository::new(
+                db.clone(),
+            )),
             Arc::new(SurrealUserRepository::new(db.clone())),
             Arc::new(AuthSvc::new(
                 SurrealUserRepository::new(db.clone()),

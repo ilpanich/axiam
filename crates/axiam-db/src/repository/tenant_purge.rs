@@ -397,6 +397,7 @@ pub const TENANT_PURGE_ORDER: &[PurgeStep] = &[
     PurgeStep::by_tenant("oauth2_proof_replay", Grants),
     PurgeStep::by_tenant("saml_assertion_replay", Grants),
     PurgeStep::by_tenant("amqp_nonce_replay", Grants),
+    PurgeStep::by_tenant("federation_id_token_replay", Grants),
     // (b) Identity links.
     PurgeStep::by_tenant("federation_link", IdentityLinks),
     // (b2) Stored credential material.

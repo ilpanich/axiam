@@ -14,12 +14,17 @@ pub mod error;
 /// keeps "any tenant" from being an accident.
 pub mod issuer;
 pub mod jwks_cache;
+/// G-A — verifying a provider-issued ID token presented by a native app as a
+/// sign-in.
+pub mod native_login;
 /// The plain-OAuth2 login variant: authentication by userinfo call, for
 /// providers that issue no ID token.
 pub mod oauth2;
 pub mod oidc;
 /// PKCE (RFC 7636) for the outbound federation flows.
 pub mod pkce;
+/// Which providers a tenant may sign in with, inheritance included.
+pub mod provider_resolution;
 #[cfg(feature = "saml")]
 pub mod saml;
 /// The bounded wait SAML signature verification gives the deployment's crypto
@@ -46,6 +51,8 @@ pub mod saml_sp;
 pub mod secrets;
 /// X4 — verifying an external IdP's token as an RFC 8693 subject token.
 pub mod token_exchange;
+/// The ID-token / access-token shape markers X4 and native sign-in share.
+pub(crate) mod token_shape;
 
 /// Shared SSRF guard (D2, X3): lifted verbatim to `axiam-pki` because it now
 /// backs the MDS BLOB fetch path too, and PKI is where trust-anchor/outbound

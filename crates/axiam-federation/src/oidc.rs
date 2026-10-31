@@ -102,6 +102,36 @@ pub struct VerifiedIdToken {
     pub raw: serde_json::Value,
 }
 
+/// What [`OidcFederationService::verify_id_token_core`] verified: the token's
+/// claims and its JOSE header (native sign-in reads the header `typ`).
+#[derive(Debug, Clone)]
+pub(crate) struct CheckedIdToken {
+    /// The verified claims, typed and raw.
+    pub verified: VerifiedIdToken,
+    /// The token's JOSE header, as decoded before verification.
+    pub header: jsonwebtoken::Header,
+}
+
+/// Why the shared ID-token verification refused.
+///
+/// `Claims` keeps the decoder's own error so a caller can tell `iss`, `aud`
+/// and `exp` apart; the browser login folds it into `JwtClaimRejected` with
+/// its text, exactly as before.
+#[derive(Debug)]
+pub(crate) enum IdTokenCheckError {
+    /// A refusal this crate names (header, algorithm, key, signature, issuer
+    /// template, unusable claims).
+    Federation(FederationError),
+    /// A claim the decoder refused.
+    Claims(jsonwebtoken::errors::Error),
+}
+
+impl From<FederationError> for IdTokenCheckError {
+    fn from(e: FederationError) -> Self {
+        Self::Federation(e)
+    }
+}
+
 /// Merge provider-supplied, **unsigned** values under a verified claim set.
 ///
 /// Apple is why this exists: the user's name arrives once, in a form field of
@@ -636,6 +666,66 @@ where
         allowed_issuer_tenants: &[String],
         cache_key: (Uuid, Uuid),
     ) -> Result<VerifiedIdToken, FederationError> {
+        // One audience — the provider's web `client_id` — and the errors this
+        // function has always returned: a claim the decoder refused is
+        // `JwtClaimRejected` with the decoder's own text. The browser login's
+        // behaviour is exactly what it was before native sign-in shared the
+        // core below.
+        self.verify_id_token_core(
+            token,
+            discovery,
+            &[client_id],
+            allowed_algorithms,
+            allowed_issuer_tenants,
+            cache_key,
+        )
+        .await
+        .map(|checked| checked.verified)
+        .map_err(|e| match e {
+            IdTokenCheckError::Federation(f) => f,
+            IdTokenCheckError::Claims(e) => FederationError::JwtClaimRejected(e.to_string()),
+        })
+    }
+
+    /// The verification behind [`Self::verify_id_token_full`], for any
+    /// non-empty set of accepted audiences, keeping the decoder's own error
+    /// and the JOSE header.
+    ///
+    /// Crate-private (G-A): native sign-in accepts the provider's
+    /// `native_login.client_ids` rather than its web `client_id`, and needs to
+    /// tell a wrong issuer, a wrong audience and an expired token apart in its
+    /// logs and tests, which the string in `JwtClaimRejected` does not do
+    /// robustly. The steps, their order and the leeway are the browser
+    /// login's, unchanged:
+    ///
+    /// 1. raw-header `alg=none` refusal (D-04);
+    /// 2. `decode_header` for `alg` and `kid`;
+    /// 3. the algorithm allow-list (D-04);
+    /// 4. the JWKS cache, one rate-limited forced refetch on an unknown `kid`
+    ///    (D-01..D-03) — no new fetch surface;
+    /// 5. signature, `iss` (templated issuers resolved, §6), `aud` ∈
+    ///    `audiences` (string or array), `exp` with the 60 s leeway (D-05),
+    ///    and `iss`/`aud`/`exp`/`iat` required.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn verify_id_token_core(
+        &self,
+        token: &str,
+        discovery: &OidcDiscoveryDocument,
+        audiences: &[&str],
+        allowed_algorithms: &[String],
+        allowed_issuer_tenants: &[String],
+        cache_key: (Uuid, Uuid),
+    ) -> Result<CheckedIdToken, IdTokenCheckError> {
+        // An empty set would make the decoder skip the audience check
+        // altogether. Unreachable from both callers (a browser login passes
+        // one value; native sign-in refuses an empty `client_ids` before it
+        // gets here), and refused here so it stays unreachable.
+        if audiences.is_empty() {
+            return Err(IdTokenCheckError::Federation(
+                FederationError::JwtClaimRejected("no accepted audience is configured".into()),
+            ));
+        }
+
         // Step 1 — Belt-and-suspenders: reject `alg=none` by inspecting the raw
         // JOSE header before handing the token to `decode_header`.
         // `jsonwebtoken` 10 does not have an `Algorithm::None` variant and
@@ -649,10 +739,7 @@ where
         // Step 3 — Algorithm allow-list check.
         let allowed: Vec<Algorithm> = map_algorithm_strings(allowed_algorithms);
         if !allowed.contains(&header.alg) {
-            return Err(FederationError::AlgorithmNotAllowed(format!(
-                "{:?}",
-                header.alg
-            )));
+            return Err(FederationError::AlgorithmNotAllowed(format!("{:?}", header.alg)).into());
         }
 
         // Step 4 — Resolve JWKS from cache and find the matching JWK by kid.
@@ -692,7 +779,7 @@ where
         let mut validation = Validation::new(header.alg);
         validation.algorithms = allowed;
         validation.set_issuer(&[&expected_issuer]);
-        validation.set_audience(&[client_id]);
+        validation.set_audience(audiences);
         validation.set_required_spec_claims(&["iss", "aud", "exp", "iat"]);
         validation.leeway = CLOCK_SKEW_LEEWAY_SECS; // REQ-5 clock-skew tolerance
 
@@ -703,8 +790,10 @@ where
             decode::<serde_json::Value>(token, &decoding_key, &validation).map_err(|e| {
                 use jsonwebtoken::errors::ErrorKind;
                 match e.kind() {
-                    ErrorKind::InvalidSignature => FederationError::JwtSignatureInvalid,
-                    _ => FederationError::JwtClaimRejected(e.to_string()),
+                    ErrorKind::InvalidSignature => {
+                        IdTokenCheckError::Federation(FederationError::JwtSignatureInvalid)
+                    }
+                    _ => IdTokenCheckError::Claims(e),
                 }
             })?;
 
@@ -713,7 +802,10 @@ where
             FederationError::JwtClaimRejected(format!("ID token claims are not usable: {e}"))
         })?;
 
-        Ok(VerifiedIdToken { claims, raw })
+        Ok(CheckedIdToken {
+            verified: VerifiedIdToken { claims, raw },
+            header,
+        })
     }
 
     /// Exchange an authorization code for tokens at the external IdP's

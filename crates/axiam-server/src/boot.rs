@@ -2935,6 +2935,9 @@ where
         Arc::new(saml_participant_repo.clone()),
         Arc::new(saml_logout_run_repo.clone()),
         Arc::new(amqp_nonce_repo.clone()),
+        Arc::new(axiam_db::SurrealProviderIdTokenReplayRepository::new(
+            db_handle.clone(),
+        )),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
         Arc::new(audit_repo.clone()),

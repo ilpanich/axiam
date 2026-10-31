@@ -588,6 +588,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "federation_native_login_trust",
         sql: SCHEMA_V111,
     },
+    Migration {
+        version: 112,
+        name: "federation_id_token_replay",
+        sql: SCHEMA_V112,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5699,6 +5704,37 @@ DEFINE FIELD IF NOT EXISTS native_login_max_token_age_secs ON TABLE federation_c
     TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v112 — the native sign-in replay store (G-A, #816, D-N10)
+// -----------------------------------------------------------------------
+//
+// `federation_id_token_replay`: every provider-issued ID token a native
+// sign-in consumed, by the hex SHA-256 of the token as presented (Google's ID
+// tokens carry no `jti`). First sighting by `CREATE`, replay by violation of
+// the UNIQUE `(tenant_id, provider_id, token_hash)` index, no read in the
+// path; a row lives until the token's `exp` plus the 60 s skew allowance and
+// is then swept by the cleanup loop.
+//
+// A table of its own rather than a fifth `oauth2_proof_replay.kind`: widening
+// that field's ASSERT takes a `DEFINE FIELD OVERWRITE`, which is not additive
+// (#729) — and a third overwrite of one field is the re-narrowing hazard the
+// boot-time gap refusal exists for. Every statement here is
+// `DEFINE … IF NOT EXISTS`. `tenant_id` is the tenant that owns the provider,
+// so the tenant purge removes the rows with it.
+const SCHEMA_V112: &str = "\
+DEFINE TABLE IF NOT EXISTS federation_id_token_replay SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE federation_id_token_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS provider_id ON TABLE federation_id_token_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS token_hash ON TABLE federation_id_token_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE federation_id_token_replay TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_id_token_replay TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_uniq ON TABLE federation_id_token_replay
+    COLUMNS tenant_id, provider_id, token_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_expires_at
+    ON TABLE federation_id_token_replay COLUMNS expires_at;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6105,6 +6141,53 @@ mod tests {
             );
         }
         assert!(is_additive(SCHEMA_V111));
+    }
+
+    /// G-A (#816, D-N10) — v112 is the native sign-in replay table, its
+    /// fields and its two indexes, and nothing else: every statement
+    /// `DEFINE … IF NOT EXISTS` (#729), the uniqueness on exactly
+    /// `(tenant_id, provider_id, token_hash)`, no existing table touched.
+    #[test]
+    fn v112_adds_only_the_native_sign_in_replay_table() {
+        let statements: Vec<String> = SCHEMA_V112
+            .split(';')
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE TABLE IF NOT EXISTS federation_id_token_replay SCHEMAFULL",
+                "DEFINE FIELD IF NOT EXISTS tenant_id ON TABLE federation_id_token_replay \
+                 TYPE string",
+                "DEFINE FIELD IF NOT EXISTS provider_id ON TABLE federation_id_token_replay \
+                 TYPE string",
+                "DEFINE FIELD IF NOT EXISTS token_hash ON TABLE federation_id_token_replay \
+                 TYPE string",
+                "DEFINE FIELD IF NOT EXISTS expires_at ON TABLE federation_id_token_replay \
+                 TYPE datetime",
+                "DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_id_token_replay \
+                 TYPE datetime DEFAULT time::now()",
+                "DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_uniq ON TABLE \
+                 federation_id_token_replay COLUMNS tenant_id, provider_id, token_hash UNIQUE",
+                "DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_expires_at ON TABLE \
+                 federation_id_token_replay COLUMNS expires_at",
+            ],
+            "v112 defines the replay table and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "oauth2_proof_replay",
+        ] {
+            assert!(
+                !SCHEMA_V112.contains(forbidden),
+                "v112 must not contain {forbidden}: it adds one table and touches no other"
+            );
+        }
+        assert!(is_additive(SCHEMA_V112));
     }
 
     #[test]
@@ -7719,10 +7802,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&111),
-            "v111 is the newest migration (G-A, #816 — `federation_config.native_login_enabled`, \
+            Some(&112),
+            "v112 is the newest migration (G-A, #816, D-N10 — the `federation_id_token_replay` \
+             table, the native sign-in replay store, additive); v111 was G-A, #816 — \
+             `federation_config.native_login_enabled`, \
              `native_login_client_ids` and `native_login_max_token_age_secs`, the native \
-             sign-in trust block, absent reading as disabled); v110 was G-C, #818 — \
+             sign-in trust block, absent reading as disabled; v110 was G-C, #818 — \
              `security_settings.oauth2_refresh_reuse_response` and the \
              `idx_refresh_token_session` index a refused replay's revocation selects on; v109 \
              was #676 — the `rate_limit_bucket.updated_at` index the \

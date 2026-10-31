@@ -30,6 +30,9 @@ zeroize = { workspace = true }
 jsonwebtoken = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+# G-A: the native sign-in nonce comparison is constant-time. Already a
+# workspace dependency (axiam-auth, axiam-oauth2), so no crate enters the graph.
+subtle = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

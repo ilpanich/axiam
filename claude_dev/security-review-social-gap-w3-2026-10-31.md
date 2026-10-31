@@ -660,3 +660,188 @@ underlying unbound-state login CSRF, which is a pre-existing, separate matter.
   wanted, it belongs on the roadmap, not in this wave.
 
 F4-W3-01 … 11 are closed. Nothing here is High or Medium.
+
+## Addendum 2 — sweep 2 re-check (2026-10-31)
+
+**Against:** `a15573e..4588b12` on `claude/social-gap-w3`, the one commit
+`4588b12` (#835; F4-W3-12 … 16; D-N28, D-N29). The range touches 21 files and
+adds about 920 lines. As before, every finding was re-checked against the code,
+not the commit message, and the new code was read for what it adds. Two
+throw-away probes ran and were kept out of the tree (below). The following
+were run and were green (exit 0):
+
+- `cargo test -p axiam-oauth2 --lib`: 659 passed, including every `honour::`
+  test, `fresh_authentication_is_prompt_login_or_max_age_zero_in_any_spelling`,
+  `peek_reports_a_pushed_fresh_authentication_demand_as_a_bool`,
+  `the_fresh_authentication_marker_is_appended_last_and_only_when_set` and
+  `the_fresh_authentication_marker_never_reaches_the_consent_page`.
+- `cargo test -p axiam-api-rest --no-default-features --test oauth2_honour_lane_test --test oauth2_idp_hint_test --test par_test`:
+  42 + 19 + 31 passed, including the three `d_n28_*` tests.
+- `cargo test -p axiam-api-rest --no-default-features --test oauth2_cosmetic_params_test --test federation_login_providers_test`:
+  10 + 54 passed (55 with the probe), including `a_handoff_code_buys_exactly_one_session`.
+- `cargo test -p axiam-api-rest --no-default-features --lib federation_login`:
+  11 passed, including `a_cross_site_return_carries_the_start_state`.
+- `npx vitest run LoginPageIdpHint.test.tsx SsoCallbackPage.test.tsx ssoLogin.test.ts`:
+  3 files, 87 passed (89 with the probe).
+- `scripts/check-crate-layering.py`: OK, 19 crates, 62 edges.
+  `scripts/check-spec-digest.py`: OK (no OpenAPI-visible change).
+  `cargo fmt -p axiam-oauth2 -p axiam-api-rest -- --check`: clean.
+
+**Probes.** (1) REST, appended to `federation_login_providers_test.rs` and then
+removed: start a plain-OAuth2 sign-in with
+`redirect_uri=…/auth/sso/callback?keep=1`, then post the form callback with
+that `state` and `error=access_denied"<x`. The answer is `303` to
+`…/callback?keep=1&error=provider_error&state=<the start state>` (the error is
+sanitised, the URI's own query is kept, the value is encoded). Replaying the
+same `state` afterwards is `401` on the form callback with an `error`, `401`
+with a `code`, and `401` on the SPA's JSON `oauth2/callback`: the echoed value
+is spent everywhere it could be redeemed. The `303` carries
+`Cache-Control: no-store` but **no** `Referrer-Policy` (F4-W3-19). (2) SPA, a
+temporary `describe` in `LoginPageIdpHint.test.tsx`, then removed: an
+interaction hop `/login?return_to=…prompt=login…&reauth=1&idp=<id>` (and the
+same with `acr=urn:axiam:acr:mfa` in place of `reauth=1`) starts nothing. But
+the page rewrites its URL to `?return_to=…&idp=<id>`, and rendering that URL
+again (a reload) **auto-starts** the provider after the workspace step
+(F4-W3-17).
+
+### B.1 Verdicts
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| **F4-W3-12** | **Closed as decided (D-N28)** | The server marks the hop. `AuthnRequestParams::demands_fresh_authentication` (`authn_params.rs:504`) is `max_age == Some(0) \|\| prompt ∋ Login`. It is applied to the query copy on the anonymous leg (`oauth2.rs:1149`, which now also parses `max_age`; `parse` records an error and carries on, and this arm reads no `parse_error`, so the extra field changes nothing else on the leg). For the pushed copy it is applied inside `ParService::peek` (`par.rs:436`), which returns one `bool` and still consumes nothing (the test asserts `consumes == 0` for every case). Carrier selection follows RFC 9126 §4: beside a `request_uri` only the pushed copy counts, and a query `prompt=login` next to it does not mark (tested). The marker is set on the honour lane only, on the first leg only (`oauth2.rs:2275` sets `false` on the interaction hop), never on `/consent` (`build_interaction_redirect` drops it), and appended last, so an unmarked URL is the G-B URL byte for byte. The page holds the start on `fresh=1` and keeps it in the address bar. **Lane rule, gap check.** A `fapi2` client can never be on the honour lane (`fapi.rs`, `m1_m6_fapi_plus_honour_is_refused_at_creation` / `_on_update`), and its `prompt`/`max_age` are refused, so no `fapi2` token ever answers a fresh-login demand. On `ignore`, `prompt=login`/`max_age` are dropped: even a live AXIAM session would be reused silently, so an auto-start there asserts nothing the lane promised. The docs' table says exactly this ("Not set on the `ignore` lane or for `fapi2` clients"). One behaviour moved: sweep 1's SPA parse held the start for an *inline* `prompt=login` on any lane, and now an `ignore`-lane client's inline `prompt=login` auto-starts. That is consistent with the lane and documented. **Accepted.** Correction to Addendum 1: F4-W3-12's scenario named `fapi2`. The real exposure was an honour-lane client using PAR (optional or `require_par`), because a `fapi2` request carrying `prompt`/`max_age` is refused. The fix covers exactly that client. Residual: F4-W3-17. |
+| **F4-W3-13** | **Closed (accepted and documented)** | `docs/admin/oidc-authn-parameters.md` now has a table of marks. `reauth=1` is (a) the stale-cookie first leg, (b) every honour-lane interaction hop (checked against `Reason::requires_reauthentication`, which is everything but `ConsentRequired`), and (c) the CIBA step-up link (`ciba.ts:112`). The table states that case (a) also gets click-to-start, and why the page cannot tell (a) from (b). The `LoginPage` comment says the same. Fails safe. |
+| **F4-W3-14** | **Closed** | `demandsFreshLogin` is gone (no occurrence under `frontend/src`). There is one parser, the honour lane's own. `honour::evaluate` now calls the shared predicate (`honour.rs:320`): `A \|\| (L \|\| C \|\| S)` became `(A \|\| L) \|\| (C \|\| S)`, with `A` the unchanged `max_age_is_login` (`== Some(0)`, `:287`). That is the same boolean, `max_age_is_login` keeps its other use (the `prompt=none` refusal), and every honour, lane and cosmetic test is green. F4-W3-14's probe spellings (`00`, `+0`, ` 0`, tab, newline) now mark the hop at the REST level (`d_n28_an_inline_fresh_authentication_demand_marks_the_first_leg`). The page auto-starts on them only when the server did not mark the hop (`auto-starts when only return_to says %s`). |
+| **F4-W3-15** | **Closed** | The coverage-matrix `auth` row now describes the operative guards (no `idp` on the failure link, the guard written on start and cancel, one start per load, the workspace step, `error`/`error_description` as defence in depth), the three marks, and the D-N29 binding. `sso_error` has no occurrence in code or docs outside this review. |
+| **F4-W3-16** | **Closed as decided (D-N29)** | The record is written only after the start answers (`LoginPage.tsx:558`), with `start.state` or SAML's `relay_state`. A failed start leaves no record (tested). `takePendingSso` bounds the stored value (non-empty string, ≤ 512 characters) and removes the record before parsing. `hopForCallback` (`ssoLogin.ts:229`) returns the hop only if both values are present and equal. Otherwise the sign-in still completes and lands on `/dashboard`, and the failure link is a bare `/login`. All four arrivals carry the value: the OIDC/OAuth2 provider redirect, and on the server's side the SAML and Apple handoff and Apple's form-post error (`spa_return_target`, `federation_login.rs:73`). A login CSRF or stale callback can therefore no longer resume a hop the person left behind. The underlying unbound federated state is open item (3). |
+
+### B.2 The new `state` on the cross-site returns
+
+I scrutinised the server change on its own, because it is the only part of
+#835 that puts a new value into a URL.
+
+- **Never live when echoed.** There are exactly three call sites, and each
+  runs after the atomic `consume_login_state`, which does SELECT + DELETE in one
+  transaction (`federation_login_state.rs:100`). The Apple success path calls
+  `mint_handoff_and_redirect` with `&f.state` after `:898`. The Apple error path
+  calls `redirect_with_error` with `&f.state` after the same consume ("consumed
+  whatever the outcome"). SAML calls `mint_handoff_and_redirect` with
+  `relay_state` after `:1040`. Every failure *after* the consume (workspace,
+  config, assertion or code verification, origin check, reactor veto) returns
+  an API error, not a redirect, so it echoes nothing. The echoed string is the
+  form's own value, which matched the row byte for byte. Probe (1) confirms
+  that a replay is `401` on all three redemption endpoints. The value keys no
+  other table: the nonce and PKCE verifier are separate fields of the row, and
+  SAML replay protection keys on the assertion.
+- **Leakage.** The value is not new to the browser. While it *was* live, it
+  already sat in the provider URL (Apple's `state`, SAML's `RelayState`), in
+  history, and at the provider. Now it reappears spent, beside a handoff code
+  that *is* live and is protected as before: `SsoCallbackPage` calls
+  `replaceState(…, pathname)` before redeeming, which removes `state` with it.
+  The success `303` sends `Referrer-Policy: no-referrer`. The error `303` does
+  not (pre-existing, F4-W3-19); there the URL holds only a sanitised error code
+  and the spent value. Server logs: the `info!` line logs no URL. An access log
+  of the SPA route records the same query that already held the handoff code.
+  The value is a random 256-bit correlator with nothing behind it.
+- **Replay or completion.** It can complete nothing (see above). The SPA uses
+  it only for an equality test that can *withhold* a hop and never grant one.
+  An attacker's own handoff URL carries the attacker's `state`, which does not
+  match the victim's record, so the hop is withheld. That is the intended
+  effect.
+- **The handoff exchange.** It is unchanged. `sso_handoff_public` takes the code
+  alone. Its single use, 60-second TTL, hash-only storage and redirect-origin
+  confinement are untouched (`a_handoff_code_buys_exactly_one_session`
+  passes). The exchange is not bound to `state`, so its security is neither
+  better nor worse (open item 3).
+- **Dispatch on the callback.** The page checks `error` first, then
+  `axiam_handoff`, then `code && state`. A handoff URL now has `state` but no
+  `code`, so it can never be misrouted to `completeOidc`/`completeOauth2`.
+
+**Verdict:** sound. It leaks nothing that was not already exposed while live,
+and it changes no credential's security. It needs one parity fix (F4-W3-19)
+and one contract note (F4-W3-18).
+
+### B.3 The executor's open items
+
+1. **A reload after `reauth=1`/`acr` is stripped can auto-start.** The
+   finding is **confirmed** by probe (2) and filed as **F4-W3-17 (Low)**. The
+   *interaction* hop carries `idp` (`oauth2.rs`, the G-B arm) and never
+   `fresh`. `LoginPage`'s strip effect deletes `reauth` and `acr`
+   (`LoginPage.tsx:294`) and keeps `idp`, so the reloaded URL has no mark.
+   After the workspace step the page auto-starts. An upstream session answers,
+   and the return leg is judged on a session dated now. For `prompt=login`,
+   `max_age=0` and an unmet `max_age`, that is the D-N26 outcome (a fresh
+   authentication nobody performed) behind one reload. For a step-up `acr` it
+   only loops back to another hop, because the federated session does not
+   carry the factor. Severity matches F4-W3-03 (Low): it needs the person to
+   reload and re-enter the workspace, and it yields presence at AXIAM but no
+   credential. It is not pre-W3: it entered with #833 in this wave. The
+   existing test `stays quiet on reload: the page strips reauth but keeps fresh=1`
+   covers only a URL carrying both marks, which the server never builds (the
+   interaction hop never has `fresh`). **Should be fixed. Size XS.**
+   Preferred: when the strip effect removes `reauth` or `acr`, set `fresh=1` in
+   their place. The page keeps its own "hold the start" state across a reload,
+   the provider stays highlighted, and `fresh` already has exactly this meaning
+   for the page. The alternative, deleting `idp` along with them, also closes
+   it but loses the highlight. Either way, add `reauth=1`-only and `acr`-only
+   cases to the reload test.
+2. **CONTRACT §12 does not mention `state` on the handoff redirect.** Filed
+   as **F4-W3-18 (Info)**. The change is additive. An SDK that reads
+   `axiam_handoff` keeps working. An SDK that binds its callback to its own
+   start (the right thing to do) now *can* on SAML and Apple. No reasonable
+   SDK reads `state` on a handoff URL in a way this breaks. It **should** be
+   a CONTRACT change in W4, but it is not a blocker for W3. Add a sentence to
+   §12.3 rule 12: "the redirect also carries `state`, the value the start
+   operation returned (`state`, or SAML's `relay_state`), already spent; an
+   SDK MAY compare it with the value it stored to bind the return to its own
+   start, and MUST NOT redeem or forward it". State the same for the
+   form-post `error` redirect. Bump the contract minor version and re-sync
+   the eleven SDKs with the next contract sync. Optionally say it in the two
+   `303` response descriptions in OpenAPI too, which changes the spec digest.
+3. **Federated state is not bound to the browser (login CSRF).** It
+   **predates W3 and is outside it. Severity Low.** An attacker who drives a
+   victim's tab to the callback with the attacker's own handoff code or
+   `code`+`state` signs that tab in as the attacker. D-N29 removed the one
+   way W3 made this worse (resuming the victim's stale hop under the
+   attacker's session). What remains is the classic login CSRF, at the same
+   level as before W3. **It needs its own issue, not a W3 change.** Suggested
+   shape: set a `__Host-` cookie at the start endpoint that binds to the
+   login-state row (the start is a same-origin `POST`). Check it where the
+   browser comes back same-origin: at `oidc/callback`, `oauth2/callback` and
+   handoff redemption. Do not check it at the cross-site form endpoints, where
+   a `SameSite=Strict` or `Lax` cookie is not sent.
+
+### B.4 Invariants
+
+| # | Invariant | Verdict | Evidence |
+|---|---|---|---|
+| 1 | X4 refuses ID tokens by name and by shape; its tests unchanged | **Holds** | No `token_exchange.rs` (`axiam-oauth2`, `axiam-federation`) or test of it is in the range; `axiam-oauth2 --lib` (659) green. |
+| 2 | No refresh token from token exchange | **Holds** | No exchange code in the range. |
+| 3 | `fapi2` grace unchanged | **Holds** | `fapi.rs` not in the range. The marker is honour-only, and a `fapi2` client can never be on the honour lane. `peek`'s new `bool` is computed silently and refuses nothing. |
+| 4 | Crate layering | **Holds** | "19 crates, 62 internal production edge(s), all pointing inward; 4 declared test-only inversion(s)". `axiam-oauth2` gained no dependency. |
+| 5 | `missing_docs` on `axiam-authz` / `axiam-directory` | **Holds (untouched)** | Neither crate is in the range. The new public items are documented anyway: `demands_fresh_authentication`, `Cosmetic::fresh_authentication`, `FRESH_LOGIN_PARAM` and `PeekedRequest::fresh_authentication`. |
+| 6 | Spec current | **Holds** | The digest matches. The new handler parameter is internal, and the `303` descriptions are unchanged (see F4-W3-18 for the optional wording). |
+| 7 | Threat model and docs cite real tests | **Holds** | Every test name in the T-493 amendment, `docs/admin/*`, the coverage matrix and the CHANGELOG delta was looked up in the tree: 9 Rust and 18 frontend titles. The other back-ticked identifiers are module or parameter names, not tests. The docs match the code on the carrier, the lane, first-leg-only, no `/consent`, appended last, and the `reauth=1` sources. One statement is incomplete: "keeps `fresh` in the address bar so a reload stays quiet" is true of a `fresh` hop but not of a `reauth`/`acr` hop (F4-W3-17). |
+
+### B.5 New findings
+
+| ID | Severity | Where | Finding | Fix |
+|---|---|---|---|---|
+| **F4-W3-17** | Low | `LoginPage.tsx:276–296` (strip effect), `:247` (`freshAuthRequired`) | A reload of an interaction hop (`reauth=1` or a step-up `acr`, which carries `idp`) loses the mark, because the page strips it from the URL and keeps `idp`. The reloaded page auto-starts the provider (probe 2), which is D-N26's unattended re-authentication behind one reload. | XS: when the strip effect removes `reauth`/`acr`, write `fresh=1` (or drop `idp`); add the two single-mark reload cases; amend the T-493 sentence. |
+| F4-W3-18 | Info | `sdks/CONTRACT.md` §12.3 rule 12 | The SAML/Apple handoff redirect and the form-post error redirect now carry the spent start `state`. The contract does not say so, and SDKs cannot rely on it for binding. | XS, W4: one paragraph and a minor contract bump; downstream re-sync. |
+| F4-W3-19 | Info | `federation_login.rs:1165` (`redirect_with_error`) | The form-post error `303` sends `Cache-Control: no-store` but not `Referrer-Policy: no-referrer`, which the success `303` sends. It is pre-existing. The URL now also holds the spent `state`, so nothing live leaks, but the two exits of one endpoint should match. | XS: add the header. |
+
+### B.6 Final status of every W3 finding
+
+F4-W3-01 … 16 are **closed**:
+
+- 01, 02, 04, 06 … 11, 14, 15 and 16 are fixed.
+- 03 and 12 are closed as decided (D-N26, D-N28). The upstream forwarding of
+  `prompt`/`max_age`/`ForceAuthn` remains a later item, as decided.
+- 05 is fixed by auditing in this wave (D-N27).
+- 13 is accepted and documented.
+
+Open: **F4-W3-17 (Low, XS)**, which should be fixed before the merge or as the
+first W4 item. **F4-W3-18 (Info)** is a W4 contract note. **F4-W3-19 (Info,
+XS)** can be fixed in any later commit. Outside W3, the browser-unbound
+federated state (login CSRF, pre-existing, Low) needs its own issue. Nothing
+in this review is High or Medium.

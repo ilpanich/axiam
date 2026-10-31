@@ -700,6 +700,8 @@ recommendation.
 | D-N27 | *(F4-W3-05, #834)* Admin OAuth2 client create/update/delete are not audited (pre-existing), so `default_idp` changes leave no record. Residual with its own issue, or audit in this wave? | **Recommended: residual + own issue.** | **Answered by the maintainer 2026-10-31: audit in this wave.** |
 | D-N28 | *(F4-W3-12, #835)* Under PAR the sign-in page cannot see `prompt=login`/`max_age=0` and auto-starts the provider. Server marks the hop, or residual? | **The server marks the hop** as a re-authentication (query and PAR alike); the SPA stops parsing `return_to` (also settles F4-W3-13/-14) | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N29 | *(F4-W3-16, #835)* Bind the remembered login hop to the SSO start that created it? | **Yes**: resume only on a callback whose `state` matches the one recorded at start | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N30 | *(W4 start)* How are the eleven SDK changes delivered? | **One draft PR per SDK**, each on `claude/bold-mayer-wpd3kv` in its own repository, referencing contract 1.65 and listed in the final axiam PR; the maintainer merges and tags | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N31 | *(W4 start)* #836 (F4-W3-17/-18/-19, open after W3's two sweeps): fix inside the plan? | **Yes**: F4-W3-17 and -19 as the first W4 commit (W4.0); F4-W3-18 folded into the contract 1.65 text (W4.1) | **Answered by the maintainer 2026-10-31: as recommended.** |
 
 ---
 

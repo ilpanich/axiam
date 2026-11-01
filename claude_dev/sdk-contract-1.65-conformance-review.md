@@ -602,3 +602,135 @@ optional.
   C++ runs above are green.
 
 Everything else from the fix list (C165-01 … -21) is closed.
+
+## Addendum 2 — sweep 2 re-check (2026-11-01)
+
+**Scope.** The nine sweep-2 commits on `claude/bold-mayer-wpd3kv` (plus Kotlin's follow-up `320cefa`), each
+diffed against its Addendum 1 head, against §12.1 rule 3 "No redirect is followed" (no redirect followed from a
+`POST` to `/oauth2/*`; a `3xx` is `NetworkError`) and its 1.63 paragraph (no session cookie or `X-CSRF-Token` on
+`/oauth2/*`). Go (`e4235e7`) and Swift (`139198d`) had no sweep-2 findings and were not re-read. No sweep commit
+touches `CONTRACT.md`, `openapi.json`, `management-registry.json` or `proto/`, so A1.1's vendoring stands.
+
+| SDK | A1 head | sweep-2 head | Findings addressed | CI on the sweep-2 head (check runs) |
+|---|---|---|---|---|
+| PHP | `114810f` | `2b2809b` | C165-22 | 7 success, 2 skipped (publish, tag) |
+| Java | `ae12455` | `b54a3bb` | C165-23, -25 | 20 success, 2 skipped |
+| Kotlin | `54871aa` | `62d0e47` → `320cefa` | C165-23, -25 | `320cefa`: 9 success (JDK 17 / Kotlin 2.1.0 and JDK 27 / Kotlin 2.4.21), 2 skipped |
+| TypeScript | `4586681` | `34db3dc` | C165-26 | 7 success, 2 skipped |
+| C | `3476b7d` | `00cced0` | C165-25, -27 | 26 success, 4 skipped |
+| C++ | `7e45f76` | `c37f016` | C165-25 | 10 success, 2 skipped; llvm-cov → Coveralls still running when read |
+| Rust | `9d5ca23` | `f047710` | C165-25 | 16 success, 2 skipped |
+| C# | `c06bbf3` | `620b987` | C165-25 | 10 success, 2 skipped |
+| Python | `4ccc75a` | `ff8a2a9` | C165-25 | 13 success, 2 skipped |
+
+Kotlin `62d0e47` failed to compile its own test under Kotlin 2.4.21 (`OAuth2NoRedirectTest.kt:104`,
+`assertFalse(e is OAuthProtocolError)` on a `NetworkError` is `IMPOSSIBLE_IS_CHECK_ERROR`). `320cefa` changes that
+one test line to `assertFalse(OAuthProtocolError::class.java.isInstance(e))`. That is test-only and changes no
+behaviour. The assertion is vacuous (the two types are unrelated, which is what the compiler said). The real check
+is `assertThrows(NetworkError::class.java)` on the line above. Accepted.
+
+### A2.1 Runs (scratch worktrees at the sweep-2 heads, removed afterwards)
+
+| Repo | Run | Result |
+|---|---|---|
+| php | **none**: `composer install` still fails ("Could not authenticate against github.com"; dist zipballs come from `api.github.com`, and `--prefer-source` fails the same way). `php -l` on `OidcClient.php` and the new test: clean. Read only | — |
+| java | `mvnw -o -Dtest=Oauth2NoRedirectTest,NativeSignInTest,RefreshReuseInvalidGrantTest,Ciba*` + reviewer probes (`devicePoll` 307, `cibaPoll` 308) | 6 + 14 + 1 + 24 passed; probes: `NetworkError`, second host 0 requests, one token POST |
+| kotlin (`62d0e47` sources) | `gradlew --offline --no-daemon test` OAuth2NoRedirect, Ciba, NativeSignIn, IdpHint, OidcRefreshReuse + two reviewer probes in `CibaTest` | 4 + 29 + 14 + 7 + 1 passed; probes: C165-29 |
+| typescript | `npm ci`; `vitest run` oauth2BrowserCredentials, nativeSignIn, idpHint, oidcTokenOps, clientRegistration (proxy unset); `tsc --noEmit` | 5 files, 91 passed; tsc clean |
+| python | venv `pip install -e .[dev]`; pytest token_grants, native_sign_in, idp_hint, ciba, uma, device_flow, refresh single-flight | 229 passed |
+| rust | `cargo test --no-default-features --features rest --test contract_165_test` | 25 passed (was 24) |
+| csharp | `dotnet test --filter NativeLogin\|IdpHint\|OidcRefreshAndCredentials\|ClientRegistration` | 63 passed |
+| c | cmake Debug, tests on; full `ctest`; `readelf` | 83/83; SONAME `libaxiam.so.3` |
+| cplusplus | cmake Debug, tests on, shared; `ctest` | 2/2 (`axiam_cpp_tests` 1672 cases, 6579 checks, 0 failed) |
+
+The probes lived only in the scratch worktrees. Peak scratch use was about 1.5 GB (the Rust target dir).
+
+### A2.2 Status of the findings this sweep addressed
+
+| ID | SDK | Status | Evidence on the sweep-2 head |
+|---|---|---|---|
+| C165-22 | php | **Closed** (read; not run) | `oauth2PostOptions()` (`src/Oidc/OidcClient.php:2940-2958`) adds `allow_redirects => false` to every `/oauth2/*` form POST: `postForm` (`:2985`), the device poll (`:1116`), the CIBA poll (`:2534`) and `postTokenAsync` (`:2684`). A `3xx` becomes `NetworkError` before the 5xx branch in both polls (`:1123-1126`, `:2539-2542`). The polls' retry predicates do not retry it: the device predicate refuses any status `< 500`, and the CIBA predicate only accepts null/5xx/408/429. The `Location` is neither followed nor echoed (`redirectRefused`, status only). The test (`tests/Contract165/Oauth2RedirectRefusalTest.php`) runs through `HandlerStack::create`, so Guzzle's redirect middleware is really in the path. It covers 307 and 308 for `oidcRefresh` and both polls, with retry on, and asserts one request and no request to the other host. See A2.4 point 1 on the fulfilled-value choice. |
+| C165-23 | java | **Closed** | `oauth2HttpClient = httpClient.newBuilder().followRedirects(false).followSslRedirects(false)` (`AxiamClient.java:745`). `executeFormPost(url, form)` uses it (`:4342-4343`), and `pollHttpClient` is derived from it (`:746`), so the device poll (`:3765`) and the CIBA poll (`:5018`) follow nothing either. The other `/oauth2/*` POSTs already rode redirect-free clients: native sign-in on `Sessionless` (`followRedirects(false)`) and `cibaInitiate` on `sendOnceHttpClient` (`:747-749`). No other `/oauth2/*` POST exists. The shipped tests cover `oidcRefresh` (307, 308) and client credentials (307, 302). The reviewer's poll probes passed. Deriving from `httpClient` keeps its interceptors, which is the 1.63 posture it already had. |
+| C165-23 | kotlin | **Closed except `cibaInitiate`** → C165-29 | `oauth2Client` (lazy, `followRedirects(false)`/`followSslRedirects(false)`) and `executeOAuth2Post` (`oidc/OidcSupport.kt:2110-2134`) now carry native sign-in (`:701`), revoke (`:806`), the CIBA poll (`:1494`), the UMA ticket (`:1773`) and `postOAuth2Form` (`:2073`). `postOAuth2Form` serves PAR, introspect, device authorization, token exchange, the token grants and the device poll. `cibaInitiate` (`:1408`) still calls `httpClient.newCall` directly. Probed: see C165-29. |
+| C165-25 | java | **Closed** | `isRedirect` → `fromHttpResponse` (a `NetworkError`) at the top of `fromOAuth2Response` and `fromOAuth2ErrorAtAnyStatus` (`errors/ErrorMapper.java:136-138`, `:169-172`). `fromDevicePollResponse` delegates to the first. Unit test on both mappers. |
+| C165-25 | kotlin | **Closed except `cibaInitiate`** → C165-29 | The check sits in the transport (`executeOAuth2Post`, `3xx` → `NetworkError` before any mapper runs), not in `ErrorMapper`. So every path through it is covered. `cibaInitiate` maps with `fromOAuth2ResponseAtAnyStatus` (`:1414`), which is unchanged. Probed: a `307` with an `error` body there is `OAuthProtocolError`. |
+| C165-25 | rust | **Closed** | `oauth2_error_or_fallback` returns `AxiamError::Network` for `300..400` before reading the body (`src/oidc/exchange.rs:349-360`). It is the only `OAuth2ErrorResponseWire` reader (15 call sites). New test in `contract_165_test`. |
+| C165-25 | csharp | **Closed** | `MapOAuth2ErrorAnyStatusAsync` checks the status first (`AxiamClient.ClientRegistration.cs:339-345`). The other two readers (`MapOAuth2ErrorAsync`, `MapUmaGrantErrorAsync`) already gate on 400/401/403, so a `3xx` falls to `ErrorMapper`'s `NetworkError`. |
+| C165-25 | python | **Closed** | `error_from_oauth2_response` returns `error_from_http_status(...)` for 300–399 before `_oauth2_error_body` (`_errors.py:366-370`). For a 3xx that is `NetworkError` (only 401/403/409 map otherwise). It is the only reader. Tests in `tests/test_oidc_token_grants.py`. |
+| C165-25 | c | **Closed except the UMA ticket exchange** → C165-30 | `oidc_map_grant_error` sets `AXIAM_ERR_NETWORK` for 300–399 before parsing (`src/oidc.c:497-503`). It serves the token grants, native sign-in, `ciba_initiate` and `ciba_poll` (`oidc_ciba.c:440`, `:569`). `uma.c`'s own `map_oauth2_error` (`:85-110`, called at `:825` for any non-2xx) still dispatches on the body first. |
+| C165-25 | cplusplus | **Closed** | `raise_grant_error` throws `NetworkError("… (HTTP 3xx)", "http_3xx")` before the body (`src/oidc.cpp:474-480`). The CIBA poll's terminal path ends in it, and the poll does not retry a 3xx. The UMA ticket exchange guards separately with `raise_for_status` for a 3xx (`src/client.cpp:1516-1517`), whose fall-through is `NetworkError("unexpected HTTP status (3xx)")`. Three new cases in `tests/test_oidc_errors.cpp`. |
+| C165-26 | typescript | **Closed** | `oauth2RequestConfig` sets `fetchOptions: { credentials: 'omit', redirect: 'error' }` (`src/rest/session.ts:329`). `bareRequest` maps status 0 or 300–399 to `NetworkError` without the `Location` (`src/rest/bareTransport.ts:72-78`). Both are needed. axios 1.21's fetch adapter overrides `redirect` to `'manual'` when `maxRedirects === 0` (`lib/adapters/fetch.js:521-527`), and `bareRequest` sets `maxRedirects: 0`. So on the RFC 7592 path a browser hands back an opaque-redirect (status 0), and the new guard catches it. On the main client's `/oauth2/*` requests (no `maxRedirects`), `'error'` makes `fetch` reject. One comment is inaccurate: C165-32. |
+| C165-27 | c | **Closed** | `README.md:33-37` now says 1.1.x ships `libaxiam.so.2` and the contract-1.65 (1.2) release ships `libaxiam.so.3`, which matches `CMakeLists.txt` and `readelf`. |
+
+### A2.3 New findings (sweep 2)
+
+| ID | Severity | SDK | `path:line` | Rule | What | Fix |
+|---|---|---|---|---|---|---|
+| C165-29 | Low | kotlin | `src/main/kotlin/io/axiam/sdk/oidc/OidcSupport.kt:1405-1416` (`cibaInitiate`) | §12.1 rule 3; C165-23/-25 residual | `cibaInitiate` (`POST /oauth2/bc-authorize`) was not moved to `executeOAuth2Post`. It still runs `httpClient.newCall` on the redirect-following client. Its `OneShotBody` stops OkHttp from following a 307/308, but a 301–303 is followed as a body-less `GET` to any host, and that host's answer is accepted. **Probed:** `302 Location: <second MockWebServer>` returned `Success(CibaInitiateResponse(...))` built from the second host's `auth_req_id`, one `GET` there. A `307` with an `{"error":…}` body surfaced as `OAuthProtocolError`. No secret leaks (the `GET` carries no form), but the rule's MUST is broken. The CHANGELOG list omits `cibaInitiate`, which is how it was missed. | Keep the existing `IOException` catch (its message carries only the exception's class name), but run the call on `oauth2Client` and add `if (response.code in 300..399) { response.close(); throw NetworkError("cibaInitiate: redirect (HTTP ${response.code}) not followed") }` before the mapper. Tests in `CibaTest`: 302 and 307 (with an error body) → `NetworkError`, zero requests at the second host. Add `cibaInitiate` to the CHANGELOG list. About 5 lines + 2 tests. |
+| C165-30 | Info | c | `src/uma.c:85-110` (`map_oauth2_error`), `:824-825` | §12.1 rule 3; C165-25 residual | The UMA ticket exchange (`POST` to the token endpoint) maps any non-2xx through its own mapper, which reads the body first. So a `3xx` carrying `{"error":…}` is `AXIAM_ERR_AUTH` with `oauth_error` set, not `AXIAM_ERR_NETWORK`. No redirect is followed (libcurl `FOLLOWLOCATION` is off). The C++ fixer guarded the same path (`client.cpp:1516`); C did not. Found by reading. | First statement of `map_oauth2_error`: `if (resp->status >= 300 && resp->status < 400) { axiam_error_set(err, AXIAM_ERR_NETWORK, resp->status, "uma ticket exchange failed"); return AXIAM_ERR_NETWORK; }`, plus one test. Trivial. |
+| C165-31 | Info | kotlin | `src/main/kotlin/io/axiam/sdk/oidc/OidcSupport.kt:2087-2116` | doc accuracy | The new KDoc for `oauth2Client` was inserted between `executeRequest`'s existing KDoc (the §12.3 rule 3 "structural guarantee" paragraph) and `executeRequest`. Two KDoc blocks now precede `oauth2Client`, so Dokka attaches the second one, the first is orphaned, and `executeRequest` loses its documentation. The orphaned paragraph is the regression note for the 401-never-refreshes invariant. | Move `executeRequest`'s KDoc back down to directly above `private suspend fun executeRequest`. Doc-only. |
+| C165-32 | Info | typescript | `src/rest/session.ts:318-323` | doc accuracy | The comment says the fetch adapter "ignores `maxRedirects`" and that with `redirect: 'error'` "`fetch` then rejects". In axios 1.21 a `maxRedirects` of 0 overrides `redirect` to `'manual'`, so on the `bareRequest` path the browser returns an opaque-redirect rather than rejecting. The code is right, because the guard in `bareTransport.ts:72-78` exists for exactly this case. Only the explanation is wrong. C165-26's own wording ("does not honour `maxRedirects`") made the same error. | Reword: "`redirect: 'error'` makes `fetch` reject on the main client; where `maxRedirects: 0` is set (the bare transport) axios substitutes `'manual'`, and `bareRequest` maps the opaque-redirect (status 0) or `3xx` to `NetworkError`." |
+
+**Counts (new):** Low 1 (C165-29) · Informational 3 (C165-30, -31, -32). No Medium, High or Critical.
+
+### A2.4 Verdicts on the points the orchestrator asked about
+
+1. **PHP: `postTokenAsync` fulfils with the `NetworkError` as a value.** Correct, and it is the smallest choice
+   that works. `RefreshGuard::settle` turns every rejection that is not an `AuthError` into
+   `AuthError('token refresh failed: …')` (`src/Auth/RefreshGuard.php`, `settle`), and `join` does the same.
+   A rejected `NetworkError` would therefore reach the caller as `AuthError`, which contradicts §12.1 rule 3. As a
+   fulfilled value it passes through `settle`'s success path. That path runs `onClear` (the slot is cleared, so
+   the outcome is not cached for the next caller, §9.3), and the OIDC kind passes no `onSuccess`. The leader
+   (`$guarded['promise']->wait()`) and every same-kind joiner (`RefreshGuard::join`) receive the **same**
+   `NetworkError` instance and throw it (`OidcClient.php:632-636`, `:650-653`). So the single flight still shares
+   one wire call and one outcome. A different-kind waiter (the cookie-session path) only joins in order to retry
+   the acquire, and ignores the value. The only cost is that the one exception object is thrown from several
+   stacks, so its trace shows where it was built, not each throw site. That is harmless.
+2. **Java: `pollHttpClient` derived from `oauth2HttpClient`.** Correct. The poll client keeps
+   `retryOnConnectionFailure(false)` (the §16.1 attempt count) and gains the redirect refusal. Both clients come
+   from `httpClient` through `newBuilder()`, so they share its connection pool and its interceptors, as the poll
+   client always did.
+3. **Kotlin: a cookie jar on `oauth2Client`.** This does not contradict the 1.63 paragraph. The rule forbids
+   *attaching* `axiam_*` cookies or `X-CSRF-Token` to `/oauth2/*`, not having a jar. `newBuilder()` copies
+   `AuthHeaderInterceptor`, which tags every `/oauth2/*` request with `NO_SESSION_CREDENTIALS_HEADER` (and adds
+   no CSRF header). It also copies `NoSessionCredentialsNetworkInterceptor`, which strips `Cookie` after
+   `BridgeInterceptor` has applied the jar (`internal/AuthHeaderInterceptor.kt:110-135`; `AxiamClient.kt:275-285`).
+   These requests rode the same jar and interceptors before the sweep. The only change is that they no longer
+   follow redirects, which also removes the one way a jar could have mattered: a followed hop to another path.
+4. **Kotlin: native sign-in through `executeOAuth2Post`.** The one-shot body is intact. The request is still
+   built as `post(OneShotBody(form))` (`OidcSupport.kt:700`). The helper only changes the client and adds the
+   `3xx` check, and it closes the response before throwing. `NativeSignInTest` passed 14/14. With redirects off,
+   the one-shot body now guards only OkHttp's silent retry, which is its §37.2 rule 10 job.
+5. **TypeScript: `redirect: 'error'` plus the status-0/3xx guard.** Both are needed, and the fixer's reading of
+   axios is right (see A2.2, C165-26). The guard covers the RFC 7592 path, where `maxRedirects: 0` makes axios
+   choose `'manual'`. `'error'` covers the main client's `/oauth2/*` calls. The comment is C165-32.
+6. **C++: the UMA ticket exchange guard in `client.cpp`.** Correct and needed. That path dispatches on the
+   body's `error` at any status (§20.4) before it reaches `raise_grant_error`, so without the guard it would have
+   been the C++ twin of C165-30. `raise_for_status` gives `NetworkError` for any 3xx.
+
+### A2.5 Records left as they were
+
+- **C165-24** (Info, contract record text in §34.9 "Amended 2026-10-31" item (5)) is **Open**, as recorded. The
+  sentence at `sdks/CONTRACT.md:14271` still reads "(same-host only; Rust for `/oauth2/*` on `http_bare`)" and
+  still omits Java and Kotlin. `CONTRACT.md` is unchanged since `d93976b`. It belongs in the next contract text
+  pass. A re-vendor only for this is not worth it.
+- **C165-28** (Info, Kotlin `OidcRefreshTest` flake) is **Open**, as recorded. Neither `62d0e47` nor `320cefa`
+  touches `oidcRefresh`'s logic beyond the transport swap or the test. Both CI legs on `320cefa` are green, and
+  no reproduction was attempted this round.
+
+### A2.6 Before W5
+
+- **Should fix before the 1.2.0 tags:** C165-29 (Kotlin `cibaInitiate`). It is the one remaining breach of the
+  §12.1 rule 3 MUST in the eleven SDKs, and it is about 5 lines and 2 tests.
+- **Cheap, may ride the same commits:** C165-30 (C UMA guard, one `if`), C165-31 (move a KDoc), C165-32 (one
+  comment).
+- **May defer:** C165-24 (next contract text pass) and C165-28 (tracked flake).
+- **Still to confirm:** C++ `llvm-cov coverage → Coveralls` on `c37f016` was still running when read. Every other
+  check run on the nine heads concluded success or skipped (publish and tag gates).
+
+**Final status, C165-01 … C165-32:** 01 Closed · 02 Closed · 03 Closed · 04 Closed · 05 Closed · 06 Closed ·
+07 Closed · 08 Closed · 09 Closed · 10 Closed · 11 Closed (Rust closed as decided) · 12 Closed · 13 Closed ·
+14 Closed · 15 Closed · 16 Closed · 17 Closed · 18 Closed · 19 Closed · 20 Closed · 21 Closed · 22 Closed ·
+23 Closed (Kotlin `cibaInitiate` residual → 29) · **24 Open (Info)** · 25 Closed (Kotlin `cibaInitiate` → 29,
+C UMA → 30) · 26 Closed · 27 Closed · **28 Open (Info)** · **29 Open (Low)** · **30 Open (Info)** ·
+**31 Open (Info)** · **32 Open (Info)**.

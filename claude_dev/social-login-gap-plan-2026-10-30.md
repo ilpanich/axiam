@@ -708,6 +708,7 @@ recommendation.
 | D-N35 | *(arose in W4.11)* The C SDK's CI was red on `main` because the 1.1.3 release left `AXIAM_VERSION_PATCH` at 2 and the version test at "1.1.2". Carry the fix in the contract 1.65 PR? | **Carry it** (ilpanich/axiam-c-sdk `c29f78e`) | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N36 | *(W4.13 Q1, C165-11)* Under PAR, should `oidc_par` carry over a hint `oidc_begin` put on the authorization URL (9 SDKs drop it silently)? | **Yes, normative**: the URL's hint is pushed; an explicit `oidc_par` argument wins when both are set (the PHP pattern) | **Answered by the maintainer 2026-10-31: as recommended.** |
 | D-N37 | *(W4.13, C165-03)* The C++ model structs change layout while SOVERSION stays 4. Bump? | **Yes: SOVERSION 5**, `abi_soname` and the CHANGELOG corrected; the release stays minor (D-N32). C goes to SOVERSION 3 under D-N32 (C165-02) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N38 | *(contract 1.65 review, after two sweeps)* C165-29 (Low, Kotlin `cibaInitiate` follows redirects), C165-30/-31/-32 (Info: C UMA mapper, Kotlin KDoc, TS comment): fix now or leave open? | **One targeted pass** (the D-N31 precedent); only C165-24 and C165-28 stay on the final PR's open list | **Answered by the maintainer 2026-11-01: as recommended.** |
 
 ---
 

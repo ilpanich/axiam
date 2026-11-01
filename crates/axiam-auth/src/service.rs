@@ -112,7 +112,9 @@ pub enum LoginResult {
 }
 
 /// Output returned when MFA enforcement requires initial setup.
-#[derive(Debug)]
+///
+/// [`Debug`] is implemented by hand and redacts the setup token, for the same
+/// reason as [`LoginOutput`]: the enclosing [`LoginResult`] derives `Debug`.
 pub struct MfaSetupOutput {
     /// Short-lived JWT the client must present to `enroll_mfa_with_setup_token`
     /// and `confirm_mfa_with_setup_token`.
@@ -120,7 +122,9 @@ pub struct MfaSetupOutput {
 }
 
 /// MFA challenge token returned when login detects MFA is enabled.
-#[derive(Debug)]
+///
+/// [`Debug`] is implemented by hand and redacts the challenge token, for the
+/// same reason as [`LoginOutput`].
 pub struct MfaChallengeOutput {
     /// Short-lived JWT encoding user_id + tenant_id + org_id.
     pub challenge_token: String,
@@ -129,6 +133,23 @@ pub struct MfaChallengeOutput {
     /// Populated by the REST handler layer (not `AuthService`) because
     /// `AuthService` does not have visibility into WebAuthn credentials.
     pub available_methods: Vec<String>,
+}
+
+impl std::fmt::Debug for MfaSetupOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfaSetupOutput")
+            .field("setup_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MfaChallengeOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfaChallengeOutput")
+            .field("challenge_token", &"<redacted>")
+            .field("available_methods", &self.available_methods)
+            .finish()
+    }
 }
 
 /// Input for the refresh token rotation flow.
@@ -2127,5 +2148,30 @@ mod logout_tests {
             logout_failed_writes(&Ok(2), Some(&Err(db_error()))),
             ["session_invalidate"]
         );
+    }
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    /// No `{:?}` of a [`LoginResult`] may print a token, whichever variant it is.
+    #[test]
+    fn login_result_debug_never_prints_a_token() {
+        let marker = "tok-must-not-appear";
+        let results = [
+            LoginResult::MfaRequired(MfaChallengeOutput {
+                challenge_token: marker.into(),
+                available_methods: vec!["totp".into()],
+            }),
+            LoginResult::MfaSetupRequired(MfaSetupOutput {
+                setup_token: marker.into(),
+            }),
+        ];
+        for result in &results {
+            let text = format!("{result:?}");
+            assert!(!text.contains(marker), "token leaked through Debug");
+            assert!(text.contains("<redacted>"));
+        }
     }
 }

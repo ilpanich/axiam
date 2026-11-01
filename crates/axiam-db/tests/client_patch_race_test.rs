@@ -83,6 +83,7 @@ fn client(tenant_id: Uuid) -> CreateOAuth2Client {
         allowed_resources: Vec::new(),
         managed_by: ManagedBy::Admin,
         ciba: Default::default(),
+        default_idp: None,
     }
 }
 

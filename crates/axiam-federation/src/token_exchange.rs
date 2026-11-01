@@ -240,12 +240,19 @@ fn reject_wrong_token_kind(
     claims: &ExternalClaims,
     header_typ: Option<&str>,
 ) -> Result<(), ExternalSubjectError> {
-    for (name, present) in [
-        ("nonce", claims.nonce.is_some()),
-        ("at_hash", claims.at_hash.is_some()),
-        ("c_hash", claims.c_hash.is_some()),
-        ("s_hash", claims.s_hash.is_some()),
-    ] {
+    // The marker list is shared with native sign-in (`crate::token_shape`),
+    // which requires the shape this refuses; one list, so the two cannot
+    // drift. A marker this struct has no field for refuses rather than passes:
+    // a list grown without this match being taught the new name fails closed,
+    // and `an_access_token_shape_passes` turns red.
+    for name in crate::token_shape::ID_TOKEN_ONLY_CLAIMS {
+        let present = match name {
+            "nonce" => claims.nonce.is_some(),
+            "at_hash" => claims.at_hash.is_some(),
+            "c_hash" => claims.c_hash.is_some(),
+            "s_hash" => claims.s_hash.is_some(),
+            _ => true,
+        };
         if present {
             return Err(ExternalSubjectError::rejected(format!(
                 "the token carries '{name}', which is an ID-token claim; \
@@ -255,20 +262,24 @@ fn reject_wrong_token_kind(
     }
 
     for typ in [header_typ, claims.typ.as_deref()].into_iter().flatten() {
-        let normalized = typ.trim().to_ascii_lowercase();
-        let normalized = normalized
-            .strip_prefix("application/")
-            .unwrap_or(&normalized);
-        if matches!(
-            normalized,
-            "id_token" | "id+jwt" | "refresh" | "refresh_token" | "offline" | "logout+jwt"
-        ) {
+        let normalized = crate::token_shape::normalize_typ(typ);
+        if crate::token_shape::refused_as_subject_token(&normalized) {
             return Err(ExternalSubjectError::rejected(format!(
                 "token type '{typ}' is not usable as a subject token"
             )));
         }
     }
     Ok(())
+}
+
+/// Test seam for the cross-module shape tests in `crate::native_login`: does
+/// X4's kind check refuse this claim set? Deserialized exactly as a verified
+/// subject token's claims are.
+#[cfg(test)]
+pub(crate) fn kind_check_refuses(claims: serde_json::Value, header_typ: Option<&str>) -> bool {
+    let claims: ExternalClaims =
+        serde_json::from_value(claims).expect("test claims must deserialize as ExternalClaims");
+    reject_wrong_token_kind(&claims, header_typ).is_err()
 }
 
 /// Time-based checks that `jsonwebtoken`'s own validation does not cover.

@@ -241,6 +241,7 @@ fn client_input(tenant_id: Uuid, ciba: CibaClientMetadata) -> CreateOAuth2Client
         allowed_resources: Vec::new(),
         managed_by: ManagedBy::Admin,
         ciba,
+        default_idp: None,
     }
 }
 

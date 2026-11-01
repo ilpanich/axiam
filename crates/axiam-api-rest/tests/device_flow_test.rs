@@ -181,6 +181,7 @@ async fn create_device_client(
         allowed_resources: Vec::new(),
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         ciba: Default::default(),
+        default_idp: None,
     };
     edit(&mut input);
     let (client, secret) = SurrealOAuth2ClientRepository::new(db.clone())
@@ -1927,6 +1928,7 @@ async fn redeem_code_grant_token(
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();

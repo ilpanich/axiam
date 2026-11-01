@@ -171,7 +171,7 @@ The rules, all enforced by the server and summarised from
 | --- | --- |
 | **An exchange only ever narrows** | No parameter makes the issued token permit more than the subject token did. |
 | **`actor_token` selects delegation** | Present it and the token carries `act`; leave it out and you have asked for *impersonation*, which is refused unless the client holds `urn:axiam:params:oauth:grant-type:may-impersonate`. A client without it gets `unauthorized_client`, never a silent downgrade. |
-| **The actor token is the client's own** | It must have been issued to the exchanging client: its `client_credentials` token, or a user token from its own grants. A token issued to any other client, a console sign-in or a service account's token is `invalid_request`. |
+| **The actor token is the client's own** | It must have been issued to the exchanging client: its `client_credentials` token, or a user token from its own grants. A token issued to any other client, a console sign-in, a service account's token or a token minted by an exchange (even your own, #819) is `invalid_request`. |
 | **`act` chains are capped at depth 3** | Re-exchanging nests `act.act`; a subject token already naming three actors is `invalid_request`. |
 | **Scopes are an intersection** | `requested ∩ subject ∩ client-registered`. A scope the subject lacks is `invalid_scope`, not dropped. An empty intersection fails. |
 | **`audience` / `resource` must be registered** | The target must be in the exchanging client's `allowed_resources` or be one of AXIAM's own audiences, else `invalid_target`. |
@@ -185,7 +185,9 @@ client** (since 1.0.0, #518). The usual choice is the agent's own
 `client_credentials` token, whose `sub` is the agent's `client_id`. An agent
 cannot name another party as its actor by presenting that party's token — an
 MCP server holds its callers' tokens by design, and before 1.0.0 it could have
-written any of them into `act`. Every exchange, successful or not, is audited
+written any of them into `act`. Nor can it launder one through an exchange first.
+Since #819 an exchanged token names the exchanging client in `client_id`, but
+it is marked `axiam_exchanged` and is never accepted as an actor. Every exchange, successful or not, is audited
 with the client, subject, actor, scopes, audience and outcome.
 
 Register the exchanging client with the grant and with the targets it may

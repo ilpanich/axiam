@@ -233,6 +233,26 @@ service use the Token Exchange grant (RFC 8693). Delegation vs impersonation,
 the scope-narrowing rule, the lifetime cap and the error table are in
 [`token-exchange.md`](token-exchange.md).
 
+## Native sign-in with a provider ID token
+
+A mobile or desktop app that signs a user in with a provider's native SDK
+(Google, Apple, Facebook Limited Login) presents the provider's ID token at
+`POST /oauth2/token` with `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`
+and receives the client's ordinary token set, with a session. It is off per
+provider until an operator lists the app's client IDs. Setup, the request and
+error tables, nonce rules, replay semantics and the audit record are in
+[`native-sign-in.md`](native-sign-in.md). It is not token exchange.
+
+## Choosing the sign-in provider on the authorization endpoint
+
+`GET /oauth2/authorize` and the body of `POST /oauth2/par` accept AXIAM's
+`axiam_idp_hint` — a provider's UUID, its `provider_slug` or a branded kind name
+(`google`, `github`, `facebook`, `apple`, `microsoft`) — and a client can carry a
+`default_idp`. A hint that names nothing is ignored. There is no `kc_idp_hint`
+alias. Forms, precedence, PAR, the sign-in page's auto-redirect and the Keycloak
+migration note are in
+[`../admin/oidc-authn-parameters.md`](../admin/oidc-authn-parameters.md#choosing-the-provider-axiam_idp_hint-and-default_idp).
+
 ## MCP servers
 
 Fronting a [Model Context Protocol](https://modelcontextprotocol.io) server

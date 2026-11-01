@@ -1442,6 +1442,453 @@ async fn a_refused_refresh_replay_is_audited() {
 }
 
 // ===========================================================================
+// G-C (#818) — a refused refresh-token replay revokes its session
+// ===========================================================================
+
+/// One refresh-grant request; the status and the decoded body.
+async fn refresh_with(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    tenant_id: Uuid,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> (u16, serde_json::Value) {
+    let form = format!(
+        "grant_type=refresh_token&refresh_token={refresh_token}\
+         &client_id={client_id}&client_secret={client_secret}"
+    );
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(form)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    (status, body)
+}
+
+/// A real session row for `user_id` and an access token that arrives as it
+/// (`jti` = session id, the D-15 convention the authorize handler reads), so
+/// the code — and every refresh token minted from it — names the session.
+async fn signed_in_session(
+    db: &Surreal<TestDb>,
+    auth: &AuthConfig,
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+) -> (Uuid, String) {
+    use axiam_core::models::session::{Amr, CreateSession};
+    use axiam_core::repository::SessionRepository;
+    use axiam_db::repository::SurrealSessionRepository;
+
+    let session = SurrealSessionRepository::new(db.clone())
+        .create(CreateSession {
+            tenant_id,
+            user_id,
+            token_hash: Uuid::new_v4().to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            authenticated_at: chrono::Utc::now(),
+            amr: vec![Amr::Pwd],
+            browser_token_hash: None,
+        })
+        .await
+        .expect("session");
+    let jwt = issue_access_token(
+        user_id,
+        tenant_id,
+        org_id,
+        &[],
+        auth,
+        session.id.to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
+    (session.id, jwt)
+}
+
+/// **G-C, end to end, on the default policy.** A `standard` client's refresh
+/// token is rotated, and the rotated predecessor is replayed. The replay is
+/// refused with `invalid_grant` as before, and now:
+///
+/// - the session the token names is gone, and the revocation feed lists it;
+/// - the successor the first rotation issued — what an attacker who won the
+///   race would hold — is refused too;
+/// - a refresh token of **another** session of the same user and client keeps
+///   working;
+/// - the audit row says `response: "revoked_session"` and carries no token.
+///
+/// The token service is rebuilt over a session repository with the feed on
+/// (`AppState::for_test` leaves it off) and the settings-backed policy, which
+/// is what `axiam-server`'s composition root wires.
+#[actix_rt::test]
+async fn g_c_a_refused_refresh_replay_revokes_its_session_end_to_end() {
+    use axiam_core::repository::{
+        AuditLogFilter, AuditLogRepository, Pagination, SessionRepository,
+    };
+    use axiam_db::repository::{
+        SurrealAuditLogRepository, SurrealAuthorizationCodeRepository,
+        SurrealOAuth2ClientRepository, SurrealRefreshTokenRepository,
+        SurrealServiceAccountRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    };
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let (replayed_session, jwt_a) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let (other_session, jwt_b) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+
+    let mut state = AppState::for_test(db.clone(), auth.clone());
+    let feed_sessions = SurrealSessionRepository::new(db.clone())
+        .with_revocation_feed(chrono::Duration::seconds(900));
+    state.oauth2.token_service = axiam_oauth2::token::TokenService::new(
+        SurrealOAuth2ClientRepository::new(db.clone()),
+        SurrealServiceAccountRepository::new(db.clone()),
+        SurrealAuthorizationCodeRepository::new(db.clone()),
+        SurrealTenantRepository::new(db.clone()),
+        SurrealRefreshTokenRepository::new(db.clone()),
+        SurrealUserRepository::new(db.clone()),
+        feed_sessions,
+        SurrealAuditLogRepository::new(db.clone()),
+        auth.clone(),
+        2_592_000,
+        Arc::new(axiam_oauth2::mtls::InventoryCertificateLookup::new(
+            axiam_db::SurrealCertificateRepository::new(db.clone()),
+            axiam_db::SurrealCaCertificateRepository::new(db.clone()),
+        )),
+    )
+    .with_refresh_reuse_policy(Arc::new(
+        axiam_api_rest::scope_policy::SettingsScopePolicy::new(
+            SurrealTenantRepository::new(db.clone()),
+            SurrealSettingsRepository::new(db.clone()),
+            Arc::new(Default::default()),
+        ),
+    ));
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(auth.clone()))
+            .app_data(web::Data::new(state))
+            .app_data(web::Data::new(
+                Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+            ))
+            .configure(|cfg| {
+                axiam_api_rest::register_api_v1_routes_with::<TestDb>(
+                    cfg,
+                    &permissive_rate_limits(),
+                    axiam_api_rest::RouteOptions {
+                        revocation_feed_enabled: true,
+                        ..axiam_api_rest::RouteOptions::default()
+                    },
+                )
+            }),
+    )
+    .await;
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &jwt_a).await;
+    let grant = |jwt: String| {
+        let (client_id, client_secret, redirect_uri) = (
+            client_id.clone(),
+            client_secret.clone(),
+            redirect_uri.clone(),
+        );
+        let app = &app;
+        async move {
+            let code = do_authorize(app, &jwt, &client_id, &redirect_uri, None, None).await;
+            let resp = do_token_exchange(
+                app,
+                tenant_id,
+                &client_id,
+                &client_secret,
+                &code,
+                &redirect_uri,
+                None,
+            )
+            .await;
+            assert_eq!(resp.status().as_u16(), 200, "the code exchange succeeds");
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            body["refresh_token"]
+                .as_str()
+                .expect("a refresh token is issued")
+                .to_owned()
+        }
+    };
+    let predecessor = grant(jwt_a).await;
+    let other_device = grant(jwt_b).await;
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &predecessor).await;
+    assert_eq!(status, 200, "the honest first rotation succeeds");
+    let successor = body["refresh_token"]
+        .as_str()
+        .expect("rotation issues a successor")
+        .to_owned();
+
+    // The replay: refused exactly as before.
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &predecessor).await;
+    assert_eq!(status, 400, "a replay is refused");
+    assert_eq!(
+        body["error"], "invalid_grant",
+        "and refused as invalid_grant"
+    );
+
+    // The session it named is gone, and the feed says so.
+    let sessions = SurrealSessionRepository::new(db.clone());
+    assert!(
+        sessions
+            .get_by_id(tenant_id, replayed_session)
+            .await
+            .is_err(),
+        "the replayed token's session is invalidated"
+    );
+    let feed = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/oauth2/revocations")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(feed.status().as_u16(), 200);
+    let feed: serde_json::Value = test::read_body_json(feed).await;
+    let revoked: Vec<&str> = feed["revoked"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        revoked.contains(&axiam_core::revocation_feed::revocation_hash(replayed_session).as_str()),
+        "the revocation feed lists the replayed session"
+    );
+    assert!(
+        !revoked.contains(&axiam_core::revocation_feed::revocation_hash(other_session).as_str()),
+        "and not the other one"
+    );
+
+    // The successor — the token an attacker who won the race would hold — is
+    // refused, and its presentation is a stale credential, not a replay.
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &successor).await;
+    assert_eq!(
+        status, 400,
+        "the session's other refresh tokens are revoked"
+    );
+    assert_eq!(body["error"], "invalid_grant");
+
+    // Another session of the same user and client is untouched.
+    let (status, _) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &other_device).await;
+    assert_eq!(
+        status, 200,
+        "a refresh token of another session keeps working"
+    );
+    sessions
+        .get_by_id(tenant_id, other_session)
+        .await
+        .expect("the other session is untouched");
+
+    let entries = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .expect("audit log read back");
+    assert_eq!(entries.items.len(), 1, "one replay, one audit row");
+    let entry = &entries.items[0];
+    assert_eq!(entry.metadata["disposition"], "refused");
+    assert_eq!(entry.metadata["response"], "revoked_session");
+    let rendered = serde_json::to_string(&entry.metadata).unwrap();
+    for token in [&predecessor, &successor, &other_device] {
+        assert!(
+            !rendered.contains(token.as_str()),
+            "no refresh token value may reach the audit log"
+        );
+    }
+}
+
+/// **D-N39 (#839, F4-R12-01) — RP-initiated logout ends the session's
+/// refresh tokens.** An authorization-code grant's refresh token names the
+/// session it was authorized from, and every rotation copies it; logging that
+/// session out with a signed `id_token_hint` now revokes the current token of
+/// the chain, which before kept rotating with a dead `sid`. Presenting it is a
+/// stale credential (no replay row), and another session of the same user and
+/// client is untouched.
+#[actix_rt::test]
+async fn d_n39_rp_logout_revokes_the_code_grants_refresh_token() {
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+    use axiam_db::repository::SurrealAuditLogRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let (logged_out, jwt_a) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let (_kept, jwt_b) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &jwt_a).await;
+    let mut refresh_of = Vec::new();
+    for jwt in [&jwt_a, &jwt_b] {
+        let code = do_authorize(&app, jwt, &client_id, &redirect_uri, None, None).await;
+        let resp = do_token_exchange(
+            &app,
+            tenant_id,
+            &client_id,
+            &client_secret,
+            &code,
+            &redirect_uri,
+            None,
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        refresh_of.push(body["refresh_token"].as_str().unwrap().to_owned());
+    }
+    // One honest rotation, so the token logout must reach is a successor that
+    // inherited the session id rather than the one the code exchange minted.
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[0]).await;
+    assert_eq!(status, 200, "{body}");
+    let current = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let hint = axiam_auth::token::issue_id_token(
+        user_id,
+        &client_id,
+        None,
+        None,
+        &["openid".to_string()],
+        &auth,
+        Some(logged_out),
+        &axiam_auth::token::IdTokenEvidence::NONE,
+    )
+    .unwrap();
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/end_session?tenant_id={tenant_id}&id_token_hint={hint}"
+        ))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    let (status, body) = refresh_with(&app, tenant_id, &client_id, &client_secret, &current).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "the logged-out session's refresh token is revoked: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "nothing is minted");
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[1]).await;
+    assert_eq!(status, 200, "another session keeps its grant: {body}");
+
+    let replays = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        replays.items.is_empty(),
+        "a token revoked at logout is not a replay"
+    );
+}
+
+/// **G-C, the escape hatch.** An organization on
+/// `oauth2.refresh_reuse_response = refuse` gets the 1.1.x behaviour through
+/// the real settings wiring: the replay is refused and audited
+/// (`response: "refused"`), and the successor and the session survive.
+#[actix_rt::test]
+async fn g_c_an_organization_on_refuse_keeps_the_previous_behaviour_end_to_end() {
+    use axiam_core::models::settings::{RefreshReuseResponse, SetOrgSettings, system_defaults};
+    use axiam_core::repository::{
+        AuditLogFilter, AuditLogRepository, Pagination, SessionRepository, SettingsRepository,
+    };
+    use axiam_db::repository::{
+        SurrealAuditLogRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    };
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(
+            org_id,
+            SetOrgSettings {
+                refresh_reuse_response: RefreshReuseResponse::Refuse,
+                ..system_defaults()
+            },
+        )
+        .await
+        .expect("org settings");
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let (session_id, jwt) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &jwt).await;
+    let code = do_authorize(&app, &jwt, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let predecessor = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &predecessor).await;
+    assert_eq!(status, 200);
+    let successor = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &predecessor).await;
+    assert_eq!(status, 400, "the replay is refused under either policy");
+    assert_eq!(body["error"], "invalid_grant");
+
+    SurrealSessionRepository::new(db.clone())
+        .get_by_id(tenant_id, session_id)
+        .await
+        .expect("under `refuse` the session survives the replay");
+    let (status, _) = refresh_with(&app, tenant_id, &client_id, &client_secret, &successor).await;
+    assert_eq!(status, 200, "under `refuse` the successor keeps working");
+
+    let entries = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .expect("audit log read back");
+    assert_eq!(entries.items.len(), 1);
+    assert_eq!(entries.items[0].metadata["disposition"], "refused");
+    assert_eq!(entries.items[0].metadata["response"], "refused");
+}
+
+// ===========================================================================
 // T10.2 — Token Revocation (RFC 7009)
 // ===========================================================================
 
@@ -2553,6 +3000,7 @@ async fn p2_a_fapi_client_sending_none_of_them_is_unaffected() {
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         last_authorized_at: None,
         ciba: Default::default(),
+        default_idp: None,
     };
     assert_eq!(validate_registration(&client), Ok(()));
     assert!(
@@ -2626,6 +3074,7 @@ async fn a_fapi_client_is_refused_the_security_bearing_parameters() {
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         last_authorized_at: None,
         ciba: Default::default(),
+        default_idp: None,
     };
 
     let cases: [(&str, RawAuthnParams<'_>); 6] = [
@@ -2868,5 +3317,220 @@ async fn t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_no
         ],
         "an ignore-lane client's ID token must carry exactly this set — \
          no auth_time, no acr, no amr, and no nulls"
+    );
+}
+
+// ===========================================================================
+// D-N40 (#841) — an administrator's MFA reset revokes the user's refresh tokens
+// ===========================================================================
+
+/// **D-N40 (#841).** `POST /api/v1/users/{id}/reset-mfa` ended the user's
+/// sessions and evicted their factors but revoked no OAuth2 refresh token, so a
+/// grant minted before the reset kept minting access tokens for the account the
+/// administrator had just locked down. It now revokes them, as a password reset
+/// does: the refresh token issued before the reset is refused after it, and
+/// nothing is minted. The administrator's own grant is untouched.
+#[actix_rt::test]
+async fn d_n40_an_admin_mfa_reset_revokes_the_users_refresh_tokens() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_id = create_admin_user(&db, tenant_id).await;
+    let target_id = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "mfa-reset-target".into(),
+            email: "mfa-reset-target@example.com".into(),
+            password: "password12345".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let (_admin_session, admin_jwt) =
+        signed_in_session(&db, &auth, admin_id, tenant_id, org_id).await;
+    let (_target_session, target_jwt) =
+        signed_in_session(&db, &auth, target_id, tenant_id, org_id).await;
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &admin_jwt).await;
+    let mut refresh_of = Vec::new();
+    for jwt in [&target_jwt, &admin_jwt] {
+        let code = do_authorize(&app, jwt, &client_id, &redirect_uri, None, None).await;
+        let resp = do_token_exchange(
+            &app,
+            tenant_id,
+            &client_id,
+            &client_secret,
+            &code,
+            &redirect_uri,
+            None,
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        refresh_of.push(body["refresh_token"].as_str().unwrap().to_owned());
+    }
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{target_id}/reset-mfa"))
+        .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        204,
+        "the administrator's reset succeeds"
+    );
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[0]).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "a refresh token issued before the reset is refused after it: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "nothing is minted");
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[1]).await;
+    assert_eq!(status, 200, "another user's grant is untouched: {body}");
+}
+
+// ===========================================================================
+// D-N41 (#842) — an authorization-code replay revokes its session's refresh tokens
+// ===========================================================================
+
+/// **D-N41 (#842).** A replayed authorization code invalidated the session it
+/// was issued from (RFC 6749 §10.5), which stops the access tokens at the
+/// session check — but the refresh grant does not ask whether a session is
+/// live, so the code's own refresh token and every sibling grant on the same
+/// session kept minting. The replay now also revokes every refresh token of
+/// that session, as a refused refresh-token replay (G-C) and a logout (D-N39)
+/// do. Here the sibling is another client's grant authorized from the same
+/// session; another session of the same user keeps its grant, and a token
+/// revoked this way is a stale credential, not a refresh-token replay.
+#[actix_rt::test]
+async fn d_n41_a_code_replay_revokes_every_refresh_token_of_its_session() {
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+    use axiam_db::repository::SurrealAuditLogRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let (_replayed, jwt_a) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let (_kept, jwt_b) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &jwt_b).await;
+    let (sibling_id, sibling_secret, sibling_redirect) = create_client(&app, &jwt_b).await;
+
+    // Session A: the code that will be replayed, and a sibling grant to
+    // another client on the same session.
+    let code = do_authorize(&app, &jwt_a, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let codes_refresh = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let grant = |jwt: String, id: String, secret: String, redirect: String| {
+        let app = &app;
+        async move {
+            let code = do_authorize(app, &jwt, &id, &redirect, None, None).await;
+            let resp =
+                do_token_exchange(app, tenant_id, &id, &secret, &code, &redirect, None).await;
+            assert_eq!(resp.status().as_u16(), 200);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            body["refresh_token"].as_str().unwrap().to_owned()
+        }
+    };
+    let sibling_refresh = grant(
+        jwt_a.clone(),
+        sibling_id.clone(),
+        sibling_secret.clone(),
+        sibling_redirect.clone(),
+    )
+    .await;
+    // Session B: the same user and client, another sign-in.
+    let other_session_refresh = grant(
+        jwt_b.clone(),
+        client_id.clone(),
+        client_secret.clone(),
+        redirect_uri.clone(),
+    )
+    .await;
+
+    // The replay: refused exactly as before.
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400, "a replayed code is refused");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_grant");
+
+    let (status, body) = refresh_with(
+        &app,
+        tenant_id,
+        &sibling_id,
+        &sibling_secret,
+        &sibling_refresh,
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "a sibling grant on the replayed code's session is revoked: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "nothing is minted");
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &codes_refresh).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "the code's own refresh token is revoked: {body}"
+    );
+
+    let (status, body) = refresh_with(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &other_session_refresh,
+    )
+    .await;
+    assert_eq!(status, 200, "another session keeps its grant: {body}");
+
+    let replays = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        replays.items.is_empty(),
+        "a token revoked by a code replay is a stale credential, not a refresh replay"
     );
 }

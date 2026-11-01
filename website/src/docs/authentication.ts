@@ -1177,6 +1177,11 @@ const responseJson = assertion.toJSON();   // → back to the SDK, unchanged`,
         type: "note",
         text: "An unrecognised value is refused rather than defaulted. That matters more than it looks: the default is the stricter of the two, so a silently-tolerated typo would fail closed today and open on any future revision that flips which value is the default.",
       },
+      { type: "h", id: "native-sign-in", text: "Native apps: sign in with the provider's ID token" },
+      {
+        type: "p",
+        text: "A mobile or desktop app that used the provider's native SDK holds an ID token and no browser redirect. With `native_login` enabled on an OIDC provider and the app's client IDs listed, the app presents that token to the token endpoint and AXIAM signs the user in as the browser login would — the same user, the same provisioning rules. It is off by default and a separate switch from `token_exchange`. See [native sign-in](#/docs/native-sign-in).",
+      },
     ],
   },
 

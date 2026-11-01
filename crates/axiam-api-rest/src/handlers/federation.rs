@@ -6,8 +6,8 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::federation::{
-    CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol, ProviderKind,
-    SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
+    CreateFederationConfig, FederationConfig, FederationLink, FederationProtocol, NativeLoginTrust,
+    ProviderKind, SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::models::session::{Amr, AuthenticationEvidence};
 use axiam_core::repository::{
@@ -154,6 +154,82 @@ impl From<TokenExchangeTrust> for TokenExchangeTrustResponse {
     }
 }
 
+/// Native sign-in trust (G-A): which ID tokens this provider issued to an
+/// app are accepted as a sign-in at the token endpoint.
+///
+/// Mirrors the domain block on the wire, as `TokenExchangeTrustRequest` does,
+/// so an omitted member takes its documented default rather than failing
+/// deserialization. Only an `OidcConnect` provider may enable it.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct NativeLoginTrustRequest {
+    /// Off unless explicitly enabled. Configuring a provider for browser
+    /// login is not agreement to accept its ID tokens from apps.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The audiences a presented ID token may carry: the iOS bundle ID,
+    /// Android client ID or Apple app ID the native SDK was configured with.
+    /// Required (non-empty) when `enabled`; at most 64 entries of at most 512
+    /// characters, none blank, none repeated. The web `client_id` is accepted
+    /// only when it is listed here.
+    #[serde(default)]
+    pub client_ids: Vec<String>,
+    /// Bound on `now - iat` for a presented ID token, 1 to 3600 seconds.
+    /// Omitted: 300.
+    #[serde(default)]
+    pub max_token_age_secs: Option<i64>,
+}
+
+impl NativeLoginTrustRequest {
+    /// Convert and validate the block on its own. The protocol rule needs
+    /// the provider, so the callers apply it through
+    /// `NativeLoginTrust::validate_for_protocol` once the protocol is known.
+    fn into_domain(self) -> Result<NativeLoginTrust, AxiamApiError> {
+        let trust = NativeLoginTrust {
+            enabled: self.enabled,
+            client_ids: self.client_ids,
+            max_token_age_secs: self
+                .max_token_age_secs
+                .unwrap_or(axiam_core::models::federation::DEFAULT_MAX_TOKEN_AGE_SECS),
+        };
+        trust
+            .validate()
+            .map_err(|e| validation_err(e.to_string()))?;
+        Ok(trust)
+    }
+}
+
+/// Native sign-in trust as returned to an administrator. Nothing here is
+/// secret; it is never part of the unauthenticated providers listing.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct NativeLoginTrustResponse {
+    /// Whether ID tokens from apps are accepted as a sign-in.
+    pub enabled: bool,
+    /// The accepted ID-token audiences.
+    pub client_ids: Vec<String>,
+    /// Bound on `now - iat`, in seconds.
+    pub max_token_age_secs: i64,
+}
+
+impl From<NativeLoginTrust> for NativeLoginTrustResponse {
+    fn from(t: NativeLoginTrust) -> Self {
+        Self {
+            enabled: t.enabled,
+            client_ids: t.client_ids,
+            max_token_age_secs: t.max_token_age_secs,
+        }
+    }
+}
+
+/// Apply the protocol rule to the block a write would leave on the provider.
+fn validate_native_login_for(
+    block: &NativeLoginTrust,
+    protocol: FederationProtocol,
+) -> Result<(), AxiamApiError> {
+    block
+        .validate_for_protocol(protocol)
+        .map_err(|e| validation_err(e.to_string()))
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateFederationConfigRequest {
     /// Display name for the identity provider (e.g., "Google", "Okta").
@@ -176,6 +252,9 @@ pub struct CreateFederationConfigRequest {
     pub allowed_algorithms: Option<Vec<String>>,
     /// X4 external token-exchange trust. Omitted means disabled.
     pub token_exchange: Option<TokenExchangeTrustRequest>,
+    /// Native sign-in trust (G-A). Omitted means disabled. Refused when
+    /// enabled on a `Saml` or `OAuth2` provider.
+    pub native_login: Option<NativeLoginTrustRequest>,
     // --- login-provider fields ---
     /// Which provider this is: `google`, `github`, `facebook`, `apple`,
     /// `microsoft`, `generic_oidc`, `generic_oauth2` or `generic_saml`.
@@ -256,6 +335,10 @@ pub struct UpdateFederationConfigRequest {
     /// a partial merge of a trust configuration is how an operator ends up
     /// keeping an `accepted_audiences` entry they believed they had removed.
     pub token_exchange: Option<TokenExchangeTrustRequest>,
+    /// Native sign-in trust (G-A). Replaced **wholesale** when present, as
+    /// `token_exchange` is; omitted leaves it. Refused when enabled on a
+    /// `Saml` or `OAuth2` provider.
+    pub native_login: Option<NativeLoginTrustRequest>,
     // --- login-provider fields ---
     //
     // `provider_kind` is deliberately absent: it selects the protocol and the
@@ -324,6 +407,8 @@ pub struct FederationConfigResponse {
     pub enabled: bool,
     /// X4 external token-exchange trust.
     pub token_exchange: TokenExchangeTrustResponse,
+    /// Native sign-in trust (G-A).
+    pub native_login: NativeLoginTrustResponse,
     // --- login-provider fields ---
     /// Which provider this is. Derived from `protocol` for a config written
     /// before the field existed.
@@ -412,6 +497,7 @@ impl From<FederationConfig> for FederationConfigResponse {
             allow_sha1_signatures: c.allow_sha1_signatures,
             idp_metadata_signing_cert_pem: c.idp_metadata_signing_cert_pem.clone(),
             token_exchange: c.token_exchange.into(),
+            native_login: c.native_login.into(),
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -960,6 +1046,17 @@ pub async fn create<C: Connection + Clone>(
         ));
     }
 
+    // G-A: the native sign-in block is validated on its own and then against
+    // the protocol. Only an OIDC provider issues the ID token native sign-in
+    // verifies; enabling it on SAML or on the OAuth2 variant is refused.
+    let native_login = req
+        .native_login
+        .map(NativeLoginTrustRequest::into_domain)
+        .transpose()?;
+    if let Some(ref block) = native_login {
+        validate_native_login_for(block, protocol)?;
+    }
+
     // Validate IdP signing cert PEM before storage so garbage certs are
     // rejected at upload rather than at assertion-verification time (CQ-B40).
     if let Some(ref pem) = req.idp_signing_cert_pem {
@@ -997,6 +1094,7 @@ pub async fn create<C: Connection + Clone>(
             idp_signing_cert_pem: req.idp_signing_cert_pem,
             allowed_algorithms: req.allowed_algorithms,
             token_exchange,
+            native_login,
             provider_kind: Some(provider_kind),
             provider_slug: req.provider_slug,
             allow_tenant_inheritance: req.allow_tenant_inheritance,
@@ -1190,6 +1288,19 @@ pub async fn update<C: Connection + Clone>(
         ));
     }
 
+    // G-A: checked against the block the row will hold after this write —
+    // the submitted one, or the stored one when the request leaves it alone —
+    // and the row's own protocol, which is immutable. A gate that ran only on
+    // create would be a gate with an update around it (the T-241 lesson).
+    let native_login = req
+        .native_login
+        .map(NativeLoginTrustRequest::into_domain)
+        .transpose()?;
+    validate_native_login_for(
+        native_login.as_ref().unwrap_or(&existing.native_login),
+        existing.protocol,
+    )?;
+
     /// Fold an `Option<Option<T>>` patch over the current value.
     fn patched<T: Clone>(patch: &Option<Option<T>>, current: &Option<T>) -> Option<T> {
         match patch {
@@ -1283,6 +1394,7 @@ pub async fn update<C: Connection + Clone>(
                 idp_signing_cert_pem: req.idp_signing_cert_pem,
                 allowed_algorithms: req.allowed_algorithms,
                 token_exchange,
+                native_login,
                 provider_slug: req.provider_slug,
                 allow_tenant_inheritance: req.allow_tenant_inheritance,
                 scopes: req.scopes,

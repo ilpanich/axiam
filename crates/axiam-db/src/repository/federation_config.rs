@@ -4,7 +4,7 @@ use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
 use axiam_core::models::federation::{
     CreateFederationConfig, DEFAULT_MAX_TOKEN_AGE_SECS, FederationConfig, FederationProtocol,
-    ProviderKind, SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
+    NativeLoginTrust, ProviderKind, SubjectMapping, TokenExchangeTrust, UpdateFederationConfig,
 };
 use axiam_core::repository::{FederationConfigRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
@@ -62,6 +62,11 @@ struct FederationConfigRow {
     allow_sha1_signatures: Option<bool>,
     // #530 (schema v93) — absent on a pre-v93 row: no metadata signature check.
     idp_metadata_signing_cert_pem: Option<String>,
+    // G-A native sign-in trust (schema v111) — absent on a pre-v111 row,
+    // which hydrates to `NativeLoginTrust::default()` (disabled).
+    native_login_enabled: Option<bool>,
+    native_login_client_ids: Option<Vec<String>>,
+    native_login_max_token_age_secs: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -109,6 +114,11 @@ struct FederationConfigRowWithId {
     allow_sha1_signatures: Option<bool>,
     // #530 (schema v93) — absent on a pre-v93 row: no metadata signature check.
     idp_metadata_signing_cert_pem: Option<String>,
+    // G-A native sign-in trust (schema v111) — absent on a pre-v111 row,
+    // which hydrates to `NativeLoginTrust::default()` (disabled).
+    native_login_enabled: Option<bool>,
+    native_login_client_ids: Option<Vec<String>>,
+    native_login_max_token_age_secs: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -156,6 +166,11 @@ struct FederationConfigListRow {
     allow_sha1_signatures: Option<bool>,
     // #530 (schema v93) — absent on a pre-v93 row: no metadata signature check.
     idp_metadata_signing_cert_pem: Option<String>,
+    // G-A native sign-in trust (schema v111) — absent on a pre-v111 row,
+    // which hydrates to `NativeLoginTrust::default()` (disabled).
+    native_login_enabled: Option<bool>,
+    native_login_client_ids: Option<Vec<String>>,
+    native_login_max_token_age_secs: Option<i64>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -288,6 +303,23 @@ fn trust_from_columns(cols: TrustColumns) -> TokenExchangeTrust {
     }
 }
 
+/// Hydrate the G-A native sign-in block from its three columns.
+///
+/// As with `trust_from_columns`, `enabled` is read from its own column only
+/// and an absent column means `false`, so neither a pre-v111 row nor a corrupt
+/// neighbour can switch native sign-in on.
+fn native_login_from_columns(
+    enabled: Option<bool>,
+    client_ids: Option<Vec<String>>,
+    max_age: Option<i64>,
+) -> NativeLoginTrust {
+    NativeLoginTrust {
+        enabled: enabled.unwrap_or(false),
+        client_ids: client_ids.unwrap_or_default(),
+        max_token_age_secs: max_age.unwrap_or(DEFAULT_MAX_TOKEN_AGE_SECS),
+    }
+}
+
 /// Serialize the scope map for storage.
 ///
 /// Infallible by construction — the map is `BTreeMap<String, Vec<String>>`,
@@ -342,6 +374,11 @@ impl FederationConfigRow {
                 self.token_exchange_max_token_age_secs,
                 self.token_exchange_max_lifetime_secs,
             )),
+            native_login: native_login_from_columns(
+                self.native_login_enabled,
+                self.native_login_client_ids,
+                self.native_login_max_token_age_secs,
+            ),
             provider_kind: lp.provider_kind,
             provider_slug: lp.provider_slug,
             allow_tenant_inheritance: lp.allow_tenant_inheritance,
@@ -411,6 +448,11 @@ impl FederationConfigListRow {
                 self.token_exchange_max_token_age_secs,
                 self.token_exchange_max_lifetime_secs,
             )),
+            native_login: native_login_from_columns(
+                self.native_login_enabled,
+                self.native_login_client_ids,
+                self.native_login_max_token_age_secs,
+            ),
             provider_kind: lp.provider_kind,
             provider_slug: lp.provider_slug,
             allow_tenant_inheritance: lp.allow_tenant_inheritance,
@@ -476,6 +518,11 @@ impl FederationConfigRowWithId {
                 self.token_exchange_max_token_age_secs,
                 self.token_exchange_max_lifetime_secs,
             )),
+            native_login: native_login_from_columns(
+                self.native_login_enabled,
+                self.native_login_client_ids,
+                self.native_login_max_token_age_secs,
+            ),
             provider_kind: lp.provider_kind,
             provider_slug: lp.provider_slug,
             allow_tenant_inheritance: lp.allow_tenant_inheritance,
@@ -536,7 +583,8 @@ impl<C: Connection> SurrealFederationConfigRepository<C> {
              allow_tenant_inheritance, scopes, authorization_endpoint, \
              token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
              apple_team_id, apple_key_id, require_pkce, button_icon, \
-             allow_sha1_signatures, idp_metadata_signing_cert_pem, created_at, updated_at \
+             allow_sha1_signatures, idp_metadata_signing_cert_pem, native_login_enabled, \
+             native_login_client_ids, native_login_max_token_age_secs, created_at, updated_at \
              FROM federation_config \
              WHERE tenant_id = $tenant_id \
              ORDER BY created_at ASC";
@@ -582,6 +630,9 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
         // has already validated it; re-validating here would duplicate the
         // rule in a place that cannot report it usefully.
         let trust = input.token_exchange.unwrap_or_default();
+        // G-A: likewise — absent is disabled, and the handler validated it
+        // against the provider's protocol before this call.
+        let native_login = input.native_login.unwrap_or_default();
 
         let result = self
             .db
@@ -617,6 +668,9 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  button_icon = $button_icon, \
                  allow_sha1_signatures = $allow_sha1_signatures, \
                  idp_metadata_signing_cert_pem = $idp_metadata_signing_cert_pem, \
+                 native_login_enabled = $nl_enabled, \
+                 native_login_client_ids = $nl_client_ids, \
+                 native_login_max_token_age_secs = $nl_max_age, \
                  enabled = true, \
                  created_at = time::now(), \
                  updated_at = time::now()",
@@ -668,6 +722,9 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                 "idp_metadata_signing_cert_pem",
                 input.idp_metadata_signing_cert_pem,
             ))
+            .bind(("nl_enabled", native_login.enabled))
+            .bind(("nl_client_ids", native_login.client_ids))
+            .bind(("nl_max_age", native_login.max_token_age_secs))
             .await
             .map_err(DbError::from)?;
 
@@ -801,6 +858,19 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
             binds.push((
                 "tx_max_lifetime".into(),
                 serde_json::json!(trust.max_lifetime_secs),
+            ));
+        }
+
+        // G-A native sign-in block: wholesale too, for the same reason.
+        if let Some(ref nl) = input.native_login {
+            set_clauses.push("native_login_enabled = $nl_enabled".into());
+            binds.push(("nl_enabled".into(), serde_json::json!(nl.enabled)));
+            set_clauses.push("native_login_client_ids = $nl_client_ids".into());
+            binds.push(("nl_client_ids".into(), serde_json::json!(nl.client_ids)));
+            set_clauses.push("native_login_max_token_age_secs = $nl_max_age".into());
+            binds.push((
+                "nl_max_age".into(),
+                serde_json::json!(nl.max_token_age_secs),
             ));
         }
 
@@ -968,7 +1038,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
                  apple_team_id, apple_key_id, require_pkce, button_icon, \
-             allow_sha1_signatures, idp_metadata_signing_cert_pem, created_at, updated_at \
+             allow_sha1_signatures, idp_metadata_signing_cert_pem, native_login_enabled, \
+             native_login_client_ids, native_login_max_token_age_secs, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  ORDER BY created_at DESC \
@@ -1014,7 +1085,8 @@ impl<C: Connection> FederationConfigRepository for SurrealFederationConfigReposi
                  allow_tenant_inheritance, scopes, authorization_endpoint, \
                  token_endpoint, userinfo_endpoint, allowed_issuer_tenants, \
                  apple_team_id, apple_key_id, require_pkce, button_icon, \
-             allow_sha1_signatures, idp_metadata_signing_cert_pem, created_at, updated_at \
+             allow_sha1_signatures, idp_metadata_signing_cert_pem, native_login_enabled, \
+             native_login_client_ids, native_login_max_token_age_secs, created_at, updated_at \
                  FROM federation_config \
                  WHERE tenant_id = $tenant_id \
                  AND token_exchange_enabled = true \

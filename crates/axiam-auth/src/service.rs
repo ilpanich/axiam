@@ -112,7 +112,9 @@ pub enum LoginResult {
 }
 
 /// Output returned when MFA enforcement requires initial setup.
-#[derive(Debug)]
+///
+/// [`Debug`] is implemented by hand and redacts the setup token, for the same
+/// reason as [`LoginOutput`]: the enclosing [`LoginResult`] derives `Debug`.
 pub struct MfaSetupOutput {
     /// Short-lived JWT the client must present to `enroll_mfa_with_setup_token`
     /// and `confirm_mfa_with_setup_token`.
@@ -120,7 +122,9 @@ pub struct MfaSetupOutput {
 }
 
 /// MFA challenge token returned when login detects MFA is enabled.
-#[derive(Debug)]
+///
+/// [`Debug`] is implemented by hand and redacts the challenge token, for the
+/// same reason as [`LoginOutput`].
 pub struct MfaChallengeOutput {
     /// Short-lived JWT encoding user_id + tenant_id + org_id.
     pub challenge_token: String,
@@ -129,6 +133,23 @@ pub struct MfaChallengeOutput {
     /// Populated by the REST handler layer (not `AuthService`) because
     /// `AuthService` does not have visibility into WebAuthn credentials.
     pub available_methods: Vec<String>,
+}
+
+impl std::fmt::Debug for MfaSetupOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfaSetupOutput")
+            .field("setup_token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for MfaChallengeOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MfaChallengeOutput")
+            .field("challenge_token", &"<redacted>")
+            .field("available_methods", &self.available_methods)
+            .finish()
+    }
 }
 
 /// Input for the refresh token rotation flow.
@@ -1301,9 +1322,69 @@ impl<
         })
     }
 
-    /// Invalidate a single session (logout).
+    /// End a single session (logout) **and the OAuth2 refresh tokens issued
+    /// under it** (D-N39, #839).
+    ///
+    /// Every single-session ending goes through here: `POST /auth/logout`,
+    /// RP-initiated logout (`/oauth2/end_session` and its cookie hop) and SAML
+    /// single logout. Deleting the session row alone ended its access tokens
+    /// at the session check but left every refresh token naming it live — the
+    /// refresh grant does not ask whether `session_id` still exists — so a
+    /// native sign-in (whose only credential is its OAuth2 refresh token) kept
+    /// minting access tokens for a session the user had ended (F4-R12-01).
+    /// The scope is exactly the G-C one,
+    /// [`RefreshTokenRepository::revoke_all_for_session`]: the tokens of this
+    /// session, for every client and grant bound to it, and nothing wider —
+    /// the user's other sessions and devices keep theirs.
+    ///
+    /// A token revoked here is not stamped `rotated_at`, so presenting it
+    /// later is an ordinary stale credential (`invalid_grant`), never a
+    /// refresh-token replay: it triggers no second revocation and no
+    /// `oauth2.refresh_token_replayed` row.
+    ///
+    /// # Order, and what a failure leaves behind (F4-R12-07, D-N43)
+    ///
+    /// The refresh tokens are revoked **first**, and the session is deleted
+    /// only once that has succeeded. A logout is the caller asking for exactly
+    /// this effect, so answering "signed out" while the session or its refresh
+    /// tokens are still live is the half-ended state this must not leave
+    /// silently: a failure is logged at `error` with `failed_writes` naming the
+    /// write that failed (G-C's vocabulary: `refresh_tokens_revoke`,
+    /// `session_invalidate`) and returned as an error.
+    ///
+    /// The order is what makes that error retryable. Every failure leaves the
+    /// session row in place — a failed revocation never reaches the delete, and
+    /// a failed delete leaves it by definition — so the credential the caller
+    /// logged out with (the bearer token, the OP-session cookie, the SAML
+    /// session index) still resolves to the session, and the same request
+    /// repeated completes the logout: the revocation is idempotent (a second
+    /// pass revokes nothing new) and the delete then runs. The reverse order,
+    /// used until D-N43, could leave the session gone and its refresh tokens
+    /// live, a state the caller's own credential no longer reaches (its retry
+    /// was a `401`, or a "signed out" page over a live refresh token).
+    ///
+    /// The window between the two writes is one statement long. A refresh
+    /// token of this session presented in it is already revoked; a console
+    /// refresh that consumes the session row in it moves the session to a new
+    /// id that this logout no longer reaches — the same outcome as that refresh
+    /// landing just before the logout, which no ordering prevents.
     pub async fn logout(&self, tenant_id: Uuid, session_id: Uuid) -> AxiamResult<()> {
-        self.session_repo.invalidate(tenant_id, session_id).await
+        let revoked = self
+            .refresh_token_repo
+            .revoke_all_for_session(tenant_id, session_id)
+            .await;
+        let invalidated = match &revoked {
+            Ok(count) => {
+                tracing::debug!(
+                    %tenant_id, %session_id, refresh_tokens_revoked = count,
+                    "logout: the session's OAuth2 refresh tokens are revoked"
+                );
+                Some(self.session_repo.invalidate(tenant_id, session_id).await)
+            }
+            // Not attempted: the session stays, so the caller can retry.
+            Err(_) => None,
+        };
+        logout_outcome(tenant_id, session_id, revoked, invalidated)
     }
 
     /// Revoke all sessions for a user AND all OAuth2 refresh tokens.
@@ -1976,6 +2057,121 @@ fn account_status_permits(
                 }
             }
             Err(AuthError::AccountPendingVerification)
+        }
+    }
+}
+
+/// The answer of [`AuthService::logout`] from its two independent writes
+/// (D-N39, #839).
+///
+/// `Ok` only when both succeeded. Otherwise the failure is logged at `error`
+/// with `failed_writes` naming which of `session_invalidate` and
+/// `refresh_tokens_revoke` failed — the names G-C's `revocation_failed` audit
+/// row uses — and the first error is returned, so no caller can answer
+/// "signed out" over a session or a refresh token that is still live.
+fn logout_outcome(
+    tenant_id: Uuid,
+    session_id: Uuid,
+    revoked: AxiamResult<u64>,
+    invalidated: Option<AxiamResult<()>>,
+) -> AxiamResult<()> {
+    let failed_writes = logout_failed_writes(&revoked, invalidated.as_ref());
+    if failed_writes.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        %tenant_id,
+        %session_id,
+        ?failed_writes,
+        refresh_tokens_error = revoked.as_ref().err().map(ToString::to_string),
+        session_error = invalidated
+            .as_ref()
+            .and_then(|r| r.as_ref().err())
+            .map(ToString::to_string),
+        "logout: the session could not be fully ended and is still live; the logout \
+         is reported as failed, and repeating it with the same credential completes it"
+    );
+    revoked?;
+    invalidated.unwrap_or(Ok(()))
+}
+
+/// Which of the logout's two writes failed, in G-C's vocabulary. The session
+/// write is `None` when it was not attempted (the revocation failed first).
+fn logout_failed_writes(
+    revoked: &AxiamResult<u64>,
+    invalidated: Option<&AxiamResult<()>>,
+) -> Vec<&'static str> {
+    [
+        revoked.is_err().then_some("refresh_tokens_revoke"),
+        invalidated
+            .is_some_and(Result::is_err)
+            .then_some("session_invalidate"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(test)]
+mod logout_tests {
+    use super::*;
+
+    fn db_error() -> AxiamError {
+        AxiamError::Database("unavailable".into())
+    }
+
+    /// D-N39: both writes succeeding is the only "signed out".
+    #[test]
+    fn a_logout_succeeds_only_when_both_writes_do() {
+        let (tenant, session) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(logout_outcome(tenant, session, Ok(0), Some(Ok(()))).is_ok());
+        assert!(logout_outcome(tenant, session, Ok(3), Some(Ok(()))).is_ok());
+        assert!(
+            logout_outcome(tenant, session, Err(db_error()), None).is_err(),
+            "a failed revocation is a failed logout, the session write not attempted"
+        );
+        assert!(
+            logout_outcome(tenant, session, Ok(1), Some(Err(db_error()))).is_err(),
+            "revoked tokens over a live session is not a logout either"
+        );
+    }
+
+    /// The failed writes are named as G-C's `failed_writes` names them.
+    #[test]
+    fn the_failed_writes_use_the_g_c_names() {
+        assert!(logout_failed_writes(&Ok(2), Some(&Ok(()))).is_empty());
+        assert_eq!(
+            logout_failed_writes(&Err(db_error()), None),
+            ["refresh_tokens_revoke"]
+        );
+        assert_eq!(
+            logout_failed_writes(&Ok(2), Some(&Err(db_error()))),
+            ["session_invalidate"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    /// No `{:?}` of a [`LoginResult`] may print a token, whichever variant it is.
+    #[test]
+    fn login_result_debug_never_prints_a_token() {
+        let marker = "tok-must-not-appear";
+        let results = [
+            LoginResult::MfaRequired(MfaChallengeOutput {
+                challenge_token: marker.into(),
+                available_methods: vec!["totp".into()],
+            }),
+            LoginResult::MfaSetupRequired(MfaSetupOutput {
+                setup_token: marker.into(),
+            }),
+        ];
+        for result in &results {
+            let text = format!("{result:?}");
+            assert!(!text.contains(marker), "token leaked through Debug");
+            assert!(text.contains("<redacted>"));
         }
     }
 }

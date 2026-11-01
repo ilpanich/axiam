@@ -11,7 +11,7 @@ use axiam_core::models::oauth2_client::{
 };
 use axiam_core::repository::{
     AuditLogRepository, DeviceGrantRepository, OAuth2ClientRepository, PaginatedResult, Pagination,
-    RefreshTokenRepository,
+    RefreshTokenRepository, TenantRepository,
 };
 use axiam_oauth2::client_grants::ClientGrantStores;
 use chrono::{DateTime, Utc};
@@ -187,6 +187,17 @@ pub struct CreateOAuth2ClientRequest {
     /// code to verify.
     #[serde(default)]
     pub backchannel_user_code_parameter: Option<bool>,
+    /// G-B (#817) — the federation provider (a federation config `id`) this
+    /// client's sign-in page starts with when an authorization request carries
+    /// no `axiam_idp_hint`; a hint that names a provider overrides it.
+    ///
+    /// Must name a provider this tenant can sign in with — its own enabled
+    /// configs, or the organization's enabled ones it inherits — or the
+    /// registration is refused with `400`. If that provider is later disabled
+    /// or deleted the default is ignored at the authorization endpoint (the
+    /// provider chooser is shown), never an error. Omit for none.
+    #[serde(default)]
+    pub default_idp: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -236,6 +247,12 @@ pub struct UpdateOAuth2ClientRequest {
     pub backchannel_authentication_request_signing_alg: Option<String>,
     /// G-7 — `true` refused, as on create.
     pub backchannel_user_code_parameter: Option<bool>,
+    /// G-B (#817) — see [`CreateOAuth2ClientRequest::default_idp`]. Omitted
+    /// leaves it; `null` clears it; an id is held to the create rule (`400`
+    /// unless it names a provider this tenant can sign in with).
+    #[serde(default, deserialize_with = "super::directory::double_option")]
+    #[schema(value_type = Option<Uuid>, nullable)]
+    pub default_idp: Option<Option<Uuid>>,
 }
 
 /// OAuth2 client response -- omits client_secret_hash.
@@ -314,6 +331,12 @@ pub struct OAuth2ClientResponse {
     /// requests with; absent for a client sending plain requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backchannel_authentication_request_signing_alg: Option<CibaRequestSigningAlg>,
+    /// G-B (#817) — the provider this client's sign-in page starts with when
+    /// a request carries no hint; absent for none. Echoed as stored: a value
+    /// whose provider has since been disabled is shown, and ignored at the
+    /// authorization endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_idp: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -353,6 +376,7 @@ impl From<OAuth2Client> for OAuth2ClientResponse {
                 .ciba
                 .backchannel_authentication_request_signing_alg,
             require_par: c.require_par,
+            default_idp: c.default_idp,
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -443,6 +467,14 @@ const KNOWN_GRANT_TYPES: &[&str] = &[
     axiam_oauth2::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE,
     // G-7 — CIBA; its metadata is validated by `validate_ciba`.
     CIBA_GRANT_TYPE,
+    // G-A (W2.3) — native sign-in with a provider ID token. Registrable, never
+    // implied: no default grant set and no other registration path (DCR, CIMD)
+    // grants it, so a client holds it only when an administrator listed it.
+    // Permitted to a public client — the mobile app it exists for has no
+    // secret — because what it rests on is the provider's signed ID token,
+    // issued to a client ID the operator listed on the provider, and bound to
+    // the app's nonce; not the `client_id`.
+    axiam_oauth2::provider_id_token::PROVIDER_ID_TOKEN_GRANT_TYPE,
 ];
 
 /// G-7 — validate a registration's CIBA metadata (the rules are
@@ -453,6 +485,53 @@ fn validate_ciba(
 ) -> Result<CibaClientMetadata, AxiamApiError> {
     axiam_oauth2::ciba::validate_client_registration(view)
         .map_err(|e| validation_err(e.to_string()))
+}
+
+/// G-B (#817), T-494 — refuse a `default_idp` that names no provider the
+/// client's tenant can sign in with.
+///
+/// "Can sign in with" is the authorization endpoint's own rule: the tenant's
+/// effective, enabled providers (`effective_providers` — its own enabled
+/// configs plus the organization's enabled, inheritable, unshadowed ones). So
+/// another tenant's provider, a disabled one, an organization provider that is
+/// not inheritable or that this tenant shadows, and an id that names nothing
+/// are all one refusal; the message does not say which, because the listing an
+/// operator can read already does.
+///
+/// Run on create and on update whenever the patch sets an id (T-241: a gate
+/// that only runs on create is a gate with a PATCH around it). The field has
+/// no interaction with any other field of the row, so the value the patch
+/// sets *is* the merged value; a patch that leaves the field alone does not
+/// re-check a default whose provider was disabled since, because that state
+/// is already handled where it matters (the endpoint ignores it) and refusing
+/// an unrelated rename over it would be a trap.
+async fn validate_default_idp<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    default_idp: Uuid,
+) -> Result<(), AxiamApiError> {
+    let organization_id = state
+        .tenant_repo
+        .get_by_id(tenant_id)
+        .await?
+        .organization_id;
+    let effective = crate::handlers::federation_login::effective_providers(
+        state,
+        crate::handlers::federation_login::Workspace {
+            organization_id,
+            tenant_id,
+        },
+    )
+    .await?;
+    if effective.iter().any(|p| p.config.id == default_idp) {
+        Ok(())
+    } else {
+        Err(validation_err(
+            "default_idp must name a federation provider this tenant can sign in with: one \
+             of its own enabled providers, or an enabled provider its organization lets it \
+             inherit (see GET /api/v1/auth/federation/providers)",
+        ))
+    }
 }
 
 fn validation_err(msg: impl Into<String>) -> AxiamApiError {
@@ -879,6 +958,7 @@ fn reject_public_client_grants(
     security(("bearer" = []))
 )]
 pub async fn create<C: Connection + Clone>(
+    http: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
@@ -951,7 +1031,14 @@ pub async fn create<C: Connection + Clone>(
         // this is the one handler entitled to assert `admin`.
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         ciba,
+        default_idp: req.default_idp,
     };
+
+    // G-B (#817), T-494 — the registration decides which provider is the
+    // default, and only among those the tenant offers.
+    if let Some(id) = create.default_idp {
+        validate_default_idp(&state, user.tenant_id, id).await?;
+    }
 
     // X5.1 — refuse a registration that could not satisfy the profile it
     // declares, BEFORE it is written. A `fapi2` client missing PAR or mTLS
@@ -973,6 +1060,25 @@ pub async fn create<C: Connection + Clone>(
     // operator who cannot find their secret, not as a client silently treated
     // as public.
     let client_secret = (!client.token_endpoint_auth_method.is_public()).then_some(raw_secret);
+
+    // #834 (F4-W3-05, D-N27) — after the write, on success only, as every
+    // administrator registry write is audited. Never the secret.
+    audit_client_write(
+        &state,
+        &http,
+        &user,
+        &client,
+        CLIENT_CREATED_ACTION,
+        serde_json::json!({
+            "client_id": client.client_id,
+            "name": client.name,
+            "grant_types": client.grant_types,
+            "token_endpoint_auth_method": client.token_endpoint_auth_method.as_str(),
+            "profile": client.profile,
+            "default_idp": client.default_idp,
+        }),
+    )
+    .await;
 
     Ok(HttpResponse::Created().json(OAuth2ClientCreatedResponse {
         id: client.id,
@@ -1368,7 +1474,14 @@ pub async fn update<C: Connection + Clone>(
         browser_sso: req.browser_sso,
         allowed_resources,
         ciba,
+        default_idp: req.default_idp,
     };
+
+    // G-B (#817), T-494 — the same rule as on create, on the update path
+    // (T-241). `Some(None)` clears and needs no check.
+    if let Some(Some(id)) = update.default_idp {
+        validate_default_idp(&state, user.tenant_id, id).await?;
+    }
 
     // X5.1 — validate the MERGED result, not the patch. Flipping `profile` to
     // `fapi2` on a client that has none of the rest is a perfectly well-formed
@@ -1433,6 +1546,30 @@ pub async fn update<C: Connection + Clone>(
         };
         audit_conversion_to_public(&state, &http, &user, &client, from, revoked, complete).await;
     }
+
+    // #834 (F4-W3-05, D-N27) — the names of what this write changed, measured
+    // against the row the write was conditional on, so a member the patch
+    // repeated unchanged is not listed. `default_idp` steers every sign-in of
+    // the client, so its new value (a tenant-public provider id, or `null`
+    // when cleared) is recorded when it changed. A conversion to public also
+    // has its own row above.
+    let changed = changed_client_fields(&stored, &client);
+    let mut metadata = serde_json::json!({
+        "client_id": client.client_id,
+        "changed_fields": changed,
+    });
+    if changed.contains(&"default_idp") {
+        metadata["default_idp"] = serde_json::json!(client.default_idp);
+    }
+    audit_client_write(
+        &state,
+        &http,
+        &user,
+        &client,
+        CLIENT_UPDATED_ACTION,
+        metadata,
+    )
+    .await;
     Ok(HttpResponse::Ok().json(OAuth2ClientResponse::from(client)))
 }
 
@@ -1528,6 +1665,127 @@ async fn audit_conversion_to_public<C: Connection + Clone>(
     }
 }
 
+/// #834 (F4-W3-05, D-N27) — an administrator created an OAuth2 client.
+pub const CLIENT_CREATED_ACTION: &str = "oauth2.client_created";
+/// #834 — an administrator updated an OAuth2 client; the row names the changed
+/// members.
+pub const CLIENT_UPDATED_ACTION: &str = "oauth2.client_updated";
+/// #834 — an administrator deleted an OAuth2 client.
+pub const CLIENT_DELETED_ACTION: &str = "oauth2.client_deleted";
+
+/// One audit row of an administrator's client write (#834), never failing the
+/// request: the write it describes is already durable, so a failed append is
+/// logged, as for [`audit_conversion_to_public`]. Only successful writes are
+/// audited — a refused one changed nothing — which is the rule every other
+/// administrator registry (SAML service providers, SCIM targets, SSF streams)
+/// follows.
+///
+/// `metadata` is built by the caller from public registration members only:
+/// never `client_secret_hash`, and never the one-time secret `create` returns.
+async fn audit_client_write<C: Connection + Clone>(
+    state: &AppState<C>,
+    http: &HttpRequest,
+    user: &AuthenticatedUser,
+    client: &OAuth2Client,
+    action: &str,
+    metadata: serde_json::Value,
+) {
+    let entry = CreateAuditLogEntry {
+        tenant_id: client.tenant_id,
+        actor_id: user.user_id,
+        actor_type: ActorType::User,
+        action: action.into(),
+        resource_id: Some(client.id),
+        outcome: AuditOutcome::Success,
+        ip_address: client_ip(http),
+        metadata: Some(metadata),
+    };
+    if let Err(e) = state.audit_repo.append(entry).await {
+        tracing::error!(
+            error = %e,
+            client_id = %client.client_id,
+            action,
+            "failed to write the audit row of an OAuth2 client write"
+        );
+    }
+}
+
+/// The names of the registration members that differ between `old` and `new`
+/// (#834). Names only, never a value, so no redirect URI, key set or subject
+/// DN reaches the audit log through this list; the secret hash is not compared
+/// at all, and neither are the bookkeeping members (`updated_at`,
+/// `last_authorized_at`) nor the immutable ones (`id`, `tenant_id`,
+/// `client_id`, `managed_by`, `created_at`).
+fn changed_client_fields(old: &OAuth2Client, new: &OAuth2Client) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    let mut note = |differs: bool, name: &'static str| {
+        if differs {
+            out.push(name);
+        }
+    };
+    note(old.name != new.name, "name");
+    note(old.redirect_uris != new.redirect_uris, "redirect_uris");
+    note(old.grant_types != new.grant_types, "grant_types");
+    note(old.scopes != new.scopes, "scopes");
+    note(
+        old.post_logout_redirect_uris != new.post_logout_redirect_uris,
+        "post_logout_redirect_uris",
+    );
+    note(
+        old.backchannel_logout_uri != new.backchannel_logout_uri,
+        "backchannel_logout_uri",
+    );
+    note(old.require_par != new.require_par, "require_par");
+    note(old.profile != new.profile, "profile");
+    note(
+        old.token_endpoint_auth_method != new.token_endpoint_auth_method,
+        "token_endpoint_auth_method",
+    );
+    note(
+        old.tls_client_auth_subject_dn != new.tls_client_auth_subject_dn,
+        "tls_client_auth_subject_dn",
+    );
+    note(
+        old.tls_client_auth_san_dns != new.tls_client_auth_san_dns,
+        "tls_client_auth_san_dns",
+    );
+    note(
+        old.tls_client_auth_san_uri != new.tls_client_auth_san_uri,
+        "tls_client_auth_san_uri",
+    );
+    note(
+        old.self_signed_tls_client_auth_thumbprints != new.self_signed_tls_client_auth_thumbprints,
+        "self_signed_tls_client_auth_thumbprints",
+    );
+    note(
+        old.tls_client_certificate_bound_access_tokens
+            != new.tls_client_certificate_bound_access_tokens,
+        "tls_client_certificate_bound_access_tokens",
+    );
+    note(old.jwks != new.jwks, "jwks");
+    note(old.jwks_uri != new.jwks_uri, "jwks_uri");
+    note(
+        old.dpop_bound_access_tokens != new.dpop_bound_access_tokens,
+        "dpop_bound_access_tokens",
+    );
+    note(
+        old.dpop_require_nonce != new.dpop_require_nonce,
+        "dpop_require_nonce",
+    );
+    note(
+        old.authn_request_params != new.authn_request_params,
+        "authn_request_params",
+    );
+    note(old.browser_sso != new.browser_sso, "browser_sso");
+    note(
+        old.allowed_resources != new.allowed_resources,
+        "allowed_resources",
+    );
+    note(old.ciba != new.ciba, "ciba");
+    note(old.default_idp != new.default_idp, "default_idp");
+    out
+}
+
 /// `DELETE /api/v1/oauth2-clients/{id}`
 #[utoipa::path(
     delete,
@@ -1541,6 +1799,7 @@ async fn audit_conversion_to_public<C: Connection + Clone>(
     security(("bearer" = []))
 )]
 pub async fn delete<C: Connection + Clone>(
+    http: HttpRequest,
     user: AuthenticatedUser,
     authz: AuthzData,
     path: web::Path<Uuid>,
@@ -1575,6 +1834,20 @@ pub async fn delete<C: Connection + Clone>(
             "a deleted client's grants could not be revoked a second time"
         );
     }
+    // #834 (F4-W3-05, D-N27) — after the delete, on success only.
+    audit_client_write(
+        &state,
+        &http,
+        &user,
+        &client,
+        CLIENT_DELETED_ACTION,
+        serde_json::json!({
+            "client_id": client.client_id,
+            "name": client.name,
+            "managed_by": client.managed_by,
+        }),
+    )
+    .await;
     Ok(HttpResponse::NoContent().finish())
 }
 

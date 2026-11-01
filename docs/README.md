@@ -88,7 +88,8 @@ Task-oriented guides for operators and integrators.
   sign-in page
 - [`admin/oidc-authn-parameters.md`](./admin/oidc-authn-parameters.md) — the
   `authn_request_params` per-client switch: `prompt`, `max_age`, `acr_values`
-  and `id_token_hint`
+  and `id_token_hint`; also `axiam_idp_hint` and a client's `default_idp`, which
+  send the user straight to one identity provider
 - [`admin/public-clients.md`](./admin/public-clients.md) — public clients
   (`token_endpoint_auth_method: "none"`) and RFC 8252 loopback redirects
 - [`admin/dynamic-client-registration.md`](./admin/dynamic-client-registration.md) —

@@ -132,6 +132,13 @@ pub struct PushedRequest {
     /// protocol error — instead of surfacing in a browser after a sign-in the
     /// user should never have been asked for.
     pub resource: Option<String>,
+    /// G-B (#817) — `axiam_idp_hint`, resolved (or ignored) at the
+    /// authorization endpoint. Bounded at push time by
+    /// [`crate::authn_params::bound_idp_hint`] (F4-W3-09): an over-long,
+    /// blank or garbled value is stored as no hint. Never validated against a
+    /// provider here and never refused: a hint that names nothing is answered
+    /// as no hint on either carrier.
+    pub axiam_idp_hint: Option<String>,
 }
 
 /// What `/oauth2/par` answers with (RFC 9126 §2.2).
@@ -279,6 +286,14 @@ where
                     claims_locales: req.claims_locales,
                     dpop_jkt: req.dpop_jkt,
                     resource,
+                    // F4-W3-09 — the query string's bound, applied before
+                    // storage rather than only at use, so the stored row never
+                    // holds more than a hint can be. Silent, as on the query:
+                    // an unusable hint is no hint, never an error at push.
+                    axiam_idp_hint: crate::authn_params::bound_idp_hint(
+                        req.axiam_idp_hint.as_deref(),
+                    )
+                    .map(str::to_owned),
                 },
                 expires_at,
             })
@@ -360,12 +375,38 @@ where
     /// marked or carried forward.
     ///
     /// **This is an early refusal, never an authorization.**
+    ///
+    /// # The one value it does hand back (G-B, #817)
+    ///
+    /// [`PeekedRequest`] carries the pushed `axiam_idp_hint`, one bool (below)
+    /// and nothing else.
+    /// The anonymous browser this runs for is about to be sent to the sign-in
+    /// page, and that page is the only place the hint means anything; without
+    /// it, a `require_par` client's hint could never reach the page, and the
+    /// client's `default_idp` would override the hint it pushed. A provider
+    /// hint authorizes nothing and is resolved against the tenant's public
+    /// provider list before any of it is used, so handing it out keeps the
+    /// property above: nothing returned here can stand in for `consume`.
+    ///
+    /// What becomes observable is only the *resolved* provider id, on the
+    /// `/login` redirect the holder of the `request_uri` is sent to — a
+    /// tenant-public id the browser would show anyway (F4-W3-09). The pushed
+    /// string itself is never echoed: a PAR authorization request's
+    /// `return_to` carries `client_id` and `request_uri`, not the hint.
+    ///
+    /// # And whether the pushed request demands a fresh authentication (#835)
+    ///
+    /// [`PeekedRequest::fresh_authentication`] — a bool, not the pushed
+    /// `prompt` or `max_age`. The sign-in page must not start a provider by
+    /// itself for a request that says `prompt=login` or `max_age=0`, and under
+    /// PAR only this server can see that it does. A bool authorizes nothing
+    /// and selects nothing, so the property above holds.
     pub async fn peek(
         &self,
         tenant_id: Uuid,
         client_id: &str,
         request_uri: &str,
-    ) -> Result<(), OAuth2Error> {
+    ) -> Result<PeekedRequest, OAuth2Error> {
         if !request_uri.starts_with(REQUEST_URI_PREFIX) {
             return Err(OAuth2Error::InvalidRequest(
                 "request_uri is not a pushed authorization request URI".into(),
@@ -389,8 +430,43 @@ where
             ));
         }
 
-        Ok(())
+        // #835 (D-N28) — one bool, through the honour lane's own parse, so
+        // the marker reads `prompt`/`max_age` exactly as `crate::honour` will
+        // when the request is consumed. The values themselves stay here.
+        let fresh_authentication =
+            crate::authn_params::AuthnRequestParams::parse(&crate::authn_params::RawAuthnParams {
+                prompt: stored.params.prompt.as_deref(),
+                max_age: stored.params.max_age.as_deref(),
+                ..Default::default()
+            })
+            .demands_fresh_authentication();
+
+        Ok(PeekedRequest {
+            axiam_idp_hint: stored.params.axiam_idp_hint,
+            fresh_authentication,
+        })
     }
+}
+
+/// What [`ParService::peek`] hands back about a still-spendable pushed request:
+/// the presentation the sign-in page needs before the request is consumed, and
+/// deliberately nothing that could be used to authorize (see `peek`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeekedRequest {
+    /// G-B (#817) — the pushed `axiam_idp_hint`, unresolved; bounded at push
+    /// time (F4-W3-09), and run by the caller through `authn_params` and the
+    /// provider resolver exactly as the inline one. It never reaches a page
+    /// as a string: what crosses into the front channel is only the id of
+    /// the provider it resolved to (`/login?…&idp=<uuid>`), a provider the
+    /// tenant's public listing already shows, or nothing.
+    pub axiam_idp_hint: Option<String>,
+    /// #835 (D-N28) — whether the pushed request demands a fresh
+    /// authentication (`prompt` naming `login`, or `max_age=0`), decided by
+    /// [`crate::authn_params::AuthnRequestParams::demands_fresh_authentication`]
+    /// on the pushed values. The caller applies it on the honour lane only and
+    /// turns it into the hop's `fresh=1`; the pushed values themselves are not
+    /// handed out.
+    pub fresh_authentication: bool,
 }
 
 /// The single answer given for a `request_uri` that is unknown, expired or
@@ -681,6 +757,78 @@ mod tests {
              the handler, after a principal exists"
         );
         assert_eq!(svc.par_repo.reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// G-B (#817) — the pushed `axiam_idp_hint` is the one value `peek`
+    /// returns, so the first leg's sign-in page sees the hint a `require_par`
+    /// client pushed; and the handle is still not spent.
+    #[tokio::test]
+    async fn peek_returns_the_pushed_idp_hint_and_nothing_else() {
+        let tenant = Uuid::now_v7();
+        let mut repo = OneRow::live(tenant, "client-a");
+        if let Some(row) = repo.row.as_mut() {
+            row.params.axiam_idp_hint = Some("corp-okta".into());
+            row.params.login_hint = Some("ada@example.com".into());
+        }
+        let svc = service(repo);
+        let peeked = svc
+            .peek(tenant, "client-a", &generate_request_uri())
+            .await
+            .expect("a live handle");
+        assert_eq!(
+            peeked,
+            PeekedRequest {
+                axiam_idp_hint: Some("corp-okta".into()),
+                fresh_authentication: false,
+            }
+        );
+        assert_eq!(svc.par_repo.consumes.load(Ordering::SeqCst), 0);
+
+        let plain = service(OneRow::live(tenant, "client-a"))
+            .peek(tenant, "client-a", &generate_request_uri())
+            .await
+            .expect("a live handle");
+        assert_eq!(plain, PeekedRequest::default());
+    }
+
+    /// #835 (D-N28) — `peek` reports whether the pushed request demands a
+    /// fresh authentication, read through the honour lane's parse (so `00`,
+    /// `+0` and a tab-separated `prompt` count), as a bool and nothing more;
+    /// and the handle is still not spent.
+    #[tokio::test]
+    async fn peek_reports_a_pushed_fresh_authentication_demand_as_a_bool() {
+        let tenant = Uuid::now_v7();
+        for (prompt, max_age, fresh) in [
+            (Some("login"), None, true),
+            (Some("consent\tlogin"), None, true),
+            (None, Some("0"), true),
+            (None, Some("00"), true),
+            (None, Some("+0"), true),
+            (None, Some(" 0"), true),
+            (Some("consent"), None, false),
+            (None, Some("3600"), false),
+            (None, None, false),
+        ] {
+            let mut repo = OneRow::live(tenant, "client-a");
+            if let Some(row) = repo.row.as_mut() {
+                row.params.prompt = prompt.map(str::to_owned);
+                row.params.max_age = max_age.map(str::to_owned);
+            }
+            let svc = service(repo);
+            let peeked = svc
+                .peek(tenant, "client-a", &generate_request_uri())
+                .await
+                .expect("a live handle");
+            assert_eq!(
+                peeked,
+                PeekedRequest {
+                    axiam_idp_hint: None,
+                    fresh_authentication: fresh,
+                },
+                "prompt={prompt:?} max_age={max_age:?}"
+            );
+            assert_eq!(svc.par_repo.consumes.load(Ordering::SeqCst), 0);
+        }
     }
 
     /// Unknown, expired and already-used are one answer, and it is the same

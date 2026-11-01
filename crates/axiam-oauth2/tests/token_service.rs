@@ -520,6 +520,14 @@ struct MockRefreshRepo {
     /// (the raw token is opaque), so recording the call is the only way to
     /// assert that the claims request was copied forward rather than dropped.
     created: Arc<Mutex<Vec<CreateRefreshToken>>>,
+    /// G-C — every session whose refresh tokens this repository was asked to
+    /// revoke. The revocation is a side effect with no visible response, so
+    /// the log is how a test asserts it happened — and that it named the
+    /// replayed session and no other.
+    session_revocations: Arc<Mutex<Vec<Uuid>>>,
+    /// G-C — make `revoke_all_for_session` fail, to pin that a failed
+    /// revocation does not change the client's answer.
+    session_revocation_fails: bool,
 }
 
 impl MockRefreshRepo {
@@ -531,7 +539,14 @@ impl MockRefreshRepo {
             rotated: None,
             retired: Arc::new(Mutex::new(Vec::new())),
             created: Arc::new(Mutex::new(Vec::new())),
+            session_revocations: Arc::new(Mutex::new(Vec::new())),
+            session_revocation_fails: false,
         }
+    }
+    /// G-C — a handle on [`Self::session_revocations`], taken before the repo
+    /// is moved into the service.
+    fn session_revocation_log(&self) -> Arc<Mutex<Vec<Uuid>>> {
+        Arc::clone(&self.session_revocations)
     }
     fn with_get(mut self, rt: RefreshToken) -> Self {
         self.get = Get::Found(Box::new(rt));
@@ -634,6 +649,14 @@ impl RefreshTokenRepository for MockRefreshRepo {
     }
     async fn revoke_all_for_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> {
         unimplemented!()
+    }
+    async fn revoke_all_for_session(&self, _t: Uuid, session_id: Uuid) -> AxiamResult<u64> {
+        self.session_revocations.lock().unwrap().push(session_id);
+        if self.session_revocation_fails {
+            Err(AxiamError::Database("revoke_all_for_session failed".into()))
+        } else {
+            Ok(1)
+        }
     }
     async fn delete_all_for_user(&self, _: Uuid, _: Uuid) -> AxiamResult<u64> {
         Ok(0)
@@ -801,6 +824,7 @@ fn make_client(grants: &[&str], scopes: &[&str]) -> Box<OAuth2Client> {
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         last_authorized_at: None,
         ciba: Default::default(),
+        default_idp: None,
     })
 }
 
@@ -875,6 +899,9 @@ struct MockSessionRepo(
     /// to mark. A replay marker is a side effect with no visible response
     /// either, so the same trick: record the call and assert on the log.
     ReplayLog,
+    /// F4-W1-02 (#822) — when set, `invalidate` records the call and then
+    /// fails, so the G-C failure path can be driven from the session side.
+    bool,
 );
 
 impl axiam_core::repository::SessionRepository for MockSessionRepo {
@@ -913,6 +940,9 @@ impl axiam_core::repository::SessionRepository for MockSessionRepo {
     }
     async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
         self.1.lock().unwrap().push((tenant_id, id));
+        if self.3 {
+            return Err(AxiamError::Database("invalidate failed".into()));
+        }
         Ok(())
     }
     async fn consume(&self, _tenant_id: Uuid, _id: Uuid) -> AxiamResult<bool> {
@@ -1139,7 +1169,12 @@ fn build_with_session_log(
         MockTenantRepo::new(tenant),
         refresh,
         MockUserRepo,
-        MockSessionRepo(None, sessions.clone(), Arc::new(Mutex::new(Vec::new()))),
+        MockSessionRepo(
+            None,
+            sessions.clone(),
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+        ),
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
@@ -1172,6 +1207,9 @@ fn base_req(grant: &str) -> TokenRequest {
         client_assertion: None,
         client_assertion_type: None,
         auth_req_id: None,
+        provider: None,
+        id_token: None,
+        nonce: None,
     }
 }
 
@@ -3307,7 +3345,12 @@ fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLo
         MockTenantRepo::new(TenantOutcome::Found),
         refresh,
         MockUserRepo,
-        MockSessionRepo(None, Arc::new(Mutex::new(Vec::new())), replays.clone()),
+        MockSessionRepo(
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+            replays.clone(),
+            false,
+        ),
         audit,
         test_config(),
         2_592_000,
@@ -4333,6 +4376,109 @@ async fn a_replayed_code_with_no_session_is_denied_without_revoking() {
     assert!(invalidations.lock().unwrap().is_empty());
 }
 
+/// **D-N41 (#842).** A replayed code also revokes every refresh token of the
+/// session it was issued from — the code's own and any sibling grant's — with
+/// G-C's `revoke_all_for_session`, beside the §10.5 session invalidation. The
+/// answer is the same `invalid_grant`.
+#[tokio::test]
+async fn a_replayed_authorization_code_revokes_its_sessions_refresh_tokens() {
+    let session_id = Uuid::new_v4();
+    let mut code = make_auth_code(&["openid"], None);
+    code.session_id = Some(session_id);
+    let refresh = MockRefreshRepo::new();
+    let revoked_sessions = refresh.session_revocation_log();
+
+    let (svc, invalidations) = build_with_session_log(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo {
+            get: Some(code),
+            consume_ok: false,
+        },
+        TenantOutcome::Found,
+        refresh,
+    );
+
+    let err = svc
+        .exchange(client_tenant(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("a replayed code must still be denied");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert_eq!(
+        invalidations.lock().unwrap().clone(),
+        vec![(client_tenant(), session_id)],
+        "the §10.5 session invalidation stays"
+    );
+    assert_eq!(
+        revoked_sessions.lock().unwrap().clone(),
+        vec![session_id],
+        "the session's refresh tokens are revoked, and only that session's"
+    );
+}
+
+/// D-N41 with G-C's failure handling: a refresh-token revocation that fails
+/// does not change the answer (no `500`, which would tell the presenter its
+/// replay reached a revocation), and the session invalidation is still
+/// attempted — the two writes are independent.
+#[tokio::test]
+async fn a_failed_refresh_revocation_after_a_code_replay_is_still_invalid_grant() {
+    let session_id = Uuid::new_v4();
+    let mut code = make_auth_code(&["openid"], None);
+    code.session_id = Some(session_id);
+    let mut refresh = MockRefreshRepo::new();
+    refresh.session_revocation_fails = true;
+    let revoked_sessions = refresh.session_revocation_log();
+
+    let (svc, invalidations) = build_with_session_log(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo {
+            get: Some(code),
+            consume_ok: false,
+        },
+        TenantOutcome::Found,
+        refresh,
+    );
+
+    let err = svc
+        .exchange(client_tenant(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("a replayed code must still be denied");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert_eq!(revoked_sessions.lock().unwrap().clone(), vec![session_id]);
+    assert_eq!(
+        invalidations.lock().unwrap().clone(),
+        vec![(client_tenant(), session_id)],
+        "the session write is attempted whatever the refresh-token write does"
+    );
+}
+
+/// An unknown code, or a replayed one with no session behind it, revokes no
+/// refresh token either.
+#[tokio::test]
+async fn a_code_with_no_replayed_session_revokes_no_refresh_token() {
+    for code in [
+        MockCodeRepo::none(),
+        MockCodeRepo {
+            get: Some(make_auth_code(&["openid"], None)), // session_id: None
+            consume_ok: false,
+        },
+    ] {
+        let refresh = MockRefreshRepo::new();
+        let revoked_sessions = refresh.session_revocation_log();
+        let (svc, _) = build_with_session_log(
+            ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+            code,
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(client_tenant(), auth_code_req(None), &no_cert())
+            .await
+            .expect_err("refused");
+        assert_eq!(err.error_code(), "invalid_grant");
+        assert!(revoked_sessions.lock().unwrap().is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // T-254 — the refresh-rotation grace window is a `fapi2` behaviour, and every
 // replay is marked
@@ -4681,6 +4827,752 @@ async fn t254_the_replay_audit_record_never_carries_the_token() {
         rendered.contains(&session_id.to_string()),
         "the session is what an investigation follows, and must be there"
     );
+}
+
+// ---------------------------------------------------------------------------
+// G-C (#818) — a refused refresh-token replay revokes its session
+// ---------------------------------------------------------------------------
+//
+// The T-254 amendment. A presentation of an already-rotated refresh token that
+// is *refused* — every `standard` replay, and a `fapi2` replay once its grace
+// has run out — now also invalidates the session the token names and revokes
+// every refresh token of that session, unless the tenant chose
+// `oauth2.refresh_reuse_response = refuse`. The `fapi2` presentation *inside*
+// the window is untouched (D-N4). The answer to the client is the same
+// `invalid_grant` in every case.
+
+/// What a G-C test reads back: session invalidations, replay markers, the
+/// audit log and the per-session refresh-token revocations.
+struct GcLogs {
+    invalidated: InvalidateLog,
+    replays: ReplayLog,
+    audit: AuditLog,
+    revoked_sessions: Arc<Mutex<Vec<Uuid>>>,
+}
+
+/// [`build_t254`], with the session-invalidation log too, and the tenant's
+/// policy pinned when `policy` is `Some` (left at the service's default —
+/// `revoke_session` — when `None`).
+fn build_g_c(
+    client: ClientOutcome,
+    refresh: MockRefreshRepo,
+    policy: Option<axiam_core::models::settings::RefreshReuseResponse>,
+) -> (Svc, GcLogs) {
+    build_g_c_with(client, refresh, policy, false)
+}
+
+/// [`build_g_c`], with the session repository's `invalidate` failing when
+/// `invalidate_fails` is set (F4-W1-02, #822).
+fn build_g_c_with(
+    client: ClientOutcome,
+    refresh: MockRefreshRepo,
+    policy: Option<axiam_core::models::settings::RefreshReuseResponse>,
+    invalidate_fails: bool,
+) -> (Svc, GcLogs) {
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    let invalidated: InvalidateLog = Arc::new(Mutex::new(Vec::new()));
+    let replays: ReplayLog = Arc::new(Mutex::new(Vec::new()));
+    let revoked_sessions = refresh.session_revocation_log();
+    let audit = MockAuditRepo::default();
+    let audit_log = Arc::clone(&audit.0);
+    let mut svc = TokenService::new(
+        MockClientRepo(client, upgrade.clone()),
+        MockSaRepo(SaOutcome::NotFound, upgrade),
+        dummy_code_repo(),
+        MockTenantRepo::new(TenantOutcome::Found),
+        refresh,
+        MockUserRepo,
+        MockSessionRepo(None, invalidated.clone(), replays.clone(), invalidate_fails),
+        audit,
+        test_config(),
+        2_592_000,
+        not_issued_here(),
+    );
+    if let Some(policy) = policy {
+        svc = svc.with_refresh_reuse_policy(axiam_oauth2::refresh_reuse::fixed(policy));
+    }
+    (
+        svc,
+        GcLogs {
+            invalidated,
+            replays,
+            audit: audit_log,
+            revoked_sessions,
+        },
+    )
+}
+
+/// The refusal a replay gets, whatever the policy: `invalid_grant`, "already
+/// consumed". Asserted on the code and the description, never on the body.
+fn assert_refused_as_consumed(err: &axiam_oauth2::error::OAuth2Error) {
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        err.error_description().contains("already consumed"),
+        "a refused replay keeps its T-254 description"
+    );
+}
+
+/// **The headline.** A `standard` replay is refused exactly as before, and the
+/// session the replayed token names is now invalidated (which is what
+/// publishes it to the revocation feed) and its refresh tokens — the
+/// successor an attacker may hold among them — revoked. The audit row says so.
+#[tokio::test]
+async fn g_c_a_standard_replay_revokes_the_session_it_names() {
+    let raw = generate_refresh_token();
+    let tenant_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(tenant_id, refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a rotated token must not redeem twice on a standard client");
+    assert_refused_as_consumed(&err);
+
+    assert_eq!(
+        logs.invalidated.lock().unwrap().clone(),
+        vec![(tenant_id, session_id)],
+        "the replayed token's session is invalidated — the revocation feed's publisher"
+    );
+    assert_eq!(
+        logs.revoked_sessions.lock().unwrap().clone(),
+        vec![session_id],
+        "every refresh token of that session, and only that session, is revoked"
+    );
+    assert_eq!(
+        logs.replays.lock().unwrap().clone(),
+        vec![(session_id, false)],
+        "the T-254 marker is written exactly as before"
+    );
+    let entry = only_replay_audit(&logs.audit);
+    assert_eq!(
+        entry.outcome,
+        axiam_core::models::audit::AuditOutcome::Failure
+    );
+    let metadata = entry.metadata.expect("the audit row carries metadata");
+    assert_eq!(metadata["disposition"], "refused");
+    assert_eq!(metadata["response"], "revoked_session");
+}
+
+/// **D-N4.** Inside the `fapi2` grace the presentation is accepted and marked,
+/// as T-254 decided, and nothing is revoked. The audit row's `response` is
+/// absent: an accepted presentation was not refused, so there was nothing to
+/// respond to.
+#[tokio::test]
+async fn g_c_a_fapi2_replay_inside_the_grace_is_accepted_and_revokes_nothing() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let (client, ctx) = fapi2_refresh_client();
+    let refresh_repo = MockRefreshRepo::new().with_get(t254_stored(&raw, session_id, true));
+
+    let (svc, logs) = build_g_c(ClientOutcome::Found(client), refresh_repo, None);
+    let mut req = refresh_req(&raw);
+    req.client_secret = None;
+    svc.exchange(Uuid::new_v4(), req, &ctx)
+        .await
+        .expect("inside the grace window the previous token is still redeemable");
+
+    assert_eq!(
+        logs.replays.lock().unwrap().clone(),
+        vec![(session_id, true)]
+    );
+    assert!(
+        logs.invalidated.lock().unwrap().is_empty(),
+        "an accepted grace retry must not sign anybody out"
+    );
+    assert!(logs.revoked_sessions.lock().unwrap().is_empty());
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["disposition"], "accepted_under_fapi_grace");
+    assert!(metadata["response"].is_null());
+}
+
+/// A `fapi2` replay *after* the grace ran out — the superseded row has
+/// expired, so only `find_rotated` sees it — is refused and now revokes, as on
+/// `standard`.
+#[tokio::test]
+async fn g_c_a_fapi2_replay_after_the_grace_revokes_the_session() {
+    let raw = generate_refresh_token();
+    let tenant_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let (client, ctx) = fapi2_refresh_client();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+
+    let (svc, logs) = build_g_c(ClientOutcome::Found(client), refresh_repo, None);
+    let mut req = refresh_req(&raw);
+    req.client_secret = None;
+    let err = svc
+        .exchange(tenant_id, req, &ctx)
+        .await
+        .expect_err("outside the window a superseded token is refused");
+    assert_refused_as_consumed(&err);
+
+    assert_eq!(
+        logs.invalidated.lock().unwrap().clone(),
+        vec![(tenant_id, session_id)]
+    );
+    assert_eq!(
+        logs.revoked_sessions.lock().unwrap().clone(),
+        vec![session_id]
+    );
+    assert_eq!(
+        logs.replays.lock().unwrap().clone(),
+        vec![(session_id, false)]
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["client_profile"], "fapi2");
+    assert_eq!(metadata["response"], "revoked_session");
+}
+
+/// A superseded row presented after the registration left `fapi2` is a
+/// refused replay too (T-254's "the registration decides now"), so it revokes.
+#[tokio::test]
+async fn g_c_a_superseded_row_refused_off_fapi_revokes_the_session() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_get(t254_stored(&raw, session_id, true));
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a standard client may not redeem a superseded token");
+    assert_refused_as_consumed(&err);
+    assert_eq!(
+        logs.revoked_sessions.lock().unwrap().clone(),
+        vec![session_id]
+    );
+    assert_eq!(logs.invalidated.lock().unwrap().len(), 1);
+}
+
+/// **`refuse` restores 1.1.x exactly**: the same refusal, the same marker,
+/// the same audit row (with `response: "refused"`), and nothing revoked.
+#[tokio::test]
+async fn g_c_the_refuse_setting_restores_the_previous_behaviour() {
+    use axiam_core::models::settings::RefreshReuseResponse;
+
+    for (label, client, ctx, secret) in [
+        (
+            "standard",
+            make_client(&["refresh_token"], &["api"]),
+            no_cert(),
+            true,
+        ),
+        (
+            "fapi2 after the grace",
+            fapi2_refresh_client().0,
+            fapi2_refresh_client().1,
+            false,
+        ),
+    ] {
+        let raw = generate_refresh_token();
+        let session_id = Uuid::new_v4();
+        let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+        let (svc, logs) = build_g_c(
+            ClientOutcome::Found(client),
+            refresh_repo,
+            Some(RefreshReuseResponse::Refuse),
+        );
+        let mut req = refresh_req(&raw);
+        if !secret {
+            req.client_secret = None;
+        }
+        let err = svc
+            .exchange(Uuid::new_v4(), req, &ctx)
+            .await
+            .expect_err("refused under either policy");
+        assert_refused_as_consumed(&err);
+
+        assert!(
+            logs.invalidated.lock().unwrap().is_empty(),
+            "{label}: `refuse` must not invalidate the session"
+        );
+        assert!(
+            logs.revoked_sessions.lock().unwrap().is_empty(),
+            "{label}: `refuse` must not revoke the session's refresh tokens"
+        );
+        assert_eq!(
+            logs.replays.lock().unwrap().clone(),
+            vec![(session_id, false)],
+            "{label}: the marker is written exactly as before"
+        );
+        let metadata = only_replay_audit(&logs.audit)
+            .metadata
+            .expect("the audit row carries metadata");
+        assert_eq!(metadata["disposition"], "refused", "{label}");
+        assert_eq!(metadata["response"], "refused", "{label}");
+    }
+}
+
+/// A token revoked at logout and presented again is not a replay —
+/// `find_rotated` requires `rotated_at` — and revokes nothing.
+#[tokio::test]
+async fn g_c_a_logout_revoked_token_presented_again_revokes_nothing() {
+    let raw = generate_refresh_token();
+    // Neither live nor rotated: what a revoked-at-logout token looks like.
+    let refresh_repo = MockRefreshRepo::new();
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a stale refresh token is still refused");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert!(
+        err.error_description()
+            .contains("invalid, expired, or revoked")
+    );
+    assert!(logs.invalidated.lock().unwrap().is_empty());
+    assert!(logs.revoked_sessions.lock().unwrap().is_empty());
+    assert!(logs.replays.lock().unwrap().is_empty());
+    assert!(logs.audit.lock().unwrap().is_empty());
+}
+
+/// A revocation that fails does not change the answer: still `invalid_grant`,
+/// never a `500`, and the audit row does not claim a revocation that did not
+/// complete — it says `revocation_failed` and names the failed write (#822).
+#[tokio::test]
+async fn g_c_a_failed_revocation_still_answers_invalid_grant() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let mut refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+    refresh_repo.session_revocation_fails = true;
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("still refused");
+    assert_refused_as_consumed(&err);
+    assert_eq!(
+        logs.invalidated.lock().unwrap().len(),
+        1,
+        "the session invalidation is attempted independently of the token revocation"
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revocation_failed");
+    assert_eq!(
+        metadata["failed_writes"],
+        serde_json::json!(["refresh_tokens_revoke"])
+    );
+}
+
+/// F4-W1-02 (#822) — `invalidate` fails: the refresh tokens are still revoked
+/// (the writes are independent), the answer is unchanged, and the audit row
+/// says `revocation_failed` naming the session write. With both writes
+/// failing it names both.
+#[tokio::test]
+async fn f4w102_a_failed_session_invalidation_is_audited_as_revocation_failed() {
+    for (label, tokens_fail, expected) in [
+        (
+            "invalidate only",
+            false,
+            serde_json::json!(["session_invalidate"]),
+        ),
+        (
+            "both writes",
+            true,
+            serde_json::json!(["session_invalidate", "refresh_tokens_revoke"]),
+        ),
+    ] {
+        let raw = generate_refresh_token();
+        let session_id = Uuid::new_v4();
+        let mut refresh_repo =
+            MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+        refresh_repo.session_revocation_fails = tokens_fail;
+
+        let (svc, logs) = build_g_c_with(
+            ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+            refresh_repo,
+            None,
+            true,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+            .await
+            .expect_err("still refused");
+        assert_refused_as_consumed(&err);
+        assert_eq!(
+            logs.invalidated.lock().unwrap().len(),
+            1,
+            "{label}: the invalidation was attempted"
+        );
+        assert_eq!(
+            logs.revoked_sessions.lock().unwrap().clone(),
+            vec![session_id],
+            "{label}: the token revocation is attempted whatever the session write did"
+        );
+        let metadata = only_replay_audit(&logs.audit)
+            .metadata
+            .expect("the audit row carries metadata");
+        assert_eq!(metadata["response"], "revocation_failed", "{label}");
+        assert_eq!(metadata["failed_writes"], expected, "{label}");
+    }
+}
+
+/// `failed_writes` is `null` on every response that is not a failure.
+#[tokio::test]
+async fn f4w102_failed_writes_is_null_unless_the_revocation_failed() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let _ = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await;
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revoked_session");
+    assert!(metadata["failed_writes"].is_null());
+}
+
+/// A replayed token that names no session has no family beyond itself; the
+/// refusal revokes nothing and says `refused`.
+#[tokio::test]
+async fn g_c_a_replay_naming_no_session_revokes_nothing() {
+    let raw = generate_refresh_token();
+    let mut stored = t254_stored(&raw, Uuid::new_v4(), true);
+    stored.session_id = None;
+    let refresh_repo = MockRefreshRepo::new().with_rotated(stored);
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("still refused");
+    assert_refused_as_consumed(&err);
+    assert!(logs.invalidated.lock().unwrap().is_empty());
+    assert!(logs.revoked_sessions.lock().unwrap().is_empty());
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "refused");
+}
+
+/// The audit row carries the response and the session, and never the token
+/// or its digest.
+#[tokio::test]
+async fn g_c_the_audit_row_carries_the_response_and_never_the_token() {
+    let raw = generate_refresh_token();
+    let hashed = hash_refresh_token(&raw);
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let _ = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await;
+
+    let entry = only_replay_audit(&logs.audit);
+    let metadata = entry.metadata.expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revoked_session");
+    let rendered = serde_json::to_string(&metadata).expect("metadata serializes");
+    assert!(
+        !rendered.contains(&raw),
+        "the raw refresh token must never reach the audit log"
+    );
+    assert!(
+        !rendered.contains(&hashed),
+        "nor its hash — it is a lookup key for a live credential"
+    );
+    assert!(rendered.contains(&session_id.to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// F4-W1-01 (#821) — only the token's own, proven client revokes by replay
+// ---------------------------------------------------------------------------
+//
+// The authorization-code precedent: a code replay revokes only when the
+// presenting client is the one the code was issued to. A refresh-token replay
+// now does the same, and on a sender-constrained token also requires the
+// proof the successful refresh would demand. Anything else is still the same
+// `invalid_grant`, still marked and audited, and revokes nothing.
+
+/// Asserts a refused replay that revoked nothing and was audited
+/// `refused_unverified_presenter`, naming both clients.
+fn assert_unverified_presenter(logs: &GcLogs, session_id: Uuid, token_client: &str, label: &str) {
+    assert!(
+        logs.invalidated.lock().unwrap().is_empty(),
+        "{label}: an unproven presenter must not sign the user out"
+    );
+    assert!(
+        logs.revoked_sessions.lock().unwrap().is_empty(),
+        "{label}: an unproven presenter must not revoke the session's refresh tokens"
+    );
+    assert_eq!(
+        logs.replays.lock().unwrap().clone(),
+        vec![(session_id, false)],
+        "{label}: the replay is still marked"
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["disposition"], "refused", "{label}");
+    assert_eq!(
+        metadata["response"], "refused_unverified_presenter",
+        "{label}"
+    );
+    assert_eq!(metadata["token_client_id"], token_client, "{label}");
+}
+
+/// A rotated token issued to another client, presented by `client-1`: the
+/// same refusal, the replay marked and audited, nothing revoked.
+#[tokio::test]
+async fn f4w101_a_replay_through_another_client_revokes_nothing() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let mut stored = t254_stored(&raw, session_id, true);
+    stored.client_id = "victim-client".into();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(stored);
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("a rotated token is refused through any client");
+    assert_refused_as_consumed(&err);
+    assert_unverified_presenter(&logs, session_id, "victim-client", "another client");
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(
+        metadata["client_id"], "client-1",
+        "the presenting client is recorded beside the token's"
+    );
+}
+
+/// A public DPoP-bound client's rotated token, bound to `KEY_A`, presented by
+/// its own client with no proof or with another key's proof: refused, audited,
+/// nothing revoked.
+#[tokio::test]
+async fn f4w101_a_bound_replay_without_its_proof_revokes_nothing() {
+    for (label, ctx) in [
+        ("no proof", no_cert()),
+        ("another key's proof", proof_for(KEY_B)),
+    ] {
+        let raw = generate_refresh_token();
+        let session_id = Uuid::new_v4();
+        let mut stored = t254_stored(&raw, session_id, true);
+        stored.dpop_jkt = Some(KEY_A.into());
+        let refresh_repo = MockRefreshRepo::new().with_rotated(stored);
+
+        let (svc, logs) = build_g_c(
+            ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+            refresh_repo,
+            None,
+        );
+        let mut req = refresh_req(&raw);
+        req.client_secret = None;
+        let err = svc
+            .exchange(Uuid::new_v4(), req, &ctx)
+            .await
+            .expect_err("a rotated token is refused");
+        assert_refused_as_consumed(&err);
+        assert_unverified_presenter(&logs, session_id, "client-1", label);
+    }
+}
+
+/// The same bound token presented by its own client with a proof by the key
+/// it is bound to: the presenter is proven, and the session is revoked.
+#[tokio::test]
+async fn f4w101_a_bound_replay_with_its_proof_revokes_the_session() {
+    let raw = generate_refresh_token();
+    let tenant_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let mut stored = t254_stored(&raw, session_id, true);
+    stored.dpop_jkt = Some(KEY_A.into());
+    let refresh_repo = MockRefreshRepo::new().with_rotated(stored);
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(public_dpop_client(&["refresh_token"])),
+        refresh_repo,
+        None,
+    );
+    let mut req = refresh_req(&raw);
+    req.client_secret = None;
+    let err = svc
+        .exchange(tenant_id, req, &proof_for(KEY_A))
+        .await
+        .expect_err("a rotated token is refused");
+    assert_refused_as_consumed(&err);
+    assert_eq!(
+        logs.invalidated.lock().unwrap().clone(),
+        vec![(tenant_id, session_id)]
+    );
+    assert_eq!(
+        logs.revoked_sessions.lock().unwrap().clone(),
+        vec![session_id]
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revoked_session");
+}
+
+/// A public client identified by its `client_id` alone, presenting its own
+/// bearer refresh token: the standard lane, and it revokes.
+#[tokio::test]
+async fn f4w101_a_public_clients_own_bearer_replay_revokes_the_session() {
+    let raw = generate_refresh_token();
+    let tenant_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let refresh_repo = MockRefreshRepo::new().with_rotated(t254_stored(&raw, session_id, true));
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(public_registered(&["refresh_token"])),
+        refresh_repo,
+        None,
+    );
+    let mut req = refresh_req(&raw);
+    req.client_secret = None;
+    let err = svc
+        .exchange(tenant_id, req, &no_cert())
+        .await
+        .expect_err("a rotated token is refused");
+    assert_refused_as_consumed(&err);
+    assert_eq!(
+        logs.invalidated.lock().unwrap().clone(),
+        vec![(tenant_id, session_id)]
+    );
+    assert_eq!(
+        logs.revoked_sessions.lock().unwrap().clone(),
+        vec![session_id]
+    );
+    let metadata = only_replay_audit(&logs.audit)
+        .metadata
+        .expect("the audit row carries metadata");
+    assert_eq!(metadata["response"], "revoked_session");
+    assert_eq!(metadata["token_client_id"], "client-1");
+}
+
+// ---------------------------------------------------------------------------
+// F4-W1-07 (#824) — a live superseded row presented through another client
+// ---------------------------------------------------------------------------
+//
+// The live-row branch refuses another client's presentation before it reaches
+// the replay record. A row that carries `rotated_at` is a rotated token, so
+// that presentation is now recorded like a not-found replay — marked, audited
+// `refused_unverified_presenter` with `token_client_id` — and still revokes
+// nothing. The answer is the one this branch has always given. A row never
+// rotated is not a replay and is not recorded.
+
+/// The ownership refusal this branch has always answered, unchanged.
+fn assert_refused_as_not_this_clients(err: &axiam_oauth2::error::OAuth2Error, label: &str) {
+    assert_eq!(err.error_code(), "invalid_grant", "{label}");
+    assert_eq!(
+        err.error_description(),
+        "refresh token was not issued to this client",
+        "{label}: the live-row ownership refusal keeps its description"
+    );
+}
+
+/// A `fapi2` row superseded inside its grace, and a superseded row whose
+/// client has left `fapi2`, each presented by another client: recorded,
+/// nothing revoked, nothing accepted, the same answer as before.
+#[tokio::test]
+async fn f4w107_a_live_superseded_row_through_another_client_is_recorded_and_revokes_nothing() {
+    for (label, client, ctx, secret) in [
+        (
+            "fapi2 in-window row",
+            fapi2_refresh_client().0,
+            fapi2_refresh_client().1,
+            false,
+        ),
+        (
+            "superseded row off fapi2",
+            make_client(&["refresh_token"], &["api"]),
+            no_cert(),
+            true,
+        ),
+    ] {
+        let raw = generate_refresh_token();
+        let session_id = Uuid::new_v4();
+        let mut stored = t254_stored(&raw, session_id, true);
+        stored.client_id = "victim-client".into();
+        let refresh_repo = MockRefreshRepo::new().with_get(stored);
+        let created = refresh_repo.created.clone();
+
+        let (svc, logs) = build_g_c(ClientOutcome::Found(client), refresh_repo, None);
+        let mut req = refresh_req(&raw);
+        if !secret {
+            req.client_secret = None;
+        }
+        let err = svc
+            .exchange(Uuid::new_v4(), req, &ctx)
+            .await
+            .expect_err("another client's token is never redeemed");
+        assert_refused_as_not_this_clients(&err, label);
+        assert!(
+            created.lock().unwrap().is_empty(),
+            "{label}: nothing is rotated"
+        );
+        assert_unverified_presenter(&logs, session_id, "victim-client", label);
+    }
+}
+
+/// A live row that was never rotated, presented by another client, is not a
+/// replay: the same refusal, and no marker and no audit row.
+#[tokio::test]
+async fn f4w107_a_never_rotated_row_through_another_client_is_not_recorded() {
+    let raw = generate_refresh_token();
+    let session_id = Uuid::new_v4();
+    let mut stored = t254_stored(&raw, session_id, false);
+    stored.client_id = "victim-client".into();
+    let refresh_repo = MockRefreshRepo::new().with_get(stored);
+
+    let (svc, logs) = build_g_c(
+        ClientOutcome::Found(make_client(&["refresh_token"], &["api"])),
+        refresh_repo,
+        None,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req(&raw), &no_cert())
+        .await
+        .expect_err("another client's token is never redeemed");
+    assert_refused_as_not_this_clients(&err, "never rotated");
+    assert!(logs.replays.lock().unwrap().is_empty());
+    assert!(logs.audit.lock().unwrap().is_empty());
+    assert!(logs.invalidated.lock().unwrap().is_empty());
+    assert!(logs.revoked_sessions.lock().unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -5131,6 +6023,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
                 session,
                 Arc::new(Mutex::new(Vec::new())),
                 Arc::new(Mutex::new(Vec::new())),
+                false,
             ),
             MockAuditRepo::default(),
             test_config(),

@@ -653,6 +653,11 @@ pub async fn login<C: Connection + Clone>(
     responses(
         (status = 204, description = "Logged out"),
         (status = 401, description = "Unauthorized"),
+        (status = 500, description = "The session could not be fully ended: revoking its \
+                                      OAuth2 refresh tokens, or deleting the session after \
+                                      that, failed. The session is still live, so repeating \
+                                      the request with the same bearer token completes the \
+                                      logout"),
     ),
     security(("bearer" = []))
 )]
@@ -675,6 +680,14 @@ pub async fn logout<C: Connection + Clone>(
     let session_tenant = user.principal_tenant_id;
     // G-5 (D-52): the `session-revoked` the session repository reports is the
     // user's own doing.
+    //
+    // D-N39 (#839): `logout` also revokes the OAuth2 refresh tokens issued
+    // under this session — a native sign-in's bearer token names its own
+    // session, so this ends that device's grant too. A failed write is an
+    // error (500) rather than a 204 over a half-ended session. The refresh
+    // tokens are revoked before the session is deleted (F4-R12-07), so every
+    // failure leaves the session live and this same bearer token can repeat
+    // the request to complete the logout.
     with_cause(
         Some(InitiatingEntity::User),
         state.auth_service.logout(session_tenant, user.session_id),
@@ -1283,6 +1296,13 @@ pub async fn me<C: Connection + Clone>(
                            reset it"
         ),
         (status = 404, description = "User not found"),
+        (status = 500, description = "The reset did not complete: a step (removing the \
+                                      factors, ending the user's sessions, revoking their \
+                                      OAuth2 refresh tokens) failed after the steps before \
+                                      it. Every step is idempotent, so repeating the request \
+                                      completes the reset; a caller resetting their own \
+                                      account whose sessions were already ended signs in \
+                                      again first"),
     ),
     security(("bearer" = []))
 )]
@@ -1333,6 +1353,8 @@ pub async fn reset_mfa<C: Connection + Clone>(
     };
     // G-5 (D-52): the TOTP secret is removed, the passkeys are removed, and
     // every session of the account goes with them — one cause, one `txn`.
+    // D-N40 (#841): and every OAuth2 refresh token of the account, which
+    // `reset_mfa` revokes as a password reset does; a failure is a `500`.
     with_cause(Some(initiator), async {
         use axiam_core::repository::WebauthnCredentialRepository as _;
         // Read before the reset: whether a TOTP authenticator is about to go.

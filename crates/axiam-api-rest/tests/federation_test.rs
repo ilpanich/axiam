@@ -980,6 +980,7 @@ async fn seed_config_row(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            native_login: None,
             token_exchange: None,
             provider_kind: None,
             provider_slug: None,

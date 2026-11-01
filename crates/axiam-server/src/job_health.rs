@@ -58,6 +58,8 @@ pub const SWEEP_JOBS: &[&str] = &[
     // limiters' counters).
     "rate_limit_bucket",
     "amqp_nonce_replay",
+    // G-A (#816, D-N10): the native sign-in replay store.
+    "federation_id_token_replay",
     "gdpr_purge",
     "gdpr_export",
     "audit_retention",
@@ -258,6 +260,8 @@ mod tests {
             "ssf_step_up",
             "scim_reconcile",
             "ciba_request",
+            // G-A (#816): the native sign-in replay store.
+            "federation_id_token_replay",
             // #753: the refresh-token rows past the replay-detection retention.
             "oauth2_refresh_token",
             // #638: the shared rate-limit table's sweep.

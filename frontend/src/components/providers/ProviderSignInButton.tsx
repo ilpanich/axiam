@@ -83,6 +83,12 @@ export interface ProviderSignInButtonProps {
   busy?: boolean;
   /** Blocks the button while some *other* action owns the page. */
   disabled?: boolean;
+  /**
+   * The provider the relying party (or the client's default) named, on a page
+   * that must not start it by itself — a re-authentication (#833, D-N26).
+   * Drawn with a ring so it stands out; it is still only a button.
+   */
+  suggested?: boolean;
 }
 
 export function ProviderSignInButton({
@@ -90,6 +96,7 @@ export function ProviderSignInButton({
   onSelect,
   busy = false,
   disabled = false,
+  suggested = false,
 }: ProviderSignInButtonProps) {
   const brand = BRANDS[provider.provider_kind] ?? GENERIC;
   const label = brand.label(provider.display_name);
@@ -105,6 +112,7 @@ export function ProviderSignInButton({
       // visible text is swapped for the busy state.
       aria-label={label}
       aria-busy={busy || undefined}
+      data-suggested={suggested || undefined}
       className={cn(
         // 40px floor clears every published minimum.
         "flex h-10 w-full items-center justify-center gap-3 rounded-md border",
@@ -112,6 +120,7 @@ export function ProviderSignInButton({
         "focus-visible:outline-hidden focus-visible:ring-2",
         "disabled:cursor-not-allowed disabled:opacity-60",
         brand.className,
+        suggested && "ring-2 ring-primary ring-offset-2 ring-offset-background",
       )}
     >
       {busy ? (

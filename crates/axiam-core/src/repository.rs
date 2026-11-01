@@ -2567,6 +2567,26 @@ pub trait RefreshTokenRepository: Send + Sync {
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
+    /// Revoke every refresh token issued under one session within a tenant
+    /// (G-C, #818). Idempotent — already-revoked tokens are skipped and do not
+    /// count toward the returned total.
+    ///
+    /// The scope a refused refresh-token replay revokes: the session the
+    /// replayed token names, and nothing wider. [`Self::revoke_all_for_user`]
+    /// would sign the user out of every client on every device; a token of
+    /// *another* session of the same user and client is left alone.
+    ///
+    /// `rotated_at` is deliberately not stamped: these tokens were not
+    /// succeeded, their grant was ended, and a later presentation of one is an
+    /// ordinary stale credential rather than a second replay.
+    ///
+    /// Returns the number of tokens newly revoked.
+    fn revoke_all_for_session(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
     /// Delete every refresh token of a user within a tenant, revoked or not
     /// (Art. 17 erasure). Idempotent — a user with no rows deletes none — so a
     /// re-run of the erasure is safe. The caller revokes first; this removes
@@ -2936,6 +2956,56 @@ pub trait AmqpNonceRepository: Send + Sync {
     /// Delete expired AMQP nonce rows across all tenants.
     ///
     /// Returns the number of rows deleted.
+    fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
+}
+
+// ---------------------------------------------------------------------------
+// Provider ID-token replay (G-A, #816, D-N10)
+// ---------------------------------------------------------------------------
+
+/// Repository recording the provider-issued ID tokens a native sign-in has
+/// consumed, so each is a sign-in exactly once.
+///
+/// A trait and a table of its own (`federation_id_token_replay`) rather than a
+/// fifth [`ProofKind`]: every replay store in AXIAM has its own trait over its
+/// own table ([`AssertionReplayRepository`], [`AmqpNonceRepository`],
+/// [`ProofReplayRepository`]), and widening `oauth2_proof_replay.kind` would
+/// need a non-additive `DEFINE FIELD OVERWRITE` migration (#729, D-N10).
+///
+/// Same insert-or-conflict semantics as the others: the UNIQUE index on
+/// `(issuer, token_hash)` decides, with no read in the path.
+/// The caller records a token only **after** its signature verified, so a
+/// forged token can neither fill the table nor spend a genuine token's hash.
+///
+/// **Deployment-wide** (D-N19, F4-W2-06): the key names neither a tenant nor a
+/// provider configuration, so a token is spent once across every tenant and
+/// every configuration that would accept it — an inherited organization
+/// provider, two tenants whose providers list the same app, two providers in
+/// one tenant. The rows are therefore not tenant data and the tenant purge
+/// leaves them to [`Self::cleanup_expired`]: deleting a purged tenant's rows
+/// early could let the same token sign in through another configuration
+/// before it expires.
+pub trait ProviderIdTokenReplayRepository: Send + Sync {
+    /// Record a consumed ID token by its hash.
+    ///
+    /// `issuer` is the token's verified `iss`, exactly as the token spelled
+    /// it. `token_hash` is the lowercase hex SHA-256 of the token's JWS
+    /// signing input — the bytes before its second `.`, which the signature
+    /// covers, so an ECDSA signature's second encoding is the same token
+    /// (F4-W2-11) — never the token. `expires_at` is when the row may go: the
+    /// caller passes the token's `exp` plus a margin covering the clock
+    /// leeway.
+    ///
+    /// Returns `Err(AxiamError::ReplayDetected)` when the pair was recorded
+    /// before.
+    fn insert_id_token(
+        &self,
+        issuer: &str,
+        token_hash: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send;
+
+    /// Delete expired rows. Returns the number deleted.
     fn cleanup_expired(&self) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 

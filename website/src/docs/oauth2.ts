@@ -258,14 +258,14 @@ export const OAUTH2_PAGES: DocPage[] = [
           [
             "Refresh token",
             "30 days",
-            "Opaque, server-stored, single-use, rotating on every refresh — the predecessor is revoked and a second presentation refused. On a `fapi2` client it instead stays redeemable for 60 seconds after rotation (FAPI 2.0 §5.3.2.1-9), then expires. A refresh token presented after rotation is audited as `oauth2.refresh_token_replayed` either way, and counted on its session ([T-254](#/security/diagram/2/T-254), closed).",
+            "Opaque, server-stored, single-use, rotating on every refresh — the predecessor is revoked and a second presentation refused. On a `fapi2` client it instead stays redeemable for 60 seconds after rotation (FAPI 2.0 §5.3.2.1-9), then expires. A refresh token presented after rotation is audited as `oauth2.refresh_token_replayed` either way, counted on its session and, **by default since 1.2.0**, answered by revoking that session and every refresh token issued under it ([T-254](#/security/diagram/2/T-254), closed). Set `oauth2.refresh_reuse_response` to `refuse` to restore the 1.1.x behaviour of refusing and marking only.",
           ],
           ["MFA challenge", "5 minutes", "Single-use."],
         ],
       },
       {
         type: "note",
-        text: "Two claims are worth reading twice. `act` is absent on an impersonation exchange **by design** — impersonation's whole definition is that the result is indistinguishable from a token the subject obtained directly, which is why it is off by default, gated per client, and visible only in the audit record. And `permissions` is a record of a decision already made, never an input to a future one: nothing in the authorization path reads it to grant anything, and a live check re-evaluates against the engine.",
+        text: "Two claims are worth reading twice. `act` is absent on an impersonation exchange **by design** — impersonation's whole definition is that nothing in the result records who acted, which is why it is off by default, gated per client, and visible only in the audit record. Since #819 every exchanged token does name the exchanging client in `client_id` and carries `axiam_exchanged: true`, so a resource server can tell it came from an exchange, but not whether that exchange was a delegation or an impersonation. And `permissions` is a record of a decision already made, never an input to a future one: nothing in the authorization path reads it to grant anything, and a live check re-evaluates against the engine.",
       },
       { type: "h", id: "claims-request", text: "The `claims` request, and what survives a refresh" },
       {
@@ -332,6 +332,35 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "note",
         text: "`prompt=none` is inherently a login-status oracle for a registered relying party. It is bounded to clients registered in the tenant with exact `redirect_uri` matching, and every outcome is audited as `oauth2.prompt_none.code` or `oauth2.prompt_none.login_required` with the `client_id`, so a relying party polling it is visible. Full detail: [`docs/admin/oidc-authn-parameters.md`](https://github.com/ilpanich/axiam/blob/main/docs/admin/oidc-authn-parameters.md).",
+      },
+      { type: "h", id: "idp-hint", text: "Sending the user straight to one identity provider" },
+      {
+        type: "p",
+        text: "A relying party that already knows which provider its user wants adds `axiam_idp_hint` to the authorization request (or to the `POST /oauth2/par` body), and AXIAM's sign-in page starts that provider instead of showing the chooser. A client can also carry a `default_idp` for the same purpose when a request names nothing. Neither is behind `authn_request_params`: the hint is AXIAM's own parameter and changes nothing that is issued.",
+      },
+      {
+        type: "table",
+        proseFirstCol: true,
+        headers: ["The hint may be", "Notes"],
+        rows: [
+          ["A provider's UUID or its `provider_slug`", "Tried first. A slug is compared exactly; a UUID in any spelling the parser accepts."],
+          ["A branded kind name: `google`, `github`, `facebook`, `apple`, `microsoft`", "ASCII case-insensitive; matches when exactly one offered provider is of that kind. A slug always beats a kind name. The generic kinds are not hint names."],
+        ],
+      },
+      {
+        type: "list",
+        items: [
+          "**An unresolvable hint is a no-op.** An unknown or disabled provider, another tenant's provider, a URL or an ambiguous name is ignored, and the response is byte-identical to a request without the hint, apart from the hint's own echo inside `return_to`. It resolves only against the tenant's own public provider list, so it cannot be used to probe for providers.",
+          "**Precedence:** a hint that resolves beats the client's `default_idp`, which beats the chooser. `default_idp` must name a provider the tenant can sign in with (`400 validation_error` otherwise, on create and on update); a default whose provider was later disabled is ignored, not an error. Dynamic registration and client ID metadata documents cannot set it.",
+          "**Every lane, and PAR.** The hint is read whatever `authn_request_params` says. Under PAR the pushed hint is authoritative and a query copy beside the `request_uri` is ignored. A browser that already holds a session is not sent to sign in, so the hint is moot; a re-authentication hop carries it.",
+          "**The sign-in page redirects after a short pause** (1.5 s, 3 s with reduced motion), once the user has entered their workspace, behind a visible \"Choose another way to sign in\" button. It never loops: a failed provider leg leads back without the provider id, and a provider already started or declined in the last ten minutes, or an unmatched value, starts nothing. On a re-authentication it does not redirect by itself; the provider's button is highlighted and the user clicks it. The server marks those hops — `reauth=1`, a step-up, or `fresh=1` when the request (pushed or inline) says `prompt=login` or `max_age=0` — and a provider sign-in returns to the relying party only through the callback of the start that began it.",
+          "**Back to the relying party.** Once the provider signs the user in, the sign-in page resumes the original authorization request, so the relying party gets its code; a failed provider leg leads back to the sign-in page for that request without restarting the provider.",
+          "**Coming from Keycloak?** There is deliberately no `kc_idp_hint` alias. Rename the parameter and give the equivalent provider the same `provider_slug`.",
+        ],
+      },
+      {
+        type: "note",
+        text: "Resolution order, `default_idp` validation, the page's no-loop guards and the migration note: [`docs/admin/oidc-authn-parameters.md`](https://github.com/ilpanich/axiam/blob/main/docs/admin/oidc-authn-parameters.md#choosing-the-provider-axiam_idp_hint-and-default_idp).",
       },
       { type: "h", id: "sensitive-scopes", text: "The `address` and `phone` scopes" },
       {
@@ -696,7 +725,7 @@ export const OAUTH2_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "Since 1.0.0 the actor token must have been **issued to the exchanging client** (#518): a client's own `client_credentials` token, whose `sub` is its `client_id`, or a user token from its own code, refresh, CIBA or device grant. A valid token issued to another client, a console sign-in or a service account's token is refused with `invalid_request`, so a client cannot write somebody else into `act`.",
+        text: "Since 1.0.0 the actor token must have been **issued to the exchanging client** (#518): a client's own `client_credentials` token, whose `sub` is its `client_id`, or a user token from its own code, refresh, CIBA or device grant. A valid token issued to another client, a console sign-in, a service account's token or any token minted by an exchange (even one whose `client_id` is the exchanging client, #819) is refused with `invalid_request`, so a client cannot write somebody else into `act`.",
       },
       {
         type: "p",
@@ -717,12 +746,72 @@ export const OAUTH2_PAGES: DocPage[] = [
         text: "Because exchange only narrows, it is not a privilege-escalation mechanism — and it is also not a way to *grant* a service access to something the user cannot reach. If a downstream call needs authority the user does not have, that is a role-model problem, not an exchange problem.",
       },
       {
+        type: "note",
+        text: "Token exchange is not how a user signs in. A native app signing a user in with a provider's ID token uses [native sign-in](#/docs/native-sign-in).",
+      },
+      {
         type: "links",
         links: [
           {
             label: "Federated token exchange",
             href: "https://github.com/ilpanich/axiam/blob/main/docs/api/federated-token-exchange.md",
             note: "Accepting a partner IdP's token — Entra, Okta or Keycloak — and turning it into an AXIAM one.",
+          },
+        ],
+      },
+    ],
+  },
+
+  {
+    slug: "native-sign-in",
+    section: "OAuth2 & OIDC",
+    navLabel: "Native sign-in",
+    title: "Native sign-in with a provider ID token",
+    intro:
+      "A mobile or desktop app that signed a user in with Google, Apple or Facebook's native SDK presents the provider's ID token and receives AXIAM's ordinary token set, with a session.",
+    blocks: [
+      { type: "h", id: "what", text: "What it is" },
+      {
+        type: "p",
+        text: "A native SDK hands the app an **ID token** signed for that app, with no browser redirect for the authorization-code flow to finish. The app presents the token at `POST /oauth2/token` with `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`. AXIAM verifies it, resolves the AXIAM user it belongs to, and answers with the client's own sign-in token set.",
+      },
+      {
+        type: "note",
+        text: "The rule everything else serves: **an ID token is accepted as a sign-in only when it was issued to us** — to a client ID the operator listed on the provider for exactly this purpose. Never the web client ID unless it is listed, and never \"any audience\".",
+      },
+      {
+        type: "warn",
+        text: "This is not [token exchange](#/docs/token-exchange). Token exchange narrows a token a service already holds, creates no session, and refuses ID tokens; native sign-in takes a provider's ID token and creates a session. If you hold an access token and want a narrower one, that is not this page.",
+      },
+      { type: "h", id: "setup", text: "Operator setup" },
+      {
+        type: "list",
+        items: [
+          "**It is off by default, per provider**, and a separate switch from `token_exchange`: configuring a provider for browser login is not agreement to accept its ID tokens from apps.",
+          "**Only OIDC providers** can enable it — Google, Apple, Microsoft, generic OIDC and Facebook's OIDC variant (Limited Login). SAML and OAuth2-protocol providers are refused.",
+          "**List the app's client IDs** in the provider's `native_login.client_ids` (Google's iOS and Android client IDs, Apple's bundle ID, the Facebook app ID). The token is issued to its `azp` when it has one, otherwise to its single `aud`, and that party must be listed; with a listed `azp`, `aud` may also be the provider's web client ID, which is how Google's Android tokens arrive. Do not list the web client ID itself: that would admit the browser flow's tokens. The list must not be empty, and matching is exact.",
+          "**Register the grant on the client** (`grant_types`). A client without it gets `unauthorized_client`. Add `refresh_token` for a refresh token; a refresh token is issued only to a client that holds it.",
+        ],
+      },
+      { type: "h", id: "behaviour", text: "How it behaves" },
+      {
+        type: "list",
+        items: [
+          "**One answer for every refusal.** A wrong audience, a bad signature, an expired or replayed token and a provider that is switched off are all the same `invalid_grant`. The reason is in the audit record (`federation.native_login`), which never carries the token or the nonce.",
+          "**Single use.** Each ID token is accepted once in the whole deployment, keyed on the bytes its signature covers, so an ECDSA signature's second valid encoding is the same token. The record is written only after the signature and the nonce check out, and a record that cannot be written refuses the sign-in.",
+          "**The nonce is hashed.** The app generates a random raw nonce, gives the provider's SDK its SHA-256 hex (lower case by convention; upper case is accepted too), and sends AXIAM the raw value; AXIAM accepts the token only when the SHA-256 of the request's `nonce` equals the token's `nonce` claim, ignoring the case of its hex letters and nothing else. Someone who reads a leaked token sees only the hash and cannot present the raw value, so cannot spend it. A token with no `nonce`, or whose claim equals the request's value unhashed, is refused.",
+          "**The same user as the browser.** A native and a browser sign-in through the same provider resolve to the same AXIAM user, and an unverified email is never marked verified.",
+          "**A session, not a bare token.** The access token carries `sid`, so logout, a password reset or an administrator's revocation ends it. The grant has its own rate-limit bucket on the login preset.",
+          "**Consent.** A scope that needs a consent ceremony is `consent_required`; the provider token is already spent, so the app completes consent and obtains a fresh one.",
+        ],
+      },
+      {
+        type: "links",
+        links: [
+          {
+            label: "Native sign-in",
+            href: "https://github.com/ilpanich/axiam/blob/main/docs/api/native-sign-in.md",
+            note: "Setup, the request and error tables, nonce rules, validation order, replay, the audit fields and a worked curl example.",
           },
         ],
       },
@@ -1095,6 +1184,10 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "note",
         text: "Either way, a refresh token presented **after** it was rotated is marked on its session and written to the audit log as `oauth2.refresh_token_replayed`, naming the client, its profile and a disposition of `accepted_under_fapi_grace` or `refused` — and never the token or its digest. `GET /api/v1/users/{user_id}/sessions` reads the counters; the admin UI shows them as badges on the **Sessions** action of any row in *Users*. Alert on `refused`: nothing a conformant client does produces one.",
+      },
+      {
+        type: "note",
+        text: "**A refused replay revokes the session (1.2.0, G-C).** On a `standard` client, and on a `fapi2` client once its 60-second window has passed, presenting an already-rotated refresh token is still answered `400 invalid_grant` and now also invalidates the session the token belongs to and revokes every refresh token issued under it, the successor included, as a replayed authorization code already did (RFC 9700 §4.14.2). The audit row gains `response`: `revoked_session`, `refused`, `refused_unverified_presenter` or `revocation_failed`. Only the token's own client, passing the token's DPoP or mTLS binding, triggers the revocation; any other presenter is refused, marked and audited without revoking. A retry inside a `fapi2` window, and a token revoked at logout, revoke nothing. The behaviour is the tenant setting `oauth2.refresh_reuse_response` (`revoke_session`, the default, or `refuse`, the 1.1.x behaviour); a tenant may only tighten what its organization sets. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#refresh-token-replay-revokes-the-session-g-c-818) and the [1.2.0 upgrade notes](https://github.com/ilpanich/axiam/blob/main/claude_dev/release-1.2.0-upgrade-notes.md).",
       },
       { type: "h", id: "ciba", text: "FAPI-CIBA" },
       {

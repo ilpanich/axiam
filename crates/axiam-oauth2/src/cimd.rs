@@ -576,6 +576,7 @@ pub fn validate(
             // client, because this value is built here rather than echoed.
             managed_by: ManagedBy::Cimd,
             ciba: Default::default(),
+            default_idp: None,
         },
     })
 }

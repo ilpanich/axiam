@@ -1144,6 +1144,7 @@ mod refresh_binding_tests {
             managed_by: ManagedBy::Admin,
             last_authorized_at: None,
             ciba: Default::default(),
+            default_idp: None,
         }
     }
 

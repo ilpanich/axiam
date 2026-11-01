@@ -2749,6 +2749,163 @@ issuer, and the only issuer AXIAM accepts on an inbound token is the root one �
 which is what it accepted before this setting existed. The `?tenant_id=`
 documents are byte-identical either way.
 
+## Refresh-token replay revokes the session (G-C, #818)
+
+A refresh token is single-use: every refresh rotates it, and presenting the
+old one again is a **replay** (T-254). AXIAM has always refused that
+presentation on a `standard` client and recorded it — a marker on the session
+and an `oauth2.refresh_token_replayed` audit row. It now also **revokes the
+session** the replayed token belongs to, as it already did for a replayed
+authorization code (RFC 6749 §10.5; OAuth 2.0 Security BCP §4.14.2):
+
+- the session is invalidated, so every access token carrying its `sid` stops at
+  the next request, and — with the [revocation feed](#session-revocation-feed-optional-t-39--t-143)
+  on — the session is published to `GET /oauth2/revocations`;
+- every refresh token issued under that session is revoked, including the
+  successor the first rotation returned, which is what an attacker who replayed
+  first would be holding.
+
+**Only the token's own client can trigger it.** The revocation runs when the
+client presenting the replayed token is the client it was issued to and, for a
+sender-constrained token (a public DPoP-bound client's), the request carries a
+DPoP proof by the key the token is bound to — the same checks a successful
+refresh of that token would pass. A rotated token presented through another
+client, or without its key's proof, is refused and audited exactly the same
+way but revokes nothing; its audit row says
+`response: "refused_unverified_presenter"` and names the token's client in
+`token_client_id` beside the presenting `client_id`. (That value means a
+revocation that would otherwise have run was withheld: under
+`oauth2.refresh_reuse_response = refuse`, or when the replayed token names no
+session, nothing would have run, and the row says `refused` instead.) The same record is made
+when a `fapi2` client's just-rotated token (still inside its 60-second grace)
+is presented through another client; that presentation keeps its existing
+answer, `invalid_grant` "refresh token was not issued to this client". A
+leaked old token is therefore evidence of the leak, not a way for whoever found
+it to sign the user out.
+
+The client still receives `400 invalid_grant`, whether or not the revocation
+succeeded. A failure is logged at `error`, and the audit row then says
+`response: "revocation_failed"` with `failed_writes` naming the write that
+failed (`session_invalidate`, `refresh_tokens_revoke`, or both) — query for it:
+it is a replay whose successor may still be live.
+
+**What "the session" covers.** It is the browser sign-in the replayed token
+descends from, so the revocation reaches every client's refresh tokens issued
+under that sign-in — not only those of the client that presented the token.
+It ends the console (SSO) session too, signing the user out of every relying
+party sharing it, **only while that session has not been refreshed since the
+code was issued**: a refresh token names the session id current at
+`/oauth2/authorize`, and a console refresh replaces the session row with one
+under a new id, so after it the invalidation finds nothing and the console
+session survives (the refresh tokens are still all revoked; F4-R12-03).
+Ending the SSO session in that case would need a lineage key on the session,
+which 1.2.0 does not have. **No back-channel logout is sent** to those relying parties;
+their access tokens stop at the session check and, where it is on, through the
+revocation feed. That is the power RP-initiated logout already gives a client,
+exercised silently, and only the token's own client can exercise it (above).
+Nothing outside that sign-in is touched: another device or browser of the same
+user, on the same client or another, keeps working.
+
+What is **not** a replay, and revokes nothing: a `fapi2` client's retry inside
+its 60-second grace window (accepted, as FAPI 2.0 requires); a token revoked by
+a logout of its session (D-N39), by `/oauth2/revoke` (RFC 7009), by a password
+reset or by another user-wide revocation, and presented again (an ordinary
+stale credential). A `fapi2` replay *after* the window is refused and revokes,
+like a `standard` one.
+
+The behaviour is the security setting `oauth2.refresh_reuse_response`
+(`refresh_reuse_response` in the organization and tenant settings bodies):
+
+| Value | On a refused replay |
+|---|---|
+| `revoke_session` **(default)** | Refuse, mark, audit, and revoke the session and its refresh tokens |
+| `refuse` | Refuse, mark and audit only — the 1.1.x behaviour |
+
+It is ordered like every other security setting: an organization baseline
+that tenants inherit and may only **tighten** (`revoke_session` > `refuse`).
+The audit row's `response` key records which response was applied:
+`revoked_session`, `refused` (the policy is `refuse`, or the token named no
+session), `refused_unverified_presenter` or `revocation_failed` (see above).
+
+**Upgrade note.** The new default changes behaviour for every client on the
+`standard` profile. A client that loses a rotation response and retries with
+the old token was already refused and had to re-authorize; it now also signs
+its user out of that session, which is the point. A client that sends two
+refreshes with the same token concurrently — a client defect the BCP declines
+to accommodate — will now see its session revoked rather than one request
+refused. To keep the 1.1.x behaviour, set the organization baseline before
+upgrading or right after:
+
+```
+PUT /api/v1/organizations/{org_id}/settings
+{ ..., "refresh_reuse_response": "refuse" }
+```
+
+An organization settings `PUT` from a client written before 1.2.0 omits
+`refresh_reuse_response`, and the field defaults, so such a `PUT` moves an
+organization you set to `refuse` back to `revoke_session` — the stricter
+direction, never a weakening. Re-send `"refresh_reuse_response": "refuse"`
+from an updated client, or keep the older client away from organization
+settings.
+
+Schema migration v110 is additive (one optional column and one index on
+`oauth2_refresh_token(tenant_id, session_id)`) and backfills nothing: a
+settings row written before it reads as `revoke_session`.
+
+The whole 1.2.0 upgrade (schema v110 to v113, native sign-in's per-provider and
+per-client registration, the `fresh=1` hop parameter, the SDK server floor) is in
+[`claude_dev/release-1.2.0-upgrade-notes.md`](../../claude_dev/release-1.2.0-upgrade-notes.md).
+
+## Logout revokes the session's refresh tokens (D-N39, #839)
+
+A single-session logout — `POST /api/v1/auth/logout`, RP-initiated logout
+(`/oauth2/end_session` and its cookie hop `/oauth2/authorize/logout`) and SAML
+single logout — ends the session **and revokes every OAuth2 refresh token
+issued under it**, for every client and grant bound to it (authorization code
+and native sign-in alike). The user's other sessions keep theirs. A token
+revoked at logout is a stale credential when presented again
+(`invalid_grant`), never a [replay](#refresh-token-replay-revokes-the-session-g-c-818).
+The normative description is [`docs/api/logout.md`](../api/logout.md).
+
+**A failed write fails the logout.** The refresh tokens are revoked first, and
+the session is deleted only once that has succeeded. If either write fails, the
+logout is reported as failed instead of as signed out: `/auth/logout` answers
+`500`, `end_session` and the cookie hop answer a `500` page that does not
+redirect to the relying party, and SAML single logout shows its
+`revocation_failed` page. The server logs it at `error` with `failed_writes`
+naming the write (`refresh_tokens_revoke` or `session_invalidate`).
+
+**A failed logout is retryable with the credential that started it.** Because
+the session is deleted last, every failure leaves it live, so the same request
+repeated reaches it and completes the logout: the revocation's second pass is a
+no-op and the delete then runs. The bearer token, the `id_token_hint` and a new
+SAML `LogoutRequest` work as they did the first time; the failure pages clear
+the API cookies, but on the two paths whose session is found through the
+OP-session cookie (the cookie hop and IdP-initiated SAML logout) they keep that
+cookie, so the user's "try again" reaches the session. (Until D-N43 the two
+writes ran independently, and the common failure — session deleted, revocation
+failed — left live refresh tokens the caller's own credential could no longer
+reach; F4-R12-07.)
+
+**Limit: a session that has refreshed (F4-R12-08).** A refresh token names the
+session id that was current when its grant was authorized at
+`/oauth2/authorize`, and a console refresh (`POST /api/v1/auth/refresh`)
+replaces the session row with one under a new id. With 15-minute access tokens
+that is the common case for any browser session that outlives one access token,
+not an edge. After it, `POST /auth/logout` and the cookie-hop logout end the
+console session but **not** the code grants issued before the refresh, whose
+refresh tokens stay live until they expire, are revoked at `/oauth2/revoke`, or
+are ended by a user-wide revocation. RP-initiated logout with **that grant's
+own `id_token_hint`** does revoke them, because the hint's `sid` is the
+original id; but the session it then invalidates no longer exists, so the
+console (SSO) session survives the RP logout of one grant and the next
+`/oauth2/authorize` signs the user straight back in. A native sign-in is
+unaffected (its session id never rotates). This is the same root cause as
+[What "the session" covers](#refresh-token-replay-revokes-the-session-g-c-818)
+above; a session lineage key, which closes all three, is
+[#844](https://github.com/ilpanich/axiam/issues/844). Until then, an operator
+who must end every grant of a user uses a user-wide revocation.
+
 ## Session revocation feed (optional, T-39 / T-143)
 
 `AXIAM__AUTH__REVOCATION_FEED_ENABLED` — default `false`.

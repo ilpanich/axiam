@@ -301,3 +301,99 @@ async fn saml_idp_enabled_round_trips_and_is_overridable_downwards() {
             .saml_idp_enabled
     );
 }
+
+/// G-C (#818, schema v110): `oauth2.refresh_reuse_response` defaults to
+/// `revoke_session` when never configured and on a row written before the
+/// column existed, survives the round trip through the column and the
+/// tenant's sparse override, and a tenant may tighten `refuse` back to
+/// `revoke_session`.
+#[tokio::test]
+async fn refresh_reuse_response_defaults_round_trips_and_tightens() {
+    use axiam_core::models::settings::RefreshReuseResponse;
+
+    let (db, org_id, tenant_id) = setup().await;
+    let repo = SurrealSettingsRepository::new(db.clone());
+
+    // Never configured: the default.
+    assert_eq!(
+        repo.get_effective_settings(org_id, tenant_id)
+            .await
+            .unwrap()
+            .oauth2
+            .refresh_reuse_response,
+        RefreshReuseResponse::RevokeSession
+    );
+
+    repo.set_org_settings(org_id, system_defaults())
+        .await
+        .unwrap();
+    // A row written before v110 has no such column: reads as the default.
+    db.query("UPDATE security_settings UNSET oauth2_refresh_reuse_response")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    assert_eq!(
+        repo.get_org_settings(org_id)
+            .await
+            .unwrap()
+            .oauth2
+            .refresh_reuse_response,
+        RefreshReuseResponse::RevokeSession,
+        "absent must read as revoke_session"
+    );
+
+    repo.set_org_settings(
+        org_id,
+        SetOrgSettings {
+            refresh_reuse_response: RefreshReuseResponse::Refuse,
+            ..system_defaults()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.get_effective_settings(org_id, tenant_id)
+            .await
+            .unwrap()
+            .oauth2
+            .refresh_reuse_response,
+        RefreshReuseResponse::Refuse,
+        "no tenant row: inherits the organization's refuse"
+    );
+
+    repo.set_tenant_override(
+        tenant_id,
+        SetTenantOverride {
+            refresh_reuse_response: Some(RefreshReuseResponse::RevokeSession),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.get_tenant_override(tenant_id)
+            .await
+            .unwrap()
+            .expect("override row")
+            .refresh_reuse_response,
+        Some(RefreshReuseResponse::RevokeSession)
+    );
+    assert_eq!(
+        repo.get_effective_settings(org_id, tenant_id)
+            .await
+            .unwrap()
+            .oauth2
+            .refresh_reuse_response,
+        RefreshReuseResponse::RevokeSession
+    );
+
+    // The column refuses anything but the model's two spellings.
+    assert!(
+        db.query("UPDATE security_settings SET oauth2_refresh_reuse_response = 'revoke_family'")
+            .await
+            .unwrap()
+            .check()
+            .is_err()
+    );
+}

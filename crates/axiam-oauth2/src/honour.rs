@@ -314,11 +314,14 @@ pub fn evaluate(req: Request<'_>) -> Outcome {
     let sub_mismatch =
         !params.claims_sub.is_empty() && !params.claims_sub.contains(&req.subject.to_string());
 
-    let asked_for_interaction = max_age_is_login
+    // `demands_fresh_authentication` is `max_age_is_login || prompt ∋ login`:
+    // the predicate the login hop's re-authentication marker reads too (#835,
+    // D-N28), so the page and this decision cannot disagree about a spelling.
+    let asked_for_interaction = params.demands_fresh_authentication()
         || params
             .prompt
             .iter()
-            .any(|p| matches!(p, Prompt::Login | Prompt::Consent | Prompt::SelectAccount));
+            .any(|p| matches!(p, Prompt::Consent | Prompt::SelectAccount));
     let select_account = params.prompt.contains(&Prompt::SelectAccount);
 
     // The value the code would carry, if a code is issued. Computed once so

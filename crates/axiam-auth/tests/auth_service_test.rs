@@ -5,17 +5,19 @@ use axiam_auth::error::AuthError;
 use axiam_auth::mfa_methods::MfaMethodService;
 use axiam_auth::service::{AuthService, LoginInput, LoginResult, RefreshInput, VerifyMfaInput};
 use axiam_auth::token;
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::federation::{
     CreateFederationConfig, CreateFederationLink, FederationProtocol,
 };
+use axiam_core::models::oauth2_client::{CreateRefreshToken, RefreshToken};
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::session::{CreateSession, Session};
 use axiam_core::models::settings::MfaPolicy;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
-    FederationConfigRepository, FederationLinkRepository, OrganizationRepository, TenantRepository,
-    UserRepository,
+    FederationConfigRepository, FederationLinkRepository, OrganizationRepository,
+    RefreshTokenRepository, SessionRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealFederationConfigRepository, SurrealFederationLinkRepository,
@@ -25,6 +27,7 @@ use axiam_db::repository::{
 use axiam_test_support::{other_password, test_password};
 use chrono::{Duration, Utc};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
 use uuid::Uuid;
@@ -213,11 +216,13 @@ fn mfa_methods(
     SurrealUserRepository<surrealdb::engine::local::Db>,
     SurrealWebauthnCredentialRepository<surrealdb::engine::local::Db>,
     SurrealSessionRepository<surrealdb::engine::local::Db>,
+    SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
 > {
     MfaMethodService::new(
         SurrealUserRepository::new(db.clone()),
         SurrealWebauthnCredentialRepository::new(db.clone()),
         SurrealSessionRepository::new(db.clone()),
+        SurrealRefreshTokenRepository::new(db.clone()),
     )
 }
 
@@ -456,6 +461,350 @@ async fn logout_invalidates_session() {
 
     let login_out = login_alice(&svc, tenant_id, org_id).await;
     svc.logout(tenant_id, login_out.session_id).await.unwrap();
+}
+
+// -----------------------------------------------------------------------
+// F4-R12-07 (D-N43) — a half-failed logout is retryable with its credential
+// -----------------------------------------------------------------------
+
+type MemDb = surrealdb::engine::local::Db;
+
+/// A real session repository whose `invalidate` fails while `fail` is set.
+#[derive(Clone)]
+struct FlakySessionRepo {
+    inner: SurrealSessionRepository<MemDb>,
+    fail: Arc<AtomicBool>,
+}
+
+impl SessionRepository for FlakySessionRepo {
+    async fn create(&self, input: CreateSession) -> AxiamResult<Session> {
+        self.inner.create(input).await
+    }
+    async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {
+        self.inner.get_by_id(tenant_id, id).await
+    }
+    async fn get_by_token_hash(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<Session> {
+        self.inner.get_by_token_hash(tenant_id, token_hash).await
+    }
+    async fn get_by_browser_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        self.inner
+            .get_by_browser_token_hash(tenant_id, token_hash)
+            .await
+    }
+    async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AxiamError::Database("injected: session delete".into()));
+        }
+        self.inner.invalidate(tenant_id, id).await
+    }
+    async fn consume(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<bool> {
+        self.inner.consume(tenant_id, id).await
+    }
+    async fn consume_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        self.inner
+            .consume_by_token_hash(tenant_id, token_hash)
+            .await
+    }
+    async fn invalidate_user_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        self.inner
+            .invalidate_user_sessions(tenant_id, user_id)
+            .await
+    }
+    async fn invalidate_user_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        keep: Uuid,
+    ) -> AxiamResult<u64> {
+        self.inner
+            .invalidate_user_sessions_except(tenant_id, user_id, keep)
+            .await
+    }
+    async fn cleanup_expired(&self, tenant_id: Uuid) -> AxiamResult<u64> {
+        self.inner.cleanup_expired(tenant_id).await
+    }
+    async fn list_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Session>> {
+        self.inner.list_by_user(tenant_id, user_id).await
+    }
+    async fn mark_refresh_replay(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        accepted_under_grace: bool,
+    ) -> AxiamResult<()> {
+        self.inner
+            .mark_refresh_replay(tenant_id, session_id, accepted_under_grace)
+            .await
+    }
+}
+
+/// A real refresh-token repository whose `revoke_all_for_session` fails while
+/// `fail` is set.
+#[derive(Clone)]
+struct FlakyRefreshTokenRepo {
+    inner: SurrealRefreshTokenRepository<MemDb>,
+    fail: Arc<AtomicBool>,
+}
+
+impl RefreshTokenRepository for FlakyRefreshTokenRepo {
+    async fn create(&self, input: CreateRefreshToken) -> AxiamResult<RefreshToken> {
+        self.inner.create(input).await
+    }
+    async fn get_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<RefreshToken> {
+        self.inner.get_by_token_hash(tenant_id, token_hash).await
+    }
+    async fn revoke(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<()> {
+        self.inner.revoke(tenant_id, token_hash).await
+    }
+    async fn supersede(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+        grace_until: chrono::DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        self.inner
+            .supersede(tenant_id, token_hash, grace_until)
+            .await
+    }
+    async fn revoke_rotated(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<()> {
+        self.inner.revoke_rotated(tenant_id, token_hash).await
+    }
+    async fn find_rotated(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<RefreshToken>> {
+        self.inner.find_rotated(tenant_id, token_hash).await
+    }
+    async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
+        self.inner.revoke_all_for_client(tenant_id, client_id).await
+    }
+    async fn revoke_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        self.inner.revoke_all_for_user(tenant_id, user_id).await
+    }
+    async fn revoke_all_for_session(&self, tenant_id: Uuid, session_id: Uuid) -> AxiamResult<u64> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AxiamError::Database("injected: refresh revocation".into()));
+        }
+        self.inner
+            .revoke_all_for_session(tenant_id, session_id)
+            .await
+    }
+    async fn delete_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
+        self.inner.delete_all_for_user(tenant_id, user_id).await
+    }
+    async fn delete_expired(&self, before: chrono::DateTime<Utc>, limit: u32) -> AxiamResult<u64> {
+        self.inner.delete_expired(before, limit).await
+    }
+}
+
+/// Alice signed in through `svc`, plus an OAuth2 refresh token (a code grant's
+/// or a native sign-in's) issued under that session. Returns the access
+/// token the caller logs out with and the refresh token's hash.
+async fn sign_in_with_a_grant(
+    svc: &AuthService<
+        SurrealUserRepository<MemDb>,
+        FlakySessionRepo,
+        SurrealFederationLinkRepository<MemDb>,
+        FlakyRefreshTokenRepo,
+    >,
+    refresh_repo: &SurrealRefreshTokenRepository<MemDb>,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    user_id: Uuid,
+) -> (String, String) {
+    let out = match svc
+        .login(LoginInput {
+            tenant_id,
+            org_id,
+            username_or_email: "alice".into(),
+            password: test_password(),
+            ip_address: None,
+            user_agent: None,
+            mfa_policy: None,
+            lockout_policy: None,
+        })
+        .await
+        .unwrap()
+    {
+        LoginResult::Success(out) => out,
+        // Name the variant only: a `{:?}` of the result is a cleartext-logging sink.
+        _ => panic!("expected Success, got an MFA variant"),
+    };
+    let token_hash = token::hash_refresh_token(&token::generate_refresh_token());
+    refresh_repo
+        .create(CreateRefreshToken {
+            tenant_id,
+            token_hash: token_hash.clone(),
+            client_id: "native-app".into(),
+            user_id: Some(user_id),
+            scopes: vec!["openid".into()],
+            session_id: Some(out.session_id),
+            requested_userinfo_claims: vec![],
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: vec![],
+            dpop_jkt: None,
+            expires_at: Utc::now() + Duration::days(30),
+        })
+        .await
+        .unwrap();
+    (out.access_token, token_hash)
+}
+
+/// Whether the refresh grant would still find the token: the lookup it makes
+/// skips a revoked row, which is how a revoked token is refused.
+async fn refresh_is_live(
+    repo: &SurrealRefreshTokenRepository<MemDb>,
+    tenant_id: Uuid,
+    token_hash: &str,
+) -> bool {
+    match repo.get_by_token_hash(tenant_id, token_hash).await {
+        Ok(row) => !row.revoked,
+        Err(AxiamError::NotFound { .. }) => false,
+        Err(e) => panic!("unexpected lookup error: {e}"),
+    }
+}
+
+/// What the REST layer derives from a bearer token: the session it names.
+fn session_of(access_token: &str) -> Uuid {
+    let claims = token::validate_access_token(access_token, &test_config()).unwrap();
+    claims
+        .0
+        .sid
+        .as_deref()
+        .unwrap_or(&claims.0.jti)
+        .parse()
+        .unwrap()
+}
+
+type FlakySetup = (
+    AuthService<
+        SurrealUserRepository<MemDb>,
+        FlakySessionRepo,
+        SurrealFederationLinkRepository<MemDb>,
+        FlakyRefreshTokenRepo,
+    >,
+    SurrealSessionRepository<MemDb>,
+    SurrealRefreshTokenRepository<MemDb>,
+    Arc<AtomicBool>, // fail the session delete
+    Arc<AtomicBool>, // fail the refresh-token revocation
+    Uuid,
+    Uuid,
+    Uuid,
+);
+
+async fn flaky_setup() -> FlakySetup {
+    let (user_repo, session_repo, fed_repo, refresh_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let (fail_session, fail_refresh) = (Arc::new(AtomicBool::new(false)), Arc::default());
+    let svc = AuthService::new(
+        user_repo,
+        FlakySessionRepo {
+            inner: session_repo.clone(),
+            fail: Arc::clone(&fail_session),
+        },
+        fed_repo,
+        FlakyRefreshTokenRepo {
+            inner: refresh_repo.clone(),
+            fail: Arc::clone(&fail_refresh),
+        },
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    (
+        svc,
+        session_repo,
+        refresh_repo,
+        fail_session,
+        fail_refresh,
+        org_id,
+        tenant_id,
+        user_id,
+    )
+}
+
+/// A failed revocation fails the logout **before** the session is touched, so
+/// the caller's own credential still names a live session and repeating the
+/// logout with it completes the logout: the session ends and the refresh
+/// token is refused.
+#[tokio::test]
+async fn a_failed_revocation_leaves_the_session_for_a_retry_with_the_same_credential() {
+    let (svc, sessions, refresh_tokens, _, fail_refresh, org_id, tenant_id, user_id) =
+        flaky_setup().await;
+    let (bearer, refresh_hash) =
+        sign_in_with_a_grant(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+
+    fail_refresh.store(true, Ordering::SeqCst);
+    assert!(
+        svc.logout(tenant_id, session_of(&bearer)).await.is_err(),
+        "a failed revocation is a failed logout"
+    );
+    sessions
+        .get_by_id(tenant_id, session_of(&bearer))
+        .await
+        .expect("the session is still live, so the bearer token still reaches it");
+    assert!(
+        refresh_is_live(&refresh_tokens, tenant_id, &refresh_hash).await,
+        "the refresh token is untouched until the retry"
+    );
+
+    fail_refresh.store(false, Ordering::SeqCst);
+    svc.logout(tenant_id, session_of(&bearer))
+        .await
+        .expect("the retry with the same credential completes the logout");
+    assert!(matches!(
+        sessions.get_by_id(tenant_id, session_of(&bearer)).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+    assert!(
+        !refresh_is_live(&refresh_tokens, tenant_id, &refresh_hash).await,
+        "the session's refresh token is refused from now on"
+    );
+}
+
+/// A session delete that fails after the revocation succeeded is also a failed
+/// logout, retryable the same way: the revocation's second pass is a no-op and
+/// the delete then runs.
+#[tokio::test]
+async fn a_failed_session_delete_after_the_revocation_is_retryable() {
+    let (svc, sessions, refresh_tokens, fail_session, _, org_id, tenant_id, user_id) =
+        flaky_setup().await;
+    let (bearer, refresh_hash) =
+        sign_in_with_a_grant(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+
+    fail_session.store(true, Ordering::SeqCst);
+    assert!(svc.logout(tenant_id, session_of(&bearer)).await.is_err());
+    assert!(
+        !refresh_is_live(&refresh_tokens, tenant_id, &refresh_hash).await,
+        "the revocation ran first"
+    );
+    sessions
+        .get_by_id(tenant_id, session_of(&bearer))
+        .await
+        .expect("the session is still live for the retry");
+
+    fail_session.store(false, Ordering::SeqCst);
+    svc.logout(tenant_id, session_of(&bearer))
+        .await
+        .expect("the retry completes the logout");
+    assert!(matches!(
+        sessions.get_by_id(tenant_id, session_of(&bearer)).await,
+        Err(AxiamError::NotFound { .. })
+    ));
 }
 
 // -----------------------------------------------------------------------
@@ -1578,6 +1927,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: None,
+            native_login: None,
             token_exchange: None,
             provider_kind: None,
             provider_slug: None,

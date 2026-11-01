@@ -61,11 +61,11 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.44.0",
+ "version": "2.45.0",
  "diagramCount": 10,
- "total": 488,
+ "total": 494,
  "open": 21,
- "mitigated": 457,
+ "mitigated": 463,
  "notApplicable": 10,
  "areas": [
   {
@@ -85,14 +85,14 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 87,
+   "total": 92,
    "open": 0,
    "notApplicable": 0
   },
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 127,
+   "total": 128,
    "open": 3,
    "notApplicable": 0
   },
@@ -142,13 +142,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 105,
+   "total": 108,
    "open": 4,
    "notApplicable": 2
   },
   {
    "name": "Tampering",
-   "total": 96,
+   "total": 97,
    "open": 1,
    "notApplicable": 2
   },
@@ -172,7 +172,7 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Elevation of privilege",
-   "total": 96,
+   "total": 98,
    "open": 4,
    "notApplicable": 1
   }
@@ -186,13 +186,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 201,
+   "total": 202,
    "open": 9,
    "notApplicable": 6
   },
   {
    "name": "Medium",
-   "total": 204,
+   "total": 209,
    "open": 8,
    "notApplicable": 3
   },

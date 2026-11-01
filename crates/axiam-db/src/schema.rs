@@ -578,6 +578,26 @@ static MIGRATIONS: &[Migration] = &[
         name: "rate_limit_bucket_updated_at_index",
         sql: SCHEMA_V109,
     },
+    Migration {
+        version: 110,
+        name: "refresh_reuse_response",
+        sql: SCHEMA_V110,
+    },
+    Migration {
+        version: 111,
+        name: "federation_native_login_trust",
+        sql: SCHEMA_V111,
+    },
+    Migration {
+        version: 112,
+        name: "federation_id_token_replay",
+        sql: SCHEMA_V112,
+    },
+    Migration {
+        version: 113,
+        name: "oauth2_client_default_idp",
+        sql: SCHEMA_V113,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5643,9 +5663,149 @@ DEFINE INDEX IF NOT EXISTS rate_limit_bucket_updated_at ON TABLE rate_limit_buck
 DEFINE FIELD IF NOT EXISTS dpop_jkt ON TABLE oauth2_refresh_token TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v110 — a refused refresh-token replay revokes its session (G-C, #818)
+// -----------------------------------------------------------------------
+//
+// **`security_settings.oauth2_refresh_reuse_response`** is the layered
+// `oauth2.refresh_reuse_response` setting: `revoke_session` (the default,
+// D-N2) or `refuse` (the 1.1.x behaviour). `option<string>` with no `DEFAULT`
+// and **no backfill**: a row written before this migration reads `NONE`, which
+// the repository resolves to the default, so an upgraded deployment takes the
+// new behaviour without a write — and an operator who wants the old one sets
+// `refuse` explicitly. The `ASSERT` lists the two spellings the model writes.
+//
+// **`idx_refresh_token_session`** serves `revoke_all_for_session`, the
+// statement a refused replay runs. Without it each replay would scan every
+// refresh token of every tenant, at a rate chosen by whoever holds a rotated
+// token. The engine builds it from the rows present.
+const SCHEMA_V110: &str = "\
+DEFINE FIELD IF NOT EXISTS oauth2_refresh_reuse_response ON TABLE security_settings
+    TYPE option<string> ASSERT $value = NONE OR $value IN ['revoke_session', 'refuse'];
+DEFINE INDEX IF NOT EXISTS idx_refresh_token_session ON TABLE oauth2_refresh_token
+    COLUMNS tenant_id, session_id;
+";
+
+// -----------------------------------------------------------------------
+// Schema v111 — native sign-in trust on federation providers (G-A, #816)
+// -----------------------------------------------------------------------
+//
+// The `native_login` block (`NativeLoginTrust`): which app-issued ID tokens of
+// an OIDC provider are accepted as a sign-in. Three columns on the existing
+// `federation_config` table, every one `option<…>` with **no `DEFAULT` and no
+// backfill**: a row written before this migration reads `NONE` in each, which
+// the repository resolves to `NativeLoginTrust::default()` — `enabled: false`,
+// no client IDs, a 300 s age bound. Turning native sign-in on is therefore an
+// explicit act on each provider, never a consequence of upgrading.
+//
+// No index: the grant resolves its provider by id or slug within the tenant,
+// both already indexed, and reads the block from that one row.
+const SCHEMA_V111: &str = "\
+DEFINE FIELD IF NOT EXISTS native_login_enabled ON TABLE federation_config
+    TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS native_login_client_ids ON TABLE federation_config
+    TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS native_login_max_token_age_secs ON TABLE federation_config
+    TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v112 — the native sign-in replay store (G-A, #816, D-N10)
+// -----------------------------------------------------------------------
+//
+// `federation_id_token_replay`: every provider-issued ID token a native
+// sign-in consumed, by the hex SHA-256 of the token's JWS signing input, the
+// bytes before its second `.` (Google's ID tokens carry no `jti`; the
+// signature is left out because an ECDSA one has two valid encodings,
+// F4-W2-11). First sighting by `CREATE`, replay by violation of
+// the UNIQUE `(issuer, token_hash)` index, no read in the path; a row lives
+// until the token's `exp` plus twice the 60 s skew allowance and is then
+// swept by the cleanup loop.
+//
+// **Deployment-wide** (D-N19, F4-W2-06): the key names no tenant and no
+// provider configuration, so a token is spent once whichever tenant or
+// configuration it is presented through. The table therefore has no
+// `tenant_id`, is not tenant-scoped and is not in `TENANT_PURGE_ORDER`: a
+// purged tenant's rows leave with the expiry sweep, because deleting one early
+// could let the same token sign in through another configuration before it
+// expires. A row holds the issuer and a hash, nothing about a user.
+//
+// v112 is unreleased (introduced and changed in the same wave), so its
+// definition changed in place from the W2 key `(tenant_id, provider_id,
+// token_hash)`; it is still additive.
+//
+// A table of its own rather than a fifth `oauth2_proof_replay.kind`: widening
+// that field's ASSERT takes a `DEFINE FIELD OVERWRITE`, which is not additive
+// (#729) — and a third overwrite of one field is the re-narrowing hazard the
+// boot-time gap refusal exists for. Every statement here is
+// `DEFINE … IF NOT EXISTS`.
+const SCHEMA_V112: &str = "\
+DEFINE TABLE IF NOT EXISTS federation_id_token_replay SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS issuer ON TABLE federation_id_token_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS token_hash ON TABLE federation_id_token_replay TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE federation_id_token_replay TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_id_token_replay TYPE datetime
+    DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_uniq ON TABLE federation_id_token_replay
+    COLUMNS issuer, token_hash UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_expires_at
+    ON TABLE federation_id_token_replay COLUMNS expires_at;
+";
+
+// -----------------------------------------------------------------------
+// Schema v113 — a client's default sign-in provider (G-B, #817)
+// -----------------------------------------------------------------------
+//
+// `oauth2_client.default_idp`: the federation provider (a `federation_config`
+// id, stored as its UUID string like `tenant_id`) the sign-in page starts with
+// when an authorization request carries no `axiam_idp_hint`. One optional
+// column with **no `DEFAULT` and no backfill**: an older row reads `NONE`, a
+// client with no default, which is what it already was. Validated by the
+// administrator API when set; ignored at the authorization endpoint when it no
+// longer names a provider the tenant offers.
+//
+// The pushed request's `axiam_idp_hint` needs no statement:
+// `pushed_auth_request.params` is `TYPE object FLEXIBLE`.
+//
+// No index: the column is read from the client row the authorization endpoint
+// already loads by `(tenant_id, client_id)`.
+const SCHEMA_V113: &str = "\
+DEFINE FIELD IF NOT EXISTS default_idp ON TABLE oauth2_client TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// G-B (#817) — v113 is the one optional `default_idp` column on
+    /// `oauth2_client`, and nothing else: no `DEFAULT`, no backfill, no index.
+    #[test]
+    fn v113_adds_only_the_client_default_idp_column() {
+        let statements: Vec<&str> = SCHEMA_V113
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS default_idp ON TABLE oauth2_client TYPE option<string>"],
+            "v113 defines the default_idp column and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT ",
+            "INDEX",
+        ] {
+            assert!(
+                !SCHEMA_V113.contains(forbidden),
+                "v113 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V113));
+    }
 
     /// #551, T-117 — v85 is the rule's window column and the window table,
     /// and nothing else.
@@ -6006,6 +6166,122 @@ mod tests {
             ],
             "v109 defines the index and the field and nothing else"
         );
+    }
+
+    /// G-C (#818) — v110 is the refresh-reuse setting's column, optional and
+    /// asserted to the model's two spellings, and the per-session index the
+    /// revocation selects on; nothing else, and nothing backfilled (an absent
+    /// value reads as the default, `revoke_session`).
+    /// G-A (#816) — v111 is the `native_login` block's three optional
+    /// columns on `federation_config`, and nothing else: no index, no
+    /// `DEFAULT`, nothing backfilled (an absent value reads as the disabled
+    /// default).
+    #[test]
+    fn v111_adds_only_the_native_login_columns() {
+        let statements: Vec<&str> = SCHEMA_V111
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS native_login_enabled ON TABLE federation_config\n    \
+                 TYPE option<bool>",
+                "DEFINE FIELD IF NOT EXISTS native_login_client_ids ON TABLE \
+                 federation_config\n    TYPE option<array<string>>",
+                "DEFINE FIELD IF NOT EXISTS native_login_max_token_age_secs ON TABLE \
+                 federation_config\n    TYPE option<int>",
+            ],
+            "v111 defines the three native_login columns and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT",
+            "INDEX",
+        ] {
+            assert!(
+                !SCHEMA_V111.contains(forbidden),
+                "v111 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V111));
+    }
+
+    /// G-A (#816, D-N10, D-N19) — v112 is the native sign-in replay table,
+    /// its fields and its two indexes, and nothing else: every statement
+    /// `DEFINE … IF NOT EXISTS` (#729), the uniqueness on exactly
+    /// `(issuer, token_hash)` — deployment-wide, so no `tenant_id` field —
+    /// no existing table touched.
+    #[test]
+    fn v112_adds_only_the_native_sign_in_replay_table() {
+        let statements: Vec<String> = SCHEMA_V112
+            .split(';')
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE TABLE IF NOT EXISTS federation_id_token_replay SCHEMAFULL",
+                "DEFINE FIELD IF NOT EXISTS issuer ON TABLE federation_id_token_replay \
+                 TYPE string",
+                "DEFINE FIELD IF NOT EXISTS token_hash ON TABLE federation_id_token_replay \
+                 TYPE string",
+                "DEFINE FIELD IF NOT EXISTS expires_at ON TABLE federation_id_token_replay \
+                 TYPE datetime",
+                "DEFINE FIELD IF NOT EXISTS created_at ON TABLE federation_id_token_replay \
+                 TYPE datetime DEFAULT time::now()",
+                "DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_uniq ON TABLE \
+                 federation_id_token_replay COLUMNS issuer, token_hash UNIQUE",
+                "DEFINE INDEX IF NOT EXISTS idx_federation_id_token_replay_expires_at ON TABLE \
+                 federation_id_token_replay COLUMNS expires_at",
+            ],
+            "v112 defines the replay table and nothing else"
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "oauth2_proof_replay",
+        ] {
+            assert!(
+                !SCHEMA_V112.contains(forbidden),
+                "v112 must not contain {forbidden}: it adds one table and touches no other"
+            );
+        }
+        assert!(is_additive(SCHEMA_V112));
+    }
+
+    #[test]
+    fn v110_adds_only_the_refresh_reuse_setting_and_the_session_index() {
+        let statements: Vec<&str> = SCHEMA_V110
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS oauth2_refresh_reuse_response ON TABLE \
+                 security_settings\n    TYPE option<string> ASSERT $value = NONE OR $value IN \
+                 ['revoke_session', 'refuse']",
+                "DEFINE INDEX IF NOT EXISTS idx_refresh_token_session ON TABLE \
+                 oauth2_refresh_token\n    COLUMNS tenant_id, session_id",
+            ],
+            "v110 defines the setting's column and the index and nothing else"
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT"] {
+            assert!(
+                !SCHEMA_V110.contains(forbidden),
+                "v110 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V110));
     }
 
     /// Item 11 of the 1.1.0 atomicity audit — v107 is the deletion request's
@@ -7593,9 +7869,18 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&109),
-            "v109 is the newest migration (#676 — the `rate_limit_bucket.updated_at` index the \
-             cleanup sweep selects on, and #681 — `oauth2_refresh_token.dpop_jkt`); v108 was \
+            Some(&113),
+            "v113 is the newest migration (G-B, #817 — `oauth2_client.default_idp`, a \
+             client's default sign-in provider, optional, absent reading as none); v112 was \
+             G-A, #816, D-N10 — the `federation_id_token_replay` \
+             table, the native sign-in replay store, additive; v111 was G-A, #816 — \
+             `federation_config.native_login_enabled`, \
+             `native_login_client_ids` and `native_login_max_token_age_secs`, the native \
+             sign-in trust block, absent reading as disabled; v110 was G-C, #818 — \
+             `security_settings.oauth2_refresh_reuse_response` and the \
+             `idx_refresh_token_session` index a refused replay's revocation selects on; v109 \
+             was #676 — the `rate_limit_bucket.updated_at` index the \
+             cleanup sweep selects on, and #681 — `oauth2_refresh_token.dpop_jkt`; v108 was \
              #689 — `user.erasure_audit_pending` and `tenant_purge_pending`, the markers an \
              erasure and a tenant purge leave at their point of no return and clear with their \
              record, so that a unit cut there is recorded by the next start; \

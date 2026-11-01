@@ -36,6 +36,14 @@ pub enum FederationError {
     #[error("User provisioning failed: {0}")]
     ProvisioningFailed(String),
 
+    /// Provisioning a first-time federated user collided with an existing
+    /// account's username or email (a UNIQUE violation). Kept apart from
+    /// [`Self::ProvisioningFailed`] so native sign-in can refuse it as a token
+    /// problem rather than a server error (F4-W2-10); every other caller maps
+    /// it exactly as before (`Internal`).
+    #[error("User provisioning failed: {0}")]
+    ProvisioningConflict(String),
+
     // ------------------------------------------------------------------
     // JWKS / signature verification errors (plan 04-02)
     // ------------------------------------------------------------------

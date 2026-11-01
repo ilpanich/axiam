@@ -183,7 +183,9 @@ client the request would produce hold the device grant
   on a public row. A device that still sends the old secret is refused
   `invalid_client`, as any public client presenting a credential is.
 * **One audit row** names the conversion: action
-  `oauth2.client_converted_to_public`, the administrator as actor, the client's
+  `oauth2.client_converted_to_public` (beside the `oauth2.client_updated` row
+  every administrator update writes, which lists `token_endpoint_auth_method`
+  among its changed fields), the administrator as actor, the client's
   row id as resource, and metadata with the `client_id`, the method it had
   (`from`), `none` (`to`), its `grant_types`, `client_secret_cleared: true`,
   and what was revoked (`refresh_tokens_revoked`, `device_grants_deleted`,

@@ -249,6 +249,13 @@ existing `apple.rs` rules apply unchanged); `nonce_supported` is true. Facebook
 *Limited Login* mints an OIDC ID token (`iss https://www.facebook.com`) and
 works through this grant when the provider is configured as the OIDC variant.
 
+> **Correction 2026-10-31 (W2.2, D-N10/D-N11):** step 6 does not use
+> `ProofReplayRepository`; the replay record lives in the additive table
+> `federation_id_token_replay` (v112) behind its own
+> `ProviderIdTokenReplayRepository`, keyed on the provider's owning tenant.
+> Step 7 has no `subject_mapping`: resolution is the browser path
+> (`map_identity` → `provision_or_link_identity`), then `account_may_act`.
+
 ### 3.2 G-B — IdP hint and per-client default provider
 
 **Parameter.** `axiam_idp_hint`, following the vendor-namespace rule stated at
@@ -335,6 +342,20 @@ issued to" — and therefore allowed where it was previously refused for want of
 evidence. Introspection shows the claim. `docs/api/token-exchange.md:110-116`
 updated. Small, but it touches an authorization rule, hence Opus.
 
+> **Correction, 2026-10-30 (W1.2).** The consequence stated above is wrong,
+> and the executor showed it by test before committing. With the claim,
+> client A holding user U's token issued to client B can exchange it as a
+> `subject_token` (result: `sub = U`, `client_id = A`) and then present the
+> result as its own `actor_token`, obtaining `act.sub = U` — "U acts for A",
+> the false attribution #518 / D-5 exists to refuse. Holding a token the
+> client itself exchanged is not evidence that U consented to the client.
+> **Maintainer decision D-N9 (option A):** exchanged tokens carry
+> `client_id` *and* an exchange marker (`axiam_exchanged`), and
+> `actor_token_client` refuses any token carrying the marker, `act` or
+> `ext_exchange` — actor behaviour is exactly as before. Pinned by
+> `an_exchanged_token_is_refused_as_an_actor_even_by_its_own_client` and
+> `an_x4_token_names_its_client_and_is_never_that_clients_actor`.
+
 ---
 
 ## 4. Waves
@@ -346,6 +367,12 @@ updated. Small, but it touches an authorization rule, hence Opus.
 > the task *defines* behaviour under adversarial input, **Sonnet 5.5** where
 > the design above already states the fix and names the precedent at a
 > `file:line`.
+>
+> **Amended 2026-10-30 by the maintainer:** no PR per wave. When a wave's
+> F4 and sweeps are clean, the orchestrator fast-forwards the plan branch
+> `claude/social-gap-1.2.0` to the wave branch (linear history, no merge
+> commit) and cuts the next wave from it. A **single PR**, plan branch →
+> `main`, is opened after W5; the maintainer merges it and tags.
 
 ### 4.0 Model per activity — the suggestion, in one table
 
@@ -424,9 +451,287 @@ The maintainer merges and tags `v1.2.0`.
 
 ### 4.1 Wave results (written by the orchestrator as each wave lands)
 
-*Empty until W1 lands. One subsection per wave: base commit, PR, what
-changed against §4, test counts before/after, issues filed under §1.4-style
-"arises while the plan runs".*
+*One subsection per wave: base commit, PR, what changed against §4, test
+counts before/after, issues filed under §1.4-style "arises while the plan
+runs".*
+
+#### W1 — the security core (`claude/social-gap-w1`, closed 2026-10-30)
+
+**Base** `85721de` (the plan branch after the D-N1…D-N7 record). **PR:** none
+per the 2026-10-30 amendment above; the plan branch was fast-forwarded to the
+wave head. **Commits**, each signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `f978dff` | W1.1 G-C (#818) | `revoke_all_for_session`; refused replay on `standard`, post-window `fapi2` and superseded-off-`fapi2` invalidates the session and revokes its refresh tokens; setting `oauth2.refresh_reuse_response` (`revoke_session` default \| `refuse`), tighten-only; audit `response`; schema **v110** (column + `idx_refresh_token_session`); CHANGELOG *Changed* + deployment upgrade note; OpenAPI regenerated |
+| `9f1c855` | W1.2 G-D (#819) | `client_id` on B3 and X4 tokens **plus** the `axiam_exchanged` marker; `actor_token_client` refuses marked / `act` / `ext_exchange` tokens (D-N9); introspection (REST and gRPC) echoes the `client_id` claim |
+| `9e761ad` | orchestrator | D-N8, D-N9, §3.4 correction |
+| `3c7d031` | W1.3 | T-37, T-254, T-471 amended; model **2.45.0**; T-254 decision §7 |
+| `dc5e4f5` | F4 | `security-review-social-gap-w1-2026-10-30.md`: 0 C/H/M, 2 Low, 4 Info |
+| `4241409` `e398312` `09242b6` | sweep 1 | #821, #822, #823 |
+| `fe5de4e` | F4 addendum 1 | all six closed; 2 Info → #824 |
+| `4119629` | sweep 2 | #824 |
+| `ed33742` | F4 addendum 2 | both closed; F4-W1-09 (Info, docs wording) left open by the two-sweep rule |
+
+**Deltas against §4.**
+- **W1.2 stopped before committing.** The consequence §3.4 predicted was a
+  #518 regression (actor-token laundering), shown by a probe test; the
+  maintainer chose option A (D-N9). The probe is now the regression test
+  `an_exchanged_token_is_refused_as_an_actor_even_by_its_own_client`.
+- **G-D needed no new threat id**: T-471 (#518 / D-5) already covered it and
+  was amended; T-489…T-494 stay reserved for W2/W3.
+- **G-C is narrower than §3.3 stated** after #821: only the token's own client,
+  passing the same binding checks a live refresh runs, triggers revocation;
+  any other presentation is refused, marked and audited
+  (`refused_unverified_presenter`) — the authorization-code replay precedent.
+  Audit `response` values: `revoked_session` \| `refused` \|
+  `refused_unverified_presenter` \| `revocation_failed` (with `failed_writes`);
+  `token_client_id` recorded beside the presenting client.
+- **Beyond scope, accepted:** introspection now returns `client_id` for every
+  JWT access token (code, refresh, CIBA, device too — RFC 7662 conformant,
+  F4-checked); `website/src/docs/oauth2.ts` and the agents guide corrected.
+- **OpenAPI** regenerated three times in-wave (`RefreshReuseResponse`
+  component); `sdks/openapi.json` and `management-registry.json` must be
+  re-vendored by W4.
+
+**Tests**, before → after on the binaries the wave touched: `axiam-oauth2`
+`token_service` 149 → 166, lib 630 → 636; `axiam-api-rest`
+`oauth2_flow_test` 44 → 46, `token_exchange_test` 29 → 31,
+`external_token_exchange_test` 27 → 28; `axiam-auth` lib 278 → 280;
+`grpc_units` 47 → 48; plus new `axiam-db` (3) and `axiam-core` (4) tests. Full
+binaries of every touched crate green at each commit; none skipped or
+ignored beyond the pre-existing live-service ignores.
+
+**Issues filed:** [#821](https://github.com/ilpanich/axiam/issues/821),
+[#822](https://github.com/ilpanich/axiam/issues/822),
+[#823](https://github.com/ilpanich/axiam/issues/823),
+[#824](https://github.com/ilpanich/axiam/issues/824) — all fixed in-wave,
+close with the 1.2.0 PR. **Open after two sweeps:** F4-W1-09 (Info) — the docs
+say a cross-client presentation is always audited
+`refused_unverified_presenter`; under `refuse` or a session-less row it is
+`refused`. Text only; proposed for W5.1.
+
+**Not run:** OIDF conformance suite (no Docker); the full workspace suite in
+one invocation (per-crate binaries instead); the frontend suite (no console
+change in W1).
+
+#### W2 — native sign-in (`claude/social-gap-w2`, closed 2026-10-31)
+
+**Base** `fc8f888` (the plan branch after W1). **PR:** none (single PR after
+W5); the plan branch was fast-forwarded to the wave head. **Commits**, each
+signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `0349f3c` | W2.1 | `NativeLoginTrust` on OIDC federation configs (off by default; 1–64 client IDs ≤ 512 bytes, no duplicates; `max_token_age_secs` 1..=3600, default 300; OIDC only); schema **v111**; admin `PUT /api/v1/federation-configs/{id}` (not the PATCH §3.1 named); never on the public provider listing |
+| `9b733e4` | W2.2 | `axiam-federation::native_login` (steps 2–7); `token_shape` marker list shared with X4; `provider_resolution` moved from axiam-api-rest; a crate-private multi-audience core behind `verify_id_token_full` (browser behaviour unchanged); `federation_id_token_replay` (schema **v112**, own trait, sweep, write-conflict retry) |
+| `8157a17` | orchestrator | D-N10, D-N11; §3.1 steps 6–7 corrected |
+| `9c24a61` | W2.3 | grant `urn:axiam:params:oauth:grant-type:provider-id-token`; dispatch; limiter bucket; audit `federation.native_login`; session + `sid` |
+| `2811532` | orchestrator | D-N12…D-N15 |
+| `75f79e6` | W2.4 | admin UI trust card; grant option in the client editor; coverage matrix |
+| `c4e7e18` | W2.5 | discovery lists the grant (D-N15); OpenAPI + management registry regenerated; `docs/api/native-sign-in.md`; website page and blocks; T-489…T-492 (model 2.45.0, 492 threats); `CLAUDE.md` protocol line |
+| `6346fd3` | F4 | `security-review-social-gap-w2-2026-10-31.md`: **1 High**, 1 Medium, 3 Low, 5 Info |
+| `e2c0be9` | orchestrator | D-N16…D-N19 |
+| `81d0dee` `34f2e14` `a12dbe5` | sweep 1 | #828, #829, #830 |
+| `2ba70c7` | orchestrator | D-N18 wording: the per-client binding is not part of 1.2.0 |
+| `94f3483` | F4 addendum 1 | 9 of 10 closed, F4-W2-10 partly; 1 Low + 4 Info new → #831 |
+| `ace76a9` | orchestrator | D-N20, D-N21 |
+| `24f6929` | sweep 2 | #831 |
+| `64380ae` | F4 addendum 2 | all closed or closed as decided; no new finding; F4-W2-15 is a PR-description note |
+
+**Deltas against §4 and §3.1.**
+- **Replay store (D-N10, then D-N19, then F4-W2-11):** a dedicated table, not
+  `oauth2_proof_replay`; keyed deployment-wide on (issuer, SHA-256 of the JWS
+  signing input), kept to `exp` + 2 × leeway, left out of the tenant purge
+  (deleting early would re-enable a token elsewhere).
+- **Subject resolution (D-N11):** the browser path (`map_identity` →
+  `provision_or_link_identity`); there is no `subject_mapping` setting.
+- **Nonce (D-N16, D-N21):** hashed form only — SHA-256(request nonce) hex,
+  either case, must equal the claim. §3.1 step 5's raw form is withdrawn: it
+  bound nothing.
+- **Audience (D-N17):** azp-first; Google Android tokens (`aud` = web,
+  `azp` = Android) sign in with only the app IDs listed.
+- **Grant (D-N12…D-N14):** a session per sign-in; `fapi2` clients under FAPI
+  rules; `consent_required` spends the token, every user-independent check
+  (including the sensitive-scope switch and the nonce bound) runs before it.
+  An omitted `scope` is the empty set. The `login.post_auth` gate runs before
+  issuance (#828; CONTRACT §22 lists the grant, version not bumped — W4).
+- **Limiter:** `oauth2_provider_id_token:{tenant}:{ip}`; no address is refused.
+- **Residuals recorded:** per-tenant (not per-client) trust, T-489 (D-N18);
+  the first-sign-in account-existence signal shared with browser login, T-491
+  (D-N20); JWKS refetch reachable by caller-chosen `kid`, T-491.
+- **Beyond scope, accepted:** `website/src/docs/operate.ts` sweep list was two
+  short (`oauth2_refresh_token` also missing) — fixed.
+- **OpenAPI** regenerated in W2.5 and sweep 1; `TokenRequest` gains
+  `provider`, `id_token`, `nonce`. W4 re-vendors `openapi.json`,
+  `management-registry.json` and CONTRACT §22.
+
+**Tests**, before → after: `axiam-federation` lib 349 → 404; `axiam-oauth2`
+lib 636 → 648; new `provider_id_token_test` 21, `federation_id_token_replay_test`
+4; `oauth2_client_test` 45 → 46; `axiam-db` schema tests +1 (v112); frontend
++29 (2416 total, line coverage 96.61 %). Unchanged and green:
+`external_token_exchange_test` 28, `token_exchange_test` 31, `oauth2_flow_test`
+46, `token_service` 166, `rate_limit_bucket_names_test` 21,
+`sec095_federated_login_gate_test` 4, `axiam-server` lib 175, `cleanup_task` 65.
+
+**Issues filed:** [#828](https://github.com/ilpanich/axiam/issues/828),
+[#829](https://github.com/ilpanich/axiam/issues/829),
+[#830](https://github.com/ilpanich/axiam/issues/830),
+[#831](https://github.com/ilpanich/axiam/issues/831) — all fixed in-wave, close
+with the 1.2.0 PR. **Open after two sweeps:** F4-W2-15 (Info, PR note): a dev
+database that ran the pre-sweep v112 keeps the old required fields and fails
+closed on native sign-in — drop `federation_id_token_replay` and the v112
+stamp; no release affected. **Optional, not filed:** a non-base64 or DER
+signature segment is audited `claim_rejected` rather than `bad_signature`
+(same wire answer); the OpenAPI text says "lower-case SHA-256 hex" (accurate
+guidance; say "either case" at the next regeneration).
+
+**Not run:** OIDF conformance suite; a real Google/Apple token (the stub IdP
+mints the shapes); `npm run test:a11y` (CI step).
+
+#### W3 — IdP hint (`claude/social-gap-w3`, closed 2026-10-31)
+
+**Base** `ad1430f` (the plan branch after W2). **PR:** none (single PR after
+W5); the plan branch was fast-forwarded to the wave head. **Commits**, each
+signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `01b4f43` | W3.1 | `axiam_idp_hint` on `/oauth2/authorize` and the PAR body, resolved server-side to `idp=<uuid>` on the login hop, unresolvable ⇒ byte-identical to no hint; `OAuth2Client.default_idp` (schema **v113**), validated on create/update, stale default ignored, not settable by DCR/CIMD |
+| `787836d` | orchestrator | D-N22…D-N24 |
+| `3b4b0bd` | W3.1b | kind name (`google`, `github`, `facebook`, `apple`, `microsoft`) as a third hint form (D-N24); slug beats kind; ambiguous ignored; generic kinds refused |
+| `d78a6f9` | W3.2 | SPA auto-redirect (1.5 s; 3 s with reduced motion) with cancel and loop guards; admin "Default identity provider" select |
+| `bd520e6` | W3.3 | OpenAPI + management registry regenerated (also the deferred W2 "either case" nonce wording); `docs/admin/oidc-authn-parameters.md`, `browser-login-hop.md`; website block; T-493, T-494 (494 threats); `CLAUDE.md` line |
+| `19490dd` | F4 | `security-review-social-gap-w3-2026-10-31.md`: 1 Medium, 4 Low, 6 Info; server half holds |
+| `a151491` | orchestrator | D-N25…D-N27 |
+| `b42318c` `30f5b84` `d1c6f40` | sweep 1 | #832, #833, #834 |
+| `2e13c33` | F4 addendum 1 | 01–11 closed; 1 Low + 4 Info new → #835 |
+| `a15573e` | orchestrator | D-N28, D-N29 |
+| `4588b12` | sweep 2 | #835 |
+| `6d095e3` | F4 addendum 2 | 12–16 closed; 17–19 open → #836 |
+
+**Deltas against §4 and §3.2.**
+- **Hint forms (D-N24):** UUID, slug and branded kind name; §3.2 named only
+  the first two.
+- **Lanes (D-N22):** the hint and `default_idp` apply on every
+  `authn_request_params` lane; **PAR (D-N23):** the pushed hint is
+  authoritative, read through a narrow `ParService::peek`.
+- **The SSO round trip (D-N25, #832):** an SSO leg started from a login hop
+  now returns to the relying party — pre-existing gap, made the main path by
+  G-B. The stored hop is bound to its start's `state` (D-N29); SAML and Apple
+  handoff redirects now carry the spent start `state` (server change).
+- **Re-authentication (D-N26, D-N28):** no auto-start on a re-authentication
+  hop; the server marks a first-leg hop that demands a fresh authentication
+  with `fresh=1` (honour lane, query and PAR), using the predicate the honour
+  lane already decides with.
+- **Beyond scope, decided by the maintainer (D-N27, #834):** admin OAuth2
+  client create/update/delete are now audited (`oauth2.client_created`,
+  `_updated` with `changed_fields`, `_deleted`); an audit-write failure is
+  logged and the write stands, as every REST admin audit does.
+- **OpenAPI** regenerated in W3.3; W4 re-vendors `openapi.json` and
+  `management-registry.json`.
+
+**Tests**, before → after: `axiam-oauth2` lib 648 → 659; `axiam-api-rest` lib
+315 → 324; new `oauth2_idp_hint_test` 19; `oauth2_honour_lane_test` 39 → 42;
+`par_test` 30 → 31; `axiam-db` schema +1 (v113); frontend 2416 → 2486 (line
+coverage 96.64 %). Unchanged and green: `oauth2_flow_test`,
+`oauth2_client_test`, `oauth2_login_hop_test`, `oauth2_cosmetic_params_test`,
+`federation_login_providers_test`, `provider_id_token_test`,
+`token_exchange_test`, `external_token_exchange_test`, `axiam-server` lib.
+
+**Issues filed:** [#832](https://github.com/ilpanich/axiam/issues/832),
+[#833](https://github.com/ilpanich/axiam/issues/833),
+[#834](https://github.com/ilpanich/axiam/issues/834),
+[#835](https://github.com/ilpanich/axiam/issues/835) — fixed in-wave, close
+with the 1.2.0 PR. **Open after two sweeps:**
+[#836](https://github.com/ilpanich/axiam/issues/836) — F4-W3-17 (Low: a
+reload of a stripped interaction hop auto-starts the provider; proposed as the
+first W4 item), F4-W3-18 (Info: CONTRACT §12 note on the handoff `state`;
+W4.1), F4-W3-19 (Info: `Referrer-Policy` on the form-post error redirect; with
+F4-W3-17). **Outside the plan, filed:**
+[#837](https://github.com/ilpanich/axiam/issues/837) (federated state not
+bound to the browser — pre-existing login CSRF),
+[#838](https://github.com/ilpanich/axiam/issues/838) (forward
+`prompt=login`/`max_age`/`ForceAuthn` upstream — the later item of D-N26).
+
+**Not run:** OIDF conformance suite; a real upstream IdP;
+`npm run test:a11y` (CI step).
+
+#### W4 — contract 1.65 and the eleven SDKs (`claude/social-gap-w4`, closed 2026-11-01)
+
+**Base** `a29ede0` (the plan branch after W3). **PR:** none in this repository
+(single PR after W5); the plan branch was fast-forwarded to the wave head. The
+SDK work is **one draft PR per SDK** (D-N30), each on `claude/bold-mayer-wpd3kv`.
+**Commits** in this repository, each signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `c3a2043` | orchestrator | D-N30, D-N31 |
+| `eecd4df` | W4.0 | #836: F4-W3-17 (`fresh=1` written when the page strips `reauth`/`acr`) and F4-W3-19 (`Referrer-Policy: no-referrer` on the form-post error 303) |
+| `b1283a7` | W4.1 | version **1.2.0** ahead of the re-vendor (the 1.1.2 W8.4a precedent); OpenAPI and management registry regenerated |
+| `76d35d9` | W4.1 | contract **1.65**: §37 native sign-in helper (`login_with_provider_id_token`, `native_nonce`, 13 conformance tests), `idp_hint` on `oidc_begin`/`oidc_par`, the §9 refresh-reuse note, §15.2 rule 10, F4-W3-18 (§12.1 note 12), §34.9 record |
+| `73c2532` | orchestrator | D-N32 … D-N35 |
+| `294cdd9` | W4.13 | `sdk-contract-1.65-conformance-review.md`: 21 findings, 3 Medium |
+| `8c0241f` | orchestrator | D-N36, D-N37 |
+| `d93976b` | W4.13a | contract 1.65 amended in place: C165-09 … -13, -19; D-N36 (PAR carries the begin URL's hint); §12.1 rule 3 "no redirect is followed" |
+| `a59ef55` | review addendum 1 | fix round re-checked; C165-22 … -28 |
+| `e6890c0` | review addendum 2 | sweep 2 re-checked; C165-29 … -32 |
+| `365b106` | orchestrator | D-N38 |
+| *(this commit)* | review addendum 3 + results | the targeted pass; W4 results |
+
+**SDK draft PRs** (all green on CI at their final heads unless noted):
+
+| SDK | PR | Final head | Notes |
+|---|---|---|---|
+| Rust | [ilpanich/axiam-rust-sdk#145](https://github.com/ilpanich/axiam-rust-sdk/pull/145) | `f047710` | `OidcBeginParams.idp_hint` is a source-breaking public field (listed, D-N32); `retry_after` on the `#[non_exhaustive]` `Auth` variant |
+| TypeScript | [ilpanich/axiam-typescript-sdk#157](https://github.com/ilpanich/axiam-typescript-sdk/pull/157) | `b199c0a` | `retryAfterMs` additive; browser `/oauth2/*` `redirect: 'error'` |
+| Python | [ilpanich/axiam-python-sdk#107](https://github.com/ilpanich/axiam-python-sdk/pull/107) | `ff8a2a9` | C165-01 (Medium): AXIAM's description-less 429 now maps to `OAuthProtocolError` |
+| Java | [ilpanich/axiam-java-sdk#127](https://github.com/ilpanich/axiam-java-sdk/pull/127) | `b54a3bb` | record constructors source-breaking (D-N32); one redirect-free `oauth2HttpClient` |
+| Kotlin | [ilpanich/axiam-kotlin-sdk#82](https://github.com/ilpanich/axiam-kotlin-sdk/pull/82) | `08c4b07` | data-class constructors source/binary-breaking (D-N32); C165-28 flake tracked |
+| C# | [ilpanich/axiam-csharp-sdk#115](https://github.com/ilpanich/axiam-csharp-sdk/pull/115) | `620b987` | `adoptAsCredential` dropped (C165-18); `RetryAfter` public |
+| PHP | [ilpanich/axiam-php-sdk#89](https://github.com/ilpanich/axiam-php-sdk/pull/89) | `2b2809b` | positional constructors source-breaking (D-N32); one `oauth2PostOptions()` for every `/oauth2/*` POST |
+| Go | [ilpanich/axiam-go-sdk#107](https://github.com/ilpanich/axiam-go-sdk/pull/107) | `e4235e7` | pre-existing `-race` data race in a UMA test (CI runs without `-race`) |
+| Swift | [ilpanich/axiam-swift-sdk#80](https://github.com/ilpanich/axiam-swift-sdk/pull/80) | `139198d` | `oidcRefresh` single-flight guard added (D-N34) |
+| C | [ilpanich/axiam-c-sdk#79](https://github.com/ilpanich/axiam-c-sdk/pull/79) | `02aa474` | **SOVERSION 3** (C165-02); 1.1.3's `AXIAM_VERSION_PATCH` fixed (D-N35); `oauth_error_description`, `oauth_retry_after_ms` |
+| C++ | [ilpanich/axiam-cplusplus-sdk#82](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/82) | `c37f016` | **SOVERSION 5** (D-N37); an intermittent g++-16/C++23 crash after the new tests, in pre-existing curl tests (re-run green; a diagnostic is proposed on the PR) |
+
+**Deltas against §4.**
+- **W4.0 added** (D-N31): #836's F4-W3-17/-19 in this repository; F4-W3-18 in the contract.
+- **Version bump moved forward** to W4.1, so every SDK vendors the final spec once.
+- **Decisions in-wave:** D-N30 … D-N38 — release level minor with breaks listed (D-N32); server floor documented, every SDK states it (D-N33); C SOVERSION 3 and C++ 5 (D-N32, D-N37); PAR carries the begin URL's hint (D-N36); no redirect is followed on an `/oauth2/*` POST (the C165-13 amendment).
+- **Beyond scope, accepted:** the redirect hardening reached every `/oauth2/*` POST in nine SDKs, not only the new grant (C165-14, -22, -23, -26, -29); C's 1.1.3 version macro was wrong on `main` (D-N35).
+- **The conformance review ran three rounds** (fix round, sweep 2, the D-N38 targeted pass).
+
+**Tests** (suite before → after, each SDK): Rust 1202 → 1229; TypeScript 1781 → 1810;
+Python 2175 → 2260; Java 1534 → 1562; Kotlin 1327 → 1357; C# 1514 → 1558 (+72
+ASP.NET Core); PHP 2084 → 2125; Go 986 → ~1010; Swift 1498 → 1530; C 81 → 83 ctest
+suites (Unity cases +~30); C++ 1667 → 1672 cases. This repository: frontend 2486 →
+2490 (W4.0); `federation_login_providers_test` 54 → 55.
+
+**Open after the review:** C165-24 (Info, §34.9 record text; next contract text
+pass), C165-28 (Info, Kotlin flake, tracked).
+
+**Not run locally** (CI covered): the Swift 6.4, JDK 25/27, PHP 8.2/8.5, Python
+3.11/3.15, clang/C23 matrix legs; PHPStan; sanitizer/valgrind cells beyond those noted.
+
+#### W5 — release readiness 1.2.0 (`claude/social-gap-1.2.0`, closed 2026-11-01)
+
+| Commit | Task | What |
+|---|---|---|
+| `e8de849` | W5.1, W5.2 | CHANGELOG `[1.2.0] - 2026-11-01`; `release-1.2.0-upgrade-notes.md`; F4-W1-09 wording; Keycloak comparison rows; roadmap row; threat-model copies reconciled to 2.45.0 (494 / 463 / 21 / 10); website refresh-rotation text |
+| `5ae4c02` | W5.3 | combined F4 review: 0 High/Medium, 3 Low, 3 Info; invariants hold; regression gate green |
+| `a377893` `0274ad2` `e32a835` | orchestrator | D-N39 … D-N44 |
+| `d6083b2` `2da13a6` | sweep 1 | #839 (logout revokes the session's refresh tokens; native client is a session participant), #840 |
+| `60f0cdf` `9c040db` `92bf8d3` | sweep 2 | #841 (admin MFA reset revokes refresh tokens), #842 (code replay revokes the session's refresh tokens), D-N42 (`end_session` 500 declared) |
+| `22acf19` | review addendum 1 | sweeps re-checked; F4-R12-07 … -11 |
+| `c442c7c` `c6819a4` `54fe63f` | targeted pass (D-N43, D-N44) | #843: logout revokes before it deletes; the D-N39 limit documented; logout/reset-mfa 500s declared |
+| *(this commit)* | review addendum 2 + results | |
+
+**Deltas against §4.** Beyond the plan, decided by the maintainer: logout revokes the session's refresh tokens (D-N39), admin MFA reset revokes the user's (D-N40, a pre-existing regression), code replay revokes the session's (D-N41), three 500s declared in the spec with two re-vendors of `openapi.json` into the eleven SDK PRs (D-N42, D-N44).
+
+**Issues filed:** #839 … #843 (fixed, close with the PR); #844 (session lineage key, later); ilpanich/axiam-cplusplus-sdk#83 (intermittent g++-16 CI crash, pre-existing code).
+
+**Open:** F4-R12-09, F4-R12-11 (SSF part), the F4-R12-01 residual (Info); #844; C165-24, C165-28 (Info, W4).
 
 **Expected cost**, in executor sessions: W1 3 (3 Opus), W2 6 (4 Opus), W3 4
 (2 Opus), W4 13 (1 Opus), W5 3 (1 Opus) — roughly **29 sessions, 11 Opus**,
@@ -436,15 +741,56 @@ plus the orchestrator. W2.2 is the long pole; W4's eleven run in parallel.
 
 ## 5. Decisions requested from the maintainer
 
-| # | Question | Recommendation |
-|---|---|---|
-| D-N1 | Where does native sign-in live: a grant at `/oauth2/token` (OAuth2 token set, client-bound, consent-ruled); a session-world `POST /api/v1/auth/federation/native` (the SDK login shape, cookies/handoff); or both? | **The grant.** It answers the analysis' two complaints (client binding, refresh) in the OAuth2 world where mobile apps live, and reuses rotation, DPoP and consent as they stand. The SDK helper wraps it. A session-world variant can follow if the console or an SDK needs it. |
-| D-N2 | Default for `oauth2.refresh_reuse_response` | **`revoke_session`.** The BCP's behaviour, what the compared products do, and what AXIAM already does for an authorization-code replay. `refuse` stays available per tenant. |
-| D-N3 | Hint parameter name | **`axiam_idp_hint`** alone, by the vendor-namespace rule already written at `login_hop.rs`. A `kc_idp_hint` alias would make a Keycloak client "just work" but puts a competitor's prefix in AXIAM's API; decline unless a migration asks for it. |
-| D-N4 | On `fapi2`, revoke inside the grace window when the *successor* has already been rotated (the BCP's definitive breach signal)? | **Not in this plan.** T-254's reasoning stands for that lane; the window is sender-constrained; certification was obtained with it. Record as the residual it already is. |
-| D-N5 | Accept a provider **access token** (plus a userinfo call) for OAuth2-protocol providers — GitHub, classic Facebook — as Auth0 does? | **No.** An access token's audience cannot be verified generically (Google's `tokeninfo` is provider-specific), which is the one check §3.1 rests on. Facebook has Limited Login (OIDC) for apps; GitHub has no native SDK sign-in to begin with. |
-| D-N6 | Consent for the native grant | **Refuse with `consent_required`** any scope that would need a ceremony; the client's registration decides what needs none, as it does today. An "implicit consent for first-party clients" switch is a separate decision with its own threat entry. |
-| D-N7 | Version | **1.2.0.** New grant, new parameter, one default behaviour change with an opt-out. |
+All seven were put to the maintainer on 2026-10-30, before W1 was cut, and
+each was answered explicitly (none applied by default). Every answer is the
+recommendation.
+
+| # | Question | Recommendation | Answer |
+|---|---|---|---|
+| D-N1 | Where does native sign-in live: a grant at `/oauth2/token` (OAuth2 token set, client-bound, consent-ruled); a session-world `POST /api/v1/auth/federation/native` (the SDK login shape, cookies/handoff); or both? | **The grant.** It answers the analysis' two complaints (client binding, refresh) in the OAuth2 world where mobile apps live, and reuses rotation, DPoP and consent as they stand. The SDK helper wraps it. A session-world variant can follow if the console or an SDK needs it. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N2 | Default for `oauth2.refresh_reuse_response` | **`revoke_session`.** The BCP's behaviour, what the compared products do, and what AXIAM already does for an authorization-code replay. `refuse` stays available per tenant. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N3 | Hint parameter name | **`axiam_idp_hint`** alone, by the vendor-namespace rule already written at `login_hop.rs`. A `kc_idp_hint` alias would make a Keycloak client "just work" but puts a competitor's prefix in AXIAM's API; decline unless a migration asks for it. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N4 | On `fapi2`, revoke inside the grace window when the *successor* has already been rotated (the BCP's definitive breach signal)? | **Not in this plan.** T-254's reasoning stands for that lane; the window is sender-constrained; certification was obtained with it. Record as the residual it already is. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N5 | Accept a provider **access token** (plus a userinfo call) for OAuth2-protocol providers — GitHub, classic Facebook — as Auth0 does? | **No.** An access token's audience cannot be verified generically (Google's `tokeninfo` is provider-specific), which is the one check §3.1 rests on. Facebook has Limited Login (OIDC) for apps; GitHub has no native SDK sign-in to begin with. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N6 | Consent for the native grant | **Refuse with `consent_required`** any scope that would need a ceremony; the client's registration decides what needs none, as it does today. An "implicit consent for first-party clients" switch is a separate decision with its own threat entry. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N7 | Version | **1.2.0.** New grant, new parameter, one default behaviour change with an opt-out. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N8 | *(arose in W1.1)* Is `oauth2.refresh_reuse_response` tighten-only like the other security settings (a tenant may choose `refuse` only when its organization is on `refuse`), or may a tenant relax it alone? | **Tighten-only**, as every other hierarchical security setting; "available per tenant" in D-N2 is met through the organization. | **Answered by the maintainer 2026-10-30: as recommended.** |
+| D-N9 | *(arose in W1.2)* The `client_id` claim on exchanged tokens re-opens #518 (an exchanged token becomes an acceptable `actor_token` for its exchanging client — laundering). A: claim + exchange marker, exchanged tokens never actors; B: accept; C: defer G-D | **A** | **Answered by the maintainer 2026-10-30: A.** See the §3.4 correction. |
+| D-N10 | *(arose in W2.2)* Where is the provider-ID-token replay record kept? `oauth2_proof_replay.kind` is an ASSERT allow-list; widening it is a non-additive redefinition (#729). (a) widen the ASSERT; (b) a new additive table | **(b)** — `federation_id_token_replay`, schema v112, UNIQUE (tenant_id, provider_id, token_hash), written after signature and nonce checks, kept until `exp` + 60 s, a failed write refuses | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N11 | *(arose in W2.2)* §3.1 step 7 names a provider `subject_mapping` (linked_only / jit_provision) that does not exist. (a) resolve exactly as browser OIDC login (`map_identity` → `provision_or_link_identity`); (b) add a new per-provider mapping setting | **(a)** — native and browser sign-in land on the same user; no `email_verified` refusal; an unverified email is never marked verified | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N12 | *(arose in W2.3)* Does a native sign-in create an AXIAM session (tokens carry `sid`), or follow the device-grant precedent (no session)? | **Create a session**, as federated browser login does: upstream auth evidence, `amr = [fed]`; UserInfo and session-validated APIs accept the tokens and logout/session revocation ends them | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N13 | *(arose in W2.3)* May `fapi2`-profile clients use the grant? | **Allow**, under `fapi::enforce_token_request` and sender binding, as X4, CIBA and the device grant | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N14 | *(arose in W2.3)* Consent is decided after verification (it needs the resolved user), so `consent_required` has already spent the provider token and may have provisioned a first-time user | **Accept and document**: every user-independent check (parameters, scope registration, `resource`, grant, binding) runs first and spends nothing; after consent the app obtains a fresh provider ID token | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N15 | *(arose in W2.3)* List the grant URN in discovery `grant_types_supported`? | **List it** (W2.5, with the OpenAPI regen) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N16 | *(F4-W2-02, #829)* The raw-nonce form binds nothing (a stolen token's own claim passes). Hashed only; per-provider opt-in raw; or keep both as a residual? | **Hashed only**: SHA-256(request `nonce`) must equal the token's `nonce` claim; the app gives the provider SDK SHA-256(raw) and AXIAM the raw value | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N17 | *(F4-W2-03, #829)* Google Android tokens: `aud` = web client ID, `azp` = Android client ID. Change the audience rule or only the docs? | **azp-first**: the issued-to party is `azp` when present, else the single `aud`, and must be listed; with a listed `azp`, `aud` may be listed or the provider's web `client_id`; browser-flow tokens stay refused | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N18 | *(F4-W2-04, #830)* Bind provider app IDs to specific AXIAM clients? | **Residual for 1.2.0**, recorded under T-489 and documented | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N19 | *(F4-W2-06, #830)* Single use per provider config or deployment-wide? | **Deployment-wide**: the replay row is keyed on (issuer, SHA-256(token)); v112 is unreleased, so its definition changes in-wave | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N20 | *(F4-W2-12, #831)* First-sign-in provisioning still tells a caller whether an email/username is taken, as browser login does. Record a residual or change provisioning now? | **Residual** shared with browser login; correct the text that claims otherwise; a provisioning change can be planned later | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N21 | *(F4-W2-14, #831)* Upper-case hex nonce hashes are refused. Accept either case or document lower-case only? | **Accept either case**: normalise before the constant-time compare | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N22 | *(arose in W3.1)* Do `axiam_idp_hint` and `default_idp` apply on every `authn_request_params` lane or only on `honour`? | **Every lane**: the lanes govern the nine OIDC parameters; this is AXIAM's presentational parameter and never changes what is issued; honour-only would make `default_idp` inert for most clients | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N23 | *(arose in W3.1)* Under PAR, read the pushed hint (widening `ParService::peek` to return only `axiam_idp_hint`) or only a query copy? | **The pushed hint, via the narrow peek** (RFC 9126: pushed parameters are authoritative); a query copy beside `request_uri` is ignored | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N24 | *(arose in W3.1)* Also accept the provider kind name (`google`, `apple`, …) as a hint value, for branded providers without a slug? | **Recommended: not in 1.2.0.** | **Answered by the maintainer 2026-10-31: accept the kind name now** (a third form beside slug and UUID; a name matching more than one effective provider is ignored as ambiguous). |
+| D-N25 | *(F4-W3-01, #832)* An SSO sign-in started from a login hop never returns to the relying party (pre-existing; G-B makes it the main path). Fix in W3 or document and defer? | **Fix in W3**: `return_to` carried in the pending-SSO record, the hop resumed on success, kept on the failure link | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N26 | *(F4-W3-03, #833)* The re-authentication hop auto-starts the provider while `prompt=login`/`max_age`/`ForceAuthn` are not forwarded upstream. No auto-start on re-auth, or forward upstream now? | **No auto-start on a re-authentication hop**; forwarding upstream is a later issue | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N27 | *(F4-W3-05, #834)* Admin OAuth2 client create/update/delete are not audited (pre-existing), so `default_idp` changes leave no record. Residual with its own issue, or audit in this wave? | **Recommended: residual + own issue.** | **Answered by the maintainer 2026-10-31: audit in this wave.** |
+| D-N28 | *(F4-W3-12, #835)* Under PAR the sign-in page cannot see `prompt=login`/`max_age=0` and auto-starts the provider. Server marks the hop, or residual? | **The server marks the hop** as a re-authentication (query and PAR alike); the SPA stops parsing `return_to` (also settles F4-W3-13/-14) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N29 | *(F4-W3-16, #835)* Bind the remembered login hop to the SSO start that created it? | **Yes**: resume only on a callback whose `state` matches the one recorded at start | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N30 | *(W4 start)* How are the eleven SDK changes delivered? | **One draft PR per SDK**, each on `claude/bold-mayer-wpd3kv` in its own repository, referencing contract 1.65 and listed in the final axiam PR; the maintainer merges and tags | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N31 | *(W4 start)* #836 (F4-W3-17/-18/-19, open after W3's two sweeps): fix inside the plan? | **Yes**: F4-W3-17 and -19 as the first W4 commit (W4.0); F4-W3-18 folded into the contract 1.65 text (W4.1) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N32 | *(arose in W4)* Regenerating from openapi 1.2.0 is source-breaking in some SDKs (Java records and PHP constructors gain positional parameters; Rust `OidcBeginParams` gains a public field; C generated structs grow). Release level? | **Minor**, with the breaks listed in each CHANGELOG (the 1.1.0 and contract 1.42 precedent); C keeps SOVERSION 2 unless W4.13 finds a grown struct is caller-allocated | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N33 | *(arose in W4)* `native_login` is required in federation-config responses, so 1.2-line SDKs cannot decode them from servers older than 1.2.0. Document or make it optional? | **Document the floor**: the spec stays truthful; the SDK CHANGELOGs and the 1.2.0 upgrade notes state that federation-config admin calls of 1.2-line SDKs need a server of 1.2.0 or later | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N34 | *(arose in W4.10)* The Swift `oidcRefresh` lacked the single-flight guard §12.1 requires; the session added it. Keep it in the contract 1.65 PR? | **Keep it** (with D-N2, an unguarded concurrent refresh would end the session); W4.13 reviews it | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N35 | *(arose in W4.11)* The C SDK's CI was red on `main` because the 1.1.3 release left `AXIAM_VERSION_PATCH` at 2 and the version test at "1.1.2". Carry the fix in the contract 1.65 PR? | **Carry it** (ilpanich/axiam-c-sdk `c29f78e`) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N36 | *(W4.13 Q1, C165-11)* Under PAR, should `oidc_par` carry over a hint `oidc_begin` put on the authorization URL (9 SDKs drop it silently)? | **Yes, normative**: the URL's hint is pushed; an explicit `oidc_par` argument wins when both are set (the PHP pattern) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N37 | *(W4.13, C165-03)* The C++ model structs change layout while SOVERSION stays 4. Bump? | **Yes: SOVERSION 5**, `abi_soname` and the CHANGELOG corrected; the release stays minor (D-N32). C goes to SOVERSION 3 under D-N32 (C165-02) | **Answered by the maintainer 2026-10-31: as recommended.** |
+| D-N38 | *(contract 1.65 review, after two sweeps)* C165-29 (Low, Kotlin `cibaInitiate` follows redirects), C165-30/-31/-32 (Info: C UMA mapper, Kotlin KDoc, TS comment): fix now or leave open? | **One targeted pass** (the D-N31 precedent); only C165-24 and C165-28 stay on the final PR's open list | **Answered by the maintainer 2026-11-01: as recommended.** |
+| D-N39 | *(W5.3, F4-R12-01, #839)* Logout does not end a session's refresh tokens, so a native sign-in keeps minting tokens after logout. (A) revoke on logout and record the native client as a session participant; (B) correct the docs and CONTRACT; (A) for cookie-less sessions only | **(A)**: single-session logout and RP `end_session` revoke that session's refresh tokens (`revoke_all_for_session`); the docs and CONTRACT §37.2 rule 8 become true, no contract change | **Answered by the maintainer 2026-11-01: as recommended.** |
+| D-N40 | *(W5.3 sweep 1)* Admin MFA reset ends the user's sessions but revokes no OAuth2 refresh tokens (a likely regression). Fix in 1.2.0? | **Fix in 1.2.0** (`revoke_all_for_user`) | **Answered by the maintainer 2026-11-01: as recommended.** |
+| D-N41 | *(W5.3 sweep 1)* An authorization-code replay revokes the code's tokens (RFC 6749 §10.5) and the session, not the session's other refresh tokens. Match D-N39? | **Recommended: leave as is and file it.** | **Answered by the maintainer 2026-11-01: match D-N39 now** (`revoke_all_for_session` on code replay). |
+| D-N42 | *(W5.3 sweep 1)* D-N39's failed-logout path answers a 500 on `end_session` that the OpenAPI spec does not declare; declaring it changes `sdks/openapi.json` (eleven SDK re-vendors). Declare it? | **Recommended: not now** (a browser redirect endpoint no SDK reads). | **Answered by the maintainer 2026-11-01: declare it and re-vendor `openapi.json` in all eleven SDK PRs.** |
+| D-N43 | *(release review addendum 1)* F4-R12-07 (a half-failed logout cannot be retried with its own credential) and F4-R12-08 (the D-N39 limit after a console refresh is the common case, documented only in the upgrade notes): fix now? | **Targeted pass**: revoke the refresh tokens first and delete the session only on success; state the limit in the CHANGELOG, `docs/api/logout.md` and the deployment guide; file a session-lineage-key issue; also F4-R12-11's `logout.md` gap | **Answered by the maintainer 2026-11-01: as recommended.** |
+| D-N44 | *(F4-R12-10)* Declare the 500 of `POST /api/v1/auth/logout` and `POST /api/v1/users/{id}/reset-mfa` in the spec (another re-vendor in eleven SDKs)? | **Declare and re-vendor**, consistent with D-N42 | **Answered by the maintainer 2026-11-01: as recommended.** |
 
 ---
 

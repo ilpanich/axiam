@@ -1333,7 +1333,8 @@ fn user_session_of(
 /// - the **tenant path binding** (`enforce_tenant_path_binding`);
 /// - a token **minted by a grant that names no session** — a client's token
 ///   without `sid` (the device grant; a code grant with no session), an RPT,
-///   an exchanged token carrying `act` or `ext_exchange`. Its session id falls
+///   an exchanged token (`axiam_exchanged`, and before #819 `act` or
+///   `ext_exchange`). Its session id falls
 ///   back to a `jti` minted fresh for that token, which names no session row,
 ///   so the session check refuses it whenever a [`SessionValidator`] is
 ///   registered, which the server always does.
@@ -1358,7 +1359,8 @@ pub fn admissible_session(
         && (claims.client_id.is_some()
             || claims.permissions.is_some()
             || claims.act.is_some()
-            || claims.ext_exchange.is_some());
+            || claims.ext_exchange.is_some()
+            || claims.axiam_exchanged.is_some());
     if grant_without_session || path_tenant.is_some_and(|tenant| tenant != identity.tenant_id) {
         return None;
     }
@@ -1789,6 +1791,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             act: None,
             permissions: None,
             ext_exchange: None,
+            axiam_exchanged: None,
             cnf: None,
             client_id: None,
             ext: None,
@@ -2008,6 +2011,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             act: None,
             permissions: None,
             ext_exchange: None,
+            axiam_exchanged: None,
             cnf: None,
             client_id: None,
             ext: None,

@@ -566,6 +566,22 @@ pub struct OAuth2Client {
     /// before schema v80.
     #[serde(default)]
     pub ciba: crate::models::ciba::CibaClientMetadata,
+    /// G-B (#817) — the federation provider this client's sign-in page starts
+    /// with when an authorization request carries no `axiam_idp_hint`.
+    ///
+    /// *The registration decides; the request may only choose among what the
+    /// tenant offers.* Validated when it is set — on create and on update — to
+    /// name a provider the client's tenant can see (its own enabled configs
+    /// plus the organization's enabled, inheritable, unshadowed ones). A
+    /// default that stops being valid later (the provider is disabled or
+    /// deleted) is not an error anywhere: the authorization endpoint ignores
+    /// it exactly as it ignores a hint that names nothing.
+    ///
+    /// Set by the administrator API only. Dynamic registration (RFC 7591) and
+    /// CIMD have no member for it. `None` on every row written before schema
+    /// v113, which is the behaviour those clients already had.
+    #[serde(default)]
+    pub default_idp: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -835,6 +851,10 @@ pub struct CreateOAuth2Client {
     /// G-7 — see [`OAuth2Client::ciba`].
     #[serde(default)]
     pub ciba: crate::models::ciba::CibaClientMetadata,
+    /// G-B (#817) — see [`OAuth2Client::default_idp`]. Only the administrator
+    /// handler sets it; the DCR and CIMD paths leave it `None`.
+    #[serde(default)]
+    pub default_idp: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -893,6 +913,17 @@ pub struct UpdateOAuth2Client {
     /// `Some(CibaClientMetadata::default())` clears them.
     #[serde(default)]
     pub ciba: Option<crate::models::ciba::CibaClientMetadata>,
+    /// G-B (#817) — see [`OAuth2Client::default_idp`]. `None` leaves it,
+    /// `Some(None)` clears it, `Some(Some(id))` sets it (the caller validates
+    /// `id` against the tenant's providers first).
+    ///
+    /// A nested `Option` rather than an empty-string sentinel: a UUID has no
+    /// spare value to mean "clear". This struct is handed to the repository,
+    /// never round-tripped through JSON, so the serde collapse of `Some(None)`
+    /// to `None` is unreachable; it is skipped when absent so a serialised
+    /// patch never claims to clear what it did not touch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_idp: Option<Option<Uuid>>,
 }
 
 /// The fields an RFC 7592 `PUT /oauth2/register/{client_id}` may replace on a
@@ -1416,6 +1447,16 @@ pub struct PushedAuthParams {
     /// never sent — the correct reading in both cases.
     #[serde(default)]
     pub resource: Option<String>,
+    /// G-B (#817) — AXIAM's `axiam_idp_hint`, pushed with the request.
+    ///
+    /// Carried for the reason the rest are: for a `require_par` client PAR is
+    /// the only carrier, and a hint added to the query string alone would be
+    /// lost by exactly those clients. Presentational only — it is resolved
+    /// against the tenant's public provider list or ignored, and decides
+    /// nothing about what is issued. `#[serde(default)]`: an older row pushed
+    /// no hint.
+    #[serde(default)]
+    pub axiam_idp_hint: Option<String>,
 }
 
 /// Input for creating a pushed authorization request.
@@ -1728,6 +1769,7 @@ mod tests {
             managed_by: ManagedBy::Admin,
             last_authorized_at: None,
             ciba: Default::default(),
+            default_idp: None,
         }
     }
 
@@ -1757,6 +1799,7 @@ mod tests {
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         }
     }
 

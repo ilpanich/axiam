@@ -71,22 +71,43 @@ pub const TOKEN_TYPE_ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token
 pub const MAY_IMPERSONATE_GRANT: &str = "urn:axiam:params:oauth:grant-type:may-impersonate";
 
 /// The OAuth2 client an AXIAM access token was issued to, as far as the token
-/// says (#518).
+/// says (#518, D-5).
 ///
-/// AXIAM tokens carry no `azp`. A token from the code, refresh, CIBA or device
-/// grant carries RFC 9068's `client_id`. A client-credentials token carries
-/// none, because its `sub` *is* the `client_id` and its audience is
-/// [`AUD_M2M`]; so for an `axiam:m2m` token without the claim the `sub` is
-/// returned. That never confuses a service account's token (also `axiam:m2m`)
-/// or an exchanged one for a client's: their `sub` is a UUID, and a client's
-/// `client_id` is an `oa_` identifier or a CIMD document URL, so it compares
-/// unequal to every client. A console sign-in carries neither and names no
-/// client at all. Read from the claims rather than `sub_kind`, which stays
-/// informational (D-10).
+/// The rule: an `actor_token` is accepted only when the token itself shows it
+/// was issued to the exchanging client — otherwise the client could write
+/// somebody else's `sub` into `act`, and an MCP server holds its callers'
+/// tokens by design.
 ///
-/// `may_act` (RFC 8693 §4.4), which would let a subject token name other
-/// parties allowed to act for it, is not read; it is planned for `1.0.x`.
+/// * A token from the code, refresh, CIBA or device grant carries RFC 9068's
+///   `client_id`, and that is the answer. AXIAM tokens carry no `azp`.
+/// * A client-credentials token carries no `client_id`, because its `sub`
+///   *is* the `client_id` and its audience is [`AUD_M2M`]; so for an
+///   `axiam:m2m` token without the claim the `sub` is returned. A service
+///   account's token (also `axiam:m2m`) has a UUID `sub`, and a client's
+///   `client_id` is an `oa_` identifier or a CIMD document URL, so it compares
+///   unequal to every client.
+/// * A console sign-in names no client at all: `None`.
+/// * **A token minted by a token exchange is never an actor: `None`** (#819).
+///   Since #819 an exchanged token carries `client_id` — the *exchanging*
+///   client, as RFC 9068 §2.2 requires — but that client only had to *hold*
+///   the subject token, not be the party it was issued to. Accepting it here
+///   would reopen #518 in two requests: exchange a foreign token as the
+///   subject (a delegation using the client's own client-credentials actor),
+///   then present the result as the `actor_token`, and the foreign token's
+///   `sub` lands in `act`. The `axiam_exchanged` marker, which every exchange
+///   shape carries (B3 delegation and impersonation, X4), is what this reads;
+///   `act` and `ext_exchange` are checked too, so a shape that somehow lost
+///   the marker still fails closed. Exchanged tokens minted before #819 carry
+///   no `client_id` and were refused by the first two arms already.
+///
+/// Read from the claims rather than `sub_kind`, which stays informational
+/// (D-10). `may_act` (RFC 8693 §4.4), which would let a subject token name
+/// other parties allowed to act for it, is not read; it is planned for
+/// `1.0.x`.
 fn actor_token_client(actor: &AccessTokenClaims) -> Option<&str> {
+    if actor.axiam_exchanged.is_some() || actor.act.is_some() || actor.ext_exchange.is_some() {
+        return None;
+    }
     match (&actor.client_id, actor.aud.as_deref()) {
         (Some(client_id), _) => Some(client_id.as_str()),
         (None, Some(AUD_M2M)) => Some(actor.sub.as_str()),
@@ -686,8 +707,9 @@ where
                 (ExchangeKind::Delegation, Some(actor.sub))
             }
             None => {
-                // Impersonation. The resulting token is indistinguishable from
-                // one the subject obtained directly, so it is off unless the
+                // Impersonation. The resulting token records no actor — only
+                // `client_id` and `axiam_exchanged` (#819) say an exchange
+                // produced it, not who acted — so it is off unless the
                 // client was explicitly granted it — and a client without the
                 // grant is REFUSED rather than silently downgraded to
                 // delegation, which would hand back a token that is not the
@@ -808,6 +830,9 @@ where
             // Same-domain: no foreign provenance to record.
             None,
             cnf.clone(),
+            // RFC 9068 §2.2 (#819): the client that ran the exchange. Never
+            // read as "issued to" by `actor_token_client`.
+            &client.client_id,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -1038,6 +1063,9 @@ where
                 iss: external.issuer.clone(),
             }),
             cnf.clone(),
+            // RFC 9068 §2.2 (#819): the client that ran the exchange. Never
+            // read as "issued to" by `actor_token_client`.
+            &client.client_id,
         )
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
@@ -1080,6 +1108,65 @@ pub const ISSUER_NOT_TRUSTED: &str =
 mod tests {
     use super::*;
     use axiam_core::models::oauth2_client::AuthnRequestParamsMode;
+
+    /// F4-W1-04 (#823) — hand-built actor claims for the fail-closed arms of
+    /// [`actor_token_client`]: a token naming `oa_exchanger` as its client,
+    /// with no `axiam_exchanged` marker, plus whatever `extra` adds.
+    fn actor_claims(extra: serde_json::Value) -> AccessTokenClaims {
+        let mut claims = serde_json::json!({
+            "sub": "00000000-0000-4000-8000-000000000001",
+            "tenant_id": "00000000-0000-4000-8000-000000000002",
+            "org_id": "00000000-0000-4000-8000-000000000003",
+            "iss": "https://axiam.test",
+            "iat": 1_700_000_000,
+            "exp": 1_700_000_900,
+            "jti": "f4w104",
+            "aud": AUD_USER,
+            "client_id": "oa_exchanger",
+        });
+        let (Some(base), Some(extra)) = (claims.as_object_mut(), extra.as_object()) else {
+            panic!("both are JSON objects");
+        };
+        base.extend(extra.clone());
+        serde_json::from_value(claims).expect("the hand-built claims deserialize")
+    }
+
+    /// The control: with no marker, `act` or `ext_exchange`, the `client_id`
+    /// claim is the answer.
+    #[test]
+    fn f4w104_a_plain_client_bound_token_names_its_client() {
+        let claims = actor_claims(serde_json::json!({}));
+        assert!(claims.axiam_exchanged.is_none());
+        assert_eq!(actor_token_client(&claims), Some("oa_exchanger"));
+    }
+
+    /// An exchanged token that lost its marker but carries `act` (a B3
+    /// delegation shape) is still never an actor, even for the client it
+    /// names.
+    #[test]
+    fn f4w104_an_unmarked_token_with_act_is_never_an_actor() {
+        let claims = actor_claims(serde_json::json!({ "act": { "sub": "oa_exchanger" } }));
+        assert!(claims.axiam_exchanged.is_none() && claims.act.is_some());
+        assert_eq!(actor_token_client(&claims), None);
+    }
+
+    /// Likewise an unmarked token carrying `ext_exchange` (the X4 shape).
+    #[test]
+    fn f4w104_an_unmarked_token_with_ext_exchange_is_never_an_actor() {
+        let claims = actor_claims(serde_json::json!({
+            "ext_exchange": { "iss": "https://partner.example" }
+        }));
+        assert!(claims.axiam_exchanged.is_none() && claims.ext_exchange.is_some());
+        assert_eq!(actor_token_client(&claims), None);
+    }
+
+    /// And the marker alone is enough, with neither of the other two.
+    #[test]
+    fn f4w104_the_marker_alone_refuses_the_actor() {
+        let claims = actor_claims(serde_json::json!({ "axiam_exchanged": true }));
+        assert!(claims.act.is_none() && claims.ext_exchange.is_none());
+        assert_eq!(actor_token_client(&claims), None);
+    }
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
@@ -1222,6 +1309,7 @@ mod tests {
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             last_authorized_at: None,
             ciba: Default::default(),
+            default_idp: None,
         };
         assert!(
             !client_may_impersonate(&client),
@@ -1418,6 +1506,7 @@ mod tests {
                 managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
                 last_authorized_at: None,
                 ciba: Default::default(),
+                default_idp: None,
             }
         }
 
@@ -1881,6 +1970,80 @@ mod tests {
             assert!(
                 err.error_description().contains("do not compose"),
                 "got: {err}"
+            );
+        }
+
+        /// G-D (#819): the X4 token names the exchanging client in RFC 9068's
+        /// `client_id` and carries the `axiam_exchanged` marker.
+        #[tokio::test]
+        async fn an_external_exchange_names_the_exchanging_client_and_is_marked() {
+            let cfg = auth_config();
+            let svc = service(
+                &cfg,
+                StubResolver::ok(subject(&["read:orders"])),
+                Arc::new(StubAuthority(vec!["read:orders".into()])),
+            );
+            let outcome = svc
+                .exchange(
+                    Uuid::new_v4(),
+                    &client(&["read:orders"]),
+                    request(foreign_token(EXT_ISS), None),
+                    None,
+                )
+                .await
+                .unwrap();
+            let claims = decode_access_token(&outcome.response.access_token, &cfg).unwrap();
+            assert_eq!(claims.client_id.as_deref(), Some("oa_gateway"));
+            assert_eq!(claims.axiam_exchanged, Some(true));
+        }
+
+        /// G-D (#819) and #518 (D-5): the actor-token rule accepts only a token
+        /// the exchanging client can show was *issued to it*. An X4 token now
+        /// carries that client's `client_id`, but the client only had to hold
+        /// a partner's token to get it, so presenting it as the `actor_token`
+        /// — by the very client it names — is refused exactly as a foreign
+        /// token is. Otherwise the partner-asserted user would land in `act`,
+        /// and cross-domain trust would compose through the actor position.
+        #[tokio::test]
+        async fn an_external_exchange_result_is_refused_as_its_own_clients_actor_token() {
+            let cfg = auth_config();
+            let tenant = Uuid::new_v4();
+            let svc = service(
+                &cfg,
+                StubResolver::ok(subject(&["read:orders"])),
+                Arc::new(StubAuthority(vec!["read:orders".into()])),
+            );
+            let gateway = client(&["read:orders"]);
+            let first = svc
+                .exchange(
+                    tenant,
+                    &gateway,
+                    request(foreign_token(EXT_ISS), None),
+                    None,
+                )
+                .await
+                .unwrap();
+
+            let subject_token = axiam_auth::token::issue_access_token(
+                Uuid::new_v4(),
+                tenant,
+                Uuid::new_v4(),
+                &["read:orders".to_string()],
+                &cfg,
+                Uuid::new_v4().to_string(),
+                AUD_USER,
+            )
+            .unwrap();
+            let mut req = request(subject_token, None);
+            req.subject_token_type = TOKEN_TYPE_ACCESS_TOKEN.into();
+            req.actor_token = Some(first.response.access_token);
+            req.actor_token_type = Some(TOKEN_TYPE_ACCESS_TOKEN.into());
+
+            let err = svc.exchange(tenant, &gateway, req, None).await.unwrap_err();
+            assert_eq!(err.error_code(), "invalid_request");
+            assert_eq!(
+                err.error_description(),
+                "actor_token was not issued to the exchanging client"
             );
         }
 

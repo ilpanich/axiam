@@ -275,6 +275,11 @@ pub struct FederationState<C: Connection + Clone> {
     /// redeems one is a federation callback.
     pub sso_handoff_code_repo: SurrealSsoHandoffCodeRepository<C>,
     pub assertion_replay_repo: SurrealAssertionReplayRepository<C>,
+    /// G-A (W2.3) — where a provider ID token presented for native sign-in is
+    /// spent (`federation_id_token_replay`, D-N10). Beside the SAML assertion
+    /// guard for the same reason: what it guards is an upstream provider's
+    /// assertion, and the native sign-in grant is its only writer.
+    pub provider_id_token_replay_repo: axiam_db::SurrealProviderIdTokenReplayRepository<C>,
     /// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
     /// OIDC federation encryption key is baked into `OidcFederationService`
     /// at construction, so absence is resolved once at startup rather than

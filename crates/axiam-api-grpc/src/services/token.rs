@@ -194,14 +194,21 @@ impl<U: UserRepository + 'static> TokenService for TokenServiceImpl<U> {
                     .as_ref()
                     .map(|e| e.iss.clone())
                     .unwrap_or_default();
-                // The client id lives in `sub` for a client-credentials token,
-                // where `sub_kind` says so. Reading it off `sub_kind` rather
-                // than pattern-matching the string is what keeps this from
-                // guessing: an `oa_`-prefixed user id would otherwise be
-                // reported as a client.
-                let client_id = match claims.sub_kind {
-                    axiam_auth::token::SubjectKind::OAuth2Client
-                    | axiam_auth::token::SubjectKind::ServiceAccount => claims.sub.clone(),
+                // RFC 9068's `client_id` claim when the token carries one —
+                // the code, refresh, CIBA and device grants, and since #819 a
+                // token exchange (the exchanging client), whose `sub` is the
+                // user. Otherwise the client id lives in `sub` for a
+                // client-credentials token, where `sub_kind` says so. Reading
+                // it off `sub_kind` rather than pattern-matching the string is
+                // what keeps this from guessing: an `oa_`-prefixed user id
+                // would otherwise be reported as a client.
+                let client_id = match (&claims.client_id, claims.sub_kind) {
+                    (Some(client_id), _) => client_id.clone(),
+                    (
+                        None,
+                        axiam_auth::token::SubjectKind::OAuth2Client
+                        | axiam_auth::token::SubjectKind::ServiceAccount,
+                    ) => claims.sub.clone(),
                     _ => String::new(),
                 };
                 Ok(Response::new(IntrospectTokenResponse {

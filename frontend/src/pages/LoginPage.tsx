@@ -33,6 +33,7 @@ import {
   layoutClassFor,
   resolveLocale,
   sanitizeDisplay,
+  sanitizeLocale,
   sanitizeLoginHint,
   useMessages,
 } from "@/i18n";
@@ -42,6 +43,9 @@ import {
   loginOpaque,
 } from "@/services/opaque";
 import {
+  autoRedirectAttempted,
+  clearAutoRedirect,
+  markAutoRedirect,
   rememberPendingSso,
   ssoCallbackUrl,
   ssoLoginService,
@@ -94,6 +98,41 @@ interface LoginResponse {
   setup_token?: string;
 }
 
+/**
+ * Error parameters that veto the auto-redirect when `/login` carries one.
+ *
+ * Defence in depth only (#833, F4-W3-04): nothing AXIAM builds puts either on
+ * `/login` — a failed provider leg ends on `SsoCallbackPage`, whose "Back to
+ * sign in" link carries no `idp` — so this is not the guard that stops a loop.
+ * It is kept because it costs nothing and covers a hand-made or third-party
+ * link back to the page.
+ */
+const SSO_ERROR_PARAMS = ["error", "error_description"] as const;
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** `idp` as a lowercase UUID, or `null` for anything else. */
+function parseIdpHint(raw: string | null): string | null {
+  return raw !== null && UUID_RE.test(raw) ? raw.toLowerCase() : null;
+}
+
+/**
+ * How long the "Redirecting to …" screen waits before navigating.
+ *
+ * 1.5 s: long enough to read the provider's name and reach the cancel button,
+ * short enough that the common case (a single-IdP tenant) does not feel
+ * stalled. Doubled for people who asked their system to reduce motion, who
+ * skew toward assistive technology and need longer to react (WCAG 2.2.1 spirit).
+ */
+const AUTO_REDIRECT_DELAY_MS = 1500;
+function autoRedirectDelayMs(): number {
+  const reduced =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return reduced ? AUTO_REDIRECT_DELAY_MS * 2 : AUTO_REDIRECT_DELAY_MS;
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
   const { setUser, setTenantContext } = useAuthStore();
@@ -112,6 +151,12 @@ export function LoginPage() {
   // own, so these checks are the ones that have to hold on their own — the
   // same argument `sanitizeReturnTo` and `sanitizeRequiredAcr` make.
   const [locale] = useState(() => resolveLocale(searchParams.get("ui_locale")));
+  // The locale the hop *asked for*, as opposed to the one rendered (which falls
+  // back to the default): only the former is handed on with a federated
+  // sign-in's hop (#832), so a retry renders exactly as this page did.
+  const [requestedLocale] = useState(() =>
+    sanitizeLocale(searchParams.get("ui_locale")),
+  );
   const [displayMode] = useState(() =>
     sanitizeDisplay(searchParams.get("display")),
   );
@@ -148,11 +193,14 @@ export function LoginPage() {
   const [returnTo] = useState<string | null>(() =>
     sanitizeReturnTo(searchParams.get("return_to"))
   );
-  // `reauth=1` says this browser arrived believing it was signed in and was
-  // not — it presented an `axiam_op_session` cookie that resolved to no live
-  // session. Trusting whatever is left in the store would be how a hop becomes
-  // a loop, so the leftovers are cleared and the user is told why they are
-  // being asked again.
+  // `reauth=1` says not to trust what this browser holds: either it arrived
+  // believing it was signed in and was not — it presented an
+  // `axiam_op_session` cookie that resolved to no live session — or the
+  // authorization endpoint's honour lane needs a fresh sign-in from a live
+  // session (`prompt=login`, an unmet `max_age` or `acr`, a hint naming
+  // somebody else); the CIBA step-up link sets it too. Trusting whatever is
+  // left in the store would be how a hop becomes a loop, so the leftovers are
+  // cleared and the user is told why they are being asked again.
   const [reauthRequested] = useState<boolean>(
     () => searchParams.get("reauth") === "1"
   );
@@ -165,6 +213,60 @@ export function LoginPage() {
   const [requiredAcr] = useState(() =>
     sanitizeRequiredAcr(searchParams.get("acr"))
   );
+  // G-B (W3.2) — `idp=<uuid>`, the provider `/oauth2/authorize` resolved from
+  // `axiam_idp_hint` or the client's `default_idp`. Read once, like `return_to`,
+  // and only ever *compared* with the ids of the providers the public listing
+  // returned: it is never used to build a URL, so a hand-written
+  // `/login?idp=…` can at worst start a provider this tenant already shows as a
+  // button. Anything that is not a UUID is dropped here.
+  //
+  // That claim rests on *which* tenant: the providers are loaded only when the
+  // person submits the workspace step, never from `?org=`/`?tenant=` or from
+  // anything in `return_to` (#833, F4-W3-02). Loading them from the URL would
+  // let a hand-made `/login?org=<theirs>&idp=<their provider>` send a visitor
+  // to any tenant operator's identity provider with no click — an open
+  // redirect on AXIAM's origin. Binding the workspace to the hop has to be done
+  // server-side, never through a URL parameter.
+  const [idpHint] = useState(() => parseIdpHint(searchParams.get("idp")));
+  // #833 (F4-W3-03, D-N26) — a re-authentication is never started for the
+  // person. `prompt=login` and `max_age` are not forwarded to the upstream
+  // provider (a later item), so a provider that still holds a session would
+  // answer at once and AXIAM would record a fresh authentication nobody
+  // performed. On such a hop the matching provider is only *suggested* —
+  // highlighted among the buttons — and the person has to click it.
+  //
+  // #835 (D-N28) — which hops those are is the **server's** call, never this
+  // page's reading of `return_to`: `reauth=1` (the browser's session is not to
+  // be trusted — see the effect below for when that is), a step-up `acr`, or
+  // `fresh=1`, which `/oauth2/authorize` adds to a first leg whose request in
+  // force — inline or pushed through PAR — says `prompt=login` or `max_age=0`.
+  // Under PAR this page could not see those values at all, and reading them
+  // out of `return_to` was a second parser of one value (F4-W3-12, -14).
+  // `fresh` is not stripped from the URL: unlike `reauth` it has no effect to
+  // repeat, and a reload must stay quiet. For the same reason the strip below
+  // writes it in place of a `reauth`/`acr` it removes (#836, F4-W3-17).
+  const [freshAuthRequired] = useState(
+    () =>
+      reauthRequested ||
+      requiredAcr !== null ||
+      searchParams.get("fresh") === "1",
+  );
+  // Whether this page load is a second visit for the same provider (Back
+  // button, a relying party restarting the request, a reload after "choose
+  // another way"), or carries an error parameter (defence in depth; see
+  // `SSO_ERROR_PARAMS`). Either way the person already saw that provider;
+  // sending them there again is the loop. Evaluated once, before this page
+  // records its own attempt, so it cannot see itself. The return from a failed
+  // leg is quiet for a simpler reason: its link carries no `idp`.
+  const [autoSuppressed] = useState(
+    () =>
+      SSO_ERROR_PARAMS.some((k) => searchParams.has(k)) ||
+      (idpHint !== null && autoRedirectAttempted(idpHint)),
+  );
+  const [autoCancelled, setAutoCancelled] = useState(false);
+  // Set when the timer fires. A ref, not state: StrictMode's second effect run
+  // must see it, and nothing renders from it.
+  const autoStarted = useRef(false);
   // W4 (T1.6) — the loop guard. `null` until the check below runs; a string is
   // the message shown *instead* of the form.
   const [loopBlocked, setLoopBlocked] = useState<string | null>(null);
@@ -185,15 +287,27 @@ export function LoginPage() {
       // `return_to` deliberately does NOT — a user who reloads this page must
       // still land back on the authorization request they came from, and the
       // value is re-validated on every read anyway.
+      //
+      // #836 (F4-W3-17) — but `reauth` and `acr` are also two of the three
+      // marks that keep this hop from auto-starting the hinted provider, and
+      // `idp` stays. Stripped bare, a reload would read an unmarked hop and
+      // start the provider for the person after the workspace step: the
+      // unattended re-authentication D-N26 rules out, behind one reload. So
+      // when this load was marked, the mark is carried on as `fresh=1`, the
+      // one that has no effect to repeat: the reload stays quiet, keeps the
+      // provider highlighted, and — `reauth` being gone — neither signs out
+      // again nor counts as another hop for the loop guard. `fresh` is read
+      // only here; the server writes it on a first leg and never reads it.
       const next = new URLSearchParams(searchParams);
       next.delete("bootstrapped");
       next.delete("org");
       next.delete("tenant");
       next.delete("reauth");
       next.delete("acr");
+      if (freshAuthRequired) next.set("fresh", "1");
       setSearchParams(next, { replace: true });
     }
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, freshAuthRequired]);
 
   // W3 — `reauth` mode. End whatever session this browser still holds before
   // showing the form, so that what follows is a real authentication event:
@@ -288,6 +402,7 @@ export function LoginPage() {
    * permissions array.
    */
   const completeSignIn = async () => {
+    clearAutoRedirect();
     const hydrated = await fetchCurrentUser();
     if (!hydrated) {
       setError(m.authenticationError);
@@ -426,10 +541,18 @@ export function LoginPage() {
    * because that is what the binding is.
    *
    * Nothing is stored client-side beyond which completion endpoint to use when
-   * the browser comes back: the `state` round-trips through the provider, and
-   * the nonce and PKCE verifier never leave the server.
+   * the browser comes back, the start's `state` and, on a login hop, the hop
+   * itself (#832): the `state` round-trips through the provider (and is echoed
+   * on a SAML or Apple handoff), and the nonce and PKCE verifier never leave
+   * the server. The stored `state` is only *compared* — it binds the hop to
+   * this start (#835, D-N29). The hop is what lets `SsoCallbackPage` resume the
+   * relying party's authorization request instead of ending on the dashboard;
+   * `return_to` is the value `sanitizeReturnTo` already accepted, re-validated
+   * once more here and again when it is read back.
    */
-  const handleSsoSelect = async (provider: PublicFederationProvider) => {
+  const handleSsoSelect = async (
+    provider: PublicFederationProvider,
+  ): Promise<boolean> => {
     setError(null);
     setSsoBusyId(provider.id);
     const body = {
@@ -440,20 +563,42 @@ export function LoginPage() {
       federation_config_id: provider.id,
       redirect_uri: ssoCallbackUrl(),
     };
-    rememberPendingSso({
-      protocol: provider.protocol,
-      displayName: provider.display_name,
-    });
+    const hopReturnTo = sanitizeReturnTo(returnTo);
+    // Written once the start has answered and before the browser leaves, so
+    // the record carries the start's own `state` (SAML: its `relay_state`):
+    // the callback resumes the hop only when it comes back with that value
+    // (#835, D-N29), and a start that failed leaves no record behind.
+    const remember = (state: string | undefined) =>
+      rememberPendingSso({
+        protocol: provider.protocol,
+        displayName: provider.display_name,
+        ...(state ? { state } : {}),
+        ...(hopReturnTo
+          ? {
+              hop: {
+                returnTo: hopReturnTo,
+                ...(requiredAcr ? { acr: requiredAcr } : {}),
+                ...(requestedLocale ? { uiLocale: requestedLocale } : {}),
+                ...(displayMode ? { display: displayMode } : {}),
+                ...(loginHint ? { loginHint } : {}),
+              },
+            }
+          : {}),
+      });
     try {
       if (provider.protocol === "Saml") {
-        submitSamlAuthnRequest(await ssoLoginService.startSaml(body));
-        return;
+        const saml = await ssoLoginService.startSaml(body);
+        remember(saml.relay_state);
+        submitSamlAuthnRequest(saml);
+        return true;
       }
       const start =
         provider.protocol === "OAuth2"
           ? await ssoLoginService.startOauth2(body)
           : await ssoLoginService.startOidc(body);
+      remember(start.state);
       window.location.assign(start.authorize_url);
+      return true;
     } catch (err) {
       setSsoBusyId(null);
       setError(
@@ -462,8 +607,43 @@ export function LoginPage() {
           format(m.ssoStartFailed, { provider: provider.display_name }),
         ),
       );
+      return false;
     }
   };
+
+  // G-B (W3.2) — the provider to start by itself, if any: the hint names a
+  // loaded provider, the person has not declined, and nothing says we have been
+  // here before. No match (unknown, disabled, other tenant, garbled) is simply
+  // "no auto-redirect": the page is the ordinary one.
+  const hintedProvider =
+    idpHint !== null && providers
+      ? (providers.find((p) => p.id.toLowerCase() === idpHint) ?? null)
+      : null;
+  const autoProvider =
+    !autoSuppressed && !autoCancelled && !freshAuthRequired ? hintedProvider : null;
+  // On a re-authentication hop the hinted provider is highlighted, not started.
+  const suggestedProviderId = freshAuthRequired ? (hintedProvider?.id ?? null) : null;
+  const autoPending = autoProvider !== null && !loopBlocked;
+  const autoProviderId = autoPending ? autoProvider.id : null;
+
+  useEffect(() => {
+    if (!autoProvider || autoStarted.current) return;
+    const timer = window.setTimeout(() => {
+      if (autoStarted.current) return;
+      autoStarted.current = true;
+      // Recorded before navigating away so Back from the provider lands on a
+      // page that does not repeat it.
+      markAutoRedirect(autoProvider.id.toLowerCase());
+      void handleSsoSelect(autoProvider).then((started) => {
+        // A start that failed shows the ordinary page with its error banner.
+        if (!started) setAutoCancelled(true);
+      });
+    }, autoRedirectDelayMs());
+    return () => window.clearTimeout(timer);
+    // Keyed on the provider's id: `autoProvider` is a new object per
+    // `providers` array, and re-arming on identity would restart the delay.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoProviderId]);
 
   const handleOrgTenantSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -729,8 +909,47 @@ export function LoginPage() {
           </div>
         )}
 
+        {/* G-B: the relying party (or the client's default) chose a provider.
+            A live region, so the announcement is not left to the focus move;
+            the cancel control is a real button and takes focus, so a keyboard
+            or screen-reader user can decline before the delay elapses. */}
+        {autoPending && (
+          <div className="py-6 text-center" data-testid="idp-auto-redirect">
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex flex-col items-center gap-3"
+            >
+              <Loader2
+                size={28}
+                className="animate-spin motion-reduce:animate-none text-primary"
+                aria-hidden="true"
+              />
+              <p className="text-sm text-muted-foreground">
+                {format(m.ssoRedirecting, {
+                  provider: autoProvider.display_name,
+                })}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              className="mt-4"
+              autoFocus
+              onClick={() => {
+                // #833 (F4-W3-11) — recorded like a start, so a reload does
+                // not restart the countdown the person just declined.
+                markAutoRedirect(autoProvider.id.toLowerCase());
+                setAutoCancelled(true);
+              }}
+            >
+              {m.ssoChooseAnother}
+            </Button>
+          </div>
+        )}
+
         {/* Step 1: Org + Tenant */}
-        {!loopBlocked && step === "org-tenant" && (
+        {!loopBlocked && !autoPending && step === "org-tenant" && (
           <form onSubmit={handleOrgTenantSubmit}>
             <fieldset>
               <legend className="text-lg font-semibold text-foreground mb-1">
@@ -798,7 +1017,7 @@ export function LoginPage() {
         )}
 
         {/* Step 2: Credentials */}
-        {!loopBlocked && step === "credentials" && (
+        {!loopBlocked && !autoPending && step === "credentials" && (
           <form onSubmit={handleCredentialsSubmit}>
             <div className="mb-6">
               <h2 className="text-lg font-semibold text-foreground mb-1">
@@ -960,6 +1179,7 @@ export function LoginPage() {
                         provider={p}
                         onSelect={handleSsoSelect}
                         busy={ssoBusyId === p.id}
+                        suggested={p.id === suggestedProviderId}
                         disabled={
                           isLoading || passkeyBusy || ssoBusyId !== null
                         }
@@ -1008,7 +1228,7 @@ export function LoginPage() {
         )}
 
         {/* Step 3: MFA */}
-        {!loopBlocked && step === "mfa" && (
+        {!loopBlocked && !autoPending && step === "mfa" && (
           <form onSubmit={handleMfaSubmit}>
             <div className="flex flex-col items-center mb-6">
               <div className="h-12 w-12 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center mb-3 shadow-glow-cyan">

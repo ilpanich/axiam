@@ -985,6 +985,9 @@ where
         user_repo.clone(),
         webauthn_cred_repo.clone(),
         session_repo.clone(),
+        // D-N40 (#841): the reset revokes the user's OAuth2 refresh tokens
+        // through the same repository the password reset uses.
+        directory_sync_refresh_repo.clone(),
     );
 
     // X3 wave 3: attestation-policy resolution, MDS metadata, and the
@@ -1313,12 +1316,16 @@ where
     // service that decides what an externally registered client's token may
     // carry. Left unwired, those services refuse such clients with
     // `server_error` rather than trust the client row.
-    let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy =
-        Arc::new(axiam_api_rest::scope_policy::SettingsScopePolicy::new(
-            tenant_repo.clone(),
-            settings_repo.clone(),
-            Arc::clone(&tenant_org_cache),
-        ));
+    let settings_policy = Arc::new(axiam_api_rest::scope_policy::SettingsScopePolicy::new(
+        tenant_repo.clone(),
+        settings_repo.clone(),
+        Arc::clone(&tenant_org_cache),
+    ));
+    let scope_policy: axiam_oauth2::scope_ceiling::SharedScopePolicy = settings_policy.clone();
+    // G-C (#818) — the tenant's effective `oauth2.refresh_reuse_response`, read
+    // by the token endpoint only after a refresh-token replay was refused.
+    let refresh_reuse_policy: axiam_oauth2::refresh_reuse::SharedRefreshReusePolicy =
+        settings_policy;
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
@@ -1359,6 +1366,8 @@ where
     .with_reactor_gate(Arc::clone(&reactor_gate))
     // #613 (T-289) — see `scope_policy` above.
     .with_scope_policy(Arc::clone(&scope_policy))
+    // G-C (#818) — see `refresh_reuse_policy` above.
+    .with_refresh_reuse_policy(refresh_reuse_policy)
     // X5.1 — `private_key_jwt` (RFC 7523 §2.2), one of FAPI 2.0's two
     // client-authentication families.
     //
@@ -2929,6 +2938,9 @@ where
         Arc::new(saml_participant_repo.clone()),
         Arc::new(saml_logout_run_repo.clone()),
         Arc::new(amqp_nonce_repo.clone()),
+        Arc::new(axiam_db::SurrealProviderIdTokenReplayRepository::new(
+            db_handle.clone(),
+        )),
         Arc::new(user_repo.clone()),
         Arc::new(auth_service.clone()),
         Arc::new(audit_repo.clone()),
@@ -3218,6 +3230,11 @@ where
             federation_login_state_repo: federation_login_state_repo.clone(),
             sso_handoff_code_repo: sso_handoff_code_repo.clone(),
             assertion_replay_repo: assertion_replay_repo.clone(),
+            // G-A (W2.3) — the native sign-in grant's replay guard; the same
+            // table the cleanup sweep above prunes.
+            provider_id_token_replay_repo: axiam_db::SurrealProviderIdTokenReplayRepository::new(
+                db_handle.clone(),
+            ),
             oidc_federation_service: oidc_federation_service.clone(),
             #[cfg(feature = "saml")]
             saml_federation_service: saml_federation_service.clone(),

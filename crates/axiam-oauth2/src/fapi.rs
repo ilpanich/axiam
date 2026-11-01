@@ -1159,6 +1159,7 @@ mod tests {
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             last_authorized_at: None,
             ciba: Default::default(),
+            default_idp: None,
         }
     }
 
@@ -2275,6 +2276,7 @@ mod tests {
             display: Some("page"),
             ui_locales: Some("en-GB"),
             claims_locales: Some("en"),
+            axiam_idp_hint: None,
         });
         assert!(
             enforce_authorization_request(&c, None, &everything, &[]).is_ok(),

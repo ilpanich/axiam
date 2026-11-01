@@ -192,6 +192,7 @@ async fn ciba_client(db: &Surreal<TestDb>, tenant_id: Uuid) -> CibaClient {
                 backchannel_token_delivery_mode: Some(CibaDeliveryMode::Poll),
                 ..Default::default()
             },
+            default_idp: None,
         })
         .await
         .unwrap();

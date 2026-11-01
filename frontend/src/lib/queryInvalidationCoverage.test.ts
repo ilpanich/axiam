@@ -64,6 +64,8 @@ const STANDALONE: Record<string, string> = {
   "scim-target-groups":
     "the group picker of the SCIM Targets form: a read-only list of the tenant's groups, fetched when the picker opens, so a stale copy costs one reopen",
   webhooks: "shown only on the Webhooks page",
+  "oauth2-client-idp-options":
+    "the OAuth2 client form's Default identity provider select: a read-only copy of the public providers listing, fetched when the page opens and stale for at most a minute",
   "group-service-accounts":
     "service-account membership of a group, invalidated by its own page alongside `service-accounts`",
   "role-service-accounts":

@@ -9,10 +9,10 @@ use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::settings::{
     CertificatePolicy, CimdPolicy, DEFAULT_DCR_MAX_CLIENTS, DEFAULT_DCR_UNUSED_CLIENT_TTL_DAYS,
     DynamicRegistrationMode, EmailVerificationPolicy, LockoutPolicy, MfaPolicy, NotificationPolicy,
-    OidcPolicy, OpaquePolicy, PasswordPolicy, PrivacyPolicy, SecuritySettings, SetOrgSettings,
-    SetTenantOverride, SettingsScope, TenantSettingsOverride, TokenPolicy, WebauthnPolicy,
-    clamp_overrides_to_org, diff_against_org, effective_settings, settings_from_org_input,
-    system_defaults,
+    OAuth2Policy, OidcPolicy, OpaquePolicy, PasswordPolicy, PrivacyPolicy, RefreshReuseResponse,
+    SecuritySettings, SetOrgSettings, SetTenantOverride, SettingsScope, TenantSettingsOverride,
+    TokenPolicy, WebauthnPolicy, clamp_overrides_to_org, diff_against_org, effective_settings,
+    settings_from_org_input, system_defaults,
 };
 use axiam_core::models::webauthn_policy::WebauthnUserVerification;
 use axiam_core::repository::SettingsRepository;
@@ -109,6 +109,10 @@ struct SettingsRow {
     // resolves to *off*, like the SAML switch above.
     #[surreal(default)]
     oidc_ssf_enabled: Option<bool>,
+    // Refresh-token reuse response (V110 / G-C, #818). Absent — a pre-V110
+    // row — reads as the default, `revoke_session` (D-N2).
+    #[surreal(default)]
+    oauth2_refresh_reuse_response: Option<String>,
     // Server certificate names (V67 / T22.14). The organization baseline of
     // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
     // refuses every `Server` request (I1). A tenant row carries the resolved
@@ -204,6 +208,10 @@ struct SettingsRowWithId {
     // resolves to *off*, like the SAML switch above.
     #[surreal(default)]
     oidc_ssf_enabled: Option<bool>,
+    // Refresh-token reuse response (V110 / G-C, #818). Absent — a pre-V110
+    // row — reads as the default, `revoke_session` (D-N2).
+    #[surreal(default)]
+    oauth2_refresh_reuse_response: Option<String>,
     // Server certificate names (V67 / T22.14). The organization baseline of
     // the S-7 fence; absent — a pre-V67 row — reads as the empty list, which
     // refuses every `Server` request (I1). A tenant row carries the resolved
@@ -348,6 +356,22 @@ fn decode_oidc(
     }
 }
 
+/// Decode the V110 `oauth2_refresh_reuse_response` column (G-C, #818).
+///
+/// Absent — a pre-V110 row — reads as the default, `revoke_session` (D-N2),
+/// and so does a value this build cannot parse. Unlike most columns in this
+/// file the default *is* the stricter value, so the fallback and the strict
+/// direction coincide: no shape of stored data turns the revocation off by
+/// accident, and the column's `ASSERT` keeps anything but the two spellings
+/// out in the first place.
+fn decode_oauth2(raw: Option<&str>) -> OAuth2Policy {
+    OAuth2Policy {
+        refresh_reuse_response: raw
+            .and_then(RefreshReuseResponse::from_wire)
+            .unwrap_or_default(),
+    }
+}
+
 fn decode_opaque(mode: Option<&str>, suite: Option<&str>, ksf: Option<&str>) -> OpaquePolicy {
     OpaquePolicy {
         opaque_mode: mode
@@ -436,6 +460,7 @@ impl SettingsRowWithId {
                 self.oidc_saml_idp_enabled,
                 self.oidc_ssf_enabled,
             ),
+            oauth2: decode_oauth2(self.oauth2_refresh_reuse_response.as_deref()),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -485,6 +510,7 @@ oidc_dcr_unused_client_ttl_days = $oidc_dcr_unused_client_ttl_days, \
 oidc_cimd_json = $oidc_cimd_json, \
 oidc_saml_idp_enabled = $oidc_saml_idp_enabled, \
 oidc_ssf_enabled = $oidc_ssf_enabled, \
+oauth2_refresh_reuse_response = $oauth2_refresh_reuse_response, \
 overrides_json = $overrides_json";
 
 const SELECT_WITH_ID: &str = "\
@@ -680,6 +706,11 @@ impl<C: Connection> SurrealSettingsRepository<C> {
         bindings.push((
             "oidc_ssf_enabled",
             BindValue::Bool(settings.oidc.ssf_enabled),
+        ));
+        // G-C (#818) — fully resolved, always written.
+        bindings.push((
+            "oauth2_refresh_reuse_response",
+            BindValue::Str(settings.oauth2.refresh_reuse_response.as_str().to_owned()),
         ));
         bindings.push(("overrides_json", BindValue::OptionStr(overrides_json)));
         bindings
@@ -944,6 +975,7 @@ impl<C: Connection> SurrealSettingsRepository<C> {
                 row.oidc_saml_idp_enabled,
                 row.oidc_ssf_enabled,
             ),
+            oauth2: decode_oauth2(row.oauth2_refresh_reuse_response.as_deref()),
             created_at: row.created_at,
             updated_at: row.updated_at,
         })

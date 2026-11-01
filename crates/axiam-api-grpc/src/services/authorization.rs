@@ -434,6 +434,7 @@ mod tests {
             act: None,
             permissions: None,
             ext_exchange: None,
+            axiam_exchanged: None,
             cnf: None,
             client_id: None,
             // OIDC Core §5.5: this fixture is not issued from an authorization

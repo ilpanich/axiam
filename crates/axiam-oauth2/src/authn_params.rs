@@ -50,6 +50,17 @@
 //! page *looks like*, so ignoring one costs a relying party nothing it can
 //! detect, and refusing `login_hint` — which client libraries send by reflex —
 //! would break working clients for no security gain.
+//!
+//! # And one AXIAM parameter beside the nine (G-B, #817)
+//!
+//! `axiam_idp_hint` names the federation provider the sign-in page should
+//! start with. It is not an OIDC parameter, so it is none of the nine: it is
+//! not recorded in [`AuthnRequestParams::present`], it is never a parse error
+//! and it is never security-bearing. It is carried here only so that the two
+//! carriers (the query string and a pushed request) reach it through the one
+//! parse, bounded the way `login_hint` is. Resolving it to a provider is the
+//! REST layer's job, against the tenant's public provider list; see
+//! [`AuthnRequestParams::idp_hint`].
 
 use axiam_core::models::oauth2_client::PushedAuthParams;
 
@@ -132,6 +143,9 @@ pub struct RawAuthnParams<'a> {
     pub display: Option<&'a str>,
     pub ui_locales: Option<&'a str>,
     pub claims_locales: Option<&'a str>,
+    /// G-B (#817) — AXIAM's `axiam_idp_hint`, not one of the nine. See
+    /// [`AuthnRequestParams::idp_hint`].
+    pub axiam_idp_hint: Option<&'a str>,
 }
 
 impl<'a> From<&'a PushedAuthParams> for RawAuthnParams<'a> {
@@ -146,6 +160,7 @@ impl<'a> From<&'a PushedAuthParams> for RawAuthnParams<'a> {
             display: p.display.as_deref(),
             ui_locales: p.ui_locales.as_deref(),
             claims_locales: p.claims_locales.as_deref(),
+            axiam_idp_hint: p.axiam_idp_hint.as_deref(),
         }
     }
 }
@@ -261,6 +276,25 @@ pub struct AuthnRequestParams {
     pub ui_locales: Option<String>,
     /// A space-separated BCP 47 list.
     pub claims_locales: Option<String>,
+    /// G-B (#817) — `axiam_idp_hint`: a provider's UUID, `provider_slug` or
+    /// branded kind name (D-N24), as the relying party sent it.
+    ///
+    /// Bounded to [`MAX_HINT_LEN`] bytes and dropped — never truncated — when
+    /// longer, or when it is not the UTF-8 the relying party meant (a value
+    /// the query decoder had to repair carries U+FFFD and can name no slug and
+    /// no UUID). Unlike the cosmetic four, a dropped hint records **no parse
+    /// error**: on the honour lane a parse error is a refusal, and a hint that
+    /// names nothing must be answered exactly as a request that sent none
+    /// (§3.2 of the social-login gap plan, T-493). Nor is it recorded in
+    /// [`Self::present`]: it is not one of the nine, so it can neither make a
+    /// `fapi2` request refusable nor make the honour lane refuse a pushed
+    /// request whose query string carries a copy.
+    ///
+    /// This string never reaches a page. The REST layer resolves it against
+    /// the request tenant's effective, enabled provider list, and what crosses
+    /// into the login-hop URL is the matched provider's id — a type — or
+    /// nothing.
+    pub idp_hint: Option<String>,
 
     /// Which of the nine arrived at all, malformed ones included.
     present: Vec<&'static str>,
@@ -426,6 +460,10 @@ impl AuthnRequestParams {
             }
         }
 
+        // G-B — `axiam_idp_hint`. Bounded like the cosmetic four, but silent:
+        // see the field's docs for why an unusable hint is no error.
+        out.idp_hint = bound_idp_hint(raw.axiam_idp_hint).map(str::to_owned);
+
         out
     }
 
@@ -446,6 +484,25 @@ impl AuthnRequestParams {
     /// Whether any of the nine arrived.
     pub fn is_empty(&self) -> bool {
         self.present.is_empty()
+    }
+
+    /// Whether this request demands a fresh authentication **whatever the
+    /// browser already holds**: `prompt` names `login`, or `max_age` is `0`
+    /// (D-14: `max_age=0` *is* `prompt=login`).
+    ///
+    /// The one predicate the honour lane's decision and the login hop's
+    /// re-authentication marker (#835, D-N28) share, so that the server and
+    /// the sign-in page cannot read a spelling differently: both go through
+    /// this parse, which splits `prompt` on ASCII whitespace and reads
+    /// `max_age` as a trimmed `u64` — `00`, `+0` and ` 0` are all `0`, and
+    /// `consent\tlogin` names `login` (F4-W3-14).
+    ///
+    /// A positive `max_age` is deliberately not on it. It is a test of a
+    /// session's age, and a browser with no session passes it with any sign-in
+    /// at all; `prompt=consent` and `prompt=select_account` ask a question,
+    /// not for a credential.
+    pub fn demands_fresh_authentication(&self) -> bool {
+        self.max_age == Some(0) || self.prompt.contains(&Prompt::Login)
     }
 
     /// The security-bearing parameters that arrived — the ones that change
@@ -472,6 +529,25 @@ impl AuthnRequestParams {
             })
             .collect()
     }
+}
+
+/// G-B — the one rule an `axiam_idp_hint` passes before anything reads it, on
+/// either carrier: trimmed, non-blank, at most [`MAX_HINT_LEN`] bytes and free
+/// of U+FFFD; `None` otherwise — dropped, never truncated, never an error.
+///
+/// Trimming is [`str::trim`], which removes leading and trailing **Unicode**
+/// whitespace — CR, LF and TAB included — so `corp-okta%0A` and `%09corp-okta`
+/// name `corp-okta` (F4-W3-07). Interior control characters, NUL and
+/// zero-width characters are not folded; such a hint matches no slug and no
+/// UUID and is ignored. Nothing the hint contains reaches a URL either way:
+/// only a matched provider's id does.
+///
+/// The query string reaches this through [`AuthnRequestParams::parse`]; the
+/// PAR endpoint applies it at push time (F4-W3-09), so a pushed hint is stored
+/// already bounded and an over-long one is stored as no hint — answered, when
+/// the browser arrives, exactly as the same value on the query string is.
+pub fn bound_idp_hint(raw: Option<&str>) -> Option<&str> {
+    present(raw).filter(|v| v.len() <= MAX_HINT_LEN && !v.contains(char::REPLACEMENT_CHARACTER))
 }
 
 /// A parameter counts as present only when it is there and not blank.
@@ -1087,6 +1163,7 @@ mod tests {
             display: Some("page"),
             ui_locales: Some("en-GB"),
             claims_locales: Some("en"),
+            axiam_idp_hint: None,
         });
         assert_eq!(from_par, inline);
     }
@@ -1101,5 +1178,155 @@ mod tests {
             ..Default::default()
         });
         assert!(p.parse_error().is_some_and(|e| e.contains("teleport")));
+    }
+
+    /// G-B (#817) — the hint travels both carriers through the one parse.
+    #[test]
+    fn the_idp_hint_is_read_from_both_carriers_alike() {
+        let pushed = PushedAuthParams {
+            response_type: "code".into(),
+            redirect_uri: "https://rp.example/cb".into(),
+            axiam_idp_hint: Some("corp-okta".into()),
+            ..Default::default()
+        };
+        let from_par = AuthnRequestParams::parse(&RawAuthnParams::from(&pushed));
+        let inline = parse(RawAuthnParams {
+            axiam_idp_hint: Some("corp-okta"),
+            ..Default::default()
+        });
+        assert_eq!(from_par, inline);
+        assert_eq!(inline.idp_hint.as_deref(), Some("corp-okta"));
+    }
+
+    /// G-B (#817), T-493 — bounded exactly like `login_hint` (dropped, never
+    /// cut), but a dropped hint is **no parse error**, because on the honour
+    /// lane a parse error is a refusal and an unusable hint must be answered
+    /// as no hint at all.
+    #[test]
+    fn an_unusable_idp_hint_is_dropped_silently() {
+        let ok = "x".repeat(MAX_HINT_LEN);
+        let p = parse(RawAuthnParams {
+            axiam_idp_hint: Some(&ok),
+            ..Default::default()
+        });
+        assert_eq!(p.idp_hint.as_deref(), Some(ok.as_str()));
+
+        let long = "x".repeat(MAX_HINT_LEN + 1);
+        let repaired = "corp\u{FFFD}okta";
+        for (label, value) in [
+            ("too long", long.as_str()),
+            ("not UTF-8 as sent", repaired),
+            ("blank", "   "),
+        ] {
+            let p = parse(RawAuthnParams {
+                axiam_idp_hint: Some(value),
+                ..Default::default()
+            });
+            assert_eq!(p.idp_hint, None, "{label}: dropped");
+            assert!(p.parse_error().is_none(), "{label}: never a parse error");
+            assert_eq!(p, AuthnRequestParams::default(), "{label}: as if unsent");
+        }
+    }
+
+    /// F4-W3-07 / F4-W3-09 — the shared bound: what the query parse keeps is
+    /// exactly what `bound_idp_hint` keeps, and trimming is `str::trim`, so
+    /// CR, LF and TAB at the ends are folded while interior ones are not.
+    #[test]
+    fn the_shared_idp_hint_bound_trims_unicode_whitespace_and_matches_the_parse() {
+        let long = "x".repeat(MAX_HINT_LEN + 1);
+        for value in [
+            "corp-okta",
+            " corp-okta ",
+            "corp-okta\n",
+            "\tcorp-okta",
+            "\r\ncorp-okta",
+            "corp\nokta",
+            long.as_str(),
+            "corp\u{FFFD}okta",
+            "   ",
+        ] {
+            let parsed = parse(RawAuthnParams {
+                axiam_idp_hint: Some(value),
+                ..Default::default()
+            });
+            assert_eq!(
+                parsed.idp_hint.as_deref(),
+                bound_idp_hint(Some(value)),
+                "{value:?}: the push-time bound and the query bound agree"
+            );
+        }
+        assert_eq!(bound_idp_hint(Some("corp-okta\n")), Some("corp-okta"));
+        assert_eq!(bound_idp_hint(Some("\tcorp-okta")), Some("corp-okta"));
+        assert_eq!(bound_idp_hint(Some("corp\nokta")), Some("corp\nokta"));
+        assert_eq!(bound_idp_hint(Some(&long)), None);
+        assert_eq!(bound_idp_hint(None), None);
+    }
+
+    /// G-B (#817) — the hint is not one of the nine: it is not `present`, so
+    /// it neither makes a `fapi2` request refusable nor counts as an inline
+    /// authentication-request parameter beside a `request_uri`.
+    #[test]
+    fn the_idp_hint_is_not_one_of_the_nine() {
+        let p = parse(RawAuthnParams {
+            axiam_idp_hint: Some("google-workspace"),
+            ..Default::default()
+        });
+        assert!(p.is_empty(), "{:?}", p.present());
+        assert!(p.security_bearing_present().is_empty());
+        assert!(p.parse_error().is_none());
+    }
+
+    /// #835 (D-N28, F4-W3-14) — the fresh-authentication predicate reads every
+    /// spelling the way the honour lane does, because it *is* the honour
+    /// lane's parse: `prompt` split on ASCII whitespace, `max_age` a trimmed
+    /// `u64`.
+    #[test]
+    fn fresh_authentication_is_prompt_login_or_max_age_zero_in_any_spelling() {
+        for (prompt, max_age) in [
+            (Some("login"), None),
+            (Some("consent login"), None),
+            (Some("consent\tlogin"), None),
+            (Some("consent\nlogin"), None),
+            (Some("login\r\nconsent"), None),
+            (None, Some("0")),
+            (None, Some("00")),
+            (None, Some("+0")),
+            (None, Some(" 0")),
+            (None, Some("0\t")),
+            (Some("consent"), Some("0")),
+        ] {
+            let p = parse(RawAuthnParams {
+                prompt,
+                max_age,
+                ..Default::default()
+            });
+            assert!(
+                p.demands_fresh_authentication(),
+                "prompt={prompt:?} max_age={max_age:?} demands a fresh authentication"
+            );
+        }
+        for (prompt, max_age) in [
+            (None, None),
+            (Some("consent"), None),
+            (Some("select_account"), None),
+            (Some("none"), None),
+            (Some("Login"), None),
+            (Some("logins"), None),
+            (None, Some("1")),
+            (None, Some("3600")),
+            (None, Some("-0")),
+            (None, Some("0.0")),
+            (None, Some("")),
+        ] {
+            let p = parse(RawAuthnParams {
+                prompt,
+                max_age,
+                ..Default::default()
+            });
+            assert!(
+                !p.demands_fresh_authentication(),
+                "prompt={prompt:?} max_age={max_age:?} does not"
+            );
+        }
     }
 }

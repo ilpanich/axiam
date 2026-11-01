@@ -16,7 +16,6 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::federation::{FederationConfig, FederationProtocol};
-use axiam_core::models::tenant::TenantKind;
 use axiam_core::repository::{
     FederationConfigRepository, FederationLoginState, FederationLoginStateRepository,
     OrganizationRepository, SSO_HANDOFF_TTL_SECS, SsoHandoffCode, SsoHandoffCodeRepository,
@@ -51,6 +50,45 @@ const SAML_FORM_ACS_PATH: &str = "/api/v1/auth/federation/saml/acs/form";
 
 /// Query parameter carrying a handoff code back into the SPA.
 const HANDOFF_QUERY_PARAM: &str = "axiam_handoff";
+
+/// Query parameter carrying the sign-in's own `state` back into the SPA on a
+/// cross-site return (#835, D-N29).
+///
+/// The OIDC and OAuth2 redirects already bring the browser back with the
+/// `state` the start endpoint returned. The two cross-site returns — a SAML
+/// IdP's form POST and Apple's `form_post` — end on this server, which
+/// redirects with a handoff code instead, so without this the SPA could not
+/// tell its own sign-in from somebody else's. It needs to: a login hop the
+/// SPA remembered for a sign-in is resumed only by the callback of **that**
+/// sign-in, never by a foreign one (a login CSRF) or a stale one.
+///
+/// The value is the login-state key the start endpoint returned (`state`, or
+/// SAML's `relay_state`), already **consumed** by the time it is echoed: it
+/// can complete nothing, and the SPA only compares it. The handoff code in the
+/// same URL is the credential, and it is protected as before.
+const START_STATE_QUERY_PARAM: &str = "state";
+
+/// The SPA URL a cross-site return redirects to: `spa_redirect_uri` with the
+/// given pairs appended, then the consumed start `state` (D-N29).
+fn spa_return_target(
+    spa_redirect_uri: &str,
+    pairs: &[(&str, &str)],
+    start_state: &str,
+) -> Result<String, AxiamApiError> {
+    let mut target = url::Url::parse(spa_redirect_uri).map_err(|_| {
+        AxiamApiError(AxiamError::Validation {
+            message: "stored redirect_uri is not a valid URL".into(),
+        })
+    })?;
+    {
+        let mut q = target.query_pairs_mut();
+        for (k, v) in pairs {
+            q.append_pair(k, v);
+        }
+        q.append_pair(START_STATE_QUERY_PARAM, start_state);
+    }
+    Ok(target.to_string())
+}
 
 // ---------------------------------------------------------------------------
 // Workspace resolution
@@ -145,88 +183,26 @@ pub(crate) async fn resolve_workspace<C: Connection + Clone>(
 // ---------------------------------------------------------------------------
 
 /// A provider that is effective for a tenant, and where it came from.
-#[derive(Debug, Clone)]
-pub(crate) struct EffectiveProvider {
-    pub config: FederationConfig,
-    /// `true` when the config lives in the organization-scope tenant and this
-    /// tenant is using it by inheritance.
-    pub inherited: bool,
-}
+///
+/// The rule lives in `axiam-federation` since G-A (#816), so native sign-in
+/// reaches exactly the providers the browser login does.
+pub(crate) use axiam_federation::provider_resolution::EffectiveProvider;
 
-/// Every provider a tenant may sign in with.
-///
-/// The rule, restated from the design doc because this function is the only
-/// place it exists in code:
-///
-/// * the tenant's own **enabled** configs, plus
-/// * the organization tenant's **enabled** configs with
-///   `allow_tenant_inheritance`, minus any whose override key the tenant
-///   already uses.
-///
-/// The subtraction deliberately uses the tenant's configs **including disabled
-/// ones**. A tenant administrator who created a Google config and disabled it
-/// has said something about Google in this tenant, and the something is "no";
-/// falling back to the inherited config there would make "disable" mean
-/// "re-enable the organization's".
+/// Every provider a tenant may sign in with — see
+/// [`axiam_federation::provider_resolution::effective_providers`] for the rule
+/// (own enabled configs, plus the organization's enabled, inheritable,
+/// unshadowed ones; a disabled own config still shadows).
 pub(crate) async fn effective_providers<C: Connection + Clone>(
     state: &AppState<C>,
     workspace: Workspace,
 ) -> Result<Vec<EffectiveProvider>, AxiamApiError> {
-    let own_all = state
-        .federation
-        .federation_config_repo
-        .list_all(workspace.tenant_id)
-        .await?;
-
-    let mut effective: Vec<EffectiveProvider> = own_all
-        .iter()
-        .filter(|c| c.enabled)
-        .cloned()
-        .map(|config| EffectiveProvider {
-            config,
-            inherited: false,
-        })
-        .collect();
-
-    // An organization-scope tenant has nothing to inherit *from*; it is the
-    // thing others inherit from.
-    let org_tenant = match state
-        .tenant_repo
-        .get_organization_tenant(workspace.organization_id)
-        .await
-    {
-        Ok(t) => t,
-        // A deployment that predates organization scope has no organization
-        // tenant, and therefore no inheritance. That is what such a deployment
-        // has always had, so it is not an error.
-        Err(_) => return Ok(effective),
-    };
-    if org_tenant.id == workspace.tenant_id || org_tenant.kind != TenantKind::Organization {
-        return Ok(effective);
-    }
-
-    let shadowed: Vec<String> = own_all.iter().map(FederationConfig::override_key).collect();
-
-    let inherited = state
-        .federation
-        .federation_config_repo
-        .list_all(org_tenant.id)
-        .await?;
-
-    for config in inherited {
-        if !config.enabled || !config.allow_tenant_inheritance {
-            continue;
-        }
-        if shadowed.contains(&config.override_key()) {
-            continue;
-        }
-        effective.push(EffectiveProvider {
-            config,
-            inherited: true,
-        });
-    }
-
-    Ok(effective)
+    Ok(axiam_federation::provider_resolution::effective_providers(
+        &state.federation.federation_config_repo,
+        &state.tenant_repo,
+        workspace.organization_id,
+        workspace.tenant_id,
+    )
+    .await?)
 }
 
 /// Resolve one config id for a login, honouring inheritance.
@@ -539,6 +515,7 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
     tenant_id: Uuid,
     user: &axiam_core::models::user::User,
     spa_redirect_uri: &str,
+    start_state: &str,
     upstream_auth_time: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Checked again here, not only at login start: this is the single point
@@ -567,14 +544,13 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
     };
     state.federation.sso_handoff_code_repo.insert(&row).await?;
 
-    let mut target = url::Url::parse(spa_redirect_uri).map_err(|_| {
-        AxiamApiError(AxiamError::Validation {
-            message: "stored redirect_uri is not a valid URL".into(),
-        })
-    })?;
-    target
-        .query_pairs_mut()
-        .append_pair(HANDOFF_QUERY_PARAM, &code);
+    // #835 (D-N29) — the consumed start `state` rides along, so the SPA can
+    // tell this return from a foreign one; see `START_STATE_QUERY_PARAM`.
+    let target = spa_return_target(
+        spa_redirect_uri,
+        &[(HANDOFF_QUERY_PARAM, code.as_str())],
+        start_state,
+    )?;
 
     info!(
         tenant_id = %tenant_id,
@@ -583,7 +559,7 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
     );
 
     Ok(HttpResponse::SeeOther()
-        .insert_header((actix_web::http::header::LOCATION, target.to_string()))
+        .insert_header((actix_web::http::header::LOCATION, target))
         // A URL carrying a credential must not be cached anywhere, and must not
         // travel onward as a referrer.
         .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
@@ -926,7 +902,7 @@ pub async fn oidc_form_callback_public<C: Connection + Clone>(
         // SPA with the reason rather than rendering an API error page at a URL
         // they did not navigate to.
         warn!(idp_error = %err, "federation form-post callback carried an error");
-        return redirect_with_error(&state, &login_state.redirect_uri, err);
+        return redirect_with_error(&state, &login_state.redirect_uri, err, &f.state);
     }
 
     let code = f
@@ -961,6 +937,7 @@ pub async fn oidc_form_callback_public<C: Connection + Clone>(
         login_state.tenant_id,
         &result.user,
         &login_state.redirect_uri,
+        &f.state,
         // X7.2 — the ID token's `auth_time`, carried onto the handoff row so
         // that the session issued one redirect later is still dated by the
         // provider. Bounded by the verification moment (T23.1.2, D-10) here,
@@ -1095,6 +1072,7 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
         login_state.tenant_id,
         &callback_result.user,
         &login_state.redirect_uri,
+        relay_state,
         // X7.2 — the assertion's `AuthnInstant`, carried for the same reason.
         super::federation::verified_upstream_auth_time(
             &resolved.config,
@@ -1188,6 +1166,7 @@ fn redirect_with_error<C: Connection + Clone>(
     state: &AppState<C>,
     redirect_uri: &str,
     error: &str,
+    start_state: &str,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Same confinement as the success path: this is still AXIAM navigating a
     // browser to a caller-supplied URL on an unauthenticated endpoint, and an
@@ -1195,11 +1174,6 @@ fn redirect_with_error<C: Connection + Clone>(
     // credential.
     require_deployment_spa_origin(state, redirect_uri)?;
 
-    let mut target = url::Url::parse(redirect_uri).map_err(|_| {
-        AxiamApiError(AxiamError::Validation {
-            message: "stored redirect_uri is not a valid URL".into(),
-        })
-    })?;
     // Bounded and sanitised: the value comes from the IdP, and it is going into
     // a URL the browser will follow. Only the OAuth error-code shape is passed
     // through; anything else becomes a generic code the SPA can still render.
@@ -1212,10 +1186,17 @@ fn redirect_with_error<C: Connection + Clone>(
     } else {
         "provider_error"
     };
-    target.query_pairs_mut().append_pair("error", safe);
+    // #835 (D-N29) — with the consumed start `state`, as on the success path,
+    // so the SPA's "Back to sign in" can keep the hop of *this* sign-in.
+    let target = spa_return_target(redirect_uri, &[("error", safe)], start_state)?;
+    // #836 (F4-W3-19) — the same two headers as the success exit of this
+    // endpoint. Nothing in this URL is live (a sanitised code and the spent
+    // `state`), but one endpoint's two exits should not differ in what they
+    // let travel onward as a referrer.
     Ok(HttpResponse::SeeOther()
-        .insert_header((actix_web::http::header::LOCATION, target.to_string()))
+        .insert_header((actix_web::http::header::LOCATION, target))
         .insert_header((actix_web::http::header::CACHE_CONTROL, "no-store"))
+        .insert_header(("Referrer-Policy", "no-referrer"))
         .finish())
 }
 
@@ -1282,6 +1263,35 @@ pub(crate) fn saml_acs_url<C: Connection + Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #835 (D-N29) — a cross-site return carries the consumed start `state`
+    /// after its own parameters, so the SPA can match it to the sign-in it
+    /// started; the redirect URI's own query is kept.
+    #[test]
+    fn a_cross_site_return_carries_the_start_state() {
+        let target = spa_return_target(
+            "https://axiam.example.com/auth/sso/callback?keep=1",
+            &[(HANDOFF_QUERY_PARAM, "the-code")],
+            "the-start-state",
+        )
+        .unwrap();
+        assert_eq!(
+            target,
+            "https://axiam.example.com/auth/sso/callback?keep=1&axiam_handoff=the-code&state=the-start-state"
+        );
+        let error = spa_return_target(
+            "https://axiam.example.com/auth/sso/callback",
+            &[("error", "access_denied")],
+            "s&t=1",
+        )
+        .unwrap();
+        assert_eq!(
+            error,
+            "https://axiam.example.com/auth/sso/callback?error=access_denied&state=s%26t%3D1",
+            "the value is encoded, never spliced"
+        );
+        assert!(spa_return_target("not a url", &[], "s").is_err());
+    }
 
     #[test]
     fn a_handoff_code_is_stored_only_as_a_hash() {

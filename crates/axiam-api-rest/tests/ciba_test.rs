@@ -132,6 +132,7 @@ fn create_input(
         allowed_resources: Vec::new(),
         managed_by: ManagedBy::Admin,
         ciba,
+        default_idp: None,
     }
 }
 

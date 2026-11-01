@@ -14,8 +14,9 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-10-23 (the `1.1.2` release branch, model
-> 2.44.0 — the 1.1.2 release's waves and its reconciliation pass, on top of the
+> **Status: source current as of 2026-11-01 (the `1.2.0` release branch, model
+> 2.45.0 — the social-login gap plan's four waves and its reconciliation, on top of
+> the `1.1.2` release's model (2.44.0, 2026-10-23: the waves and the reconciliation pass), on top of the
 > `1.1.1` release's model (2.43.0, 2026-10-19: the waves and the reconciliation pass recorded below),
 > on top of the 1.1.0 release's six waves (model 2.42.0, 2026-10-16), among them
 > the Live profile of the RADIUS recipe (formerly D4), and the 1.0.1 release's four waves
@@ -659,6 +660,22 @@
 > High or Critical are still eleven, none of them a defect awaiting a fix in
 > AXIAM's code; open in AXIAM's own request path are the three Low residuals of
 > the network write gate.
+>
+> **The 1.2.0 release, reconciliation (model 2.45.0, 2026-11-01).** The model is
+> **494 threats, 463 mitigated / 21 open / 10 not applicable** (Critical 43 with
+> 2 open; High 202, 9 open, 6 not applicable; Medium 209, 8 and 3; Low 40, 2 and
+> 1), derived from `Axiam.json` and stated in the five copies. No status changes.
+> Six entries enter Mitigated: **T-489** to **T-492** (native sign-in with a
+> provider ID token: audience, replay, stale or nonce-less input, the per-provider
+> switch; #816) and **T-493**, **T-494** (the provider hint and a client's
+> `default_idp`; #817). Three are amended: **T-37** and **T-254** (a refused
+> refresh-token replay revokes its session by default, `oauth2.refresh_reuse_response`;
+> #818, #821) and **T-471** (`client_id` and the exchange marker on exchanged
+> tokens; #819). Residuals recorded rather than closed: native-sign-in trust is
+> per tenant, not per client (T-489, D-N18), and the first-sign-in account-existence
+> signal is shared with browser login (T-491, D-N20). The wave reviews are
+> `claude_dev/security-review-social-gap-w{1,2,3}-*.md`; the combined review of the
+> release branch is W5.3 and is not recorded here.
 >
 > **The 1.1.1 release, reconciliation (model 2.43.0, 2026-10-19).** The model is
 > **488 threats, 457 mitigated / 21 open / 10 not applicable** (Critical 43 with
@@ -2012,7 +2029,7 @@ Three principles run through the whole system:
   application — backup encryption, cluster RBAC, per-service broker credentials —
   is written down as an open item with guidance, not quietly assumed away.
 
-The system is verified against a **STRIDE threat model of 488 threats** and a
+The system is verified against a **STRIDE threat model of 494 threats** and a
 compliance self-assessment covering **OWASP ASVS Level 2, ISO/IEC 27001:2022,
 the EU Cyber Resilience Act and GDPR**, with its OAuth2/OIDC surface checked
 against the relevant RFC and OpenID conformance matrices and run against the
@@ -2035,8 +2052,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 488 |
-| Mitigated / Open | 457 / 21 |
+| Threats identified | 494 |
+| Mitigated / Open | 463 / 21 |
 | Not applicable (specified, not built) | 10 |
 
 Every threat is examined against the STRIDE categories that apply to its element
@@ -2074,7 +2091,7 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **four** open items at model 2.44.0, all
+authorization, PKI — carry **four** open items at model 2.45.0, all
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
@@ -3638,7 +3655,7 @@ checklist — most of the threat model's open items live here.
 
 **The open risk register**
 
-Every threat the model records as open, most severe first — 21 of 488. The 10
+Every threat the model records as open, most severe first — 21 of 494. The 10
 entries recorded *not applicable*, for the native RADIUS front end that is not
 built, are not risks anyone carries and are not listed. On the website this table is generated from the Threat Dragon model, so it
 cannot fall behind the diagrams; the full text of each entry, with the element it
@@ -3897,7 +3914,7 @@ by who does it.
 Everything in this document was last re-derived from source at the
 **`1.0.1`** release branch (model 2.41.0) on 2026-10-14, and reconciled with the
 **`1.1.0`** release branch's model (2.42.0) on 2026-10-16, and with the
-**`1.1.1`** release branch's model (2.43.0) on 2026-10-19, and with the **`1.1.2`** release branch's model (2.44.0) on 2026-10-23 (no status changed); the handoff block at
+**`1.1.1`** release branch's model (2.43.0) on 2026-10-19, and with the **`1.1.2`** release branch's model (2.44.0) on 2026-10-23 (no status changed), and with the **`1.2.0`** release branch's model (2.45.0) on 2026-11-01 (no status changed; six entries enter, three are amended); the handoff block at
 the top of this file says what each pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

@@ -933,6 +933,7 @@ async fn post_binding_signed_end_to_end_verified_by_axiam_own_sp() {
         client_secret_ciphertext: None,
         client_secret_nonce: None,
         client_secret_key_version: None,
+        native_login: Default::default(),
         token_exchange: Default::default(),
         created_at: Utc::now(),
         updated_at: Utc::now(),

@@ -286,6 +286,7 @@ async fn setup(spec: TrustSpec) -> Fixture {
             allowed_resources: Vec::new(),
             managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();
@@ -346,6 +347,7 @@ async fn setup(spec: TrustSpec) -> Fixture {
             attribute_map: None,
             idp_signing_cert_pem: None,
             allowed_algorithms: Some(vec!["RS256".into()]),
+            native_login: None,
             token_exchange: Some(TokenExchangeTrust {
                 enabled: spec.enabled,
                 accepted_audiences: spec.accepted_audiences,
@@ -1058,6 +1060,49 @@ async fn an_ordinary_axiam_subject_token_still_exchanges_unchanged() {
     assert_eq!(
         body["error"], "unauthorized_client",
         "an AXIAM-issued token must take the B3 path: {body:?}"
+    );
+}
+
+/// G-D (#819), end to end on X4: the issued token names the exchanging client
+/// in RFC 9068's `client_id` and carries the `axiam_exchanged` marker — and,
+/// per #518 (D-5), is refused when that same client presents it as an
+/// `actor_token`, because holding a partner's token is not having been issued
+/// one. Accepting it would put the partner-asserted user in `act`.
+#[actix_web::test]
+async fn an_x4_token_names_its_client_and_is_never_that_clients_actor() {
+    let f = setup(TrustSpec::default()).await;
+    let app = test_app!(f);
+
+    let partner = partner_token(&f, |_| {});
+    let (status, body) = exchange!(app, f, subject_param(&partner, TOKEN_TYPE_JWT));
+    assert_eq!(status, 200, "X4 exchange status");
+    let x4 = body["access_token"].as_str().unwrap().to_owned();
+    let claims = claims_of(&x4);
+    assert_eq!(claims["client_id"], f.client_id.as_str(), "client_id claim");
+    assert_eq!(claims["axiam_exchanged"], true, "exchange marker");
+
+    let subject = axiam_auth::token::issue_access_token(
+        f.user_id,
+        f.tenant_id,
+        Uuid::new_v4(),
+        &["read:orders".to_string()],
+        &f.auth,
+        Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
+    let params = format!(
+        "{}&actor_token={}&actor_token_type={}",
+        subject_param(&subject, TOKEN_TYPE_ACCESS_TOKEN),
+        x4,
+        enc(TOKEN_TYPE_ACCESS_TOKEN)
+    );
+    let (status, body) = exchange!(app, f, params);
+    assert_eq!(status, 400, "X4 token as actor");
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(
+        body["error_description"],
+        "actor_token was not issued to the exchanging client"
     );
 }
 

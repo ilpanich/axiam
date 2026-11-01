@@ -133,6 +133,10 @@ struct OAuth2ClientRow {
     // D-61 (schema v81). Absent on older rows: a client sending plain requests.
     #[surreal(default)]
     backchannel_authentication_request_signing_alg: Option<String>,
+    // G-B (schema v113). Absent on older rows: a client with no default
+    // provider, which is what every such row is.
+    #[surreal(default)]
+    default_idp: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -207,6 +211,10 @@ struct OAuth2ClientRowWithId {
     // D-61 (schema v81). Absent on older rows: a client sending plain requests.
     #[surreal(default)]
     backchannel_authentication_request_signing_alg: Option<String>,
+    // G-B (schema v113). Absent on older rows: a client with no default
+    // provider, which is what every such row is.
+    #[surreal(default)]
+    default_idp: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -330,6 +338,21 @@ fn decode_ciba(
     })
 }
 
+/// Decode the stored `default_idp` (G-B, schema v113).
+///
+/// Absent is a client with no default, which is every older row. A value that
+/// is not a UUID was not written by this code (the column is only ever bound
+/// from a typed id) and is refused rather than read as "no default", for the
+/// reason [`decode_profile`] refuses an unknown profile: guessing would hide a
+/// corrupted row.
+fn decode_default_idp(raw: Option<&str>) -> Result<Option<Uuid>, DbError> {
+    raw.map(|v| {
+        Uuid::parse_str(v)
+            .map_err(|e| DbError::Migration(format!("invalid oauth2_client.default_idp: {e}")))
+    })
+    .transpose()
+}
+
 impl OAuth2ClientRow {
     fn try_into_client(self, id: Uuid) -> Result<OAuth2Client, DbError> {
         let tenant_id = Uuid::parse_str(&self.tenant_id)
@@ -375,6 +398,7 @@ impl OAuth2ClientRow {
             )?,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            default_idp: decode_default_idp(self.default_idp.as_deref())?,
         })
     }
 }
@@ -426,6 +450,7 @@ impl OAuth2ClientRowWithId {
             )?,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            default_idp: decode_default_idp(self.default_idp.as_deref())?,
         })
     }
 }
@@ -475,6 +500,7 @@ const CREATE_CLIENT: &str = "CREATE type::record('oauth2_client', $id) SET \
                  backchannel_token_delivery_mode = $ciba_mode, \
                  backchannel_client_notification_endpoint = $ciba_endpoint, \
                  backchannel_authentication_request_signing_alg = $ciba_signing_alg, \
+                 default_idp = $default_idp, \
                  last_authorized_at = NONE";
 
 /// `THROW`n by a quota-claimed create when the tenant already holds
@@ -735,6 +761,7 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
                 "ciba_endpoint",
                 normalise_optional(input.ciba.backchannel_client_notification_endpoint),
             ))
+            .bind(("default_idp", input.default_idp.map(|id| id.to_string())))
             .await
             .map_err(DbError::from)
     }
@@ -863,6 +890,9 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
             sets.push("backchannel_client_notification_endpoint = $ciba_endpoint");
             sets.push("backchannel_authentication_request_signing_alg = $ciba_signing_alg");
         }
+        if input.default_idp.is_some() {
+            sets.push("default_idp = $default_idp");
+        }
         sets.push("updated_at = time::now()");
 
         // The tenant guard and, when given, the version guard are in the
@@ -980,6 +1010,11 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
                     "ciba_endpoint",
                     normalise_optional(ciba.backchannel_client_notification_endpoint),
                 ));
+        }
+
+        if let Some(default_idp) = input.default_idp {
+            // `Some(None)` clears: the column is written `NONE`.
+            builder = builder.bind(("default_idp", default_idp.map(|id| id.to_string())));
         }
 
         let result = builder.await.map_err(DbError::from)?;
@@ -1816,6 +1851,7 @@ mod tests {
             allowed_resources: vec!["https://mcp.example.com/mcp".into()],
             managed_by,
             ciba: Default::default(),
+            default_idp: None,
         }
     }
 

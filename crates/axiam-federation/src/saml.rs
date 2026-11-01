@@ -1705,6 +1705,7 @@ pub(crate) mod tests {
             client_secret_ciphertext: None,
             client_secret_nonce: None,
             client_secret_key_version: None,
+            native_login: Default::default(),
             token_exchange: Default::default(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

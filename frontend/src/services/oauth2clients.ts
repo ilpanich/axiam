@@ -134,6 +134,16 @@ export interface OAuth2Client {
    * that has never been authorized.
    */
   last_authorized_at?: string;
+  /**
+   * G-B (W3.1) — the federation provider the login page goes straight to when
+   * the sign-in carried no `axiam_idp_hint`. Omitted by the server when unset.
+   * Admin-managed clients only: a dcr/cimd registration cannot set it.
+   *
+   * Reconciled with `OAuth2ClientResponse.default_idp` in `sdks/openapi.json`
+   * (the spec types it `string | null`; the server skips it when `None`, so
+   * the optional `string` here is the wire shape).
+   */
+  default_idp?: string;
 }
 
 /**
@@ -173,6 +183,8 @@ export interface CreateOAuth2ClientPayload extends ClientPosturePayload {
   scopes?: string[];
   post_logout_redirect_uris?: string[];
   backchannel_logout_uri?: string;
+  /** G-B — a provider id the tenant can see; omit for none. */
+  default_idp?: string;
 }
 
 export interface UpdateOAuth2ClientPayload extends ClientPosturePayload {
@@ -183,6 +195,12 @@ export interface UpdateOAuth2ClientPayload extends ClientPosturePayload {
   post_logout_redirect_uris?: string[];
   /** Pass "" to clear a previously registered URI (mirrors the backend). */
   backchannel_logout_uri?: string;
+  /**
+   * G-B — three states, like the backend: omitted leaves the stored value,
+   * `null` clears it, an id sets it. An invalid or invisible provider is a 400
+   * `validation_error` naming `default_idp`.
+   */
+  default_idp?: string | null;
 }
 
 // ─── Response types ───────────────────────────────────────────────────────────
@@ -202,11 +220,27 @@ export interface CreateOAuth2ClientResponse extends OAuth2Client {
 
 // ─── Available options ────────────────────────────────────────────────────────
 
+/**
+ * G-A — native app sign-in with a provider ID token (Sign in with Google /
+ * Apple on mobile). Accepted on public clients, and in no default set: it is
+ * granted per client, and the federation provider must also enable native
+ * login. Mirrors `PROVIDER_ID_TOKEN_GRANT_TYPE` and `KNOWN_GRANT_TYPES` on the server.
+ */
+export const PROVIDER_ID_TOKEN_GRANT =
+  "urn:axiam:params:oauth:grant-type:provider-id-token";
+
 export const GRANT_TYPES = [
   "authorization_code",
   "client_credentials",
   "refresh_token",
+  PROVIDER_ID_TOKEN_GRANT,
 ] as const;
+
+/** Per-grant explanatory text shown under the option in the client editor. */
+export const GRANT_TYPE_HINTS: Record<string, string> = {
+  [PROVIDER_ID_TOKEN_GRANT]:
+    "Native app sign-in with a provider ID token (e.g. Sign in with Google/Apple on mobile). Also requires native login to be enabled on the federation provider.",
+};
 
 export type GrantType = (typeof GRANT_TYPES)[number];
 

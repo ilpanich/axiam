@@ -611,14 +611,27 @@ async fn end_sessions<C: Connection + Clone>(
         }
     }
     if failed {
-        // Not `Success`: a session is still alive. Nothing is signed; the
-        // cookies are cleared all the same (this answers a verified request).
+        // Not `Success`: a session is still alive — `logout` revokes the
+        // refresh tokens before it deletes the session, so every failure
+        // leaves the session in place for a retry (F4-R12-07). Nothing is
+        // signed; the API cookies are cleared all the same (this answers a
+        // verified request). The OP-session cookies are kept when they are
+        // the retry's credential: an IdP-initiated logout (`initiator_sp` is
+        // `None`, `sso_logout`) found its session through that cookie, and
+        // clearing it would turn the user's retry into the logged-out page
+        // over a live session. An SP-initiated retry is a new `LogoutRequest`
+        // whose session index still resolves, so there the cookies go.
         let mut page = refusal_page(
             StatusCode::INTERNAL_SERVER_ERROR,
             "revocation_failed",
             tenant_id,
         );
-        for cookie in clear_cookies(state, tenant_id) {
+        let cookies = if initiator_sp.is_none() {
+            crate::handlers::oauth2::api_logout_cookies(&state.auth_config)
+        } else {
+            clear_cookies(state, tenant_id)
+        };
+        for cookie in cookies {
             let _ = page.add_cookie(&cookie);
         }
         return Err(Box::new(page));

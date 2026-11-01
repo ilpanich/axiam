@@ -1395,6 +1395,7 @@ async fn back_channel_logout_is_dispatched_to_oidc_rps_bound_to_the_session() {
             allowed_resources: Vec::new(),
             managed_by: ManagedBy::Admin,
             ciba: Default::default(),
+            default_idp: None,
         })
         .await
         .unwrap();

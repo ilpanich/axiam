@@ -139,6 +139,7 @@ fn public_client(tenant_id: Uuid, name: &str, backchannel: Option<String>) -> Cr
         // fixtures stand in for.
         managed_by: axiam_core::models::oauth2_client::ManagedBy::Admin,
         ciba: Default::default(),
+        default_idp: None,
     }
 }
 

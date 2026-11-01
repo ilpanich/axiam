@@ -6,7 +6,10 @@ import { apiMock, res } from "@/test/apiMock";
 vi.mock("@/lib/api", () => ({ default: apiMock }));
 
 import { FederationPage } from "./FederationPage";
-import { DEFAULT_TOKEN_EXCHANGE_TRUST } from "@/services/federation";
+import {
+  DEFAULT_NATIVE_LOGIN_TRUST,
+  DEFAULT_TOKEN_EXCHANGE_TRUST,
+} from "@/services/federation";
 import { renderWithProviders } from "@/test/renderWithProviders";
 import { setToastDispatch } from "@/hooks/useToast";
 import { useAuthStore } from "@/stores/auth";
@@ -481,8 +484,127 @@ describe("FederationPage", () => {
         // is how an operator keeps a setting they believed they had changed.
         // This fixture has none configured, so it is the disabled default.
         token_exchange: DEFAULT_TOKEN_EXCHANGE_TRUST,
+        // G-A: likewise whole, and likewise the disabled default here.
+        native_login: DEFAULT_NATIVE_LOGIN_TRUST,
       }),
     );
+  });
+
+  // ─── G-A: native app sign-in trust ─────────────────────────────────────────
+
+  it("saves a configured native sign-in block whole, with the token-exchange block", async () => {
+    apiMock.get.mockResolvedValue(res(configs));
+    apiMock.put.mockResolvedValue(res(configs[0]));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    const dialog = screen.getByRole("dialog");
+
+    await userEvent.click(
+      within(dialog).getByLabelText(
+        "Accept this provider's ID tokens from native apps",
+      ),
+    );
+    await userEvent.type(
+      within(dialog).getByLabelText(/Accepted client IDs/),
+      "com.example.app{Enter}",
+    );
+    fireEvent.change(within(dialog).getByLabelText("Max token age (seconds)", {
+      selector: "#edit-nl-max-age",
+    }), { target: { value: "120" } });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() =>
+      expect(apiMock.put).toHaveBeenCalledWith(
+        "/api/v1/federation-configs/f1",
+        expect.objectContaining({
+          token_exchange: DEFAULT_TOKEN_EXCHANGE_TRUST,
+          native_login: {
+            enabled: true,
+            client_ids: ["com.example.app"],
+            max_token_age_secs: 120,
+          },
+        }),
+      ),
+    );
+  });
+
+  it("prefills the stored native sign-in block when editing", async () => {
+    apiMock.get.mockResolvedValue(
+      res([
+        {
+          ...configs[0],
+          native_login: {
+            enabled: true,
+            client_ids: ["com.example.app", "apple.app.id"],
+            max_token_age_secs: 600,
+          },
+        },
+      ]),
+    );
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    const dialog = screen.getByRole("dialog");
+    expect(
+      within(dialog).getByLabelText(
+        "Accept this provider's ID tokens from native apps",
+      ),
+    ).toBeChecked();
+    expect(within(dialog).getByText("com.example.app")).toBeInTheDocument();
+    expect(within(dialog).getByText("apple.app.id")).toBeInTheDocument();
+    expect(
+      within(dialog).getByLabelText("Max token age (seconds)", {
+        selector: "#edit-nl-max-age",
+      }),
+    ).toHaveValue(600);
+  });
+
+  it("refuses to save an enabled native sign-in block with no client IDs", async () => {
+    apiMock.get.mockResolvedValue(res(configs));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(
+      within(dialog).getByLabelText(
+        "Accept this provider's ID tokens from native apps",
+      ),
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    expect(await within(dialog).findByText(/at least one client ID/)).toBeInTheDocument();
+    expect(apiMock.put).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's refusal of a native sign-in block", async () => {
+    apiMock.get.mockResolvedValue(res(configs));
+    apiMock.put.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        data: { error: "native_login.client_ids lists 'x' more than once" },
+      },
+    });
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit Okta" }));
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    expect(
+      await screen.findByText("native_login.client_ids lists 'x' more than once"),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no native sign-in controls on a SAML provider and does not send the block", async () => {
+    apiMock.get.mockResolvedValue(res(configs));
+    apiMock.put.mockResolvedValue(res(configs[1]));
+    renderWithProviders(<FederationPage />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit ADFS" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Native App Sign-In")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByLabelText(
+        "Accept this provider's ID tokens from native apps",
+      ),
+    ).not.toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save Changes" }));
+    await waitFor(() => expect(apiMock.put).toHaveBeenCalled());
+    expect(apiMock.put.mock.calls[0][1]).not.toHaveProperty("native_login");
   });
 
   it("includes a new client secret in the update payload only when entered", async () => {

@@ -9,8 +9,8 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.1.3",
-    "x-axiam-spec-digest": "sha256:f302e07a52cf5f757da11d8dd720f93cf93bb51c33b6906fd8524a20e8a51925"
+    "version": "1.2.0",
+    "x-axiam-spec-digest": "sha256:196ec710d86e05a7bc08a2e9c421d1b82ab698c90f12f7cb18484364c356a707"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -1354,6 +1354,9 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The session could not be fully ended: revoking its OAuth2 refresh tokens, or deleting the session after that, failed. The session is still live, so repeating the request with the same bearer token completes the logout"
           }
         },
         "security": [
@@ -2989,6 +2992,7 @@
                           "attribute_map",
                           "enabled",
                           "token_exchange",
+                          "native_login",
                           "provider_kind",
                           "allow_tenant_inheritance",
                           "scopes",
@@ -3095,6 +3099,10 @@
                           "mints_client_secret": {
                             "type": "boolean",
                             "description": "Whether AXIAM mints this provider's client secret itself, per exchange,\nrather than sending a stored one. True only for an Apple config with\nboth identifiers set."
+                          },
+                          "native_login": {
+                            "$ref": "#/components/schemas/NativeLoginTrustResponse",
+                            "description": "Native sign-in trust (G-A)."
                           },
                           "pkce_required": {
                             "type": "boolean",
@@ -5833,6 +5841,14 @@
                           "created_at": {
                             "type": "string",
                             "format": "date-time"
+                          },
+                          "default_idp": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid",
+                            "description": "G-B (#817) — the provider this client's sign-in page starts with when\na request carries no hint; absent for none. Echoed as stored: a value\nwhose provider has since been disabled is shown, and ignored at the\nauthorization endpoint."
                           },
                           "dpop_bound_access_tokens": {
                             "type": "boolean"
@@ -14111,6 +14127,9 @@
           },
           "404": {
             "description": "User not found"
+          },
+          "500": {
+            "description": "The reset did not complete: a step (removing the factors, ending the user's sessions, revoking their OAuth2 refresh tokens) failed after the steps before it. Every step is idempotent, so repeating the request completes the reset; a caller resetting their own account whose sessions were already ended signs in again first"
           }
         },
         "security": [
@@ -14889,6 +14908,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "axiam_idp_hint",
+            "in": "path",
+            "description": "G-B (#817) — which federation provider the sign-in page should start\nwith: a provider's UUID, its `provider_slug`, or a branded provider\nkind name (`google`, `github`, `facebook`, `apple`, `microsoft`; ASCII\ncase-insensitive) when exactly one provider of that kind is offered.\n\n`axiam_`-prefixed by the vendor-namespace rule `axiam_login_hop` states\n(`axiam_oauth2::login_hop::LOGIN_HOP_MARKER`); there is no\n`kc_idp_hint` alias (D-N3). Read on every lane, because it is not one\nof the OIDC parameters `authn_request_params` governs and it changes\nnothing that is issued. Resolved on the server against the request\ntenant's effective, enabled provider list — the list\n`GET /api/v1/auth/federation/providers` already shows — and only the\nmatched provider's id reaches the sign-in page (`idp=<uuid>`). A hint\nthat matches nothing, or matches more than one provider, is ignored:\nthe response is byte-identical to a request without one. Beside a\n`request_uri` the pushed copy is used and this one is ignored. Moot when\nthe browser already holds an OP session and no sign-in is needed.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -14987,6 +15018,9 @@
           },
           "400": {
             "description": "No tenant could be determined"
+          },
+          "500": {
+            "description": "The session could not be fully ended and is still live; no redirect. The API cookies are cleared and the OP browser-session cookie is kept, so repeating the request completes the logout"
           }
         }
       }
@@ -15209,6 +15243,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "The session could not be fully ended; cookies cleared, no redirect"
           }
         }
       }
@@ -15735,7 +15772,7 @@
           "oauth2"
         ],
         "summary": "`POST /oauth2/token` -- OAuth2 token endpoint.",
-        "description": "Accepts form-encoded body per RFC 6749. Supports authorization_code,\nclient_credentials, and refresh_token grant types. The `tenant_id` is\npassed as a query parameter since the token endpoint is unauthenticated\n(the client is authenticating itself here).",
+        "description": "Accepts form-encoded body per RFC 6749. Supports authorization_code,\nclient_credentials, and refresh_token grant types. The `tenant_id` is\npassed as a query parameter since the token endpoint is unauthenticated\n(the client is authenticating itself here).\n\nAlso serves the native sign-in grant\n`urn:axiam:params:oauth:grant-type:provider-id-token`, which signs a user\nin with an ID token a mobile or desktop app obtained from a federated OIDC\nprovider's native SDK. Parameters: `provider` (federation config UUID or\nprovider slug), `id_token`, `nonce` (the raw nonce; the provider's SDK was\ngiven its SHA-256 hex, in either case, which the ID token's `nonce` claim\nmust equal), and optional `scope` and `resource`. Every refusal of the provider token is\n`invalid_grant` (\"the provider ID token is not acceptable\"); the grant is\nrate limited per tenant and client address (`rate_limit_exceeded`). This\nis not token exchange (RFC 8693).",
         "operationId": "token",
         "parameters": [
           {
@@ -15790,7 +15827,7 @@
             }
           },
           "429": {
-            "description": "`rate_limit_exceeded` from the route limiters (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
+            "description": "`rate_limit_exceeded` from the route limiters and from the provider-id-token grant (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
             "content": {
               "application/json": {
                 "schema": {
@@ -18394,6 +18431,17 @@
             ],
             "description": "OIDC discovery URL or SAML metadata URL."
           },
+          "native_login": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NativeLoginTrustRequest",
+                "description": "Native sign-in trust (G-A). Omitted means disabled. Refused when\nenabled on a `Saml` or `OAuth2` provider."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "protocol": {
             "type": "string",
             "description": "Federation protocol: \"OidcConnect\" or \"Saml\"."
@@ -18747,6 +18795,14 @@
           "browser_sso": {
             "type": "boolean",
             "description": "X7.3 — whether an unauthenticated authorization request from this\nclient may be answered with a redirect to the login page rather than\nthe `401` AXIAM answers today.\n\nAccepted and stored, but **nothing reads it yet**: the login hop it\ngates is a later wave. Unlike `authn_request_params` it is permitted on\na `fapi2` client, because it relaxes nothing — it decides only how an\nanonymous browser is answered."
+          },
+          "default_idp": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "G-B (#817) — the federation provider (a federation config `id`) this\nclient's sign-in page starts with when an authorization request carries\nno `axiam_idp_hint`; a hint that names a provider overrides it.\n\nMust name a provider this tenant can sign in with — its own enabled\nconfigs, or the organization's enabled ones it inherits — or the\nregistration is refused with `400`. If that provider is later disabled\nor deleted the default is ignored at the authorization endpoint (the\nprovider chooser is shown), never an error. Omit for none."
           },
           "dpop_bound_access_tokens": {
             "type": "boolean",
@@ -20045,6 +20101,7 @@
           "attribute_map",
           "enabled",
           "token_exchange",
+          "native_login",
           "provider_kind",
           "allow_tenant_inheritance",
           "scopes",
@@ -20151,6 +20208,10 @@
           "mints_client_secret": {
             "type": "boolean",
             "description": "Whether AXIAM mints this provider's client secret itself, per exchange,\nrather than sending a stored one. True only for an Apple config with\nboth identifiers set."
+          },
+          "native_login": {
+            "$ref": "#/components/schemas/NativeLoginTrustResponse",
+            "description": "Native sign-in trust (G-A)."
           },
           "pkce_required": {
             "type": "boolean",
@@ -21494,6 +21555,58 @@
           "email_address"
         ]
       },
+      "NativeLoginTrustRequest": {
+        "type": "object",
+        "description": "Native sign-in trust (G-A): which ID tokens this provider issued to an\napp are accepted as a sign-in at the token endpoint.\n\nMirrors the domain block on the wire, as `TokenExchangeTrustRequest` does,\nso an omitted member takes its documented default rather than failing\ndeserialization. Only an `OidcConnect` provider may enable it.",
+        "properties": {
+          "client_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The audiences a presented ID token may carry: the iOS bundle ID,\nAndroid client ID or Apple app ID the native SDK was configured with.\nRequired (non-empty) when `enabled`; at most 64 entries of at most 512\ncharacters, none blank, none repeated. The web `client_id` is accepted\nonly when it is listed here."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Off unless explicitly enabled. Configuring a provider for browser\nlogin is not agreement to accept its ID tokens from apps."
+          },
+          "max_token_age_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bound on `now - iat` for a presented ID token, 1 to 3600 seconds.\nOmitted: 300."
+          }
+        }
+      },
+      "NativeLoginTrustResponse": {
+        "type": "object",
+        "description": "Native sign-in trust as returned to an administrator. Nothing here is\nsecret; it is never part of the unauthenticated providers listing.",
+        "required": [
+          "enabled",
+          "client_ids",
+          "max_token_age_secs"
+        ],
+        "properties": {
+          "client_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The accepted ID-token audiences."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether ID tokens from apps are accepted as a sign-in."
+          },
+          "max_token_age_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bound on `now - iat`, in seconds."
+          }
+        }
+      },
       "NetworkConflictReason": {
         "type": "string",
         "description": "Why a network route answered `409`: the `reason_code` member of the body,\nbeside `error` (`sdks/CONTRACT.md` §36.3 rule 2, §36.4).\n\nThe vocabulary a client branches on, so that it never has to parse\n`message` (which stays for a human); open for decoding (§27.13), so a\nclient surfaces a value it does not know. The `error` slug is unchanged:\n`conflict` for a state conflict, `already_exists` for a uniqueness clash.",
@@ -22206,6 +22319,14 @@
             "type": "string",
             "format": "date-time"
           },
+          "default_idp": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "G-B (#817) — the provider this client's sign-in page starts with when\na request carries no hint; absent for none. Echoed as stored: a value\nwhose provider has since been disabled is shown, and ignored at the\nauthorization endpoint."
+          },
           "dpop_bound_access_tokens": {
             "type": "boolean"
           },
@@ -22322,6 +22443,16 @@
           },
           "error_description": {
             "type": "string"
+          }
+        }
+      },
+      "OAuth2Policy": {
+        "type": "object",
+        "description": "OAuth 2.0 authorization-server behaviour that is a tenant's to decide\n(G-C, #818).\n\nA struct of its own rather than a field on `TokenPolicy` because it is\nnot a lifetime, and so the resolved setting reads by its documented name,\n`oauth2.refresh_reuse_response`.",
+        "properties": {
+          "refresh_reuse_response": {
+            "$ref": "#/components/schemas/RefreshReuseResponse",
+            "description": "What a refused refresh-token replay does besides refusing. Ordered: a\ntenant may move from `refuse` to `revoke_session` and never back while\nits organization's baseline is `revoke_session`.\n\nPublished as a reference to the `RefreshReuseResponse` schema, so the\ntwo legal values reach the SDK generators as an `enum` (F4-W1-06, #823)."
           }
         }
       },
@@ -23739,6 +23870,13 @@
               "null"
             ]
           },
+          "axiam_idp_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "G-B (#817) — AXIAM's provider hint, pushed like `login_hint`; see the\nauthorization endpoint's `axiam_idp_hint`. Never refused: a hint that\nnames nothing is answered as no hint."
+          },
           "claims": {
             "type": [
               "string",
@@ -24251,6 +24389,14 @@
             "format": "uuid"
           }
         }
+      },
+      "RefreshReuseResponse": {
+        "type": "string",
+        "description": "What the token endpoint does when a refresh token that has already been\nrotated is presented again and **refused** (G-C, #818 — the T-254\namendment).\n\nTwo values, ordered by strictness:\n\n* `revoke_session` — the default (D-N2). The refusal also\n  invalidates the session the replayed token names (which publishes to the\n  revocation feed) and revokes every refresh token issued under that\n  session — whichever client it was issued to, the console sign-in\n  included, with no back-channel logout sent — as the authorization-code\n  replay path does for a code (RFC 6749 §10.5; OAuth 2.0 Security BCP\n  §4.14.2). Only a presentation by the token's own client, passing the\n  token's sender constraint, triggers it (#821). On a client with no\n  grace window the honest holder of a replayed token has nothing left to\n  lose — its token is already dead and it never received the successor —\n  so the revocation costs it nothing and costs whoever holds the successor\n  everything.\n* `refuse` — the 1.1.x behaviour: the presentation is refused,\n  marked on the session and audited, and nothing else is revoked.\n\nNeither value changes what is *accepted*. A `fapi2` client's presentation\ninside the grace window is accepted and marked whatever this says (D-N4);\na token revoked at logout is not a replay and revokes nothing.\n\nThis text is published as the schema's description in `sdks/openapi.json`,\nso it carries no rustdoc intra-doc links (F4-W1-08, #824).",
+        "enum": [
+          "revoke_session",
+          "refuse"
+        ]
       },
       "RefreshSuccessResponse": {
         "type": "object",
@@ -26144,6 +26290,10 @@
           "notification": {
             "$ref": "#/components/schemas/NotificationPolicy"
           },
+          "oauth2": {
+            "$ref": "#/components/schemas/OAuth2Policy",
+            "description": "G-C (#818) — `oauth2.refresh_reuse_response`. Defaulted so a document\nwritten before the field reads as the default."
+          },
           "oidc": {
             "$ref": "#/components/schemas/OidcPolicy"
           },
@@ -26725,6 +26875,10 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "refresh_reuse_response": {
+            "$ref": "#/components/schemas/RefreshReuseResponse",
+            "description": "G-C (#818) — defaulted to `revoke_session` (D-N2): an API client\nwritten before the field lands on the new default. `refuse` restores\nthe 1.1.x behaviour. Because it is defaulted, a `PUT` from a client\nwritten before 1.2.0 (which omits it) sets an organization on `refuse`\nback to `revoke_session` — the stricter direction (F4-W1-06)."
           },
           "refresh_token_lifetime_secs": {
             "type": "integer",
@@ -28055,6 +28209,17 @@
             "format": "int32",
             "minimum": 0
           },
+          "refresh_reuse_response": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RefreshReuseResponse",
+                "description": "G-C (#818) — tighten-only on `refuse` → `revoke_session`; see\n`OAuth2Policy.refresh_reuse_response`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "refresh_token_lifetime_secs": {
             "type": [
               "integer",
@@ -28437,6 +28602,27 @@
           },
           "grant_type": {
             "type": "string"
+          },
+          "id_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ID token the provider issued to the native app."
+          },
+          "nonce": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The raw nonce the app generated. The app gave the provider's SDK its\nSHA-256 hex (either case), and the ID token's `nonce` claim must equal\nthat hash; a claim equal to this value unhashed is refused."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The federation provider that issued `id_token`: its UUID or its\n`provider_slug`, for\n`grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`."
           },
           "redirect_uri": {
             "type": [
@@ -28844,6 +29030,17 @@
             ],
             "description": "OIDC discovery or SAML metadata URL. Explicit `null` clears it;\nomitted leaves it."
           },
+          "native_login": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NativeLoginTrustRequest",
+                "description": "Native sign-in trust (G-A). Replaced **wholesale** when present, as\n`token_exchange` is; omitted leaves it. Refused when enabled on a\n`Saml` or `OAuth2` provider."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "provider": {
             "type": [
               "string",
@@ -29035,6 +29232,14 @@
               "null"
             ],
             "description": "X7.3 — see [`CreateOAuth2ClientRequest::browser_sso`]."
+          },
+          "default_idp": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "G-B (#817) — see [`CreateOAuth2ClientRequest::default_idp`]. Omitted\nleaves it; `null` clears it; an id is held to the create rule (`400`\nunless it names a provider this tenant can sign in with)."
           },
           "dpop_bound_access_tokens": {
             "type": [

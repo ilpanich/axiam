@@ -7,6 +7,245 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-01
+
+1.2.0 follows 1.1.3 and closes the social-login gap the 2026-10-30 analysis
+named, in four items (G-A to G-D) and the review findings filed while they were
+built (#816 … #819, #821 … #824, #828 … #836). It adds one grant, one
+authorize parameter, one client field and three schema versions (v110 to v113,
+all additive), and changes two behaviours: a replayed refresh token now revokes
+its session, and logging a session out now revokes its refresh tokens. Each wave ended in a security review of its own diff, and every
+finding of those reviews is fixed in its wave or recorded on its issue. The
+sign-in contract moves to 1.65 and the eleven SDKs follow as minor releases.
+
+#### Upgrading to 1.2.0 — read before you upgrade
+
+- **A replayed refresh token now revokes the session** (`standard` clients, and
+  `fapi2` clients after their grace window). To keep the 1.1.x behaviour set
+  `oauth2.refresh_reuse_response` to `refuse` on the organization before or right
+  after the upgrade; a tenant can only tighten it. An organization settings
+  `PUT` from a pre-1.2.0 client resets `refuse` to `revoke_session`.
+- **Logging a session out now revokes its refresh tokens** (`/auth/logout`,
+  RP-initiated logout, SAML single logout), for every client and grant bound to
+  that session. A relying party that kept refreshing after its user signed out
+  now gets `invalid_grant`. No setting. It does not reach a code grant issued
+  before the console session last refreshed (#844).
+- **The schema moves from v109 to v113**, additive throughout; the runner applies
+  it at boot. A development database that ran a pre-release v112 must drop
+  `federation_id_token_replay` and the v112 stamp first.
+- **Native sign-in is off until you register it**: per OIDC provider
+  (`native_login`) and per client (`grant_types`).
+- **1.2-line SDKs need a server of 1.2.0 or later** for the federation-config
+  admin calls (`native_login` is a required response member).
+
+The full notes are in
+[`claude_dev/release-1.2.0-upgrade-notes.md`](claude_dev/release-1.2.0-upgrade-notes.md).
+
+### Added
+
+- Native sign-in with a provider ID token: a new grant at `POST /oauth2/token`,
+  `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`, with
+  `provider` (a federation provider's UUID or `provider_slug`), `id_token` and
+  `nonce` (the app's raw nonce; the app gives the provider's SDK its
+  SHA-256 hex, and the token's `nonce` claim must equal that hash, the case of
+  its hex letters ignored — a claim equal to the raw value is refused), optional `scope` and
+  `resource`. A mobile app that signed the user in with the provider's own SDK
+  (Sign in with Google, Sign in with Apple, an OIDC
+  provider's native SDK) exchanges the ID token for the client's ordinary
+  sign-in token set: an access token naming the client and a new session, a
+  refresh token under the usual rotation and client binding, and an AXIAM ID
+  token carrying the request's nonce when `openid` was asked; DPoP- and
+  certificate-bound clients get bound tokens. Off unless an operator enables
+  `native_login` on an OIDC provider and lists the app's client IDs (a token is
+  issued to its `azp` when it has one, else to its single `aud`; with a listed
+  `azp`, `aud` may be the provider's web client ID, as on Android), and only
+  for a client whose `grant_types` lists the grant (public clients included).
+  Every refusal of the token or the configuration is one `invalid_grant`
+  ("the provider ID token is not acceptable"); a scope that would need the
+  user's consent is `consent_required`; a `nonce` over 512 bytes is
+  `invalid_request`; every interactive-sign-in reactor gate applies
+  (`login.post_auth`). Rate limited per tenant and address at
+  `AXIAM__RATE_LIMIT__LOGIN_PER_MIN` (bucket `oauth2_provider_id_token`), and
+  audited as `federation.native_login` (never the token or the nonce). Each
+  provider ID token is accepted once in the whole deployment: a dedicated
+  `federation_id_token_replay` record keyed on the issuer and the hash of the
+  token's signing input (the bytes its signature covers, so an ECDSA
+  signature's second encoding is the same token)
+  (schema v112, additive; not tenant data, so left to the sweep by the tenant
+  purge) is kept until the token's `exp` plus 120 seconds and swept by a new
+  cleanup job of the same name, which appears in
+  `GET /health/jobs`. The per-provider `native_login` trust block
+  (`enabled`, `client_ids`, `max_token_age_secs`) is set on
+  `PUT /api/v1/federation-configs/{id}` and in the admin console, which also
+  lists the grant on the OAuth2 client form; the grant is listed in
+  `grant_types_supported` of the OIDC discovery document. The OpenAPI spec is
+  regenerated, and `docs/api/native-sign-in.md` documents the grant, with
+  threat-model entries T-489 to T-492. It is not token exchange: X4 still
+  refuses ID tokens. (G-A, #816, #828, #829, #830, #831)
+
+- Provider hint and per-client default provider for browser sign-in (#817):
+  `/oauth2/authorize` (and `/oauth2/par`) accept `axiam_idp_hint`, a
+  federation provider's UUID, `provider_slug`, or branded kind name (`google`,
+  `github`, `facebook`, `apple`, `microsoft`, case-insensitive; a slug wins
+  over a kind name, and a kind two offered providers share is ignored as
+  ambiguous; the generic kinds are not accepted), and an OAuth2 client may
+  register `default_idp` (a provider id) on the administrator API
+  (`POST`/`PUT /api/v1/oauth2-clients`, `null` clears). Both are resolved on
+  the server against the tenant's effective, enabled providers — the list
+  `GET /api/v1/auth/federation/providers` shows — and the sign-in page receives
+  only the matched provider's id (`/login?…&idp=<uuid>`). The hint overrides
+  the default; a hint that names nothing (unknown, disabled, another tenant's)
+  is ignored and the response is byte-identical to one without it (apart from
+  the hint's own echo inside `return_to`); a default
+  whose provider was later disabled is ignored, never an error. A
+  `default_idp` the tenant cannot see is refused with `400` on create and on
+  update. Read on every `authn_request_params` lane and for `fapi2` clients;
+  it changes nothing that is issued, and with a live session no sign-in page
+  is shown. Dynamic registration and CIMD cannot set `default_idp`. The sign-in
+  page starts the matched provider by itself after 1.5 seconds (3 with reduced
+  motion) once the user has entered their workspace, behind a "Choose another
+  way to sign in" control, and never loops (a failed provider leg links back
+  without the provider id; nothing starts for an unlisted id or a provider
+  already started or declined in the last ten minutes); on a re-authentication
+  hop it only highlights the provider and waits for a click (#833). Which hops
+  those are is decided by the server (#835): `reauth=1` (a stale session cookie,
+  or an `honour`-lane interaction such as `prompt=login`, an unmet `max_age` or
+  a step-up), a step-up `acr`, or the new `/login?…&fresh=1`, set on the first
+  hop of an `honour`-lane request whose request in force — the pushed copy
+  under PAR, the query string otherwise — says `prompt=login` or `max_age=0`,
+  read with the server's own parser; the page no longer reads `prompt` or
+  `max_age` out of `return_to`. A pushed hint is bounded at push time like
+  the query one; the console client form
+  gains a "Default identity provider" select. There is deliberately no
+  `kc_idp_hint` alias. Documented in `docs/admin/oidc-authn-parameters.md`
+  (with a Keycloak migration note) and `docs/admin/browser-login-hop.md`;
+  threat-model entries T-493 and T-494; OpenAPI regenerated. The sign-in page
+  also writes `fresh=1` in place of a `reauth=1` or step-up `acr` it removes from
+  the address bar, so a reload of an interaction hop stays quiet, and the
+  form-post error redirect sends `Referrer-Policy: no-referrer` (#836). Schema
+  v113 (`oauth2_client.default_idp`, additive). (G-B, #817, #833, #835, #836)
+
+- Administrator OAuth2 client writes are audited: `POST`, `PUT` and
+  `DELETE /api/v1/oauth2-clients` write `oauth2.client_created`,
+  `oauth2.client_updated` and `oauth2.client_deleted` rows naming the
+  administrator, the tenant and the client. An update lists the *names* of the
+  members it changed (`changed_fields`, against the stored row) and, when
+  `default_idp` moved, its new provider id or `null`. Only successful writes are
+  recorded; no row carries the client secret or its hash. Dynamic registration,
+  RFC 7592 and the conversion to public keep their own rows. (#834)
+
+- Tokens issued by token exchange (RFC 8693 same-domain delegation and
+  impersonation, and X4 cross-domain exchange) now carry the RFC 9068 §2.2
+  `client_id` claim, naming the client that ran the exchange. Introspection
+  reports it: `POST /oauth2/introspect` now echoes `client_id` from any access
+  token that carries the claim, so code, refresh, CIBA and device tokens report
+  it too. gRPC `IntrospectToken` also prefers the claim. Every exchanged token
+  also carries a new marker claim, `axiam_exchanged: true`, which no other
+  token carries. An exchanged token is never accepted as an `actor_token`,
+  including by the client it names, so the #518 rule cannot be bypassed by
+  exchanging a foreign token first and then presenting the result as the
+  actor. Tokens from every other grant are unchanged byte for byte. (G-D, #819)
+
+### Changed
+
+- A refused refresh-token replay now revokes the session the replayed token
+  belongs to: on a `standard` client, and on a `fapi2` client once its 60-second
+  grace window has passed, presenting an already-rotated refresh token is still
+  answered `400 invalid_grant`, and now also invalidates that session (published
+  to the revocation feed when it is enabled) and revokes every refresh token
+  issued under it, the successor included. Other sessions of the same user are
+  untouched, a `fapi2` retry inside the grace window is still accepted, and a
+  token revoked by a logout of its session, by `/oauth2/revoke`, by a password
+  reset or by another user-wide revocation is not a replay. The new organization/tenant setting
+  `oauth2.refresh_reuse_response` defaults to `revoke_session`; setting it to
+  `refuse` restores the 1.1.x behaviour (refuse, mark and audit only). The
+  `oauth2.refresh_token_replayed` audit row gains a `response` key
+  (`revoked_session` | `refused` | `refused_unverified_presenter` |
+  `revocation_failed`), a `failed_writes` key on a failed revocation, and
+  `token_client_id`. Only the replayed token's own client, passing the token's
+  DPoP/mTLS sender constraint, triggers the revocation; any other presenter is
+  refused the same way and revokes nothing (#821); its row says
+  `refused_unverified_presenter`, or `refused` when the policy is `refuse` or the
+  token names no session, since no revocation was withheld. "The session" is the browser
+  sign-in, so the revocation reaches every client's refresh tokens under it, with
+  no back-channel logout sent; it ends the console (SSO) session too only if that
+  session has not been refreshed since the code was issued (a console refresh
+  gives the session a new id, F4-R12-03). An organization
+  settings `PUT` from a pre-1.2.0 client resets `refuse` to `revoke_session`.
+  Schema v110, additive. (G-C, #818, #821, #822, #823)
+
+- A single-session logout now also revokes every OAuth2 refresh token issued
+  under that session, for every client and grant bound to it (authorization code
+  and native sign-in alike): `POST /api/v1/auth/logout`, RP-initiated logout
+  (`/oauth2/end_session` and its cookie hop) and SAML single logout. Before, the
+  session's refresh tokens outlived it and kept minting access tokens naming the
+  dead session. The user's other sessions keep theirs; a token revoked at logout
+  is a stale credential, not a replay. A logout whose refresh-token or session
+  write fails is now reported as failed (`500`, no redirect to the relying
+  party) instead of as signed out. The refresh tokens are revoked before the
+  session is deleted, so after any failure the session is still live and
+  repeating the logout with the same credential completes it: the bearer token,
+  the `id_token_hint`, or the OP-session cookie, which the failure page of the
+  cookie hop and of IdP-initiated SAML logout keeps for that reason
+  (F4-R12-07, D-N43). The native sign-in grant
+  records its client as a session participant, so back-channel logout reaches a
+  native client that registered a `backchannel_logout_uri`. **Limit, the common
+  case for a browser session:** a refresh token names the session id current
+  when its grant was authorized, and a console refresh (`/auth/refresh`) moves
+  the session to a new id, so after one `POST /auth/logout` (and the cookie-hop
+  logout) ends the console session but not the code grants issued before it.
+  RP-initiated logout with the grant's own `id_token_hint` does revoke that
+  grant's refresh tokens, but the console (SSO) session survives it and the next
+  `/oauth2/authorize` signs the user back in. Native sign-in is unaffected (its
+  session id never rotates); a session lineage key that closes this is #844.
+  See `docs/api/logout.md`. (F4-R12-01, #839, D-N39; F4-R12-08)
+
+- A replayed authorization code now also revokes every OAuth2 refresh token
+  issued under the session the code was issued from (the code's own and any
+  sibling grant's, for every client), beside the RFC 6749 §10.5 session
+  invalidation it already did; before, those refresh tokens kept minting access
+  tokens after the replay. The answer is still `400 invalid_grant`; a failed
+  revocation is logged at `error` with `revocation_failed` and `failed_writes`
+  and does not change it. (#842, D-N41)
+
+- SDK contract 1.65 (`sdks/CONTRACT.md`, `sdks/openapi.json`,
+  `sdks/management-registry.json` re-vendored): §37 specifies the native sign-in
+  helper (`login_with_provider_id_token`, with the SHA-256 nonce rule), `idp_hint` on
+  the begin and PAR helpers (a hint on the begin URL is carried into the pushed
+  request), the refresh-reuse note in §9, and that no redirect is followed on an
+  `/oauth2/*` POST. The eleven SDKs ship it as minor releases; source-breaking
+  changes are listed in each SDK's CHANGELOG, and the C SDK moves to SOVERSION 3
+  and the C++ SDK to SOVERSION 5. (G-A, G-B, #816, #817, #836)
+
+### Fixed
+
+- A provider sign-in started from the login hop — automatically or with a
+  provider button — now returns to the relying party's authorization request when
+  it completes (OIDC, OAuth2, SAML and Apple alike) instead of ending on the
+  console dashboard, and a failed provider leg's "Back to sign in" keeps the
+  request's `return_to` but not the provider id. That hop is resumed only by the
+  callback of the sign-in that stored it: the tab keeps the start's `state`
+  (SAML: `relay_state`), the SAML and Apple handoff redirects (and Apple's
+  form-post error redirect) now also carry the spent value as `state`, and a
+  callback without it or with another value lands on the dashboard. (#832, #835)
+
+- An administrator's MFA reset (`POST /api/v1/users/{id}/reset-mfa`) now also
+  revokes the user's OAuth2 refresh tokens, as a password reset does. It ended
+  the user's sessions and evicted their factors, but a refresh token issued
+  before the reset kept minting access tokens. A failed revocation fails the
+  reset (`500`); every step is idempotent, so it can be retried. (#841, D-N40)
+
+### Security
+
+- The threat model is 2.45.0 with 494 threats: T-489 to T-492 (native sign-in:
+  audience, replay, stale or nonce-less tokens, the per-provider switch) and T-493, T-494
+  (provider hint, `default_idp`) are new, and T-37, T-249, T-250, T-254 and T-471 are amended. T-254's
+  "detectable and invalidates the family" is true again for the first time since
+  1.0.0-beta13 on the `standard` lane; the in-window `fapi2` residual stays
+  recorded. Residuals recorded rather than closed: the native-sign-in trust is per
+  tenant, not per client (T-489), and the first-sign-in account-existence signal
+  is shared with browser login (T-491). (#816, #817, #818, #819)
+
 ## [1.1.3] - 2026-10-29
 
 ### Changed

@@ -19,6 +19,9 @@ use axiam_oauth2::mtls::PresentedCertificate;
 use axiam_oauth2::oidc::{
     JwksDocument, OidcDiscoveryDocument, UserInfoResponse, build_discovery_document_for,
 };
+use axiam_oauth2::provider_id_token::{
+    NATIVE_LOGIN_AUDIT_ACTION, PROVIDER_ID_TOKEN_GRANT_TYPE, PUBLIC_REFUSAL_DESCRIPTION,
+};
 use axiam_oauth2::redirect_uri::any_redirect_uri_matches;
 use axiam_oauth2::token::{
     CLIENT_AUTH_FAILED, IntrospectRequest, IntrospectionResponse, RevokeRequest, TokenRequest,
@@ -169,6 +172,24 @@ pub struct AuthorizeQuery {
     /// protocol outcome rather than an abandoned tab.
     #[serde(rename = "axiam_user_declined")]
     pub user_declined: Option<String>,
+    /// G-B (#817) — which federation provider the sign-in page should start
+    /// with: a provider's UUID, its `provider_slug`, or a branded provider
+    /// kind name (`google`, `github`, `facebook`, `apple`, `microsoft`; ASCII
+    /// case-insensitive) when exactly one provider of that kind is offered.
+    ///
+    /// `axiam_`-prefixed by the vendor-namespace rule `axiam_login_hop` states
+    /// (`axiam_oauth2::login_hop::LOGIN_HOP_MARKER`); there is no
+    /// `kc_idp_hint` alias (D-N3). Read on every lane, because it is not one
+    /// of the OIDC parameters `authn_request_params` governs and it changes
+    /// nothing that is issued. Resolved on the server against the request
+    /// tenant's effective, enabled provider list — the list
+    /// `GET /api/v1/auth/federation/providers` already shows — and only the
+    /// matched provider's id reaches the sign-in page (`idp=<uuid>`). A hint
+    /// that matches nothing, or matches more than one provider, is ignored:
+    /// the response is byte-identical to a request without one. Beside a
+    /// `request_uri` the pushed copy is used and this one is ignored. Moot when
+    /// the browser already holds an OP session and no sign-in is needed.
+    pub axiam_idp_hint: Option<String>,
 }
 
 /// Query parameter for the token endpoint tenant routing.
@@ -855,6 +876,10 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     let authn_params = honour.then(|| {
         AuthnRequestParams::parse(&RawAuthnParams {
             prompt: q.prompt.as_deref(),
+            // #835 (D-N28) — read for the hop's re-authentication marker only
+            // (`demands_fresh_authentication`); nothing on this arm decides on
+            // it, and a malformed one is the return leg's to refuse.
+            max_age: q.max_age.as_deref(),
             login_hint: q.login_hint.as_deref(),
             display: q.display.as_deref(),
             ui_locales: q.ui_locales.as_deref(),
@@ -1006,6 +1031,8 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     // own OIDC Core §3.1.2.6 code, owned by `classify_request_object` in the
     // handler; turning either into `invalid_request` here would lose the code a
     // conformance suite matches on.
+    let mut pushed_idp_hint = None;
+    let mut pushed_fresh_authentication = false;
     if classify_request_object(q.request.as_deref(), q.request_uri.as_deref()).is_none()
         && let Some(request_uri) = q.request_uri.as_deref()
         && let Err(refusal) = state
@@ -1013,6 +1040,14 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
             .par_service
             .peek(tenant_id, &q.client_id, request_uri)
             .await
+            // G-B — what `peek` hands back: the pushed provider hint, and
+            // (#835) whether the pushed request demands a fresh
+            // authentication, for the sign-in page this browser is about to
+            // be sent to.
+            .map(|peeked| {
+                pushed_idp_hint = peeked.axiam_idp_hint;
+                pushed_fresh_authentication = peeked.fresh_authentication;
+            })
     {
         // RFC 6749 §4.1.2.1, answered exactly as the `prompt=none` arm above
         // does: redirected only to a `redirect_uri` this client registered,
@@ -1075,11 +1110,50 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         Some(_) => tenant_default_locale(state, tenant_id).await,
         None => None,
     };
-    let cosmetic = authn_params
+    let mut cosmetic = authn_params
         .as_ref()
         .map_or(axiam_oauth2::login_hop::Cosmetic::NONE, |params| {
             axiam_oauth2::login_hop::Cosmetic::from_params(params, tenant_default)
         });
+    // G-B (#817) — the provider to start with, on **every** lane: the hint is
+    // AXIAM's own parameter, not one of the nine `authn_request_params`
+    // governs, and it changes nothing that is issued. A client that sends no
+    // hint and registered no default does no lookup and gets the URL it got
+    // before. Beside a `request_uri` the pushed copy is the hint (RFC 9126
+    // §4), and the query string's copy is ignored.
+    let raw_hint = if q.request_uri.is_some() {
+        pushed_idp_hint.as_deref()
+    } else {
+        q.axiam_idp_hint.as_deref()
+    };
+    cosmetic.idp = resolve_login_idp(
+        state,
+        tenant_id,
+        bounded_idp_hint(raw_hint),
+        client.default_idp,
+    )
+    .await;
+    // #835 (D-N28, F4-W3-12) — the hop says when the request in force demands
+    // a fresh authentication (`prompt` naming `login`, or `max_age=0`), so the
+    // sign-in page never starts a provider by itself for it: neither value is
+    // forwarded upstream, and a provider that still holds a session would
+    // answer with nobody present. The page cannot read this itself — under
+    // PAR the values are in the pushed request — so the server, which sees
+    // both carriers, marks it. The pushed copy beside a `request_uri`, the
+    // query otherwise (RFC 9126 §4), each through the honour lane's parse.
+    //
+    // Honour lane only, mirroring the server's own decision: off it,
+    // `prompt=login` and `max_age` are dropped (`ignore`) or refused on the
+    // return leg (`fapi2`), nothing is asserted about the authentication's
+    // freshness, and the `/login` URL stays the one W3 built (invariant 4).
+    cosmetic.fresh_authentication = honour
+        && if q.request_uri.is_some() {
+            pushed_fresh_authentication
+        } else {
+            authn_params
+                .as_ref()
+                .is_some_and(AuthnRequestParams::demands_fresh_authentication)
+        };
     let location =
         axiam_oauth2::login_hop::build_login_redirect_for(&return_to, stale, None, &cosmetic);
 
@@ -1100,6 +1174,189 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
         ));
     }
     Err(Box::new(builder.finish()))
+}
+
+/// G-B (#817) — an `axiam_idp_hint` as `authn_params` bounds it: blank, longer
+/// than `MAX_HINT_LEN` or repaired from non-UTF-8 input is no hint at all.
+///
+/// One parse for both carriers and both arms, so the bound cannot differ
+/// between the first leg and an interaction hop.
+fn bounded_idp_hint(raw: Option<&str>) -> Option<String> {
+    AuthnRequestParams::parse(&RawAuthnParams {
+        axiam_idp_hint: raw,
+        ..Default::default()
+    })
+    .idp_hint
+}
+
+/// G-B (#817) — which provider the sign-in page starts with, if any.
+///
+/// The hint, when it names exactly one provider; otherwise the client's
+/// `default_idp`, when that still names one; otherwise none. "Names" is
+/// decided against **one** list: the request tenant's effective, enabled
+/// providers — its own plus the organization's inheritable, unshadowed ones —
+/// from the resolver `list_providers_public` uses, so the answer can only ever
+/// be a provider that endpoint already shows this tenant's sign-in page.
+///
+/// # Why a lookup is permissible here when `login_hint` forbids one (T-493)
+///
+/// `login_hint`'s rule is that nothing looks it up, because a lookup on an
+/// account identifier is an enumeration oracle. A provider is not an account,
+/// and the list consulted is public for the tenant: whatever a hint could
+/// distinguish — exists, enabled, inherited, another tenant's — can already be
+/// read from that listing, or is invisible because the hint matches only
+/// within it. So the response does not need to stay equal *by construction*;
+/// it is equal by the one rule below, which the authorize tests pin byte for
+/// byte:
+///
+/// * a hint that matches nothing (unknown, disabled, not inheritable,
+///   shadowed, another tenant's, or a URL) is treated as **no hint**, so the
+///   client default then applies exactly as it would have without the hint;
+/// * a hint that matches more than one provider (a slug shared by two kinds,
+///   or a kind name two providers share) is ambiguous and treated the same
+///   way;
+/// * a default that no longer matches (its provider was disabled or deleted
+///   after registration) is ignored, never an error — the registration was
+///   valid when written, and the user still gets a sign-in page;
+/// * a datastore failure is ignored too: a sign-in page without a preselected
+///   provider is always a correct answer.
+///
+/// What a hint may be — a UUID, a slug or a branded kind name, in that order —
+/// is [`match_idp_hint`]'s rule. Only the matched config's own `id` is
+/// returned — a type, never the hint.
+///
+/// No hint and no default: no read at all, so a request that uses neither
+/// costs what it cost before G-B.
+async fn resolve_login_idp<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+    hint: Option<String>,
+    default_idp: Option<Uuid>,
+) -> Option<Uuid> {
+    if hint.is_none() && default_idp.is_none() {
+        return None;
+    }
+    let organization_id = match state.tenant_repo.get_by_id(tenant_id).await {
+        Ok(tenant) => tenant.organization_id,
+        Err(e) => {
+            tracing::warn!(error = %e, %tenant_id, "could not read the tenant to resolve a sign-in provider; showing the chooser");
+            return None;
+        }
+    };
+    let effective = match crate::handlers::federation_login::effective_providers(
+        state,
+        crate::handlers::federation_login::Workspace {
+            organization_id,
+            tenant_id,
+        },
+    )
+    .await
+    {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = ?e, %tenant_id, "could not list the tenant's providers to resolve a sign-in provider; showing the chooser");
+            return None;
+        }
+    };
+    if let Some(hint) = hint.as_deref() {
+        let candidates: Vec<IdpHintCandidate<'_>> = effective
+            .iter()
+            .map(|p| IdpHintCandidate {
+                id: p.config.id,
+                slug: p.config.provider_slug.as_deref(),
+                kind: p.config.provider_kind,
+            })
+            .collect();
+        if let Some(id) = match_idp_hint(&candidates, hint) {
+            return Some(id);
+        }
+    }
+    default_idp.filter(|id| effective.iter().any(|p| p.config.id == *id))
+}
+
+/// G-B (#817) — what [`match_idp_hint`] needs of one effective provider: the
+/// three things a hint may name it by, all of which the public providers
+/// listing already shows (`id`, `provider_kind`) or the operator chose to make
+/// addressable (`provider_slug`).
+#[derive(Debug, Clone, Copy)]
+struct IdpHintCandidate<'a> {
+    id: Uuid,
+    slug: Option<&'a str>,
+    kind: axiam_core::models::federation::ProviderKind,
+}
+
+/// G-B (#817, D-N24) — the one provider `hint` names among `candidates` (the
+/// request tenant's effective, enabled providers), or `None`.
+///
+/// Three forms, tried in order, and the first form that matches **anything**
+/// decides — a later form is never consulted to break an earlier form's tie:
+///
+/// 1. **An explicit identifier: the UUID, or the `provider_slug`.** A UUID is
+///    compared as a UUID, so any spelling `Uuid::parse_str` accepts names the
+///    same provider; a slug is compared exactly (slugs are lower-case
+///    `[a-z0-9-]` by validation). The two are one tier, unchanged from W3.1:
+///    a lower-case hyphenated UUID is also a well-formed slug, so a hint that
+///    is one provider's id *and* another's slug is ambiguous and ignored
+///    rather than settled by a precedence nobody chose on purpose.
+/// 2. **A branded kind name** — `google`, `github`, `facebook`, `apple`,
+///    `microsoft`: the `provider_kind` value the public listing carries for
+///    each button, compared ASCII case-insensitively. Those names are
+///    lower-case canonical on the wire (`ProviderKind::as_str`), so `Google`
+///    has exactly one meaning and refusing it would only punish a
+///    capitalisation; nothing else is folded (no `-`/`_` swap, no inner
+///    whitespace — surrounding whitespace was already trimmed, for every
+///    form, by the parameter parse).
+///
+/// **The slug wins over the kind, including case-folded.** A slug is the
+/// operator's explicit choice of a word for one provider; a kind name is a
+/// category. If an operator slugged a generic provider `google`, the hint
+/// `google` names that provider (tier 1), and so must every spelling of it:
+/// a hint that equals any candidate's slug ignoring ASCII case is never read
+/// as a kind name. Otherwise `Google` would silently reach the branded Google
+/// while `google` reaches the operator's provider — two providers for one
+/// word. Such a hint (`Google` beside a slug `google`) matches nothing and is
+/// ignored. Only effective providers' slugs count: consulting a disabled
+/// provider's slug would let the hint's outcome reveal a provider the public
+/// listing does not show (T-493).
+///
+/// **Ambiguity is no answer**, in either tier: a kind two effective providers
+/// share (two tenant Google configs — nothing stops a tenant holding two) is
+/// ignored, exactly as a shared slug is. An organization's Google and the
+/// tenant's own Google never both count: the tenant's shadows the
+/// organization's in `effective_providers`, so the list holds one of them.
+///
+/// **The generic kinds are not accepted** (`generic_oidc`, `generic_oauth2`,
+/// `generic_saml`). They name a protocol family, not a provider: a client's
+/// `generic_oidc` would mean whichever OIDC provider a tenant happens to hold
+/// alone today, and the day the tenant swaps Okta for Auth0 the same hint
+/// would start a sign-in at a provider the client never named. A branded name
+/// means the same provider in every tenant. A generic provider is named by
+/// its slug or its id.
+fn match_idp_hint(candidates: &[IdpHintCandidate<'_>], hint: &str) -> Option<Uuid> {
+    fn only(mut ids: impl Iterator<Item = Uuid>) -> Option<Uuid> {
+        match (ids.next(), ids.next()) {
+            (Some(one), None) => Some(one),
+            _ => None,
+        }
+    }
+
+    let as_id = Uuid::parse_str(hint).ok();
+    let explicit = |c: &&IdpHintCandidate<'_>| Some(c.id) == as_id || c.slug == Some(hint);
+    if candidates.iter().any(|c| explicit(&c)) {
+        return only(candidates.iter().filter(explicit).map(|c| c.id));
+    }
+
+    if candidates
+        .iter()
+        .any(|c| c.slug.is_some_and(|slug| slug.eq_ignore_ascii_case(hint)))
+    {
+        return None;
+    }
+    let kind = axiam_core::models::federation::ProviderKind::ALL
+        .iter()
+        .copied()
+        .find(|k| !k.uses_slug() && k.as_str().eq_ignore_ascii_case(hint))?;
+    only(candidates.iter().filter(|c| c.kind == kind).map(|c| c.id))
 }
 
 /// W7 — the tenant's fallback UI language, for the last step of W5's
@@ -1147,6 +1404,48 @@ async fn tenant_default_locale<C: Connection + Clone>(
     locale
 }
 
+/// Whether the tenant's effective settings have the GDPR-sensitive scopes
+/// (`address`, `phone`) on. A settings read that fails is "off", logged.
+async fn sensitive_scopes_enabled<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+) -> bool {
+    // The organization the settings baseline belongs to. Resolved from the
+    // tenant rather than taken from the caller's principal, the same way
+    // `axiam_auth::lockout` resolves it: the authorization endpoint's
+    // principal type carries no `org_id`, and adding one to it would put a
+    // field on the hot path for a branch almost no request takes.
+    match state.tenant_repo.get_by_id(tenant_id).await {
+        Ok(tenant) => match axiam_core::repository::SettingsRepository::get_effective_settings(
+            &state.settings_repo,
+            tenant.organization_id,
+            tenant_id,
+        )
+        .await
+        {
+            Ok(settings) => settings.oidc.sensitive_scopes_enabled,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    %tenant_id,
+                    "could not read the tenant's effective settings while deciding whether the \
+                     address/phone scopes are enabled; treating them as disabled"
+                );
+                false
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                %tenant_id,
+                "could not resolve the organization behind this tenant; treating the \
+                 address/phone scopes as disabled"
+            );
+            false
+        }
+    }
+}
+
 /// W7 / X7 G8 — resolve what this authorization request's GDPR-sensitive
 /// scopes have earned, so `AuthorizeService` can decide without a repository.
 ///
@@ -1187,40 +1486,7 @@ async fn resolve_sensitive_scopes<C: Connection + Clone>(
         return (axiam_oauth2::sensitive::Requested::None, false);
     }
 
-    // The organization the settings baseline belongs to. Resolved from the
-    // tenant rather than taken from the caller's principal, the same way
-    // `axiam_auth::lockout` resolves it: the authorization endpoint's
-    // principal type carries no `org_id`, and adding one to it would put a
-    // field on the hot path for a branch almost no request takes.
-    let enabled = match state.tenant_repo.get_by_id(tenant_id).await {
-        Ok(tenant) => match axiam_core::repository::SettingsRepository::get_effective_settings(
-            &state.settings_repo,
-            tenant.organization_id,
-            tenant_id,
-        )
-        .await
-        {
-            Ok(settings) => settings.oidc.sensitive_scopes_enabled,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    %tenant_id,
-                    "could not read the tenant's effective settings while deciding whether the \
-                     address/phone scopes are enabled; treating them as disabled"
-                );
-                false
-            }
-        },
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                %tenant_id,
-                "could not resolve the organization behind this tenant; treating the \
-                 address/phone scopes as disabled"
-            );
-            false
-        }
-    };
+    let enabled = sensitive_scopes_enabled(state, tenant_id).await;
     if !enabled {
         return (axiam_oauth2::sensitive::Requested::Disabled, true);
     }
@@ -1599,6 +1865,10 @@ pub async fn authorize<C: Connection + Clone>(
                     display: q.display.as_deref(),
                     ui_locales: q.ui_locales.as_deref(),
                     claims_locales: q.claims_locales.as_deref(),
+                    // Not one of the nine, and not counted by `is_empty`
+                    // either way: a query-string copy beside a `request_uri`
+                    // is ignored (the pushed copy wins), never refused.
+                    axiam_idp_hint: None,
                 })
                 .is_empty();
 
@@ -1673,6 +1943,7 @@ pub async fn authorize<C: Connection + Clone>(
                 display: q.display.as_deref(),
                 ui_locales: q.ui_locales.as_deref(),
                 claims_locales: q.claims_locales.as_deref(),
+                axiam_idp_hint: q.axiam_idp_hint.as_deref(),
             });
             // Cloned into the scrutinee so the else-arm can still read
             // `q.redirect_uri`: a `let`-else MOVES what it destructures, and
@@ -1882,6 +2153,11 @@ pub async fn authorize<C: Connection + Clone>(
         let c = axiam_oauth2::login_hop::Cosmetic::from_params(&req.authn_params, tenant_default);
         (c.login_hint.map(str::to_owned), c.display, c.ui_locale)
     };
+    // G-B (#817) — the provider hint, from whichever carrier delivered the
+    // request (the pushed copy for PAR), for a sign-in hop below. Resolved
+    // only if one is built: with a live session and no interaction there is
+    // no sign-in page, and the hint is moot.
+    let idp_hint = req.authn_params.idp_hint.clone();
 
     // T21.6 — see `resolve_authorize_principal`'s use of the same value: an
     // interaction hop comes back to the endpoint the request arrived at.
@@ -1973,10 +2249,30 @@ pub async fn authorize<C: Connection + Clone>(
                 );
             }
             let (login_hint, display, ui_locale) = &cosmetic_owned;
+            // G-B (#817) — a re-authentication hop is a sign-in page too, so
+            // the hint (or the client's default) applies there exactly as on
+            // the first leg. The consent page starts no sign-in and is not
+            // asked: `build_interaction_redirect` drops `idp` for it anyway,
+            // and skipping the lookup keeps that arm's cost unchanged.
+            let idp = if interaction.reason.requires_reauthentication() {
+                let default_idp = state
+                    .oauth2_client_repo
+                    .get_by_client_id(user.tenant_id, &authorized_client_id)
+                    .await
+                    .ok()
+                    .and_then(|c| c.default_idp);
+                resolve_login_idp(&state, user.tenant_id, idp_hint, default_idp).await
+            } else {
+                None
+            };
             let cosmetic = axiam_oauth2::login_hop::Cosmetic {
                 login_hint: login_hint.as_deref(),
                 display: *display,
                 ui_locale: *ui_locale,
+                idp,
+                // #835 — first leg only: this hop already says `reauth=1` for
+                // every reason it sends a browser to sign in.
+                fresh_authentication: false,
             };
             let location = axiam_oauth2::login_hop::build_interaction_redirect(
                 &return_to,
@@ -2091,6 +2387,17 @@ pub async fn authorize<C: Connection + Clone>(
 /// client_credentials, and refresh_token grant types. The `tenant_id` is
 /// passed as a query parameter since the token endpoint is unauthenticated
 /// (the client is authenticating itself here).
+///
+/// Also serves the native sign-in grant
+/// `urn:axiam:params:oauth:grant-type:provider-id-token`, which signs a user
+/// in with an ID token a mobile or desktop app obtained from a federated OIDC
+/// provider's native SDK. Parameters: `provider` (federation config UUID or
+/// provider slug), `id_token`, `nonce` (the raw nonce; the provider's SDK was
+/// given its SHA-256 hex, in either case, which the ID token's `nonce` claim
+/// must equal), and optional `scope` and `resource`. Every refusal of the provider token is
+/// `invalid_grant` ("the provider ID token is not acceptable"); the grant is
+/// rate limited per tenant and client address (`rate_limit_exceeded`). This
+/// is not token exchange (RFC 8693).
 #[utoipa::path(
     post,
     path = "/oauth2/token",
@@ -2107,7 +2414,7 @@ pub async fn authorize<C: Connection + Clone>(
          body = OAuth2ErrorResponse),
         (status = 401, description = "`invalid_client`: client authentication failed; carries a `WWW-Authenticate` challenge",
          body = OAuth2ErrorResponse),
-        (status = 429, description = "`rate_limit_exceeded` from the route limiters (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
+        (status = 429, description = "`rate_limit_exceeded` from the route limiters and from the provider-id-token grant (with `Retry-After`), or `slow_down` on the uma-ticket and token-exchange grants",
          body = OAuth2ErrorResponse),
         (status = 500, description = "`server_error`: an internal failure; the body always carries `error_description`",
          body = OAuth2ErrorResponse),
@@ -2197,6 +2504,14 @@ async fn token_inner<C: Connection + Clone>(
         // authenticated by the credential its registration names rather than
         // by the secret it was also, unavoidably, issued.
         return handle_token_exchange(tenant_id, form, &state, &ctx).await;
+    }
+
+    // G-A (W2.3) — native sign-in with a provider ID token. Its own arm for
+    // the reason the token exchange has one: the grant's collaborators (the
+    // OIDC federation service, the replay store, the consent records) are the
+    // REST layer's, and the audit record is written here.
+    if grant_type == PROVIDER_ID_TOKEN_GRANT_TYPE {
+        return handle_provider_id_token(&req, tenant_id, form, &state, &ctx).await;
     }
 
     // X2 / UMA 2.0 §3.3.1. Third grant dispatched here for the same structural
@@ -4831,6 +5146,433 @@ async fn handle_token_exchange<C: Connection + Clone>(
     }
 }
 
+/// G-A (W2.3) — `grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`:
+/// a native app signs in with an ID token a federation provider issued to it
+/// (plan §3.1).
+///
+/// The order is the design (see `axiam_oauth2::provider_id_token`):
+///
+/// 1. the client authenticates (a public client with `client_id` alone), its
+///    profile's rules run, it must hold the grant, and its token binding is
+///    decided — then the `oauth2_provider_id_token` bucket is charged;
+/// 2. the request's parameters, scopes and target are checked — before the
+///    provider token is touched, so a malformed request does not spend it;
+/// 3. `axiam-federation` verifies the token and resolves the user (§3.1
+///    steps 2–7), every refusal one generic `invalid_grant`; then the
+///    `login.post_auth` reactor gate runs for that user (CONTRACT §22,
+///    F4-W2-01), a refusal the same `invalid_grant`;
+/// 4. consent is resolved for that user and decided (`consent_required` for
+///    anything needing a ceremony, D-N6);
+/// 5. the token set is issued, and `federation.native_login` recorded.
+///
+/// Every attempt that passes step 1 is audited, accepted or refused, with a
+/// reason code — never the token, never the nonce.
+async fn handle_provider_id_token<C: Connection + Clone>(
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    form: TokenRequest,
+    state: &web::Data<AppState<C>>,
+    ctx: &TokenRequestContext,
+) -> HttpResponse {
+    // --- 1. the client ---------------------------------------------------
+    let client = match state
+        .oauth2
+        .token_service
+        .authenticate_provider_id_token_client(tenant_id, &form, ctx)
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            if matches!(e, OAuth2Error::InvalidClient(_)) {
+                // Detached, as at every other grant (§22.3 residual 1).
+                let tenant_repo = state.tenant_repo.clone();
+                let audit_repo = state.audit_repo.clone();
+                let attempted = form.client_id.clone();
+                let peer = peer_ip(req);
+                let forwarded = client_ip(req);
+                actix_web::rt::spawn(async move {
+                    append_client_auth_failure_audit(
+                        &tenant_repo,
+                        &audit_repo,
+                        tenant_id,
+                        attempted.as_deref(),
+                        PROVIDER_ID_TOKEN_GRANT_TYPE,
+                        peer,
+                        forwarded,
+                    )
+                    .await;
+                });
+            }
+            return build_oauth2_error_response(&e);
+        }
+    };
+
+    // The grant's own bucket, `login_per_min` per tenant and address — the
+    // preset of the password login it stands in for. Applied here rather than
+    // as route middleware because `/oauth2/token` serves every grant and the
+    // grant is known only once the body is read. Keyed on the caller's
+    // address, not on the client: a mobile app's one public `client_id` is
+    // shared by every person signing in with it, and a per-client bucket
+    // would let one caller lock all of them out. And on the tenant (F4-W2-07):
+    // carrier-grade NAT puts many users of many tenants behind one address,
+    // and one tenant's traffic must not spend another's allowance. Charged
+    // after step 1, so an unauthenticated caller cannot spend it for a
+    // confidential client.
+    //
+    // `client_ip` already falls back to the transport peer; a request with
+    // neither (no forwarded address the rule trusts and no peer) is refused
+    // rather than pooled into one shared `unknown` bucket, where every such
+    // caller would spend everyone else's allowance.
+    let Some(address) = client_ip(req) else {
+        return build_oauth2_error_response(&OAuth2Error::InvalidRequest(
+            "the caller's network address could not be determined".into(),
+        ));
+    };
+    if !state.shared_rate_limit.check_at(
+        &format!("oauth2_provider_id_token:{tenant_id}:{address}"),
+        chrono::Utc::now(),
+        state.rate_limit_cfg.login_per_min,
+    ) {
+        return HttpResponse::TooManyRequests()
+            .append_header(("Cache-Control", "no-store"))
+            .append_header(("Retry-After", "60"))
+            .json(OAuth2ErrorResponse {
+                error: "rate_limit_exceeded".into(),
+                error_description: "too many native sign-in attempts from this address".into(),
+            });
+    }
+
+    let client_id = client.client().client_id.clone();
+    let requested_provider = form.provider.clone();
+    let audit = NativeLoginAudit {
+        tenant_id,
+        client_id: &client_id,
+        requested_provider: requested_provider.as_deref(),
+        ip_address: peer_ip(req),
+    };
+
+    // --- 2. the request --------------------------------------------------
+    let grant = match state
+        .oauth2
+        .token_service
+        .prepare_provider_id_token_grant(client, &form)
+        .await
+    {
+        Ok(grant) => grant,
+        Err(e) => {
+            audit.refused(state, None, e.error_code()).await;
+            return build_oauth2_error_response(&e);
+        }
+    };
+    let native = match axiam_oauth2::provider_id_token::native_request(&form) {
+        Ok(native) => native,
+        Err(e) => {
+            // F4-R12-06: a missing `provider`, `id_token` or `nonce`, or an
+            // over-long nonce, is past step 1 like every other refusal here,
+            // so it is audited like them — by reason code (`invalid_request`),
+            // never with the token or the nonce. After the client check and
+            // the bucket, so an unauthenticated caller cannot write rows.
+            audit.refused(state, None, e.error_code()).await;
+            return build_oauth2_error_response(&e);
+        }
+    };
+    // F4-W2-05 (D-N14): the tenant's sensitive-scope switch does not depend on
+    // the user, so it is decided here with the other request checks, before
+    // the provider token is verified and spent.
+    let switched_off = !axiam_oauth2::sensitive::requested(grant.scopes()).is_empty()
+        && !sensitive_scopes_enabled(state, tenant_id).await;
+    if let Err(e) =
+        axiam_oauth2::provider_id_token::refuse_switched_off_sensitive_scopes(switched_off)
+    {
+        audit.refused(state, None, e.error_code()).await;
+        return build_oauth2_error_response(&e);
+    }
+
+    // --- 3. §3.1 steps 2–7 -----------------------------------------------
+    // No federation service means no encryption key, so no provider's
+    // configuration can be read and none can be trusted: the same generic
+    // refusal as an unknown provider.
+    let Some(federation) = state.federation.oidc_federation_service.as_ref() else {
+        audit.refused(state, None, "federation_unavailable").await;
+        return build_oauth2_error_response(&OAuth2Error::InvalidGrant(
+            PUBLIC_REFUSAL_DESCRIPTION.into(),
+        ));
+    };
+    let subject = match federation
+        .verify_native_id_token(
+            &state.tenant_repo,
+            &state.federation.provider_id_token_replay_repo,
+            tenant_id,
+            &native,
+            chrono::Utc::now().timestamp(),
+        )
+        .await
+    {
+        Ok(subject) => subject,
+        Err(e) => {
+            audit.refused(state, None, e.reason_code()).await;
+            return build_oauth2_error_response(&axiam_oauth2::provider_id_token::refusal_for(&e));
+        }
+    };
+
+    // --- 3b. the `login.post_auth` gate (F4-W2-01, #828) -----------------
+    // CONTRACT §22: the event covers every interactive sign-in, after the
+    // credentials verify and before any session or token exists. This is one,
+    // so it fires here — through the adapter the SAML, OIDC and usernameless
+    // passkey paths share (SEC-095), which refuses a `require_mfa` because a
+    // one-round-trip grant has no step-up to route it into. The provider
+    // token is already spent at this point; that is the D-N14 rule for every
+    // user-dependent refusal, and the app obtains a fresh one.
+    if let Err(reason_code) =
+        native_login_post_auth(state, req, tenant_id, grant.organization_id(), &subject).await
+    {
+        audit.refused(state, Some(&subject), reason_code).await;
+        let refusal = if reason_code == NATIVE_POST_AUTH_DENIED {
+            OAuth2Error::InvalidGrant(PUBLIC_REFUSAL_DESCRIPTION.into())
+        } else {
+            OAuth2Error::ServerError(
+                axiam_oauth2::provider_id_token::SERVER_REFUSAL_DESCRIPTION.into(),
+            )
+        };
+        return build_oauth2_error_response(&refusal);
+    }
+
+    // --- 4. consent, for the user the token signed in --------------------
+    let scope = grant.scopes().join(" ");
+    let (sensitive, sensitive_switch_off) =
+        resolve_sensitive_scopes(state, tenant_id, subject.user_id, &client_id, Some(&scope)).await;
+    let external =
+        resolve_external_consent(state, tenant_id, subject.user_id, &client_id, Some(&scope)).await;
+    let consent = axiam_oauth2::provider_id_token::ConsentState {
+        sensitive,
+        sensitive_switch_off,
+        external,
+    };
+
+    // --- 5. the token set --------------------------------------------------
+    match state
+        .oauth2
+        .token_service
+        .issue_provider_id_token_grant(
+            tenant_id,
+            &grant,
+            &subject,
+            native.nonce,
+            consent,
+            axiam_oauth2::provider_id_token::SignInOrigin {
+                ip_address: client_ip(req),
+                user_agent: crate::extractors::client_info::user_agent(req),
+            },
+            ctx,
+        )
+        .await
+    {
+        Ok(issued) => {
+            // D-N39 (#839): the client has just joined the session the grant
+            // created — recorded as `/oauth2/authorize` records a code's
+            // client (B5), because back-channel logout iterates exactly these
+            // rows. A failure is logged and swallowed, as there: losing a
+            // logout notification is bad, failing the sign-in is worse.
+            if let Err(e) = state
+                .oauth2
+                .session_client_repo
+                .record(axiam_core::models::oauth2_client::CreateSessionClient {
+                    tenant_id,
+                    session_id: issued.session_id,
+                    client_id: client_id.clone(),
+                    user_id: subject.user_id,
+                })
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "could not record the native client's session participation; \
+                     back-channel logout will not reach it"
+                );
+            }
+            // Audited before the tokens are returned: for a first sign-in
+            // this record is the evidence that a provider's token created an
+            // AXIAM user.
+            audit.accepted(state, &subject, grant.scopes()).await;
+            HttpResponse::Ok()
+                .append_header(("Cache-Control", "no-store"))
+                .append_header(("Pragma", "no-cache"))
+                .json(issued.response)
+        }
+        Err(e) => {
+            audit.refused(state, Some(&subject), e.error_code()).await;
+            build_oauth2_error_response(&e)
+        }
+    }
+}
+
+/// The audit reason code of a native sign-in a `login.post_auth` reactor
+/// refused — a veto, a `fail_closed` transport failure, or a `require_mfa` the
+/// grant cannot honour (F4-W2-01).
+const NATIVE_POST_AUTH_DENIED: &str = "reactor_denied";
+
+/// F4-W2-01 (#828): fire `login.post_auth` for a verified native sign-in.
+///
+/// The user is re-read from the tenant the subject was resolved in, so the
+/// reactor sees the same payload the password, SAML, OIDC and usernameless
+/// passkey paths send (`AuthService::intercept_login_post_auth` builds it
+/// once for all of them).
+///
+/// Returns the audit reason code of a refusal: [`NATIVE_POST_AUTH_DENIED`]
+/// when the gate refused — answered as the generic `invalid_grant`, which is
+/// how the token endpoint already answers a `token.pre_issue` veto — or
+/// `server_error` when the user could not be read.
+async fn native_login_post_auth<C: Connection + Clone>(
+    state: &web::Data<AppState<C>>,
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    organization_id: Uuid,
+    subject: &axiam_federation::native_login::NativeSubject,
+) -> Result<(), &'static str> {
+    let user = state
+        .user_repo
+        .get_by_id(tenant_id, subject.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                tenant_id = %tenant_id,
+                "native sign-in could not read the user for login.post_auth"
+            );
+            "server_error"
+        })?;
+    match state
+        .auth_service
+        .intercept_federated_login_post_auth(
+            tenant_id,
+            organization_id,
+            &user,
+            client_ip(req).as_deref(),
+            crate::extractors::client_info::user_agent(req).as_deref(),
+        )
+        .await
+    {
+        Ok(()) => Ok(()),
+        // The only error the gate produces is its refusal; anything else is
+        // refused the same way rather than read as an allow.
+        Err(_) => Err(NATIVE_POST_AUTH_DENIED),
+    }
+}
+
+/// The `federation.native_login` audit record of one request (step 9).
+///
+/// What it records: the client, the provider (the resolved one once known;
+/// until then the request's name for it, bounded), the outcome, a reason
+/// code, and whether the sign-in provisioned the user. What it never records:
+/// the ID token, the nonce, or anything derived from either.
+struct NativeLoginAudit<'a> {
+    tenant_id: Uuid,
+    client_id: &'a str,
+    requested_provider: Option<&'a str>,
+    ip_address: Option<String>,
+}
+
+impl NativeLoginAudit<'_> {
+    async fn refused<C: Connection + Clone>(
+        &self,
+        state: &AppState<C>,
+        subject: Option<&axiam_federation::native_login::NativeSubject>,
+        reason_code: &str,
+    ) {
+        tracing::info!(
+            target: "axiam::audit",
+            event = NATIVE_LOGIN_AUDIT_ACTION,
+            tenant_id = %self.tenant_id,
+            client_id = %self.client_id,
+            outcome = "refused",
+            reason = reason_code,
+            "native sign-in refused"
+        );
+        self.append(state, subject, AuditOutcome::Failure, reason_code, None)
+            .await;
+    }
+
+    async fn accepted<C: Connection + Clone>(
+        &self,
+        state: &AppState<C>,
+        subject: &axiam_federation::native_login::NativeSubject,
+        scopes: &[String],
+    ) {
+        tracing::info!(
+            target: "axiam::audit",
+            event = NATIVE_LOGIN_AUDIT_ACTION,
+            tenant_id = %self.tenant_id,
+            client_id = %self.client_id,
+            outcome = "accepted",
+            user_id = %subject.user_id,
+            federation_config_id = %subject.provider_id,
+            jit_provisioned = subject.newly_provisioned,
+            "native sign-in"
+        );
+        self.append(
+            state,
+            Some(subject),
+            AuditOutcome::Success,
+            "accepted",
+            Some(scopes),
+        )
+        .await;
+    }
+
+    async fn append<C: Connection + Clone>(
+        &self,
+        state: &AppState<C>,
+        subject: Option<&axiam_federation::native_login::NativeSubject>,
+        outcome: AuditOutcome,
+        reason_code: &str,
+        scopes: Option<&[String]>,
+    ) {
+        let accepted = outcome == AuditOutcome::Success;
+        let (actor_id, actor_type) = match subject {
+            Some(s) if accepted => (s.user_id, ActorType::User),
+            _ => (Uuid::nil(), ActorType::System),
+        };
+        let metadata = serde_json::json!({
+            "client_id": self.client_id,
+            "outcome": if accepted { "accepted" } else { "refused" },
+            "reason_code": reason_code,
+            // Caller-supplied until resolved, so bounded like a client id.
+            "provider": subject
+                .map(|s| s.provider_id.to_string())
+                .or_else(|| self.requested_provider.map(truncate_bytes_on_char_boundary)),
+            "provider_name": subject.map(|s| s.provider_name.as_str()),
+            "provider_kind": subject.map(|s| s.provider_kind),
+            "provider_inherited": subject.map(|s| s.inherited),
+            "user_id": subject.map(|s| s.user_id),
+            "external_subject": subject.map(|s| s.external_subject.as_str()),
+            "newly_provisioned": subject.is_some_and(|s| s.newly_provisioned),
+            "granted_scopes": scopes.map(|s| s.join(" ")),
+        });
+        if let Err(e) = state
+            .audit_repo
+            .append(CreateAuditLogEntry {
+                tenant_id: self.tenant_id,
+                actor_id,
+                actor_type,
+                action: NATIVE_LOGIN_AUDIT_ACTION.into(),
+                resource_id: subject.map(|s| s.provider_id),
+                outcome,
+                ip_address: self.ip_address.clone(),
+                metadata: Some(metadata),
+            })
+            .await
+        {
+            // Never propagated: a sign-in must not fail because the audit sink
+            // is unavailable (T-15-04).
+            tracing::error!(
+                error = %e,
+                tenant_id = %self.tenant_id,
+                "failed to write the {NATIVE_LOGIN_AUDIT_ACTION} audit row"
+            );
+        }
+    }
+}
+
 /// `invalid_client` returns 401 with a `WWW-Authenticate` header per
 /// RFC 6749 §5.2.  Although the token endpoint uses `client_secret_post`,
 /// RFC 6749 §5.2 still requires the 401 response to include
@@ -5277,6 +6019,10 @@ pub struct PushedAuthorizationRequest {
     /// client as a protocol error rather than surfacing in a browser after a
     /// sign-in the user should never have been asked for.
     pub resource: Option<String>,
+    /// G-B (#817) — AXIAM's provider hint, pushed like `login_hint`; see the
+    /// authorization endpoint's `axiam_idp_hint`. Never refused: a hint that
+    /// names nothing is answered as no hint.
+    pub axiam_idp_hint: Option<String>,
 }
 
 /// `POST /oauth2/par` success body (RFC 9126 §2.2).
@@ -5619,6 +6365,7 @@ async fn pushed_authorization_request_inner<C: Connection + Clone>(
             claims_locales: req.claims_locales,
             dpop_jkt,
             resource: req.resource,
+            axiam_idp_hint: req.axiam_idp_hint,
         })
         .await
     {
@@ -5719,6 +6466,8 @@ pub struct EndSessionQuery {
                                       browser-session cookie and ends the session it names"),
         (status = 200, description = "Session ended; AXIAM's logged-out page"),
         (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+        (status = 500, description = "The session could not be fully ended; cookies \
+                                      cleared, no redirect"),
     ),
 )]
 pub async fn end_session<C: Connection + Clone>(
@@ -5785,9 +6534,22 @@ pub async fn end_session<C: Connection + Clone>(
         tenant_issuer.as_deref(),
     )
     .await;
-    // Best-effort: a session that has already expired is not an error — the
-    // user asked to be logged out and they are.
-    let _ = state.auth_service.logout(tenant_id, session_id).await;
+    // A session that has already expired is not an error — `invalidate` and
+    // the refresh-token revocation are both idempotent, so the user asked to
+    // be logged out and they are. A *failed* write is different (D-N39,
+    // #839): the session or the refresh tokens issued under it may still be
+    // live, and redirecting to the relying party as if the logout had worked
+    // would leave it half-ended without anyone being told.
+    if state
+        .auth_service
+        .logout(tenant_id, session_id)
+        .await
+        .is_err()
+    {
+        // The repeat names the session through the same hint, so the
+        // OP-session cookie is not needed for it.
+        return logout_incomplete_page(&state.auth_config, tenant_id, false);
+    }
 
     // 4. Redirect against the identified client's allow-list, or render.
     finish_logout(
@@ -5903,6 +6665,10 @@ fn bounce_to_cookie_logout(
         (status = 200, description = "The OP browser session this browser's cookie named \
                                       is ended; AXIAM's logged-out page"),
         (status = 400, description = "No tenant could be determined"),
+        (status = 500, description = "The session could not be fully ended and is still \
+                                      live; no redirect. The API cookies are cleared and the \
+                                      OP browser-session cookie is kept, so repeating the \
+                                      request completes the logout"),
     ),
 )]
 pub async fn end_session_at_cookie_path<C: Connection + Clone>(
@@ -5925,9 +6691,18 @@ pub async fn end_session_at_cookie_path<C: Connection + Clone>(
             .await
         {
             Ok(Some(session)) => {
-                // Best-effort, as in `end_session`: an already-ended session
-                // is a logout that succeeded.
-                let _ = state.auth_service.logout(tenant_id, session.id).await;
+                // As in `end_session`: an already-ended session is a logout
+                // that succeeded, and a failed write (D-N39) is not. The
+                // session is still live after a failure (F4-R12-07) and this
+                // cookie is what names it, so it is kept for the retry.
+                if state
+                    .auth_service
+                    .logout(tenant_id, session.id)
+                    .await
+                    .is_err()
+                {
+                    return logout_incomplete_page(&state.auth_config, tenant_id, true);
+                }
                 tracing::info!(
                     %tenant_id,
                     session_id = %session.id,
@@ -6039,16 +6814,25 @@ pub(crate) fn logout_cookies(
     config: &axiam_auth::config::AuthConfig,
     tenant_id: Uuid,
 ) -> Vec<actix_web::cookie::Cookie<'static>> {
-    let cookie_secure = config.cookie_secure;
-    let mut cookies = vec![
-        crate::middleware::csrf::clear_access_cookie(cookie_secure),
-        crate::middleware::csrf::clear_refresh_cookie(cookie_secure),
-        crate::middleware::csrf::clear_csrf_cookie(cookie_secure),
-    ];
+    let mut cookies = api_logout_cookies(config);
     cookies.extend(crate::middleware::csrf::clear_op_session_cookies(
         tenant_id, config,
     ));
     cookies
+}
+
+/// The three API-cookie removals of [`logout_cookies`], without the OP-session
+/// copies: what a failed logout clears when the OP-session cookie is the
+/// credential its retry needs (F4-R12-07).
+pub(crate) fn api_logout_cookies(
+    config: &axiam_auth::config::AuthConfig,
+) -> Vec<actix_web::cookie::Cookie<'static>> {
+    let cookie_secure = config.cookie_secure;
+    vec![
+        crate::middleware::csrf::clear_access_cookie(cookie_secure),
+        crate::middleware::csrf::clear_refresh_cookie(cookie_secure),
+        crate::middleware::csrf::clear_csrf_cookie(cookie_secure),
+    ]
 }
 
 /// AXIAM's own logged-out page.
@@ -6073,6 +6857,49 @@ pub(crate) fn logged_out_page(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <title>Signed out</title></head><body><h1>You are signed out.</h1>\
          </body></html>",
+    )
+}
+
+/// The answer of an RP-initiated logout whose session could not be fully
+/// ended (D-N39, #839): `AuthService::logout` failed to revoke the refresh
+/// tokens issued under the session or, after revoking them, to delete it, and
+/// has logged which.
+///
+/// A `500`, never the relying party's redirect: following the allow-listed
+/// `post_logout_redirect_uri` would tell the RP the user is signed out while
+/// the session is still live. `logout` revokes before it deletes
+/// (F4-R12-07), so every failure leaves the session in place and the request
+/// that started the logout can be repeated to complete it ("Please try
+/// again").
+///
+/// Which cookies are cleared follows from that. The API cookies always are —
+/// this browser asked to be signed out. The OP-session cookies are cleared
+/// only when they are not the retry's credential (`keep_op_session = false`,
+/// `end_session` with an `id_token_hint`, whose repeat names the session
+/// through the hint): on the cookie hop the cookie *is* what names the
+/// session, and clearing it would turn the retry into "signed out" over a
+/// session that is still live. Carries no RP-supplied content, as
+/// [`logged_out_page`] does not.
+fn logout_incomplete_page(
+    config: &axiam_auth::config::AuthConfig,
+    tenant_id: Uuid,
+    keep_op_session: bool,
+) -> HttpResponse {
+    let mut response = HttpResponse::InternalServerError();
+    response
+        .append_header(("Cache-Control", "no-store"))
+        .content_type("text/html; charset=utf-8");
+    if keep_op_session {
+        for cookie in api_logout_cookies(config) {
+            response.cookie(cookie);
+        }
+    } else {
+        clear_logout_cookies(&mut response, config, tenant_id);
+    }
+    response.body(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <title>Sign-out incomplete</title></head><body><h1>We could not finish \
+         signing you out.</h1><p>Please try again.</p></body></html>",
     )
 }
 
@@ -6381,5 +7208,186 @@ mod request_object_tests {
         for e in [by_value, by_reference] {
             assert_ne!(e.error_code(), "invalid_request");
         }
+    }
+}
+
+// G-B (#817, D-N24) — `match_idp_hint`, the pure part of the provider-hint
+// resolver: which of the three forms a hint takes, in which order, and what
+// counts as ambiguous. The authorization endpoint's use of it (the effective
+// list, the byte-identical fallback, PAR) is pinned by
+// `tests/oauth2_idp_hint_test.rs`.
+#[cfg(test)]
+mod idp_hint_tests {
+    use axiam_core::models::federation::ProviderKind;
+
+    use super::*;
+
+    fn cand(slug: Option<&'static str>, kind: ProviderKind) -> IdpHintCandidate<'static> {
+        IdpHintCandidate {
+            id: Uuid::new_v4(),
+            slug,
+            kind,
+        }
+    }
+
+    #[test]
+    fn uuid_and_slug_resolve_as_before() {
+        let okta = cand(Some("corp-okta"), ProviderKind::GenericOidc);
+        let google = cand(None, ProviderKind::Google);
+        let list = [okta, google];
+        assert_eq!(match_idp_hint(&list, "corp-okta"), Some(okta.id));
+        assert_eq!(
+            match_idp_hint(&list, &google.id.to_string()),
+            Some(google.id)
+        );
+        assert_eq!(
+            match_idp_hint(&list, &google.id.simple().to_string().to_uppercase()),
+            Some(google.id)
+        );
+        assert_eq!(match_idp_hint(&list, "CORP-OKTA"), None, "slugs are exact");
+        assert_eq!(match_idp_hint(&list, "no-such"), None);
+    }
+
+    #[test]
+    fn a_branded_kind_name_resolves_to_the_only_provider_of_that_kind() {
+        let okta = cand(Some("corp-okta"), ProviderKind::GenericOidc);
+        let google = cand(None, ProviderKind::Google);
+        let apple = cand(None, ProviderKind::Apple);
+        let list = [okta, google, apple];
+        assert_eq!(match_idp_hint(&list, "google"), Some(google.id));
+        assert_eq!(match_idp_hint(&list, "apple"), Some(apple.id));
+        assert_eq!(match_idp_hint(&list, "github"), None, "none offered");
+        assert_eq!(match_idp_hint(&list, "facebook"), None);
+    }
+
+    #[test]
+    fn kind_names_are_ascii_case_insensitive_and_nothing_else_is_folded() {
+        let google = cand(None, ProviderKind::Google);
+        let list = [google];
+        for hint in ["Google", "GOOGLE", "gOoGlE"] {
+            assert_eq!(match_idp_hint(&list, hint), Some(google.id), "{hint}");
+        }
+        for hint in [
+            " google",
+            "google ",
+            "goo gle",
+            "google-",
+            "googl",
+            "\u{ff47}oogle",
+        ] {
+            assert_eq!(match_idp_hint(&list, hint), None, "{hint:?}");
+        }
+    }
+
+    #[test]
+    fn a_kind_two_providers_share_is_ambiguous_and_ignored() {
+        let a = cand(None, ProviderKind::Google);
+        let b = cand(None, ProviderKind::Google);
+        let apple = cand(None, ProviderKind::Apple);
+        let list = [a, b, apple];
+        assert_eq!(match_idp_hint(&list, "google"), None);
+        assert_eq!(match_idp_hint(&list, "Google"), None);
+        assert_eq!(match_idp_hint(&list, "apple"), Some(apple.id));
+        assert_eq!(
+            match_idp_hint(&list, &a.id.to_string()),
+            Some(a.id),
+            "the id still works"
+        );
+    }
+
+    #[test]
+    fn a_slug_wins_over_a_kind_name_in_every_spelling() {
+        let slugged = cand(Some("google"), ProviderKind::GenericOidc);
+        let google = cand(None, ProviderKind::Google);
+        let list = [slugged, google];
+        assert_eq!(
+            match_idp_hint(&list, "google"),
+            Some(slugged.id),
+            "the operator's word for a provider is that provider"
+        );
+        for hint in ["Google", "GOOGLE"] {
+            assert_eq!(
+                match_idp_hint(&list, hint),
+                None,
+                "{hint}: never the other provider the same word names"
+            );
+        }
+        assert_eq!(
+            match_idp_hint(&list, &google.id.to_string()),
+            Some(google.id)
+        );
+    }
+
+    #[test]
+    fn the_generic_kinds_are_not_hint_names() {
+        let okta = cand(Some("corp-okta"), ProviderKind::GenericOidc);
+        let slugless = cand(None, ProviderKind::GenericOauth2);
+        let saml = cand(Some("adfs"), ProviderKind::GenericSaml);
+        let list = [okta, slugless, saml];
+        for kind in ProviderKind::ALL.iter().filter(|k| k.uses_slug()) {
+            assert_eq!(match_idp_hint(&list, kind.as_str()), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_branded_kind_is_accepted_by_its_wire_name() {
+        for kind in ProviderKind::ALL.iter().filter(|k| !k.uses_slug()) {
+            let only = cand(None, *kind);
+            assert_eq!(
+                match_idp_hint(&[only], kind.as_str()),
+                Some(only.id),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_id_that_is_also_another_providers_slug_is_ambiguous() {
+        let a = cand(None, ProviderKind::Google);
+        let a_id = a.id.to_string();
+        let b = IdpHintCandidate {
+            id: Uuid::new_v4(),
+            slug: Some(&a_id),
+            kind: ProviderKind::GenericOidc,
+        };
+        assert_eq!(match_idp_hint(&[a, b], &a_id), None);
+    }
+}
+
+#[cfg(test)]
+mod logout_incomplete_tests {
+    use super::*;
+    use crate::middleware::csrf::COOKIE_OP_SESSION;
+    use axiam_auth::config::AuthConfig;
+
+    fn cleared_cookie_names(response: &HttpResponse) -> Vec<String> {
+        response.cookies().map(|c| c.name().to_owned()).collect()
+    }
+
+    /// F4-R12-07: a failed logout leaves the session live, so on the cookie
+    /// hop the OP-session cookie (its credential) survives the `500` page and
+    /// the retry reaches the session; the API cookies are cleared either way.
+    #[test]
+    fn the_failure_page_keeps_the_op_session_cookie_only_when_asked() {
+        let config = AuthConfig::default();
+        let tenant = Uuid::new_v4();
+
+        let kept = logout_incomplete_page(&config, tenant, true);
+        assert_eq!(
+            kept.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let kept = cleared_cookie_names(&kept);
+        assert!(!kept.is_empty(), "the API cookies are cleared");
+        assert!(!kept.iter().any(|n| n == COOKIE_OP_SESSION));
+
+        let cleared = logout_incomplete_page(&config, tenant, false);
+        assert_eq!(
+            cleared.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let cleared = cleared_cookie_names(&cleared);
+        assert!(cleared.iter().any(|n| n == COOKIE_OP_SESSION));
+        assert!(kept.iter().all(|n| cleared.contains(n)));
     }
 }

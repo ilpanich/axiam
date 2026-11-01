@@ -3319,3 +3319,81 @@ async fn t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_no
          no auth_time, no acr, no amr, and no nulls"
     );
 }
+
+// ===========================================================================
+// D-N40 (#841) — an administrator's MFA reset revokes the user's refresh tokens
+// ===========================================================================
+
+/// **D-N40 (#841).** `POST /api/v1/users/{id}/reset-mfa` ended the user's
+/// sessions and evicted their factors but revoked no OAuth2 refresh token, so a
+/// grant minted before the reset kept minting access tokens for the account the
+/// administrator had just locked down. It now revokes them, as a password reset
+/// does: the refresh token issued before the reset is refused after it, and
+/// nothing is minted. The administrator's own grant is untouched.
+#[actix_rt::test]
+async fn d_n40_an_admin_mfa_reset_revokes_the_users_refresh_tokens() {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_id = create_admin_user(&db, tenant_id).await;
+    let target_id = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "mfa-reset-target".into(),
+            email: "mfa-reset-target@example.com".into(),
+            password: "password12345".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id;
+    let (_admin_session, admin_jwt) =
+        signed_in_session(&db, &auth, admin_id, tenant_id, org_id).await;
+    let (_target_session, target_jwt) =
+        signed_in_session(&db, &auth, target_id, tenant_id, org_id).await;
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &admin_jwt).await;
+    let mut refresh_of = Vec::new();
+    for jwt in [&target_jwt, &admin_jwt] {
+        let code = do_authorize(&app, jwt, &client_id, &redirect_uri, None, None).await;
+        let resp = do_token_exchange(
+            &app,
+            tenant_id,
+            &client_id,
+            &client_secret,
+            &code,
+            &redirect_uri,
+            None,
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        refresh_of.push(body["refresh_token"].as_str().unwrap().to_owned());
+    }
+
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{target_id}/reset-mfa"))
+        .insert_header(("Authorization", format!("Bearer {admin_jwt}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, req).await.status().as_u16(),
+        204,
+        "the administrator's reset succeeds"
+    );
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[0]).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "a refresh token issued before the reset is refused after it: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "nothing is minted");
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[1]).await;
+    assert_eq!(status, 200, "another user's grant is untouched: {body}");
+}

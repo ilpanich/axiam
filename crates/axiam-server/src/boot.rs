@@ -985,6 +985,9 @@ where
         user_repo.clone(),
         webauthn_cred_repo.clone(),
         session_repo.clone(),
+        // D-N40 (#841): the reset revokes the user's OAuth2 refresh tokens
+        // through the same repository the password reset uses.
+        directory_sync_refresh_repo.clone(),
     );
 
     // X3 wave 3: attestation-policy resolution, MDS metadata, and the

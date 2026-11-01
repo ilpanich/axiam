@@ -8,7 +8,9 @@ use axiam_core::error::AxiamResult;
 use axiam_core::models::mfa_method::{MfaMethod, MfaMethodType};
 use axiam_core::models::user::UpdateUser;
 use axiam_core::models::webauthn_credential::WebauthnCredentialType;
-use axiam_core::repository::{SessionRepository, UserRepository, WebauthnCredentialRepository};
+use axiam_core::repository::{
+    RefreshTokenRepository, SessionRepository, UserRepository, WebauthnCredentialRepository,
+};
 use uuid::Uuid;
 
 use crate::error::AuthError;
@@ -24,25 +26,38 @@ use crate::error::AuthError;
 /// has a second factor" already live, and where `delete_method` already owns
 /// "the last method goes" — makes the eviction and the revocation one call
 /// that no caller can half-perform.
+///
+/// `R` is the OAuth2 refresh-token repository, held for the same call (D-N40,
+/// #841): ending the sessions ends every access token at its next request but
+/// not an OAuth2 refresh token, which the refresh grant does not check against
+/// a live session, so the reset revokes the user's refresh tokens as a
+/// password reset does.
 #[derive(Clone)]
 pub struct MfaMethodService<
     U: UserRepository,
     W: WebauthnCredentialRepository,
     S: SessionRepository,
+    R: RefreshTokenRepository,
 > {
     user_repo: U,
     credential_repo: W,
     session_repo: S,
+    refresh_token_repo: R,
 }
 
-impl<U: UserRepository, W: WebauthnCredentialRepository, S: SessionRepository>
-    MfaMethodService<U, W, S>
+impl<
+    U: UserRepository,
+    W: WebauthnCredentialRepository,
+    S: SessionRepository,
+    R: RefreshTokenRepository,
+> MfaMethodService<U, W, S, R>
 {
-    pub fn new(user_repo: U, credential_repo: W, session_repo: S) -> Self {
+    pub fn new(user_repo: U, credential_repo: W, session_repo: S, refresh_token_repo: R) -> Self {
         Self {
             user_repo,
             credential_repo,
             session_repo,
+            refresh_token_repo,
         }
     }
 
@@ -273,8 +288,9 @@ impl<U: UserRepository, W: WebauthnCredentialRepository, S: SessionRepository>
         Ok(())
     }
 
-    /// Reset every MFA factor a user holds and revoke their sessions — the
-    /// administrative unlock behind `POST /api/v1/users/{id}/reset-mfa`.
+    /// Reset every MFA factor a user holds and revoke their sessions and OAuth2
+    /// refresh tokens — the administrative unlock behind
+    /// `POST /api/v1/users/{id}/reset-mfa`.
     ///
     /// Returns how many WebAuthn credentials were evicted, which is the part a
     /// caller could not otherwise observe and the part the audit record wants.
@@ -294,11 +310,25 @@ impl<U: UserRepository, W: WebauthnCredentialRepository, S: SessionRepository>
     ///
     /// # Order
     ///
-    /// Credentials first, then the user row, then the sessions. Each step
-    /// narrows what an attacker holding the old state can do, so a failure
-    /// part-way leaves the account *more* locked down rather than less:
-    /// credentials gone but sessions alive is a user who must re-enrol;
-    /// sessions gone but credentials alive would be the hole this closes.
+    /// Credentials first, then the user row, then the sessions, then the
+    /// OAuth2 refresh tokens. Each step narrows what an attacker holding the
+    /// old state can do, so a failure part-way leaves the account *more*
+    /// locked down rather than less: credentials gone but sessions alive is a
+    /// user who must re-enrol; sessions gone but credentials alive would be
+    /// the hole this closes.
+    ///
+    /// # The refresh tokens (D-N40, #841)
+    ///
+    /// The session revocation stops every access token at its next request,
+    /// but an OAuth2 refresh token is not checked against a live session, so
+    /// one minted before the reset — by a code grant or a native sign-in —
+    /// would keep minting access tokens for the account the administrator
+    /// just locked down. They are revoked with
+    /// [`RefreshTokenRepository::revoke_all_for_user`], exactly as a password
+    /// reset revokes them, and with the password reset's failure handling: an
+    /// error fails the reset (the handler answers `500`) rather than
+    /// reporting an unlock that left a grant live. Every step is idempotent,
+    /// so the administrator may simply retry.
     pub async fn reset_mfa(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         let evicted = self
             .credential_repo
@@ -320,6 +350,15 @@ impl<U: UserRepository, W: WebauthnCredentialRepository, S: SessionRepository>
         self.session_repo
             .invalidate_user_sessions(tenant_id, user_id)
             .await?;
+
+        let oauth2_revoked = self
+            .refresh_token_repo
+            .revoke_all_for_user(tenant_id, user_id)
+            .await?;
+        tracing::debug!(
+            %tenant_id, %user_id, %oauth2_revoked,
+            "reset_mfa: factors evicted, sessions and OAuth2 refresh tokens revoked"
+        );
 
         Ok(evicted)
     }

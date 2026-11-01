@@ -1339,6 +1339,8 @@ pub async fn reset_mfa<C: Connection + Clone>(
     };
     // G-5 (D-52): the TOTP secret is removed, the passkeys are removed, and
     // every session of the account goes with them — one cause, one `txn`.
+    // D-N40 (#841): and every OAuth2 refresh token of the account, which
+    // `reset_mfa` revokes as a password reset does; a failure is a `500`.
     with_cause(Some(initiator), async {
         use axiam_core::repository::WebauthnCredentialRepository as _;
         // Read before the reset: whether a TOTP authenticator is about to go.

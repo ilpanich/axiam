@@ -207,6 +207,12 @@ The full notes are in
   form-post error redirect) now also carry the spent value as `state`, and a
   callback without it or with another value lands on the dashboard. (#832, #835)
 
+- An administrator's MFA reset (`POST /api/v1/users/{id}/reset-mfa`) now also
+  revokes the user's OAuth2 refresh tokens, as a password reset does. It ended
+  the user's sessions and evicted their factors, but a refresh token issued
+  before the reset kept minting access tokens. A failed revocation fails the
+  reset (`500`); every step is idempotent, so it can be retried. (#841, D-N40)
+
 ### Security
 
 - The threat model is 2.45.0 with 494 threats: T-489 to T-492 (native sign-in:

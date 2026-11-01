@@ -162,6 +162,7 @@ pub type MfaMethodServiceT<C> = MfaMethodService<
     SurrealUserRepository<C>,
     axiam_db::SurrealWebauthnCredentialRepository<C>,
     SurrealSessionRepository<C>,
+    SurrealRefreshTokenRepository<C>,
 >;
 
 pub type CaServiceT<C> = CaService<axiam_db::SurrealCaCertificateRepository<C>>;
@@ -661,6 +662,7 @@ impl<C: Connection + Clone> AppState<C> {
             user_repo.clone(),
             webauthn_cred_repo.clone(),
             session_repo.clone(),
+            refresh_token_repo.clone(),
         );
         // Same resolution the composition root performs, from the same
         // function: two copies of "which custodian is the default" is how a

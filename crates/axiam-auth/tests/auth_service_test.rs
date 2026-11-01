@@ -213,11 +213,13 @@ fn mfa_methods(
     SurrealUserRepository<surrealdb::engine::local::Db>,
     SurrealWebauthnCredentialRepository<surrealdb::engine::local::Db>,
     SurrealSessionRepository<surrealdb::engine::local::Db>,
+    SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
 > {
     MfaMethodService::new(
         SurrealUserRepository::new(db.clone()),
         SurrealWebauthnCredentialRepository::new(db.clone()),
         SurrealSessionRepository::new(db.clone()),
+        SurrealRefreshTokenRepository::new(db.clone()),
     )
 }
 

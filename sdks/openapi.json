@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.2.0",
-    "x-axiam-spec-digest": "sha256:b07d6d7b1928b2ab74c561135605c984bf84552548e80b2958ea30bac695cd3d"
+    "x-axiam-spec-digest": "sha256:196ec710d86e05a7bc08a2e9c421d1b82ab698c90f12f7cb18484364c356a707"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -1354,6 +1354,9 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The session could not be fully ended: revoking its OAuth2 refresh tokens, or deleting the session after that, failed. The session is still live, so repeating the request with the same bearer token completes the logout"
           }
         },
         "security": [
@@ -14124,6 +14127,9 @@
           },
           "404": {
             "description": "User not found"
+          },
+          "500": {
+            "description": "The reset did not complete: a step (removing the factors, ending the user's sessions, revoking their OAuth2 refresh tokens) failed after the steps before it. Every step is idempotent, so repeating the request completes the reset; a caller resetting their own account whose sessions were already ended signs in again first"
           }
         },
         "security": [
@@ -15014,7 +15020,7 @@
             "description": "No tenant could be determined"
           },
           "500": {
-            "description": "The session could not be fully ended; cookies cleared, no redirect"
+            "description": "The session could not be fully ended and is still live; no redirect. The API cookies are cleared and the OP browser-session cookie is kept, so repeating the request completes the logout"
           }
         }
       }

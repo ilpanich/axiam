@@ -6665,8 +6665,10 @@ fn bounce_to_cookie_logout(
         (status = 200, description = "The OP browser session this browser's cookie named \
                                       is ended; AXIAM's logged-out page"),
         (status = 400, description = "No tenant could be determined"),
-        (status = 500, description = "The session could not be fully ended; cookies \
-                                      cleared, no redirect"),
+        (status = 500, description = "The session could not be fully ended and is still \
+                                      live; no redirect. The API cookies are cleared and the \
+                                      OP browser-session cookie is kept, so repeating the \
+                                      request completes the logout"),
     ),
 )]
 pub async fn end_session_at_cookie_path<C: Connection + Clone>(

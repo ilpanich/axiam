@@ -653,6 +653,11 @@ pub async fn login<C: Connection + Clone>(
     responses(
         (status = 204, description = "Logged out"),
         (status = 401, description = "Unauthorized"),
+        (status = 500, description = "The session could not be fully ended: revoking its \
+                                      OAuth2 refresh tokens, or deleting the session after \
+                                      that, failed. The session is still live, so repeating \
+                                      the request with the same bearer token completes the \
+                                      logout"),
     ),
     security(("bearer" = []))
 )]
@@ -1291,6 +1296,13 @@ pub async fn me<C: Connection + Clone>(
                            reset it"
         ),
         (status = 404, description = "User not found"),
+        (status = 500, description = "The reset did not complete: a step (removing the \
+                                      factors, ending the user's sessions, revoking their \
+                                      OAuth2 refresh tokens) failed after the steps before \
+                                      it. Every step is idempotent, so repeating the request \
+                                      completes the reset; a caller resetting their own \
+                                      account whose sessions were already ended signs in \
+                                      again first"),
     ),
     security(("bearer" = []))
 )]

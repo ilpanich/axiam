@@ -5266,7 +5266,15 @@ async fn handle_provider_id_token<C: Connection + Clone>(
     };
     let native = match axiam_oauth2::provider_id_token::native_request(&form) {
         Ok(native) => native,
-        Err(e) => return build_oauth2_error_response(&e),
+        Err(e) => {
+            // F4-R12-06: a missing `provider`, `id_token` or `nonce`, or an
+            // over-long nonce, is past step 1 like every other refusal here,
+            // so it is audited like them — by reason code (`invalid_request`),
+            // never with the token or the nonce. After the client check and
+            // the bucket, so an unauthenticated caller cannot write rows.
+            audit.refused(state, None, e.error_code()).await;
+            return build_oauth2_error_response(&e);
+        }
     };
     // F4-W2-05 (D-N14): the tenant's sensitive-scope switch does not depend on
     // the user, so it is decided here with the other request checks, before

@@ -128,7 +128,10 @@ The grant `urn:axiam:params:oauth:grant-type:provider-id-token` at `POST
 2. **Per client.** The OAuth2 client's `grant_types` must list the grant (the
    client form offers it). Public clients may use it. Register it only on the
    clients that are the listed native apps: the trust is per tenant, not per
-   client in 1.2.0 (T-489).
+   client in 1.2.0 (T-489) — and, for a provider the organization's tenant
+   shares by inheritance, per organization. Keep apps of different privilege on
+   different providers, or turn inheritance off for a provider with native
+   sign-in on (or shadow it in a tenant that must not accept it).
 
 The grant is listed in the discovery document's `grant_types_supported`. It is
 rate limited per tenant and address in the bucket `oauth2_provider_id_token`

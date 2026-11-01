@@ -154,7 +154,8 @@ The full notes are in
   to the revocation feed when it is enabled) and revokes every refresh token
   issued under it, the successor included. Other sessions of the same user are
   untouched, a `fapi2` retry inside the grace window is still accepted, and a
-  token revoked at logout is not a replay. The new organization/tenant setting
+  token revoked by a logout of its session, by `/oauth2/revoke`, by a password
+  reset or by another user-wide revocation is not a replay. The new organization/tenant setting
   `oauth2.refresh_reuse_response` defaults to `revoke_session`; setting it to
   `refuse` restores the 1.1.x behaviour (refuse, mark and audit only). The
   `oauth2.refresh_token_replayed` audit row gains a `response` key
@@ -165,8 +166,10 @@ The full notes are in
   refused the same way and revokes nothing (#821); its row says
   `refused_unverified_presenter`, or `refused` when the policy is `refuse` or the
   token names no session, since no revocation was withheld. "The session" is the browser
-  sign-in, so the revocation reaches every client's refresh tokens under it and
-  the console session, with no back-channel logout sent. An organization
+  sign-in, so the revocation reaches every client's refresh tokens under it, with
+  no back-channel logout sent; it ends the console (SSO) session too only if that
+  session has not been refreshed since the code was issued (a console refresh
+  gives the session a new id, F4-R12-03). An organization
   settings `PUT` from a pre-1.2.0 client resets `refuse` to `revoke_session`.
   Schema v110, additive. (G-C, #818, #821, #822, #823)
 

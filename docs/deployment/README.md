@@ -2791,9 +2791,15 @@ it is a replay whose successor may still be live.
 
 **What "the session" covers.** It is the browser sign-in the replayed token
 descends from, so the revocation reaches every client's refresh tokens issued
-under that sign-in — not only those of the client that presented the token —
-and ends the console (SSO) session: the user is signed out of every relying
-party sharing it. **No back-channel logout is sent** to those relying parties;
+under that sign-in — not only those of the client that presented the token.
+It ends the console (SSO) session too, signing the user out of every relying
+party sharing it, **only while that session has not been refreshed since the
+code was issued**: a refresh token names the session id current at
+`/oauth2/authorize`, and a console refresh replaces the session row with one
+under a new id, so after it the invalidation finds nothing and the console
+session survives (the refresh tokens are still all revoked; F4-R12-03).
+Ending the SSO session in that case would need a lineage key on the session,
+which 1.2.0 does not have. **No back-channel logout is sent** to those relying parties;
 their access tokens stop at the session check and, where it is on, through the
 revocation feed. That is the power RP-initiated logout already gives a client,
 exercised silently, and only the token's own client can exercise it (above).
@@ -2801,8 +2807,9 @@ Nothing outside that sign-in is touched: another device or browser of the same
 user, on the same client or another, keeps working.
 
 What is **not** a replay, and revokes nothing: a `fapi2` client's retry inside
-its 60-second grace window (accepted, as FAPI 2.0 requires); a token revoked at
-logout, by a password reset or by RFC 7009 and presented again (an ordinary
+its 60-second grace window (accepted, as FAPI 2.0 requires); a token revoked by
+a logout of its session (D-N39), by `/oauth2/revoke` (RFC 7009), by a password
+reset or by another user-wide revocation, and presented again (an ordinary
 stale credential). A `fapi2` replay *after* the window is refused and revokes,
 like a `standard` one.
 

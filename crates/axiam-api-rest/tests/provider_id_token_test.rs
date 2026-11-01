@@ -917,6 +917,19 @@ async fn a_missing_parameter_is_invalid_request() {
             "{name}: {body}"
         );
     }
+    // F4-R12-06: past step 1, so audited like every other refusal — by
+    // reason code, never with the token or the nonce.
+    let rows = native_login_rows(&f).await;
+    assert_eq!(
+        reason_codes(&rows),
+        ["invalid_request", "invalid_request", "invalid_request"]
+    );
+    let rendered =
+        serde_json::to_string(&rows.iter().map(|r| &r.metadata).collect::<Vec<_>>()).unwrap();
+    assert!(
+        !rendered.contains(&token),
+        "the token never reaches the audit log"
+    );
 }
 
 // ===========================================================================

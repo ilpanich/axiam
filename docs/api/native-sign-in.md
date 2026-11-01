@@ -139,8 +139,18 @@ through the staff app's `client_id` too, and the audit record names the staff
 client. The user gains nothing they could not get by signing in to that client
 in a browser, but a holder of a leaked token does. Until a per-client binding
 exists (not in 1.2.0; a later release may add it if asked for), register the grant only on the clients that are the
-native apps you listed, and keep apps with different privilege in different
-tenants or on different providers.
+native apps you listed, and keep apps with different privilege on different
+providers, or in different tenants when each tenant has its own provider.
+
+**An inherited organization provider spans the organization.** A provider
+configured on the organization's tenant with `allow_tenant_inheritance` brings
+its `native_login` block into every tenant of the organization, and the user is
+resolved (or provisioned) in whichever tenant the request names. For such a
+provider the trust is per organization: putting the staff app in another tenant
+does not separate it from the consumer app. Separate them with different
+providers, turn inheritance off for a provider that has native sign-in on, or
+shadow it in a tenant that must not accept it (a configuration of the same
+provider in that tenant, even a disabled one, replaces the inherited one).
 
 ### Register the grant on the client
 
@@ -497,8 +507,10 @@ The `reason_code` is where a refusal is told apart: `provider_not_found`,
 `nonce_missing`, `nonce_mismatch`, `replayed`, `replay_guard_unavailable`,
 `subject_unmapped`, `provisioning_conflict` (a first sign-in whose mapped
 username or email another account already holds), `account_refused`,
-`reactor_denied` (the `login.post_auth` gate refused), `server_error`, and
-`accepted`.
+`reactor_denied` (the `login.post_auth` gate refused), `server_error`, the
+OAuth2 error code of a request-level refusal (`invalid_request` for a missing
+`provider`, `id_token` or `nonce` or an over-long nonce, `invalid_scope`,
+`consent_required`), and `accepted`.
 
 **The record never carries the ID token or the nonce.** Until a provider
 resolves, `provider` is what the request named (bounded in length).

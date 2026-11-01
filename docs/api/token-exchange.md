@@ -122,10 +122,16 @@ from:
 | Actor token | Issued to | `act.sub` |
 |---|---|---|
 | The exchanging client's own `client_credentials` token (the usual choice) | its `sub`, which is the `client_id` (audience `axiam:m2m`) | the `client_id` |
-| A user token from the exchanging client's own code, refresh, CIBA or device grant | its `client_id` claim (RFC 9068 §2.2) | the user's id |
+| A user token from the exchanging client's own code, refresh, CIBA, device or native sign-in grant | its `client_id` claim (RFC 9068 §2.2) | the user's id |
 | A console sign-in, a service account's token | no client — refused | — |
 | A token minted by an exchange (B3 delegation, B3 impersonation or X4), even one whose `client_id` is the exchanging client | never counted as issued to anyone — refused | — |
 | Any of the above for another client | that client — refused | — |
+
+A native sign-in token ([native-sign-in.md](native-sign-in.md)) is an ordinary
+user token of the client that redeemed the provider ID token. Because the
+native trust is per tenant, not per client (D-N18, T-489), a client that
+redeemed a token issued to *another* listed app holds a user token it can also
+present as its own actor: the same residual, with one more consequence.
 
 **An exchanged token is never accepted as an `actor_token`.** Since #819 it
 carries the exchanging client's `client_id`, but that client only had to

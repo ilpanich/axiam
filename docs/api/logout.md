@@ -32,6 +32,54 @@ all-or-nothing.
 same `sid` as the one issued at login, so an RP that stored it can still match
 a logout token to its own session.
 
+## What a logout ends (D-N39)
+
+Every single-session logout — `POST /api/v1/auth/logout`, RP-initiated logout
+(below, including its cookie hop) and SAML single logout — ends the session
+**and revokes every OAuth2 refresh token issued under it**, for every client
+and grant bound to it: authorization-code grants and native sign-ins
+([`native-sign-in.md`](native-sign-in.md)) alike. Before 1.2.0 the session row
+went and its refresh tokens stayed live, still minting access tokens that named
+the dead `sid`. Nothing wider is touched: the user's other sessions and devices
+keep theirs.
+
+A refresh token revoked at logout is an ordinary stale credential when it is
+presented again — `invalid_grant`, with no further revocation and no
+`oauth2.refresh_token_replayed` row. It is not a refresh-token replay.
+
+**A failed write fails the logout.** The refresh tokens are revoked first and
+the session is deleted only once that has succeeded. If either write fails the
+answer is not "signed out": `POST /auth/logout` answers `500`;
+`/oauth2/end_session` and its cookie hop answer a `500` page ("We could not
+finish signing you out") and **do not redirect** to the relying party; SAML
+single logout shows its `revocation_failed` page. The server logs which write
+failed (`failed_writes`: `refresh_tokens_revoke` or `session_invalidate`).
+Because the session is deleted last, every failure leaves it live, and
+repeating the logout with the credential that started it completes it — the
+same bearer token, the same `id_token_hint`, or (on the cookie hop) the
+OP-session cookie, which that `500` page does not clear for this reason.
+
+**Limit: a session that has refreshed (F4-R12-08).** A refresh token names the
+session id that was current when its grant was authorized. A console (browser)
+session that refreshes at `POST /api/v1/auth/refresh` is replaced by a row
+under a new id, and with 15-minute access tokens nearly every session that
+outlives one access token has done so. From then on:
+
+- `POST /auth/logout` and the cookie-hop logout end the console session, but do
+  **not** reach the code grants authorized before that refresh: their refresh
+  tokens stay live until they expire, are revoked at `/oauth2/revoke`, or are
+  ended by a user-wide revocation (a password reset or change, an account
+  deletion, …).
+- RP-initiated logout with **that grant's own `id_token_hint`** does reach it —
+  the hint's `sid` is the original id — and revokes its refresh tokens. But the
+  session it invalidates is the old id, which no longer exists, so the console
+  (SSO) session **survives** the RP logout of one grant, and the next
+  `/oauth2/authorize` from that browser signs the user straight back in.
+
+A native sign-in is unaffected: its session id never rotates. Closing this
+needs a lineage key on the session, which 1.2.0 does not have; it is tracked as
+[#844](https://github.com/ilpanich/axiam/issues/844).
+
 ## RP-initiated logout
 
 ```
@@ -61,6 +109,12 @@ routinely expired already — logout commonly happens long after a 15-minute
 token was minted — so rejecting expired hints would make the hint useless
 exactly when it is needed. The signature *is* checked, because that is what
 makes the hint a statement rather than a suggestion.
+
+Since D-N39 that has a second consequence: a hint ends the session's refresh
+tokens as well as the session, so **an old ID token — however long expired —
+revokes that grant's refresh tokens** when presented here. An RP should treat
+its ID tokens as the logout capability they are; in particular, the `GET` form
+puts the hint in a URL, which browser history and intermediary logs may keep.
 
 **An unverifiable hint ends nothing.** There is no fallback to "end every
 session for the subject named in an unverified parameter": that would be a
@@ -146,7 +200,9 @@ twice — that is a retry, not an attack.
 ### Who gets told
 
 Only clients that participated in the session. Participation is recorded when
-an authorization code is issued, which is the moment a client actually joins.
+an authorization code is issued, which is the moment a client actually joins,
+and when the native sign-in grant creates a session for its client (D-N39), so
+a native app that registered a `backchannel_logout_uri` is told as well.
 
 This is tracked in a `session_client` table rather than a column on the
 session, because one AXIAM session serves many RPs — that is what SSO is. A
@@ -163,6 +219,14 @@ Best-effort, and it **never blocks the logout**. The session is gone from AXIAM
 the moment the request returns, whether or not any RP acknowledged; making
 logout synchronous on N external HTTP calls would make it a hostage to the
 least reliable RP.
+
+The fan-out is dispatched **before** the logout's own writes (the session
+delete and the refresh-token revocation). On the `500` path above the relying
+parties have therefore already been told the session ended while AXIAM still
+holds it. That is the conservative direction — an RP that drops its session
+early costs the user a sign-in, never access — and the retry that completes the
+logout sends them a second logout token (a new `jti`), which an RP handles as
+any repeated delivery.
 
 Each client is POSTed its own token (`aud` names one client, so tokens are not
 interchangeable), with up to 3 attempts, 500 ms then 2 s backoff, 5 s per
@@ -287,4 +351,5 @@ logout is upstream of the limit: an unverifiable `id_token_hint` ends nothing.
 | `id_token_hint` unverifiable or malformed | treated as absent; session untouched; `200` |
 | `post_logout_redirect_uri` not allow-listed | logged out; `200` with AXIAM's page; no redirect |
 | allow-listed URI present and valid | `302` to it, with `state` appended when supplied |
-| nothing identifiable supplied | `200` with AXIAM's page |
+| no `id_token_hint` naming a session | `302` to `/oauth2/authorize/logout`, which ends the session this browser's OP cookie names (if any), with no back-channel fan-out, then answers as above |
+| the session's refresh-token revocation or session delete fails | `500` page, no redirect; the session is still live and the same request repeated completes the logout ([above](#what-a-logout-ends-d-n39)) |

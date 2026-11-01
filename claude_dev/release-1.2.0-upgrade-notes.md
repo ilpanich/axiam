@@ -93,10 +93,15 @@ other sessions keep theirs.
   `backchannel_logout_uri`: the grant records it as a participant of the session
   it creates, and RP-initiated logout with an `id_token_hint` naming that session
   notifies it.
-- **Limit.** A code grant names the browser session as it was at
-  `/oauth2/authorize`. Once the console session has refreshed, it has a new id,
-  and `POST /auth/logout` of the console no longer reaches that grant.
-  RP-initiated logout with the grant's own ID token still does.
+- **Limit — the common case for a browser session (F4-R12-08).** A code grant
+  names the browser session as it was at `/oauth2/authorize`. Once the console
+  session has refreshed (with 15-minute access tokens, nearly every session that
+  outlives one), it has a new id, and `POST /auth/logout` or the cookie-hop
+  logout of the console no longer reaches that grant. RP-initiated logout with
+  the grant's own ID token still revokes the grant's refresh tokens, but the
+  console (SSO) session survives it, so the next `/oauth2/authorize` signs the
+  user back in. Native sign-in is unaffected. The session lineage key that
+  closes this is #844; the full statement is in `docs/api/logout.md`.
 - **A replayed authorization code** (D-N41, #842) now does the same to the
   session the code was issued from: beside invalidating that session (RFC 6749
   §10.5, unchanged), it revokes every refresh token issued under it, the code's

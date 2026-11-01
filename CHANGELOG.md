@@ -28,7 +28,8 @@ sign-in contract moves to 1.65 and the eleven SDKs follow as minor releases.
 - **Logging a session out now revokes its refresh tokens** (`/auth/logout`,
   RP-initiated logout, SAML single logout), for every client and grant bound to
   that session. A relying party that kept refreshing after its user signed out
-  now gets `invalid_grant`. No setting.
+  now gets `invalid_grant`. No setting. It does not reach a code grant issued
+  before the console session last refreshed (#844).
 - **The schema moves from v109 to v113**, additive throughout; the runner applies
   it at boot. A development database that ran a pre-release v112 must drop
   `federation_id_token_replay` and the v112 stamp first.
@@ -188,8 +189,16 @@ The full notes are in
   cookie hop and of IdP-initiated SAML logout keeps for that reason
   (F4-R12-07, D-N43). The native sign-in grant
   records its client as a session participant, so back-channel logout reaches a
-  native client that registered a `backchannel_logout_uri`. (F4-R12-01, #839,
-  D-N39)
+  native client that registered a `backchannel_logout_uri`. **Limit, the common
+  case for a browser session:** a refresh token names the session id current
+  when its grant was authorized, and a console refresh (`/auth/refresh`) moves
+  the session to a new id, so after one `POST /auth/logout` (and the cookie-hop
+  logout) ends the console session but not the code grants issued before it.
+  RP-initiated logout with the grant's own `id_token_hint` does revoke that
+  grant's refresh tokens, but the console (SSO) session survives it and the next
+  `/oauth2/authorize` signs the user back in. Native sign-in is unaffected (its
+  session id never rotates); a session lineage key that closes this is #844.
+  See `docs/api/logout.md`. (F4-R12-01, #839, D-N39; F4-R12-08)
 
 - A replayed authorization code now also revokes every OAuth2 refresh token
   issued under the session the code was issued from (the code's own and any

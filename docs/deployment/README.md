@@ -2887,6 +2887,25 @@ writes ran independently, and the common failure — session deleted, revocation
 failed — left live refresh tokens the caller's own credential could no longer
 reach; F4-R12-07.)
 
+**Limit: a session that has refreshed (F4-R12-08).** A refresh token names the
+session id that was current when its grant was authorized at
+`/oauth2/authorize`, and a console refresh (`POST /api/v1/auth/refresh`)
+replaces the session row with one under a new id. With 15-minute access tokens
+that is the common case for any browser session that outlives one access token,
+not an edge. After it, `POST /auth/logout` and the cookie-hop logout end the
+console session but **not** the code grants issued before the refresh, whose
+refresh tokens stay live until they expire, are revoked at `/oauth2/revoke`, or
+are ended by a user-wide revocation. RP-initiated logout with **that grant's
+own `id_token_hint`** does revoke them, because the hint's `sid` is the
+original id; but the session it then invalidates no longer exists, so the
+console (SSO) session survives the RP logout of one grant and the next
+`/oauth2/authorize` signs the user straight back in. A native sign-in is
+unaffected (its session id never rotates). This is the same root cause as
+[What "the session" covers](#refresh-token-replay-revokes-the-session-g-c-818)
+above; a session lineage key, which closes all three, is
+[#844](https://github.com/ilpanich/axiam/issues/844). Until then, an operator
+who must end every grant of a user uses a user-wide revocation.
+
 ## Session revocation feed (optional, T-39 / T-143)
 
 `AXIAM__AUTH__REVOCATION_FEED_ENABLED` — default `false`.

@@ -6466,6 +6466,8 @@ pub struct EndSessionQuery {
                                       browser-session cookie and ends the session it names"),
         (status = 200, description = "Session ended; AXIAM's logged-out page"),
         (status = 400, description = "OAuth2 error", body = OAuth2ErrorResponse),
+        (status = 500, description = "The session could not be fully ended; cookies \
+                                      cleared, no redirect"),
     ),
 )]
 pub async fn end_session<C: Connection + Clone>(
@@ -6661,6 +6663,8 @@ fn bounce_to_cookie_logout(
         (status = 200, description = "The OP browser session this browser's cookie named \
                                       is ended; AXIAM's logged-out page"),
         (status = 400, description = "No tenant could be determined"),
+        (status = 500, description = "The session could not be fully ended; cookies \
+                                      cleared, no redirect"),
     ),
 )]
 pub async fn end_session_at_cookie_path<C: Connection + Clone>(

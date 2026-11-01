@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.2.0",
-    "x-axiam-spec-digest": "sha256:d8ba5effec91206e74bd6a85882c9fcc5a994a9ca1abfd0a5c59040a51e956eb"
+    "x-axiam-spec-digest": "sha256:b07d6d7b1928b2ab74c561135605c984bf84552548e80b2958ea30bac695cd3d"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -15012,6 +15012,9 @@
           },
           "400": {
             "description": "No tenant could be determined"
+          },
+          "500": {
+            "description": "The session could not be fully ended; cookies cleared, no redirect"
           }
         }
       }
@@ -15234,6 +15237,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "The session could not be fully ended; cookies cleared, no redirect"
           }
         }
       }

@@ -734,3 +734,20 @@ The probes lived only in the scratch worktrees. Peak scratch use was about 1.5 G
 23 Closed (Kotlin `cibaInitiate` residual → 29) · **24 Open (Info)** · 25 Closed (Kotlin `cibaInitiate` → 29,
 C UMA → 30) · 26 Closed · 27 Closed · **28 Open (Info)** · **29 Open (Low)** · **30 Open (Info)** ·
 **31 Open (Info)** · **32 Open (Info)**.
+
+---
+
+## Addendum 3 — targeted pass after two sweeps (2026-11-01, D-N38)
+
+The maintainer chose one targeted pass for the four findings Addendum 2 left (D-N38, the D-N31 precedent). Each fix is a signed commit on the SDK's draft PR; CI is the verification of record.
+
+| ID | Sev | SDK | Commit | Change | Test |
+|---|---|---|---|---|---|
+| C165-29 | Low | kotlin | `08c4b07` | `cibaInitiate` runs on `executeOAuth2Post` (the no-redirect `oauth2Client`); a 3xx is `NetworkError` before any mapper | `CibaTest`: 302 to a second host (0 requests there, no secret/`Location` in the error); 307 with an `error` body is `NetworkError`, not `OAuthProtocolError` |
+| C165-30 | Info | c | `02aa474` | `map_oauth2_error` (`src/uma.c`) checks 300..399 → `AXIAM_ERR_NETWORK` before reading the body | `test_uma`: 301/302/303/307/308 with an `invalid_grant` body |
+| C165-31 | Info | kotlin | `08c4b07` | KDoc reorder: `executeRequest` has its §12.3 rule 3 KDoc again | — (docs) |
+| C165-32 | Info | typescript | `b199c0a` | `oauth2RequestConfig` JSDoc corrected (the bare path's `'manual'` override and status-0/3xx guard) | — (comment only) |
+
+**Final status of every C165 finding.** Closed: C165-01 … -23, -25 … -27, -29 … -32 (C165-04, -11, -12, -14 and -18 for some SDKs as decided; C165-16 confirmed correct). **Open after two sweeps and the targeted pass:** C165-24 (Info — the §34.9 record's SDK list for C165-14 repeats the Rust error and omits Java and Kotlin; no normative text is wrong; fixing it changes `CONTRACT.md` and would force all eleven SDKs to re-vendor, so it waits for the next contract text pass) and C165-28 (Info — the pre-existing load-dependent `OidcRefreshTest` flake in Kotlin, C164-33; tracked).
+
+**SDK heads at the close of W4:** rust `f047710`, typescript `b199c0a`, python `ff8a2a9`, java `b54a3bb`, kotlin `08c4b07`, csharp `620b987`, php `2b2809b`, go `e4235e7`, swift `139198d`, c `02aa474`, cplusplus `c37f016`.

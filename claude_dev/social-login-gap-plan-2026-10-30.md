@@ -657,6 +657,63 @@ bound to the browser — pre-existing login CSRF),
 **Not run:** OIDF conformance suite; a real upstream IdP;
 `npm run test:a11y` (CI step).
 
+#### W4 — contract 1.65 and the eleven SDKs (`claude/social-gap-w4`, closed 2026-11-01)
+
+**Base** `a29ede0` (the plan branch after W3). **PR:** none in this repository
+(single PR after W5); the plan branch was fast-forwarded to the wave head. The
+SDK work is **one draft PR per SDK** (D-N30), each on `claude/bold-mayer-wpd3kv`.
+**Commits** in this repository, each signed:
+
+| Commit | Task | What |
+|---|---|---|
+| `c3a2043` | orchestrator | D-N30, D-N31 |
+| `eecd4df` | W4.0 | #836: F4-W3-17 (`fresh=1` written when the page strips `reauth`/`acr`) and F4-W3-19 (`Referrer-Policy: no-referrer` on the form-post error 303) |
+| `b1283a7` | W4.1 | version **1.2.0** ahead of the re-vendor (the 1.1.2 W8.4a precedent); OpenAPI and management registry regenerated |
+| `76d35d9` | W4.1 | contract **1.65**: §37 native sign-in helper (`login_with_provider_id_token`, `native_nonce`, 13 conformance tests), `idp_hint` on `oidc_begin`/`oidc_par`, the §9 refresh-reuse note, §15.2 rule 10, F4-W3-18 (§12.1 note 12), §34.9 record |
+| `73c2532` | orchestrator | D-N32 … D-N35 |
+| `294cdd9` | W4.13 | `sdk-contract-1.65-conformance-review.md`: 21 findings, 3 Medium |
+| `8c0241f` | orchestrator | D-N36, D-N37 |
+| `d93976b` | W4.13a | contract 1.65 amended in place: C165-09 … -13, -19; D-N36 (PAR carries the begin URL's hint); §12.1 rule 3 "no redirect is followed" |
+| `a59ef55` | review addendum 1 | fix round re-checked; C165-22 … -28 |
+| `e6890c0` | review addendum 2 | sweep 2 re-checked; C165-29 … -32 |
+| `365b106` | orchestrator | D-N38 |
+| *(this commit)* | review addendum 3 + results | the targeted pass; W4 results |
+
+**SDK draft PRs** (all green on CI at their final heads unless noted):
+
+| SDK | PR | Final head | Notes |
+|---|---|---|---|
+| Rust | [ilpanich/axiam-rust-sdk#145](https://github.com/ilpanich/axiam-rust-sdk/pull/145) | `f047710` | `OidcBeginParams.idp_hint` is a source-breaking public field (listed, D-N32); `retry_after` on the `#[non_exhaustive]` `Auth` variant |
+| TypeScript | [ilpanich/axiam-typescript-sdk#157](https://github.com/ilpanich/axiam-typescript-sdk/pull/157) | `b199c0a` | `retryAfterMs` additive; browser `/oauth2/*` `redirect: 'error'` |
+| Python | [ilpanich/axiam-python-sdk#107](https://github.com/ilpanich/axiam-python-sdk/pull/107) | `ff8a2a9` | C165-01 (Medium): AXIAM's description-less 429 now maps to `OAuthProtocolError` |
+| Java | [ilpanich/axiam-java-sdk#127](https://github.com/ilpanich/axiam-java-sdk/pull/127) | `b54a3bb` | record constructors source-breaking (D-N32); one redirect-free `oauth2HttpClient` |
+| Kotlin | [ilpanich/axiam-kotlin-sdk#82](https://github.com/ilpanich/axiam-kotlin-sdk/pull/82) | `08c4b07` | data-class constructors source/binary-breaking (D-N32); C165-28 flake tracked |
+| C# | [ilpanich/axiam-csharp-sdk#115](https://github.com/ilpanich/axiam-csharp-sdk/pull/115) | `620b987` | `adoptAsCredential` dropped (C165-18); `RetryAfter` public |
+| PHP | [ilpanich/axiam-php-sdk#89](https://github.com/ilpanich/axiam-php-sdk/pull/89) | `2b2809b` | positional constructors source-breaking (D-N32); one `oauth2PostOptions()` for every `/oauth2/*` POST |
+| Go | [ilpanich/axiam-go-sdk#107](https://github.com/ilpanich/axiam-go-sdk/pull/107) | `e4235e7` | pre-existing `-race` data race in a UMA test (CI runs without `-race`) |
+| Swift | [ilpanich/axiam-swift-sdk#80](https://github.com/ilpanich/axiam-swift-sdk/pull/80) | `139198d` | `oidcRefresh` single-flight guard added (D-N34) |
+| C | [ilpanich/axiam-c-sdk#79](https://github.com/ilpanich/axiam-c-sdk/pull/79) | `02aa474` | **SOVERSION 3** (C165-02); 1.1.3's `AXIAM_VERSION_PATCH` fixed (D-N35); `oauth_error_description`, `oauth_retry_after_ms` |
+| C++ | [ilpanich/axiam-cplusplus-sdk#82](https://github.com/ilpanich/axiam-cplusplus-sdk/pull/82) | `c37f016` | **SOVERSION 5** (D-N37); an intermittent g++-16/C++23 crash after the new tests, in pre-existing curl tests (re-run green; a diagnostic is proposed on the PR) |
+
+**Deltas against §4.**
+- **W4.0 added** (D-N31): #836's F4-W3-17/-19 in this repository; F4-W3-18 in the contract.
+- **Version bump moved forward** to W4.1, so every SDK vendors the final spec once.
+- **Decisions in-wave:** D-N30 … D-N38 — release level minor with breaks listed (D-N32); server floor documented, every SDK states it (D-N33); C SOVERSION 3 and C++ 5 (D-N32, D-N37); PAR carries the begin URL's hint (D-N36); no redirect is followed on an `/oauth2/*` POST (the C165-13 amendment).
+- **Beyond scope, accepted:** the redirect hardening reached every `/oauth2/*` POST in nine SDKs, not only the new grant (C165-14, -22, -23, -26, -29); C's 1.1.3 version macro was wrong on `main` (D-N35).
+- **The conformance review ran three rounds** (fix round, sweep 2, the D-N38 targeted pass).
+
+**Tests** (suite before → after, each SDK): Rust 1202 → 1229; TypeScript 1781 → 1810;
+Python 2175 → 2260; Java 1534 → 1562; Kotlin 1327 → 1357; C# 1514 → 1558 (+72
+ASP.NET Core); PHP 2084 → 2125; Go 986 → ~1010; Swift 1498 → 1530; C 81 → 83 ctest
+suites (Unity cases +~30); C++ 1667 → 1672 cases. This repository: frontend 2486 →
+2490 (W4.0); `federation_login_providers_test` 54 → 55.
+
+**Open after the review:** C165-24 (Info, §34.9 record text; next contract text
+pass), C165-28 (Info, Kotlin flake, tracked).
+
+**Not run locally** (CI covered): the Swift 6.4, JDK 25/27, PHP 8.2/8.5, Python
+3.11/3.15, clang/C23 matrix legs; PHPStan; sanitizer/valgrind cells beyond those noted.
+
 **Expected cost**, in executor sessions: W1 3 (3 Opus), W2 6 (4 Opus), W3 4
 (2 Opus), W4 13 (1 Opus), W5 3 (1 Opus) — roughly **29 sessions, 11 Opus**,
 plus the orchestrator. W2.2 is the long pole; W4's eleven run in parallel.

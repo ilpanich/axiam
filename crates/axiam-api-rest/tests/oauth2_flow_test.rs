@@ -3397,3 +3397,140 @@ async fn d_n40_an_admin_mfa_reset_revokes_the_users_refresh_tokens() {
         refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[1]).await;
     assert_eq!(status, 200, "another user's grant is untouched: {body}");
 }
+
+// ===========================================================================
+// D-N41 (#842) — an authorization-code replay revokes its session's refresh tokens
+// ===========================================================================
+
+/// **D-N41 (#842).** A replayed authorization code invalidated the session it
+/// was issued from (RFC 6749 §10.5), which stops the access tokens at the
+/// session check — but the refresh grant does not ask whether a session is
+/// live, so the code's own refresh token and every sibling grant on the same
+/// session kept minting. The replay now also revokes every refresh token of
+/// that session, as a refused refresh-token replay (G-C) and a logout (D-N39)
+/// do. Here the sibling is another client's grant authorized from the same
+/// session; another session of the same user keeps its grant, and a token
+/// revoked this way is a stale credential, not a refresh-token replay.
+#[actix_rt::test]
+async fn d_n41_a_code_replay_revokes_every_refresh_token_of_its_session() {
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+    use axiam_db::repository::SurrealAuditLogRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let (_replayed, jwt_a) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let (_kept, jwt_b) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &jwt_b).await;
+    let (sibling_id, sibling_secret, sibling_redirect) = create_client(&app, &jwt_b).await;
+
+    // Session A: the code that will be replayed, and a sibling grant to
+    // another client on the same session.
+    let code = do_authorize(&app, &jwt_a, &client_id, &redirect_uri, None, None).await;
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let codes_refresh = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let grant = |jwt: String, id: String, secret: String, redirect: String| {
+        let app = &app;
+        async move {
+            let code = do_authorize(app, &jwt, &id, &redirect, None, None).await;
+            let resp =
+                do_token_exchange(app, tenant_id, &id, &secret, &code, &redirect, None).await;
+            assert_eq!(resp.status().as_u16(), 200);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            body["refresh_token"].as_str().unwrap().to_owned()
+        }
+    };
+    let sibling_refresh = grant(
+        jwt_a.clone(),
+        sibling_id.clone(),
+        sibling_secret.clone(),
+        sibling_redirect.clone(),
+    )
+    .await;
+    // Session B: the same user and client, another sign-in.
+    let other_session_refresh = grant(
+        jwt_b.clone(),
+        client_id.clone(),
+        client_secret.clone(),
+        redirect_uri.clone(),
+    )
+    .await;
+
+    // The replay: refused exactly as before.
+    let resp = do_token_exchange(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &code,
+        &redirect_uri,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400, "a replayed code is refused");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["error"], "invalid_grant");
+
+    let (status, body) = refresh_with(
+        &app,
+        tenant_id,
+        &sibling_id,
+        &sibling_secret,
+        &sibling_refresh,
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "a sibling grant on the replayed code's session is revoked: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "nothing is minted");
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &codes_refresh).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "the code's own refresh token is revoked: {body}"
+    );
+
+    let (status, body) = refresh_with(
+        &app,
+        tenant_id,
+        &client_id,
+        &client_secret,
+        &other_session_refresh,
+    )
+    .await;
+    assert_eq!(status, 200, "another session keeps its grant: {body}");
+
+    let replays = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        replays.items.is_empty(),
+        "a token revoked by a code replay is a stale credential, not a refresh replay"
+    );
+}

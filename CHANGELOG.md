@@ -186,6 +186,14 @@ The full notes are in
   native client that registered a `backchannel_logout_uri`. (F4-R12-01, #839,
   D-N39)
 
+- A replayed authorization code now also revokes every OAuth2 refresh token
+  issued under the session the code was issued from (the code's own and any
+  sibling grant's, for every client), beside the RFC 6749 §10.5 session
+  invalidation it already did; before, those refresh tokens kept minting access
+  tokens after the replay. The answer is still `400 invalid_grant`; a failed
+  revocation is logged at `error` with `revocation_failed` and `failed_writes`
+  and does not change it. (#842, D-N41)
+
 - SDK contract 1.65 (`sdks/CONTRACT.md`, `sdks/openapi.json`,
   `sdks/management-registry.json` re-vendored): §37 specifies the native sign-in
   helper (`login_with_provider_id_token`, with the SHA-256 nonce rule), `idp_hint` on
@@ -217,7 +225,7 @@ The full notes are in
 
 - The threat model is 2.45.0 with 494 threats: T-489 to T-492 (native sign-in:
   audience, replay, stale or nonce-less tokens, the per-provider switch) and T-493, T-494
-  (provider hint, `default_idp`) are new, and T-37, T-249, T-254 and T-471 are amended. T-254's
+  (provider hint, `default_idp`) are new, and T-37, T-249, T-250, T-254 and T-471 are amended. T-254's
   "detectable and invalidates the family" is true again for the first time since
   1.0.0-beta13 on the `standard` lane; the in-window `fapi2` residual stays
   recorded. Residuals recorded rather than closed: the native-sign-in trust is per

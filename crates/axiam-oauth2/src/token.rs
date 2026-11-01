@@ -104,6 +104,10 @@ pub const REFRESH_REPLAY_AUDIT_ACTION: &str = "oauth2.refresh_token_replayed";
 
 /// What a refused refresh-token replay did, as the `response` key of its
 /// [`REFRESH_REPLAY_AUDIT_ACTION`] row records it (G-C, #818).
+///
+/// An authorization-code replay's revocation logs its outcome in the same
+/// vocabulary (`revoked_session` or `revocation_failed`, with
+/// `failed_writes`), D-N41 (#842).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RefusedReplayResponse {
     /// The session the token named was invalidated and its refresh tokens
@@ -2175,6 +2179,27 @@ where
     /// session therefore stops the minted access token at the next request,
     /// with no new store and no new per-request read.
     ///
+    /// # And the session's refresh tokens (D-N41, #842)
+    ///
+    /// The refresh grant does not ask whether a token's session is still
+    /// live, so invalidating the session left the refresh token the code
+    /// minted — and every other refresh token issued under the same session,
+    /// to this client or a sibling — able to mint fresh access tokens. They
+    /// are revoked with [`RefreshTokenRepository::revoke_all_for_session`], the
+    /// scope a refused refresh-token replay (G-C) and a logout (D-N39) use:
+    /// that session's tokens for every client, and nothing wider. A token
+    /// revoked here is not stamped `rotated_at`, so presenting it later is a
+    /// stale credential, not a refresh-token replay.
+    ///
+    /// # A failed revocation does not fail the request
+    ///
+    /// As on the G-C path: the refusal is already decided, and a `500` would
+    /// tell the presenter its replay reached a revocation. The two writes are
+    /// attempted independently, each failure is logged at `error`, and the
+    /// outcome is logged in G-C's vocabulary — `response` `revoked_session` or
+    /// `revocation_failed`, with `failed_writes` naming `session_invalidate`
+    /// and/or `refresh_tokens_revoke`.
+    ///
     /// # The two costs, stated plainly
     ///
     /// The session is the **browser** session the authorization happened in,
@@ -2188,7 +2213,7 @@ where
     ///
     /// Both branches return the same `invalid_grant` from the caller, and a
     /// hash naming no row revokes nothing. A replay does cost one extra read
-    /// and one write, so the two are distinguishable by timing — to an
+    /// and two writes, so the two are distinguishable by timing — to an
     /// attacker who already holds a real authorization code, which is the
     /// position this whole path exists to answer.
     async fn revoke_after_code_replay(
@@ -2217,19 +2242,64 @@ where
             }
         };
 
-        match self.session_repo.invalidate(tenant_id, session_id).await {
-            Ok(()) => tracing::warn!(
+        // D-N41 (#842): the session's refresh tokens go with it, as a refused
+        // refresh-token replay (G-C) and a logout (D-N39) already do. The two
+        // writes are attempted independently, so one failing does not stop
+        // the other, and the outcome is named in G-C's vocabulary.
+        let invalidated = match self.session_repo.invalidate(tenant_id, session_id).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    client_id = %client_id,
+                    session_id = %session_id,
+                    "authorization code replay detected but the session could not be revoked; \
+                     the redemption is still denied"
+                );
+                false
+            }
+        };
+        let revoked = match self
+            .refresh_token_repo
+            .revoke_all_for_session(tenant_id, session_id)
+            .await
+        {
+            Ok(count) => Some(count),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    client_id = %client_id,
+                    session_id = %session_id,
+                    "authorization code replay detected but the session's refresh tokens could \
+                     not be revoked; the redemption is still denied"
+                );
+                None
+            }
+        };
+        let response = if invalidated && revoked.is_some() {
+            RefusedReplayResponse::RevokedSession
+        } else {
+            RefusedReplayResponse::RevocationFailed {
+                session: !invalidated,
+                refresh_tokens: revoked.is_none(),
+            }
+        };
+        match response.failed_writes() {
+            None => tracing::warn!(
                 client_id = %client_id,
                 session_id = %session_id,
+                refresh_tokens_revoked = revoked.unwrap_or_default(),
+                response = response.as_str(),
                 "authorization code replay detected; revoked the session it was issued from \
-                 (RFC 6749 §10.5)"
+                 and the session's refresh tokens (RFC 6749 §10.5, D-N41)"
             ),
-            Err(e) => tracing::warn!(
-                error = %e,
+            Some(failed_writes) => tracing::error!(
                 client_id = %client_id,
                 session_id = %session_id,
-                "authorization code replay detected but the session could not be revoked; \
-                 the redemption is still denied"
+                response = response.as_str(),
+                ?failed_writes,
+                "authorization code replay detected but the revocation did not complete; \
+                 the redemption is still denied (both writes are idempotent)"
             ),
         }
     }

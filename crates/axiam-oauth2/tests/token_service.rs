@@ -4376,6 +4376,109 @@ async fn a_replayed_code_with_no_session_is_denied_without_revoking() {
     assert!(invalidations.lock().unwrap().is_empty());
 }
 
+/// **D-N41 (#842).** A replayed code also revokes every refresh token of the
+/// session it was issued from — the code's own and any sibling grant's — with
+/// G-C's `revoke_all_for_session`, beside the §10.5 session invalidation. The
+/// answer is the same `invalid_grant`.
+#[tokio::test]
+async fn a_replayed_authorization_code_revokes_its_sessions_refresh_tokens() {
+    let session_id = Uuid::new_v4();
+    let mut code = make_auth_code(&["openid"], None);
+    code.session_id = Some(session_id);
+    let refresh = MockRefreshRepo::new();
+    let revoked_sessions = refresh.session_revocation_log();
+
+    let (svc, invalidations) = build_with_session_log(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo {
+            get: Some(code),
+            consume_ok: false,
+        },
+        TenantOutcome::Found,
+        refresh,
+    );
+
+    let err = svc
+        .exchange(client_tenant(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("a replayed code must still be denied");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert_eq!(
+        invalidations.lock().unwrap().clone(),
+        vec![(client_tenant(), session_id)],
+        "the §10.5 session invalidation stays"
+    );
+    assert_eq!(
+        revoked_sessions.lock().unwrap().clone(),
+        vec![session_id],
+        "the session's refresh tokens are revoked, and only that session's"
+    );
+}
+
+/// D-N41 with G-C's failure handling: a refresh-token revocation that fails
+/// does not change the answer (no `500`, which would tell the presenter its
+/// replay reached a revocation), and the session invalidation is still
+/// attempted — the two writes are independent.
+#[tokio::test]
+async fn a_failed_refresh_revocation_after_a_code_replay_is_still_invalid_grant() {
+    let session_id = Uuid::new_v4();
+    let mut code = make_auth_code(&["openid"], None);
+    code.session_id = Some(session_id);
+    let mut refresh = MockRefreshRepo::new();
+    refresh.session_revocation_fails = true;
+    let revoked_sessions = refresh.session_revocation_log();
+
+    let (svc, invalidations) = build_with_session_log(
+        ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+        MockCodeRepo {
+            get: Some(code),
+            consume_ok: false,
+        },
+        TenantOutcome::Found,
+        refresh,
+    );
+
+    let err = svc
+        .exchange(client_tenant(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("a replayed code must still be denied");
+    assert_eq!(err.error_code(), "invalid_grant");
+    assert_eq!(revoked_sessions.lock().unwrap().clone(), vec![session_id]);
+    assert_eq!(
+        invalidations.lock().unwrap().clone(),
+        vec![(client_tenant(), session_id)],
+        "the session write is attempted whatever the refresh-token write does"
+    );
+}
+
+/// An unknown code, or a replayed one with no session behind it, revokes no
+/// refresh token either.
+#[tokio::test]
+async fn a_code_with_no_replayed_session_revokes_no_refresh_token() {
+    for code in [
+        MockCodeRepo::none(),
+        MockCodeRepo {
+            get: Some(make_auth_code(&["openid"], None)), // session_id: None
+            consume_ok: false,
+        },
+    ] {
+        let refresh = MockRefreshRepo::new();
+        let revoked_sessions = refresh.session_revocation_log();
+        let (svc, _) = build_with_session_log(
+            ClientOutcome::Found(make_client(&["authorization_code"], &[])),
+            code,
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(client_tenant(), auth_code_req(None), &no_cert())
+            .await
+            .expect_err("refused");
+        assert_eq!(err.error_code(), "invalid_grant");
+        assert!(revoked_sessions.lock().unwrap().is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // T-254 — the refresh-rotation grace window is a `fapi2` behaviour, and every
 // replay is marked

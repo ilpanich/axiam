@@ -88,6 +88,13 @@ other sessions keep theirs.
   `/oauth2/authorize`. Once the console session has refreshed, it has a new id,
   and `POST /auth/logout` of the console no longer reaches that grant.
   RP-initiated logout with the grant's own ID token still does.
+- **A replayed authorization code** (D-N41, #842) now does the same to the
+  session the code was issued from: beside invalidating that session (RFC 6749
+  §10.5, unchanged), it revokes every refresh token issued under it, the code's
+  own and any sibling grant's. A client that retries a code exchange after
+  losing the `200` loses its refresh token as well as its session. The answer is
+  still `invalid_grant`; a failed revocation is logged (`revocation_failed`,
+  `failed_writes`) and does not change it.
 - No setting and no schema change.
 
 ## 2. Schema v110 to v113 — all additive

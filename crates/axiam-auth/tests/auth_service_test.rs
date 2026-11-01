@@ -640,7 +640,8 @@ async fn sign_in_with_a_grant(
         .unwrap()
     {
         LoginResult::Success(out) => out,
-        other => panic!("expected Success, got {other:?}"),
+        // Name the variant only: a `{:?}` of the result is a cleartext-logging sink.
+        _ => panic!("expected Success, got an MFA variant"),
     };
     let token_hash = token::hash_refresh_token(&token::generate_refresh_token());
     refresh_repo

@@ -2773,7 +2773,10 @@ refresh of that token would pass. A rotated token presented through another
 client, or without its key's proof, is refused and audited exactly the same
 way but revokes nothing; its audit row says
 `response: "refused_unverified_presenter"` and names the token's client in
-`token_client_id` beside the presenting `client_id`. The same record is made
+`token_client_id` beside the presenting `client_id`. (That value means a
+revocation that would otherwise have run was withheld: under
+`oauth2.refresh_reuse_response = refuse`, or when the replayed token names no
+session, nothing would have run, and the row says `refused` instead.) The same record is made
 when a `fapi2` client's just-rotated token (still inside its 60-second grace)
 is presented through another client; that presentation keeps its existing
 answer, `invalid_grant` "refresh token was not issued to this client". A
@@ -2841,6 +2844,10 @@ settings.
 Schema migration v110 is additive (one optional column and one index on
 `oauth2_refresh_token(tenant_id, session_id)`) and backfills nothing: a
 settings row written before it reads as `revoke_session`.
+
+The whole 1.2.0 upgrade (schema v110 to v113, native sign-in's per-provider and
+per-client registration, the `fresh=1` hop parameter, the SDK server floor) is in
+[`claude_dev/release-1.2.0-upgrade-notes.md`](../../claude_dev/release-1.2.0-upgrade-notes.md).
 
 ## Session revocation feed (optional, T-39 / T-143)
 

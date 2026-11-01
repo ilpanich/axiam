@@ -258,7 +258,7 @@ export const OAUTH2_PAGES: DocPage[] = [
           [
             "Refresh token",
             "30 days",
-            "Opaque, server-stored, single-use, rotating on every refresh — the predecessor is revoked and a second presentation refused. On a `fapi2` client it instead stays redeemable for 60 seconds after rotation (FAPI 2.0 §5.3.2.1-9), then expires. A refresh token presented after rotation is audited as `oauth2.refresh_token_replayed` either way, and counted on its session ([T-254](#/security/diagram/2/T-254), closed).",
+            "Opaque, server-stored, single-use, rotating on every refresh — the predecessor is revoked and a second presentation refused. On a `fapi2` client it instead stays redeemable for 60 seconds after rotation (FAPI 2.0 §5.3.2.1-9), then expires. A refresh token presented after rotation is audited as `oauth2.refresh_token_replayed` either way, counted on its session and, **by default since 1.2.0**, answered by revoking that session and every refresh token issued under it ([T-254](#/security/diagram/2/T-254), closed). Set `oauth2.refresh_reuse_response` to `refuse` to restore the 1.1.x behaviour of refusing and marking only.",
           ],
           ["MFA challenge", "5 minutes", "Single-use."],
         ],
@@ -1184,6 +1184,10 @@ export const OAUTH2_PAGES: DocPage[] = [
       {
         type: "note",
         text: "Either way, a refresh token presented **after** it was rotated is marked on its session and written to the audit log as `oauth2.refresh_token_replayed`, naming the client, its profile and a disposition of `accepted_under_fapi_grace` or `refused` — and never the token or its digest. `GET /api/v1/users/{user_id}/sessions` reads the counters; the admin UI shows them as badges on the **Sessions** action of any row in *Users*. Alert on `refused`: nothing a conformant client does produces one.",
+      },
+      {
+        type: "note",
+        text: "**A refused replay revokes the session (1.2.0, G-C).** On a `standard` client, and on a `fapi2` client once its 60-second window has passed, presenting an already-rotated refresh token is still answered `400 invalid_grant` and now also invalidates the session the token belongs to and revokes every refresh token issued under it, the successor included, as a replayed authorization code already did (RFC 9700 §4.14.2). The audit row gains `response`: `revoked_session`, `refused`, `refused_unverified_presenter` or `revocation_failed`. Only the token's own client, passing the token's DPoP or mTLS binding, triggers the revocation; any other presenter is refused, marked and audited without revoking. A retry inside a `fapi2` window, and a token revoked at logout, revoke nothing. The behaviour is the tenant setting `oauth2.refresh_reuse_response` (`revoke_session`, the default, or `refuse`, the 1.1.x behaviour); a tenant may only tighten what its organization sets. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#refresh-token-replay-revokes-the-session-g-c-818) and the [1.2.0 upgrade notes](https://github.com/ilpanich/axiam/blob/main/claude_dev/release-1.2.0-upgrade-notes.md).",
       },
       { type: "h", id: "ciba", text: "FAPI-CIBA" },
       {

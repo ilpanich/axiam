@@ -714,6 +714,25 @@ pass), C165-28 (Info, Kotlin flake, tracked).
 **Not run locally** (CI covered): the Swift 6.4, JDK 25/27, PHP 8.2/8.5, Python
 3.11/3.15, clang/C23 matrix legs; PHPStan; sanitizer/valgrind cells beyond those noted.
 
+#### W5 — release readiness 1.2.0 (`claude/social-gap-1.2.0`, closed 2026-11-01)
+
+| Commit | Task | What |
+|---|---|---|
+| `e8de849` | W5.1, W5.2 | CHANGELOG `[1.2.0] - 2026-11-01`; `release-1.2.0-upgrade-notes.md`; F4-W1-09 wording; Keycloak comparison rows; roadmap row; threat-model copies reconciled to 2.45.0 (494 / 463 / 21 / 10); website refresh-rotation text |
+| `5ae4c02` | W5.3 | combined F4 review: 0 High/Medium, 3 Low, 3 Info; invariants hold; regression gate green |
+| `a377893` `0274ad2` `e32a835` | orchestrator | D-N39 … D-N44 |
+| `d6083b2` `2da13a6` | sweep 1 | #839 (logout revokes the session's refresh tokens; native client is a session participant), #840 |
+| `60f0cdf` `9c040db` `92bf8d3` | sweep 2 | #841 (admin MFA reset revokes refresh tokens), #842 (code replay revokes the session's refresh tokens), D-N42 (`end_session` 500 declared) |
+| `22acf19` | review addendum 1 | sweeps re-checked; F4-R12-07 … -11 |
+| `c442c7c` `c6819a4` `54fe63f` | targeted pass (D-N43, D-N44) | #843: logout revokes before it deletes; the D-N39 limit documented; logout/reset-mfa 500s declared |
+| *(this commit)* | review addendum 2 + results | |
+
+**Deltas against §4.** Beyond the plan, decided by the maintainer: logout revokes the session's refresh tokens (D-N39), admin MFA reset revokes the user's (D-N40, a pre-existing regression), code replay revokes the session's (D-N41), three 500s declared in the spec with two re-vendors of `openapi.json` into the eleven SDK PRs (D-N42, D-N44).
+
+**Issues filed:** #839 … #843 (fixed, close with the PR); #844 (session lineage key, later); ilpanich/axiam-cplusplus-sdk#83 (intermittent g++-16 CI crash, pre-existing code).
+
+**Open:** F4-R12-09, F4-R12-11 (SSF part), the F4-R12-01 residual (Info); #844; C165-24, C165-28 (Info, W4).
+
 **Expected cost**, in executor sessions: W1 3 (3 Opus), W2 6 (4 Opus), W3 4
 (2 Opus), W4 13 (1 Opus), W5 3 (1 Opus) — roughly **29 sessions, 11 Opus**,
 plus the orchestrator. W2.2 is the long pole; W4's eleven run in parallel.

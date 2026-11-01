@@ -454,3 +454,16 @@ blocks 1.2.0 on security grounds.
    sliding refresh chain (the optional cap); not claimed by any text; later.
 6. Carried from earlier reviews: F4-W2-15's dev-database note in the PR
    description; the contract review's C165-24 and C165-28 (D-N38).
+
+---
+
+## Addendum 2 — targeted pass (2026-11-01, D-N43, D-N44, #843)
+
+| Item | Commit | Change |
+|---|---|---|
+| F4-R12-07 (Low) | `c442c7c` | `AuthService::logout` revokes the session's refresh tokens first and deletes the session only on success; a failed logout is retryable with the same credential (tests `a_failed_revocation_leaves_the_session_for_a_retry_with_the_same_credential`, `a_failed_session_delete_after_the_revocation_is_retryable`). The cookie-hop and IdP-initiated SAML SLO failure pages keep the OP-session cookie (the credential their retry needs); `end_session` with a hint and SP-initiated SLO still clear every cookie. T-249 amended. |
+| F4-R12-08 (Low) | `c6819a4` | The D-N39 limit (after a console refresh, `/auth/logout` and the cookie hop don't reach code grants issued earlier; RP logout with the grant's `id_token_hint` does; the SSO session survives that RP logout) stated in the CHANGELOG, `docs/api/logout.md` and the deployment guide; follow-up #844 (session lineage key). |
+| F4-R12-11 (docs part) | `c6819a4` | `docs/api/logout.md` updated for D-N39; back-channel fan-out runs before the logout writes. |
+| F4-R12-10 (Info) | `54fe63f` | The 500 of `POST /api/v1/auth/logout` and `POST /api/v1/users/{user_id}/reset-mfa` declared; spec and registry regenerated (`openapi.json` `782ad971…`, registry `e701c8ad…`) and re-vendored in all eleven SDK PRs. |
+
+**Open (Info, recorded):** F4-R12-09 (a code replay writes no audit row), F4-R12-11 first part (a retried MFA reset sends no SSF events for factors the failed attempt already evicted), the F4-R12-01 residual (a native session's expiry does not cap its refresh chain), #844 (session lineage key).

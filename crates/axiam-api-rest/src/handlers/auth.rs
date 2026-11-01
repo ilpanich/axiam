@@ -675,6 +675,12 @@ pub async fn logout<C: Connection + Clone>(
     let session_tenant = user.principal_tenant_id;
     // G-5 (D-52): the `session-revoked` the session repository reports is the
     // user's own doing.
+    //
+    // D-N39 (#839): `logout` also revokes the OAuth2 refresh tokens issued
+    // under this session — a native sign-in's bearer token names its own
+    // session, so this ends that device's grant too. A failed write is an
+    // error (500) rather than a 204 over a half-ended session; retrying is
+    // safe.
     with_cause(
         Some(InitiatingEntity::User),
         state.auth_service.logout(session_tenant, user.session_id),

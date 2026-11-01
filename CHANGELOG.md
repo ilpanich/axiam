@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 named, in four items (G-A to G-D) and the review findings filed while they were
 built (#816 … #819, #821 … #824, #828 … #836). It adds one grant, one
 authorize parameter, one client field and three schema versions (v110 to v113,
-all additive), and changes one default: a replayed refresh token now revokes
-its session. Each wave ended in a security review of its own diff, and every
+all additive), and changes two behaviours: a replayed refresh token now revokes
+its session, and logging a session out now revokes its refresh tokens. Each wave ended in a security review of its own diff, and every
 finding of those reviews is fixed in its wave or recorded on its issue. The
 sign-in contract moves to 1.65 and the eleven SDKs follow as minor releases.
 
@@ -25,6 +25,10 @@ sign-in contract moves to 1.65 and the eleven SDKs follow as minor releases.
   `oauth2.refresh_reuse_response` to `refuse` on the organization before or right
   after the upgrade; a tenant can only tighten it. An organization settings
   `PUT` from a pre-1.2.0 client resets `refuse` to `revoke_session`.
+- **Logging a session out now revokes its refresh tokens** (`/auth/logout`,
+  RP-initiated logout, SAML single logout), for every client and grant bound to
+  that session. A relying party that kept refreshing after its user signed out
+  now gets `invalid_grant`. No setting.
 - **The schema moves from v109 to v113**, additive throughout; the runner applies
   it at boot. A development database that ran a pre-release v112 must drop
   `federation_id_token_replay` and the v112 stamp first.
@@ -166,6 +170,19 @@ The full notes are in
   settings `PUT` from a pre-1.2.0 client resets `refuse` to `revoke_session`.
   Schema v110, additive. (G-C, #818, #821, #822, #823)
 
+- A single-session logout now also revokes every OAuth2 refresh token issued
+  under that session, for every client and grant bound to it (authorization code
+  and native sign-in alike): `POST /api/v1/auth/logout`, RP-initiated logout
+  (`/oauth2/end_session` and its cookie hop) and SAML single logout. Before, the
+  session's refresh tokens outlived it and kept minting access tokens naming the
+  dead session. The user's other sessions keep theirs; a token revoked at logout
+  is a stale credential, not a replay. A logout whose session or refresh-token
+  write fails is now reported as failed (`500`; `end_session` clears the cookies
+  but does not redirect) instead of as signed out. The native sign-in grant
+  records its client as a session participant, so back-channel logout reaches a
+  native client that registered a `backchannel_logout_uri`. (F4-R12-01, #839,
+  D-N39)
+
 - SDK contract 1.65 (`sdks/CONTRACT.md`, `sdks/openapi.json`,
   `sdks/management-registry.json` re-vendored): §37 specifies the native sign-in
   helper (`login_with_provider_id_token`, with the SHA-256 nonce rule), `idp_hint` on
@@ -191,7 +208,7 @@ The full notes are in
 
 - The threat model is 2.45.0 with 494 threats: T-489 to T-492 (native sign-in:
   audience, replay, stale or nonce-less tokens, the per-provider switch) and T-493, T-494
-  (provider hint, `default_idp`) are new, and T-37, T-254 and T-471 are amended. T-254's
+  (provider hint, `default_idp`) are new, and T-37, T-249, T-254 and T-471 are amended. T-254's
   "detectable and invalidates the family" is true again for the first time since
   1.0.0-beta13 on the `standard` lane; the in-window `fapi2` residual stays
   recorded. Residuals recorded rather than closed: the native-sign-in trust is per

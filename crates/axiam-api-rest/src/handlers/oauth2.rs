@@ -5359,7 +5359,29 @@ async fn handle_provider_id_token<C: Connection + Clone>(
         )
         .await
     {
-        Ok(response) => {
+        Ok(issued) => {
+            // D-N39 (#839): the client has just joined the session the grant
+            // created — recorded as `/oauth2/authorize` records a code's
+            // client (B5), because back-channel logout iterates exactly these
+            // rows. A failure is logged and swallowed, as there: losing a
+            // logout notification is bad, failing the sign-in is worse.
+            if let Err(e) = state
+                .oauth2
+                .session_client_repo
+                .record(axiam_core::models::oauth2_client::CreateSessionClient {
+                    tenant_id,
+                    session_id: issued.session_id,
+                    client_id: client_id.clone(),
+                    user_id: subject.user_id,
+                })
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "could not record the native client's session participation; \
+                     back-channel logout will not reach it"
+                );
+            }
             // Audited before the tokens are returned: for a first sign-in
             // this record is the evidence that a provider's token created an
             // AXIAM user.
@@ -5367,7 +5389,7 @@ async fn handle_provider_id_token<C: Connection + Clone>(
             HttpResponse::Ok()
                 .append_header(("Cache-Control", "no-store"))
                 .append_header(("Pragma", "no-cache"))
-                .json(response)
+                .json(issued.response)
         }
         Err(e) => {
             audit.refused(state, Some(&subject), e.error_code()).await;
@@ -6502,9 +6524,20 @@ pub async fn end_session<C: Connection + Clone>(
         tenant_issuer.as_deref(),
     )
     .await;
-    // Best-effort: a session that has already expired is not an error — the
-    // user asked to be logged out and they are.
-    let _ = state.auth_service.logout(tenant_id, session_id).await;
+    // A session that has already expired is not an error — `invalidate` and
+    // the refresh-token revocation are both idempotent, so the user asked to
+    // be logged out and they are. A *failed* write is different (D-N39,
+    // #839): the session or the refresh tokens issued under it may still be
+    // live, and redirecting to the relying party as if the logout had worked
+    // would leave it half-ended without anyone being told.
+    if state
+        .auth_service
+        .logout(tenant_id, session_id)
+        .await
+        .is_err()
+    {
+        return logout_incomplete_page(&state.auth_config, tenant_id);
+    }
 
     // 4. Redirect against the identified client's allow-list, or render.
     finish_logout(
@@ -6642,9 +6675,16 @@ pub async fn end_session_at_cookie_path<C: Connection + Clone>(
             .await
         {
             Ok(Some(session)) => {
-                // Best-effort, as in `end_session`: an already-ended session
-                // is a logout that succeeded.
-                let _ = state.auth_service.logout(tenant_id, session.id).await;
+                // As in `end_session`: an already-ended session is a logout
+                // that succeeded, and a failed write (D-N39) is not.
+                if state
+                    .auth_service
+                    .logout(tenant_id, session.id)
+                    .await
+                    .is_err()
+                {
+                    return logout_incomplete_page(&state.auth_config, tenant_id);
+                }
                 tracing::info!(
                     %tenant_id,
                     session_id = %session.id,
@@ -6790,6 +6830,33 @@ pub(crate) fn logged_out_page(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <title>Signed out</title></head><body><h1>You are signed out.</h1>\
          </body></html>",
+    )
+}
+
+/// The answer of an RP-initiated logout whose session could not be fully
+/// ended (D-N39, #839): `AuthService::logout` failed to delete the session or
+/// to revoke the refresh tokens issued under it, and has logged which.
+///
+/// A `500`, never the relying party's redirect: following the allow-listed
+/// `post_logout_redirect_uri` would tell the RP the user is signed out while a
+/// refresh token of the session may still mint access tokens. The cookies are
+/// cleared all the same — this browser asked to be signed out — exactly as the
+/// SAML single-logout endpoint's `revocation_failed` page does. Retrying is
+/// safe: both writes are idempotent. Carries no RP-supplied content, as
+/// [`logged_out_page`] does not.
+fn logout_incomplete_page(
+    config: &axiam_auth::config::AuthConfig,
+    tenant_id: Uuid,
+) -> HttpResponse {
+    let mut response = HttpResponse::InternalServerError();
+    response
+        .append_header(("Cache-Control", "no-store"))
+        .content_type("text/html; charset=utf-8");
+    clear_logout_cookies(&mut response, config, tenant_id);
+    response.body(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <title>Sign-out incomplete</title></head><body><h1>We could not finish \
+         signing you out.</h1><p>Please try again.</p></body></html>",
     )
 }
 

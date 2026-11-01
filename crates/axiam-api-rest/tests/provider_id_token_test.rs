@@ -1538,3 +1538,213 @@ async fn a_provisioning_collision_is_one_generic_invalid_grant() {
         ["accepted", "provisioning_conflict"]
     );
 }
+
+// ===========================================================================
+// D-N39 (#839, F4-R12-01) — ending the native session ends its refresh token
+// ===========================================================================
+
+/// One `refresh_token` grant for a public client; `(status, json)`.
+macro_rules! refresh {
+    ($app:expr, $f:expr, $client:expr, $token:expr) => {
+        token_endpoint!(
+            $app,
+            $f,
+            format!(
+                "grant_type=refresh_token&client_id={}&refresh_token={}",
+                enc($client),
+                enc($token)
+            )
+        )
+    };
+}
+
+/// A native sign-in with `openid`; the token response.
+async fn native_sign_in(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    f: &Fixture,
+    client_id: &str,
+    nonce: &str,
+) -> Value {
+    let token = id_token(f, nonce, "ada", json!({}));
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={}", f.tenant_id))
+        .insert_header(("content-type", "application/x-www-form-urlencoded"))
+        .set_payload(grant_body(client_id, SLUG, &token, nonce, "openid"))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    test::read_body_json(resp).await
+}
+
+/// RP-initiated logout with the native ID token as `id_token_hint`.
+async fn end_session_with(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    f: &Fixture,
+    id_token: &str,
+) -> u16 {
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/end_session?tenant_id={}&id_token_hint={id_token}",
+            f.tenant_id
+        ))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+fn assert_refused_without_a_token(status: u16, body: &Value, case: &str) {
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "{case}: {body}"
+    );
+    assert!(
+        body.get("access_token").is_none(),
+        "{case}: no access token is minted: {body}"
+    );
+}
+
+/// **F4-R12-01, probe 2.** The app signs the user out with RP-initiated
+/// logout: the session is gone, and its refresh token — which used to keep
+/// rotating and minting access tokens naming the dead session — is refused
+/// with `invalid_grant` and mints nothing. Presenting it again is a stale
+/// credential, not a replay: no `oauth2.refresh_token_replayed` row, and the
+/// user's other device keeps its grant.
+#[actix_web::test]
+async fn rp_logout_of_a_native_session_revokes_its_refresh_token() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let app_client = native_client(&f, "ios-app").await;
+
+    let signed_in = native_sign_in(&app, &f, &app_client, "logout-1").await;
+    let other_device = native_sign_in(&app, &f, &app_client, "logout-2").await;
+    let refresh = signed_in["refresh_token"].as_str().unwrap();
+    let id_token = signed_in["id_token"].as_str().unwrap();
+
+    assert_eq!(end_session_with(&app, &f, id_token).await, 200);
+    assert_eq!(session_rows(&f).await, 1, "only the other device's session");
+
+    for case in ["after logout", "presented again"] {
+        let (status, body) = refresh!(app, f, &app_client, refresh);
+        assert_refused_without_a_token(status, &body, case);
+    }
+    assert!(
+        audit_rows(&f, axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION)
+            .await
+            .is_empty(),
+        "a token revoked at logout is a stale credential, not a replay"
+    );
+
+    let (status, body) = refresh!(
+        app,
+        f,
+        &app_client,
+        other_device["refresh_token"].as_str().unwrap()
+    );
+    assert_eq!(status, 200, "another session keeps its grant: {body}");
+}
+
+/// The same through `POST /api/v1/auth/logout`, which takes the session from
+/// the bearer token's `sid` — a native access token logs out its own session,
+/// and now its refresh token with it.
+#[actix_web::test]
+async fn api_logout_with_a_native_access_token_revokes_its_refresh_token() {
+    let f = setup().await;
+    let app = test_app!(f);
+    let app_client = native_client(&f, "ios-app").await;
+
+    let signed_in = native_sign_in(&app, &f, &app_client, "api-logout").await;
+    let access = signed_in["access_token"].as_str().unwrap();
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/logout")
+        .insert_header(("Authorization", format!("Bearer {access}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 204);
+
+    let (status, body) = refresh!(
+        app,
+        f,
+        &app_client,
+        signed_in["refresh_token"].as_str().unwrap()
+    );
+    assert_refused_without_a_token(status, &body, "after /auth/logout");
+}
+
+/// The native client is recorded as a participant of the session its grant
+/// created, so RP-initiated logout fans a back-channel logout token out to
+/// it when it registered a `backchannel_logout_uri` — naming that session.
+#[actix_web::test]
+async fn back_channel_logout_reaches_a_native_client_that_registered_for_it() {
+    // A loopback `http` RP: the delivery guard refuses it unless this test
+    // seam is on (R101W2-04). Nothing but test code calls it.
+    axiam_api_rest::backchannel_logout::admit_private_networks_for_tests();
+    let rp = std::mem::ManuallyDrop::new(MockServer::start().await);
+    Mock::given(method("POST"))
+        .and(path("/backchannel"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&rp)
+        .await;
+
+    let f = setup().await;
+    let app = test_app!(f);
+    let backchannel = format!("{}/backchannel", rp.uri());
+    let (app_client, _) = client(
+        &f,
+        "ios-app-with-backchannel",
+        ClientAuthMethod::None,
+        &[PROVIDER_ID_TOKEN_GRANT_TYPE, "refresh_token"],
+        |c| c.backchannel_logout_uri = Some(backchannel),
+    )
+    .await;
+
+    let signed_in = native_sign_in(&app, &f, &app_client, "bcl").await;
+    let id_token = signed_in["id_token"].as_str().unwrap();
+    let sid = claims_of(id_token)["sid"].as_str().unwrap().to_owned();
+
+    use axiam_core::repository::SessionClientRepository as _;
+    let participants = axiam_db::repository::SurrealSessionClientRepository::new(f.db.clone())
+        .list_for_session(f.tenant_id, sid.parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        participants
+            .iter()
+            .map(|p| p.client_id.as_str())
+            .collect::<Vec<_>>(),
+        [app_client.as_str()],
+        "the native client participates in the session its grant created"
+    );
+
+    assert_eq!(end_session_with(&app, &f, id_token).await, 200);
+
+    // Delivery is detached and best-effort (§2.6), so it is polled.
+    let mut delivered = None;
+    for _ in 0..60 {
+        let requests = rp.received_requests().await.unwrap_or_default();
+        if let Some(req) = requests.first() {
+            delivered = Some(String::from_utf8(req.body.clone()).unwrap());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let body = delivered.expect("the native client must receive a back-channel logout");
+    // A JWT is base64url and dots: nothing in it is form-escaped.
+    let logout_token = body
+        .split('&')
+        .find_map(|p| p.strip_prefix("logout_token="))
+        .expect("the POST carries a logout_token");
+    let claims = claims_of(logout_token);
+    assert_eq!(claims["aud"], app_client.as_str());
+    assert_eq!(claims["sid"], sid.as_str());
+}

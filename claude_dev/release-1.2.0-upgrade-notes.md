@@ -6,7 +6,8 @@ Plan: [`social-login-gap-plan-2026-10-30.md`](social-login-gap-plan-2026-10-30.m
 Release 1.2.0 adds native sign-in with a provider ID token (G-A), a provider
 hint and a per-client default provider (G-B), a session revocation on a
 refresh-token replay (G-C) and `client_id` on exchanged tokens (G-D). Only G-C
-changes behaviour for a client you already run.
+and the logout change of §1a (D-N39) change behaviour for a client you already
+run.
 
 ## 1. A replayed refresh token now revokes the session (G-C, #818)
 
@@ -53,6 +54,41 @@ passed. The client's answer is unchanged.
 The full behaviour, with the cases that are not a replay, is in the deployment
 guide, [Refresh-token replay revokes the session](../docs/deployment/README.md#refresh-token-replay-revokes-the-session-g-c-818).
 This section does not repeat it.
+
+## 1a. Logout now ends the session's refresh tokens (D-N39, #839)
+
+Before 1.2.0, logging one session out deleted the session and nothing else. Its
+access tokens stopped at the session check, but every OAuth2 refresh token issued
+under the session stayed live and kept minting access tokens: refused by AXIAM's
+session-checked APIs and UserInfo, but `active` at `POST /oauth2/introspect` and
+accepted by a resource server that verifies the JWT locally. From 1.2.0 a
+single-session logout (`POST /api/v1/auth/logout`, RP-initiated logout at
+`/oauth2/end_session` with or without `id_token_hint`, and SAML single logout)
+also **revokes every refresh token issued under that session**, for every client
+and grant bound to it: authorization code and native sign-in alike. The user's
+other sessions keep theirs.
+
+- **Who is affected.** A relying party that kept refreshing after its user
+  signed out of the session (through it, or through another relying party
+  sharing the session) now gets `invalid_grant` and must sign the user in again.
+  A native app that signs out with `end_session` or `/auth/logout` no longer has
+  to call `/oauth2/revoke` as well (it still may).
+- **Not a replay.** Presenting a token revoked at logout is `invalid_grant` with
+  no `oauth2.refresh_token_replayed` row and no further revocation.
+- **A failed revocation fails the logout** rather than answering "signed out":
+  `/auth/logout` answers `500`; `end_session` answers a `500` page that clears
+  the cookies and does not redirect to the relying party; SAML single logout
+  shows its `revocation_failed` page. The server log names the write that failed
+  (`failed_writes`). A retry is safe.
+- **Back-channel logout** now reaches a native-sign-in client that registered a
+  `backchannel_logout_uri`: the grant records it as a participant of the session
+  it creates, and RP-initiated logout with an `id_token_hint` naming that session
+  notifies it.
+- **Limit.** A code grant names the browser session as it was at
+  `/oauth2/authorize`. Once the console session has refreshed, it has a new id,
+  and `POST /auth/logout` of the console no longer reaches that grant.
+  RP-initiated logout with the grant's own ID token still does.
+- No setting and no schema change.
 
 ## 2. Schema v110 to v113 — all additive
 

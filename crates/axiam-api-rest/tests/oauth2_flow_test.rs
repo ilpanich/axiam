@@ -1718,6 +1718,98 @@ async fn g_c_a_refused_refresh_replay_revokes_its_session_end_to_end() {
     }
 }
 
+/// **D-N39 (#839, F4-R12-01) — RP-initiated logout ends the session's
+/// refresh tokens.** An authorization-code grant's refresh token names the
+/// session it was authorized from, and every rotation copies it; logging that
+/// session out with a signed `id_token_hint` now revokes the current token of
+/// the chain, which before kept rotating with a dead `sid`. Presenting it is a
+/// stale credential (no replay row), and another session of the same user and
+/// client is untouched.
+#[actix_rt::test]
+async fn d_n39_rp_logout_revokes_the_code_grants_refresh_token() {
+    use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+    use axiam_db::repository::SurrealAuditLogRepository;
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let (logged_out, jwt_a) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let (_kept, jwt_b) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
+    let app = test_app!(db, auth);
+
+    let (client_id, client_secret, redirect_uri) = create_client(&app, &jwt_a).await;
+    let mut refresh_of = Vec::new();
+    for jwt in [&jwt_a, &jwt_b] {
+        let code = do_authorize(&app, jwt, &client_id, &redirect_uri, None, None).await;
+        let resp = do_token_exchange(
+            &app,
+            tenant_id,
+            &client_id,
+            &client_secret,
+            &code,
+            &redirect_uri,
+            None,
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        refresh_of.push(body["refresh_token"].as_str().unwrap().to_owned());
+    }
+    // One honest rotation, so the token logout must reach is a successor that
+    // inherited the session id rather than the one the code exchange minted.
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[0]).await;
+    assert_eq!(status, 200, "{body}");
+    let current = body["refresh_token"].as_str().unwrap().to_owned();
+
+    let hint = axiam_auth::token::issue_id_token(
+        user_id,
+        &client_id,
+        None,
+        None,
+        &["openid".to_string()],
+        &auth,
+        Some(logged_out),
+        &axiam_auth::token::IdTokenEvidence::NONE,
+    )
+    .unwrap();
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/end_session?tenant_id={tenant_id}&id_token_hint={hint}"
+        ))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    let (status, body) = refresh_with(&app, tenant_id, &client_id, &client_secret, &current).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "the logged-out session's refresh token is revoked: {body}"
+    );
+    assert!(body.get("access_token").is_none(), "nothing is minted");
+
+    let (status, body) =
+        refresh_with(&app, tenant_id, &client_id, &client_secret, &refresh_of[1]).await;
+    assert_eq!(status, 200, "another session keeps its grant: {body}");
+
+    let replays = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some(axiam_oauth2::token::REFRESH_REPLAY_AUDIT_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        replays.items.is_empty(),
+        "a token revoked at logout is not a replay"
+    );
+}
+
 /// **G-C, the escape hatch.** An organization on
 /// `oauth2.refresh_reuse_response = refuse` gets the 1.1.x behaviour through
 /// the real settings wiring: the replay is refused and audited

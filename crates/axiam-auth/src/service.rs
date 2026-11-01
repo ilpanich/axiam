@@ -1301,9 +1301,51 @@ impl<
         })
     }
 
-    /// Invalidate a single session (logout).
+    /// End a single session (logout) **and the OAuth2 refresh tokens issued
+    /// under it** (D-N39, #839).
+    ///
+    /// Every single-session ending goes through here: `POST /auth/logout`,
+    /// RP-initiated logout (`/oauth2/end_session` and its cookie hop) and SAML
+    /// single logout. Deleting the session row alone ended its access tokens
+    /// at the session check but left every refresh token naming it live — the
+    /// refresh grant does not ask whether `session_id` still exists — so a
+    /// native sign-in (whose only credential is its OAuth2 refresh token) kept
+    /// minting access tokens for a session the user had ended (F4-R12-01).
+    /// The scope is exactly the G-C one,
+    /// [`RefreshTokenRepository::revoke_all_for_session`]: the tokens of this
+    /// session, for every client and grant bound to it, and nothing wider —
+    /// the user's other sessions and devices keep theirs.
+    ///
+    /// A token revoked here is not stamped `rotated_at`, so presenting it
+    /// later is an ordinary stale credential (`invalid_grant`), never a
+    /// refresh-token replay: it triggers no second revocation and no
+    /// `oauth2.refresh_token_replayed` row.
+    ///
+    /// # A failed write fails the logout
+    ///
+    /// The two writes are attempted independently, as G-C's replay response
+    /// attempts them, so one failing does not stop the other. Unlike G-C — a
+    /// refusal that is already decided and must not become an oracle — a
+    /// logout is the caller asking for exactly this effect, and answering
+    /// "signed out" while the session or its refresh tokens are still live is
+    /// the half-ended state this must not leave silently. So a failure is
+    /// logged at `error` with `failed_writes` naming the write(s) that failed
+    /// (G-C's vocabulary: `session_invalidate`, `refresh_tokens_revoke`) and
+    /// returned as an error. Both writes are idempotent, so the caller may
+    /// simply retry.
     pub async fn logout(&self, tenant_id: Uuid, session_id: Uuid) -> AxiamResult<()> {
-        self.session_repo.invalidate(tenant_id, session_id).await
+        let invalidated = self.session_repo.invalidate(tenant_id, session_id).await;
+        let revoked = self
+            .refresh_token_repo
+            .revoke_all_for_session(tenant_id, session_id)
+            .await;
+        if let Ok(count) = &revoked {
+            tracing::debug!(
+                %tenant_id, %session_id, refresh_tokens_revoked = count,
+                "logout: session ended with its OAuth2 refresh tokens"
+            );
+        }
+        logout_outcome(tenant_id, session_id, invalidated, revoked)
     }
 
     /// Revoke all sessions for a user AND all OAuth2 refresh tokens.
@@ -1977,5 +2019,91 @@ fn account_status_permits(
             }
             Err(AuthError::AccountPendingVerification)
         }
+    }
+}
+
+/// The answer of [`AuthService::logout`] from its two independent writes
+/// (D-N39, #839).
+///
+/// `Ok` only when both succeeded. Otherwise the failure is logged at `error`
+/// with `failed_writes` naming which of `session_invalidate` and
+/// `refresh_tokens_revoke` failed — the names G-C's `revocation_failed` audit
+/// row uses — and the first error is returned, so no caller can answer
+/// "signed out" over a session or a refresh token that is still live.
+fn logout_outcome(
+    tenant_id: Uuid,
+    session_id: Uuid,
+    invalidated: AxiamResult<()>,
+    revoked: AxiamResult<u64>,
+) -> AxiamResult<()> {
+    let failed_writes = logout_failed_writes(&invalidated, &revoked);
+    if failed_writes.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        %tenant_id,
+        %session_id,
+        ?failed_writes,
+        session_error = invalidated.as_ref().err().map(ToString::to_string),
+        refresh_tokens_error = revoked.as_ref().err().map(ToString::to_string),
+        "logout: the session could not be fully ended; the logout is reported as failed \
+         (both writes are idempotent, so it can be retried)"
+    );
+    invalidated?;
+    revoked.map(|_| ())
+}
+
+/// Which of the logout's two writes failed, in G-C's vocabulary.
+fn logout_failed_writes(
+    invalidated: &AxiamResult<()>,
+    revoked: &AxiamResult<u64>,
+) -> Vec<&'static str> {
+    [
+        invalidated.is_err().then_some("session_invalidate"),
+        revoked.is_err().then_some("refresh_tokens_revoke"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(test)]
+mod logout_tests {
+    use super::*;
+
+    fn db_error() -> AxiamError {
+        AxiamError::Database("unavailable".into())
+    }
+
+    /// D-N39: both writes succeeding is the only "signed out".
+    #[test]
+    fn a_logout_succeeds_only_when_both_writes_do() {
+        let (tenant, session) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(logout_outcome(tenant, session, Ok(()), Ok(0)).is_ok());
+        assert!(logout_outcome(tenant, session, Ok(()), Ok(3)).is_ok());
+        assert!(logout_outcome(tenant, session, Err(db_error()), Ok(1)).is_err());
+        assert!(
+            logout_outcome(tenant, session, Ok(()), Err(db_error())).is_err(),
+            "a session ended over live refresh tokens is not a logout"
+        );
+        assert!(logout_outcome(tenant, session, Err(db_error()), Err(db_error())).is_err());
+    }
+
+    /// The failed writes are named as G-C's `failed_writes` names them.
+    #[test]
+    fn the_failed_writes_use_the_g_c_names() {
+        assert!(logout_failed_writes(&Ok(()), &Ok(2)).is_empty());
+        assert_eq!(
+            logout_failed_writes(&Err(db_error()), &Ok(2)),
+            ["session_invalidate"]
+        );
+        assert_eq!(
+            logout_failed_writes(&Ok(()), &Err(db_error())),
+            ["refresh_tokens_revoke"]
+        );
+        assert_eq!(
+            logout_failed_writes(&Err(db_error()), &Err(db_error())),
+            ["session_invalidate", "refresh_tokens_revoke"]
+        );
     }
 }

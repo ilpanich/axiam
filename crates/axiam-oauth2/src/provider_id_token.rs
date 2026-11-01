@@ -74,6 +74,14 @@
 //! `sid`, so UserInfo and the session-validated API admit the token, ending
 //! the session (logout, password reset, an administrator's revocation) ends
 //! the tokens, and the user's session list shows the device. No claim is new.
+//!
+//! "Ends the tokens" includes the refresh token (D-N39, #839): a single-session
+//! logout (`AuthService::logout`, behind `/auth/logout`, RP-initiated logout
+//! and SAML single logout) revokes every refresh token issued under the
+//! session, and the user-wide revocations revoke all of the user's. The token
+//! endpoint records the client as a participant of the session it creates
+//! ([`NativeSignIn::session_id`]), so back-channel logout reaches a client
+//! that registered a `backchannel_logout_uri`.
 
 use axiam_auth::token::{
     CnfClaim, IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_id_token,
@@ -362,6 +370,21 @@ pub struct SignInOrigin {
     pub user_agent: Option<String>,
 }
 
+/// What a native sign-in issued: the token set for the wire, and the session
+/// it was issued under.
+///
+/// The session id is returned so the token endpoint can record the client as
+/// a **participant** of that session — the row back-channel logout iterates
+/// (D-N39, #839) — as `/oauth2/authorize` does when it issues a code. It is
+/// the `sid` the access and ID tokens already carry, never sent separately.
+#[derive(Debug)]
+pub struct NativeSignIn {
+    /// The token response, exactly as it goes on the wire.
+    pub response: TokenResponse,
+    /// The session the tokens name (`sid`).
+    pub session_id: Uuid,
+}
+
 impl<OC, AC, TR, RT, UR, SA, SR, AR> TokenService<OC, AC, TR, RT, UR, SA, SR, AR>
 where
     OC: OAuth2ClientRepository,
@@ -496,7 +519,7 @@ where
         consent: ConsentState,
         origin: SignInOrigin,
         ctx: &TokenRequestContext,
-    ) -> Result<TokenResponse, OAuth2Error> {
+    ) -> Result<NativeSignIn, OAuth2Error> {
         decide_consent(consent)?;
         if subject.tenant_id != tenant_id {
             // The federation service resolves users in the requesting tenant
@@ -636,13 +659,16 @@ where
             None
         };
 
-        Ok(TokenResponse {
-            access_token,
-            token_type,
-            expires_in: self.auth_config.access_token_lifetime_secs,
-            refresh_token,
-            scope: (!grant.scopes.is_empty()).then(|| grant.scopes.join(" ")),
-            id_token,
+        Ok(NativeSignIn {
+            response: TokenResponse {
+                access_token,
+                token_type,
+                expires_in: self.auth_config.access_token_lifetime_secs,
+                refresh_token,
+                scope: (!grant.scopes.is_empty()).then(|| grant.scopes.join(" ")),
+                id_token,
+            },
+            session_id: session.id,
         })
     }
 }

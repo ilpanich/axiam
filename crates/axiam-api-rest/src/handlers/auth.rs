@@ -679,8 +679,10 @@ pub async fn logout<C: Connection + Clone>(
     // D-N39 (#839): `logout` also revokes the OAuth2 refresh tokens issued
     // under this session — a native sign-in's bearer token names its own
     // session, so this ends that device's grant too. A failed write is an
-    // error (500) rather than a 204 over a half-ended session; retrying is
-    // safe.
+    // error (500) rather than a 204 over a half-ended session. The refresh
+    // tokens are revoked before the session is deleted (F4-R12-07), so every
+    // failure leaves the session live and this same bearer token can repeat
+    // the request to complete the logout.
     with_cause(
         Some(InitiatingEntity::User),
         state.auth_service.logout(session_tenant, user.session_id),

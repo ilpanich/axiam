@@ -2856,6 +2856,37 @@ The whole 1.2.0 upgrade (schema v110 to v113, native sign-in's per-provider and
 per-client registration, the `fresh=1` hop parameter, the SDK server floor) is in
 [`claude_dev/release-1.2.0-upgrade-notes.md`](../../claude_dev/release-1.2.0-upgrade-notes.md).
 
+## Logout revokes the session's refresh tokens (D-N39, #839)
+
+A single-session logout — `POST /api/v1/auth/logout`, RP-initiated logout
+(`/oauth2/end_session` and its cookie hop `/oauth2/authorize/logout`) and SAML
+single logout — ends the session **and revokes every OAuth2 refresh token
+issued under it**, for every client and grant bound to it (authorization code
+and native sign-in alike). The user's other sessions keep theirs. A token
+revoked at logout is a stale credential when presented again
+(`invalid_grant`), never a [replay](#refresh-token-replay-revokes-the-session-g-c-818).
+The normative description is [`docs/api/logout.md`](../api/logout.md).
+
+**A failed write fails the logout.** The refresh tokens are revoked first, and
+the session is deleted only once that has succeeded. If either write fails, the
+logout is reported as failed instead of as signed out: `/auth/logout` answers
+`500`, `end_session` and the cookie hop answer a `500` page that does not
+redirect to the relying party, and SAML single logout shows its
+`revocation_failed` page. The server logs it at `error` with `failed_writes`
+naming the write (`refresh_tokens_revoke` or `session_invalidate`).
+
+**A failed logout is retryable with the credential that started it.** Because
+the session is deleted last, every failure leaves it live, so the same request
+repeated reaches it and completes the logout: the revocation's second pass is a
+no-op and the delete then runs. The bearer token, the `id_token_hint` and a new
+SAML `LogoutRequest` work as they did the first time; the failure pages clear
+the API cookies, but on the two paths whose session is found through the
+OP-session cookie (the cookie hop and IdP-initiated SAML logout) they keep that
+cookie, so the user's "try again" reaches the session. (Until D-N43 the two
+writes ran independently, and the common failure — session deleted, revocation
+failed — left live refresh tokens the caller's own credential could no longer
+reach; F4-R12-07.)
+
 ## Session revocation feed (optional, T-39 / T-143)
 
 `AXIAM__AUTH__REVOCATION_FEED_ENABLED` — default `false`.

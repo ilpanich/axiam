@@ -6546,7 +6546,9 @@ pub async fn end_session<C: Connection + Clone>(
         .await
         .is_err()
     {
-        return logout_incomplete_page(&state.auth_config, tenant_id);
+        // The repeat names the session through the same hint, so the
+        // OP-session cookie is not needed for it.
+        return logout_incomplete_page(&state.auth_config, tenant_id, false);
     }
 
     // 4. Redirect against the identified client's allow-list, or render.
@@ -6688,14 +6690,16 @@ pub async fn end_session_at_cookie_path<C: Connection + Clone>(
         {
             Ok(Some(session)) => {
                 // As in `end_session`: an already-ended session is a logout
-                // that succeeded, and a failed write (D-N39) is not.
+                // that succeeded, and a failed write (D-N39) is not. The
+                // session is still live after a failure (F4-R12-07) and this
+                // cookie is what names it, so it is kept for the retry.
                 if state
                     .auth_service
                     .logout(tenant_id, session.id)
                     .await
                     .is_err()
                 {
-                    return logout_incomplete_page(&state.auth_config, tenant_id);
+                    return logout_incomplete_page(&state.auth_config, tenant_id, true);
                 }
                 tracing::info!(
                     %tenant_id,
@@ -6808,16 +6812,25 @@ pub(crate) fn logout_cookies(
     config: &axiam_auth::config::AuthConfig,
     tenant_id: Uuid,
 ) -> Vec<actix_web::cookie::Cookie<'static>> {
-    let cookie_secure = config.cookie_secure;
-    let mut cookies = vec![
-        crate::middleware::csrf::clear_access_cookie(cookie_secure),
-        crate::middleware::csrf::clear_refresh_cookie(cookie_secure),
-        crate::middleware::csrf::clear_csrf_cookie(cookie_secure),
-    ];
+    let mut cookies = api_logout_cookies(config);
     cookies.extend(crate::middleware::csrf::clear_op_session_cookies(
         tenant_id, config,
     ));
     cookies
+}
+
+/// The three API-cookie removals of [`logout_cookies`], without the OP-session
+/// copies: what a failed logout clears when the OP-session cookie is the
+/// credential its retry needs (F4-R12-07).
+pub(crate) fn api_logout_cookies(
+    config: &axiam_auth::config::AuthConfig,
+) -> Vec<actix_web::cookie::Cookie<'static>> {
+    let cookie_secure = config.cookie_secure;
+    vec![
+        crate::middleware::csrf::clear_access_cookie(cookie_secure),
+        crate::middleware::csrf::clear_refresh_cookie(cookie_secure),
+        crate::middleware::csrf::clear_csrf_cookie(cookie_secure),
+    ]
 }
 
 /// AXIAM's own logged-out page.
@@ -6846,25 +6859,41 @@ pub(crate) fn logged_out_page(
 }
 
 /// The answer of an RP-initiated logout whose session could not be fully
-/// ended (D-N39, #839): `AuthService::logout` failed to delete the session or
-/// to revoke the refresh tokens issued under it, and has logged which.
+/// ended (D-N39, #839): `AuthService::logout` failed to revoke the refresh
+/// tokens issued under the session or, after revoking them, to delete it, and
+/// has logged which.
 ///
 /// A `500`, never the relying party's redirect: following the allow-listed
-/// `post_logout_redirect_uri` would tell the RP the user is signed out while a
-/// refresh token of the session may still mint access tokens. The cookies are
-/// cleared all the same — this browser asked to be signed out — exactly as the
-/// SAML single-logout endpoint's `revocation_failed` page does. Retrying is
-/// safe: both writes are idempotent. Carries no RP-supplied content, as
+/// `post_logout_redirect_uri` would tell the RP the user is signed out while
+/// the session is still live. `logout` revokes before it deletes
+/// (F4-R12-07), so every failure leaves the session in place and the request
+/// that started the logout can be repeated to complete it ("Please try
+/// again").
+///
+/// Which cookies are cleared follows from that. The API cookies always are —
+/// this browser asked to be signed out. The OP-session cookies are cleared
+/// only when they are not the retry's credential (`keep_op_session = false`,
+/// `end_session` with an `id_token_hint`, whose repeat names the session
+/// through the hint): on the cookie hop the cookie *is* what names the
+/// session, and clearing it would turn the retry into "signed out" over a
+/// session that is still live. Carries no RP-supplied content, as
 /// [`logged_out_page`] does not.
 fn logout_incomplete_page(
     config: &axiam_auth::config::AuthConfig,
     tenant_id: Uuid,
+    keep_op_session: bool,
 ) -> HttpResponse {
     let mut response = HttpResponse::InternalServerError();
     response
         .append_header(("Cache-Control", "no-store"))
         .content_type("text/html; charset=utf-8");
-    clear_logout_cookies(&mut response, config, tenant_id);
+    if keep_op_session {
+        for cookie in api_logout_cookies(config) {
+            response.cookie(cookie);
+        }
+    } else {
+        clear_logout_cookies(&mut response, config, tenant_id);
+    }
     response.body(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <title>Sign-out incomplete</title></head><body><h1>We could not finish \
@@ -7320,5 +7349,43 @@ mod idp_hint_tests {
             kind: ProviderKind::GenericOidc,
         };
         assert_eq!(match_idp_hint(&[a, b], &a_id), None);
+    }
+}
+
+#[cfg(test)]
+mod logout_incomplete_tests {
+    use super::*;
+    use crate::middleware::csrf::COOKIE_OP_SESSION;
+    use axiam_auth::config::AuthConfig;
+
+    fn cleared_cookie_names(response: &HttpResponse) -> Vec<String> {
+        response.cookies().map(|c| c.name().to_owned()).collect()
+    }
+
+    /// F4-R12-07: a failed logout leaves the session live, so on the cookie
+    /// hop the OP-session cookie (its credential) survives the `500` page and
+    /// the retry reaches the session; the API cookies are cleared either way.
+    #[test]
+    fn the_failure_page_keeps_the_op_session_cookie_only_when_asked() {
+        let config = AuthConfig::default();
+        let tenant = Uuid::new_v4();
+
+        let kept = logout_incomplete_page(&config, tenant, true);
+        assert_eq!(
+            kept.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let kept = cleared_cookie_names(&kept);
+        assert!(!kept.is_empty(), "the API cookies are cleared");
+        assert!(!kept.iter().any(|n| n == COOKIE_OP_SESSION));
+
+        let cleared = logout_incomplete_page(&config, tenant, false);
+        assert_eq!(
+            cleared.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let cleared = cleared_cookie_names(&cleared);
+        assert!(cleared.iter().any(|n| n == COOKIE_OP_SESSION));
+        assert!(kept.iter().all(|n| cleared.contains(n)));
     }
 }

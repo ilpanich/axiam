@@ -76,10 +76,19 @@ other sessions keep theirs.
 - **Not a replay.** Presenting a token revoked at logout is `invalid_grant` with
   no `oauth2.refresh_token_replayed` row and no further revocation.
 - **A failed revocation fails the logout** rather than answering "signed out":
-  `/auth/logout` answers `500`; `end_session` answers a `500` page that clears
-  the cookies and does not redirect to the relying party; SAML single logout
-  shows its `revocation_failed` page. The server log names the write that failed
-  (`failed_writes`). A retry is safe.
+  `/auth/logout` answers `500`; `end_session` answers a `500` page that does not
+  redirect to the relying party; SAML single logout shows its
+  `revocation_failed` page. The server log names the write that failed
+  (`failed_writes`: `refresh_tokens_revoke` or `session_invalidate`).
+- **Retrying it works with the same credential** (F4-R12-07, D-N43). The
+  refresh tokens are revoked first and the session is deleted only after that
+  succeeded, so every failure leaves the session live: repeating
+  `/auth/logout` with the same bearer token, `end_session` with the same
+  `id_token_hint`, or a new SAML `LogoutRequest` completes the logout. The
+  failure pages clear the API cookies; the OP-session cookie is cleared too,
+  except on the two paths where it is what names the session (the cookie hop
+  `/oauth2/authorize/logout` and IdP-initiated SAML logout), whose page keeps it
+  so that "Please try again" reaches the session.
 - **Back-channel logout** now reaches a native-sign-in client that registered a
   `backchannel_logout_uri`: the grant records it as a participant of the session
   it creates, and RP-initiated logout with an `id_token_hint` naming that session

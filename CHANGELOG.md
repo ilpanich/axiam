@@ -179,9 +179,14 @@ The full notes are in
   (`/oauth2/end_session` and its cookie hop) and SAML single logout. Before, the
   session's refresh tokens outlived it and kept minting access tokens naming the
   dead session. The user's other sessions keep theirs; a token revoked at logout
-  is a stale credential, not a replay. A logout whose session or refresh-token
-  write fails is now reported as failed (`500`; `end_session` clears the cookies
-  but does not redirect) instead of as signed out. The native sign-in grant
+  is a stale credential, not a replay. A logout whose refresh-token or session
+  write fails is now reported as failed (`500`, no redirect to the relying
+  party) instead of as signed out. The refresh tokens are revoked before the
+  session is deleted, so after any failure the session is still live and
+  repeating the logout with the same credential completes it: the bearer token,
+  the `id_token_hint`, or the OP-session cookie, which the failure page of the
+  cookie hop and of IdP-initiated SAML logout keeps for that reason
+  (F4-R12-07, D-N43). The native sign-in grant
   records its client as a session participant, so back-channel logout reaches a
   native client that registered a `backchannel_logout_uri`. (F4-R12-01, #839,
   D-N39)

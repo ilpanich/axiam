@@ -404,3 +404,201 @@ floor findings, and the contract-text fixes clarify text every SDK already meets
   were re-run where possible.
 - **The redirect behaviour of Swift's transport on Linux FoundationNetworking** (C165-14) was inferred from the
   absence of a redirect delegate, not observed.
+
+---
+
+## Addendum 1 — fix-round re-check (2026-10-31)
+
+**Scope.** The eleven fix commits on `claude/bold-mayer-wpd3kv` (all signed, all equal to their pushed
+`origin/claude/bold-mayer-wpd3kv`), each diffed against the head this review read; the contract at axiam
+`d93976b` (§12.1 rule 3 "No redirect is followed", §26.2 rule 8 + §26.6 `par_idp_hint_from_begin_url_pushed` /
+`par_idp_hint_argument_wins` (D-N36), §37.2 rules 9 and 12, §37.3 last paragraph, §37.8, §37.9 tests 3, 5 and
+12, §34.9 "Amended 2026-10-31" with the D-N33 floor); plan §5 D-N32 … D-N37.
+
+| SDK | previous head | fix head | CI on the fix head (`gh run list`) |
+|---|---|---|---|
+| Rust | `3ce575d` | `9d5ca23` | SDK CI, Coverage, clippy: success |
+| TypeScript | `df17b53` | `4586681` | SDK CI, Coverage, CodeQL: success |
+| Python | `51eb8d3` | `4ccc75a` | SDK CI, Coverage: success |
+| Java | `e2ece70` | `ae12455` | SDK CI, Coverage: success |
+| Kotlin | `97e3706` | `54871aa` | SDK CI, Coverage: success |
+| C# | `2e056b0` | `c06bbf3` | SDK CI, Coverage: success |
+| PHP | `f47a8a4` | `114810f` | SDK CI, Coverage: success |
+| Go | `cf1128c` | `e4235e7` | SDK CI, Coverage: success |
+| Swift | `4b10728` | `139198d` | sdk-ci-swift, coverage: success |
+| C | `c29f78e` | `3476b7d` | coverage: success; sdk-ci-c still running when read |
+| C++ | `999888a` | `7e45f76` | sdk-ci-cpp and coverage still running when read |
+
+### A1.1 Vendoring
+
+`CONTRACT.md` at each fix head (`git show <head>:CONTRACT.md | sha256sum`) is
+`95ee87ba128afb5a198b5364983b5a725e9a75b775840f87259c896ce3359529`, identical to axiam `d93976b`, in **all eleven**.
+No fix commit touches `openapi.json`, `management-registry.json` or `proto/`, so those stay as §2 recorded them
+(`76d35d9`). Each repository holds exactly one tracked `CONTRACT.md`.
+
+### A1.2 Runs (scratch worktrees at the fix heads, removed afterwards)
+
+| Repo | Run | Result |
+|---|---|---|
+| rust | `cargo test --no-default-features --features rest --test contract_165_test` | 24 passed |
+| typescript | `npm ci`; `vitest run` nativeSignIn, idpHint, oidcTokenOps, deviceFlow, ciba, oidcExchange (proxy unset) | 6 files, 171 passed |
+| python | focused (native, idp_hint, coverage-gaps, single-flight, device): 196 passed; full `pytest tests`: 2061 passed, 11 collection errors (django/flask/fastapi extras not installed, environmental) | green |
+| java | `mvnw -Dtest=NativeSignInTest,IdpHintTest,RefreshReuseInvalidGrantTest` + a reviewer probe | 14 + 7 + 1 passed; probe: C165-23 |
+| kotlin | `gradlew test --tests` NativeSignIn, IdpHint, OidcRefreshReuse + probe; `OidcRefreshTest` ×5 isolated | 14 + 7 + 1 passed; probe: C165-23; `OidcRefreshTest` 5/5 |
+| csharp | `dotnet test --filter NativeLogin\|IdpHint\|OidcRefreshAndCredentials` | 48 passed |
+| php | **none**: `composer install` still blocked ("Could not authenticate against github.com"); read only | — |
+| go | `go test -count=1 .`; `go vet .` | ok; clean |
+| swift | **none** (no toolchain); read only | — |
+| c | cmake Debug, `AXIAM_BUILD_TESTS=ON`; full `ctest` 83/83; valgrind `test_idp_hint`, `test_native_sign_in` clean; `readelf` SONAME `libaxiam.so.3` | green |
+| cplusplus | cmake Debug, tests on, shared; `ctest` 2/2 (`axiam_cpp_tests` 1669 cases, 6564 checks, 0 failed; `abi_soname`); `readelf` SONAME `libaxiam_cpp.so.5` | green |
+
+The two probes (a `307 Location: <second MockWebServer>/oauth2/token` answer to `oidcRefresh`) lived only in the
+scratch worktrees.
+
+### A1.3 Status of C165-01 … C165-21
+
+| ID | SDK(s) | Status | Evidence on the fix head |
+|---|---|---|---|
+| C165-01 | python | **Closed** | `_handle_token_response` maps with `description_optional=True` (`src/axiam_sdk/_oidc.py:1333-1342`); `_oauth_error` omits the description unless given; test 9 mocks exactly `429 {"error":"rate_limit_exceeded"}` and the `"retry_after":7` variant with `Retry-After: 7`. See point 3 (A1.5). |
+| C165-02 | c | **Closed** | `AXIAM_SOVERSION 3` (`CMakeLists.txt:135-137`); `abi_soname` expects `libaxiam.so.3` and passes; CHANGELOG `### Breaking changes` names the nine structs, the moved offsets and positional initialisers; the "appended member, nothing source-breaking" sentence is gone. One wording defect left in the README (C165-27). |
+| C165-03 | cplusplus | **Closed** | `AXIAM_SOVERSION 5`; `abi_soname` updated and passing; CHANGELOG "so the ABI is too" replaced, `### Binary compatibility` added. |
+| C165-04 | all eleven | **Closed** | The D-N33 floor sentence is in every CHANGELOG and README, with each SDK's actual behaviour: decode failure (Rust, Python, Java, Kotlin, C#, PHP, Swift, C++), `undefined` (TS), zero value (Go), NULL member (C). |
+| C165-05 | php | **Closed** | Empty inputs and the 513-byte nonce throw `\InvalidArgumentException` (`src/Oidc/OidcClient.php:786-798`), the type `assertIdpHint` uses; the slug-only client stays `AuthError`; tests and docblocks updated. See point 4. |
+| C165-06 | go | **Closed** | `*AuthError` before any request when `clientID == ""` (`oidc_native.go:128-132`); `TestNativeSignIn_MissingClientIDRefusedLocally`. |
+| C165-07 | go | **Closed** | `localRefusal(...)` for `Provider`/`IDToken`/`Nonce` and in `validateIdpHint` (`oidc.go:84-92`); the tests assert `errors.As(err, &*ValidationError)`. |
+| C165-08 | kotlin, go, swift, typescript, python | **Closed** | A `### Source compatibility` section in each CHANGELOG; Kotlin lists the nine classes, the parameter positions, the missing default and the JVM binary break. |
+| C165-09 | contract | **Closed** | §37.9 test 5 at `d93976b`. |
+| C165-10 | contract | **Closed** | §37.9 test 3 and the last sentence of §37.8. |
+| C165-11 | contract + nine SDKs | **Closed** (contract, D-N36); **Closed** in TypeScript, Python, Java, Kotlin, C#, Go, Swift, C and C++; PHP already conformed and added both §26.6 tests; Rust **Closed as decided** (point 1). | Each `oidc_par` now falls back to the begin URL's `axiam_idp_hint` when its argument is unset, and each of the nine (and PHP) carries `par_idp_hint_from_begin_url_pushed` and `par_idp_hint_argument_wins` by name. |
+| C165-12 | contract | **Closed** | §37.2 rule 9. |
+| C165-13 | contract | **Closed** | §12.1 rule 3 "No redirect is followed"; §37.2 rule 12. |
+| C165-14 | go, typescript (Node), swift; php; rust | Go **Closed**; TypeScript **Closed** (Node; browser persona C165-26); Swift **Closed**; PHP **Partially** (C165-22); Rust **Closed — no defect** (point 1). Java and Kotlin were wrongly cleared by this review and are **Open** as C165-23. | Go: `CheckRedirect` returns `http.ErrUseLastResponse` for an `/oauth2/*` POST and `doRequest` makes the `3xx` a `*NetworkError` without the `Location` (`client.go:428-434`, `:927-933`). TS: `maxRedirects: 0` on the four `/oauth2/*` form-POST sites (`src/node/oidc.ts:2247`, `:2811`, `:2840`, `:3112`) plus a `3xx` → `NetworkError` branch in `mapOidcError`, `cibaError` and the §16 runner; tests for native, `oidcExchange` and CIBA with a second host that sees nothing. Swift: point 2. |
+| C165-15 | contract | **Closed** | §37.9 test 12's parenthetical. |
+| C165-16 | swift | **Closed** (no action) | Swift CI green on `139198d`. |
+| C165-17 | rust, typescript, swift, c, csharp | **Closed** | Rust `AxiamError::retry_after()` on `Auth` (point 1); TS `OAuthProtocolError.retryAfterMs` (test asserts 7000); Swift `AuthError.retryAfter` (trailing defaulted init parameter, test asserts 7); C `axiam_error_t.oauth_retry_after_ms` (test asserts 7000); C# `RetryAfter` public. |
+| C165-18 | csharp | **Closed** | The parameter is gone; the only remaining `adoptAsCredential` mentions are the docs saying there is none, and `README.md:961`, which is `DeviceLoginAsync`'s. The test asserts by reflection that the parameter does not exist and that nothing is adopted. |
+| C165-19 | contract | **Closed** | §37.3 last paragraph. |
+| C165-20 | rust | **Closed** | `scopes: Some(vec![])` sends no `scope` (`src/oidc/native.rs:199-203`, `empty_scopes_send_no_scope`); an empty `axiam_idp_hint` extra is refused at `oidc_begin` (`src/oidc/authorize.rs:316-324`, `empty_idp_hint_extra_refused_at_begin`). |
+| C165-21 | c | **Closed** | `axiam_error_t.oauth_error_description[256]`, filled in `oidc_map_grant_error` and cleared by `axiam_error_reset`/`_set`; test 6 asserts it. |
+
+### A1.4 New findings
+
+| ID | Severity | SDK | `path:line` (fix head) | Rule | What | Fix (size) |
+|---|---|---|---|---|---|---|
+| C165-22 | Low | php | `src/Oidc/OidcClient.php:2674` (`postTokenAsync`, used by `oidcRefresh`), `:1110` (`devicePollWithin`), `:2527` (`cibaPollTracked`) | §12.1 rule 3 (amended); §37.2 rule 12 | `allow_redirects => false` went into `postForm` (`:2942`), which carries PAR, device authorization, token exchange, introspect, revoke, the UMA ticket, `ciba_initiate` and `postToken` (exchange, client credentials, native sign-in). Three `/oauth2/token` POSTs call `$this->http` directly on `plainHttp`, whose Guzzle default follows a 307/308 and re-sends the body to the `Location` host. Guzzle strips only `Authorization`/`Cookie` across hosts, so `oidcRefresh` re-sends `refresh_token` and `client_secret`, the device poll `device_code`, the CIBA poll `auth_req_id` and the secret. Found by reading; not run (no composer). | Add `'allow_redirects' => false` to the three option arrays. Map a `3xx` to `NetworkError` before the existing status handling: in `postTokenAsync`'s fulfilled callback, and as a `$status >= 300 && < 400` branch in the two polls. That is the poll's decided answer and not §16-retried. Add one test: `oidcRefresh` against a `307` → `NetworkError`, `assertCount(1, $this->sent)`. Small (~15 lines + 1 test). |
+| C165-23 | Low | java, kotlin | Java `src/main/java/io/axiam/sdk/AxiamClient.java:736` (`httpClient`, OkHttp default `followRedirects(true)`), `:739` (`pollHttpClient`), `:4334-4345` (`executeFormPost`); Kotlin `src/main/kotlin/io/axiam/sdk/AxiamClient.kt:270-283` (shared `httpClient`), `oidc/OidcSupport.kt:2058-2079` (`postOAuth2Form`), `:2111-2120` (`executeRequest`) | §12.1 rule 3 (amended); §37.2 rule 12 | §3's "Java and Kotlin do not follow" was wrong: it read only the native POST's transport (Java `sessionlessHttpClient`, Kotlin `OneShotBody`). Every other `/oauth2/*` form POST rides an OkHttp client that follows redirects, with a `FormBody` that is not one-shot. OkHttp re-POSTs that body on a 307/308 to any host and drops only `Authorization`. The affected calls are `oidcExchange`, `oidcRefresh`, client credentials, PAR, introspect, revoke, token exchange, the UMA ticket and device authorization, plus Java's device and CIBA polls. Kotlin's one-shot polls and CIBA are protected from 307/308 only, and still follow 301–303 as a `GET`. **Probed in both:** `oidcRefresh` answered `307 Location: http://<second server>/oauth2/token` sent `grant_type=refresh_token&refresh_token=the-refresh-token&client_id=app&client_secret=s3cret` to the second server (one request there) and returned *its* answer. | Java: build an `/oauth2/*` client once, `httpClient.newBuilder().followRedirects(false).followSslRedirects(false)`, and use it for `executeFormPost`, with `pollHttpClient` derived from it. Map a `3xx` to `NetworkError` ahead of `ErrorMapper.fromOAuth2…`. Kotlin: the same, with `executeRequest(…, client = oauth2Client)` for every `/oauth2/*` POST (`Sessionless.kt:49-50` already does it for its client), and a `3xx` → `NetworkError` branch in `mapOAuth2ErrorResponse`. Tests: the probe above, asserting `NetworkError` and zero requests at the second server, for `oidcRefresh` and one poll. Small (~20 lines + 2 tests each). |
+| C165-24 | Info | contract | `sdks/CONTRACT.md` §34.9 "Amended 2026-10-31" item (5) | record accuracy | The *SDK code* list for C165-14 repeats this review's error twice. It names Rust "(same-host only; Rust for `/oauth2/*` on `http_bare`)", but `http_bare` was always `redirect::Policy::none()` and `idp_form_post` is the only `/oauth2/*` POST path (`src/client.rs:579-581`, `:1126-1131`). It also omits Java and Kotlin (C165-23). §12.1 rule 3 binds every SDK whatever the record lists, so nothing normative is wrong. | Optional text fix: "Go, PHP, TypeScript (Node), Swift, Java and Kotlin (C165-23); Rust needed none (its `/oauth2/*` transport follows no redirect) and added the test". Fold it into the next contract text pass. A separate re-vendor of all eleven only for this is not worth it. |
+| C165-25 | Info | rust, java, kotlin, csharp, python, c, cplusplus | Rust `src/oidc/exchange.rs:347-373`; Python `_oidc.py:1332-1342`; Java/Kotlin/C#/C/C++ the "any status" OAuth2 mappers §3 cites | §12.1 rule 3 ("a `3xx` is surfaced as `NetworkError`") | None of these follows a redirect. But their `/oauth2/*` mappers read the body before the status, so a `3xx` whose body is `{"error":…}` surfaces as `OAuthProtocolError`, not `NetworkError`. Nothing leaks; the type is wrong only for a contrived intermediary answer. TS, Go, PHP and Swift check the status first. | A `300..399` → `NetworkError` guard ahead of the body dispatch, the TS/Go/Swift pattern. Trivial; not blocking. |
+| C165-26 | Info | typescript (browser persona) | `src/rest/session.ts:322-324` (`oauth2RequestConfig`); `src/rest/bareTransport.ts:56-60` | §12.1 rule 3 | The browser persona's `/oauth2/*` config is the axios `fetch` adapter with `credentials: 'omit'` and no `redirect` option. That adapter does not honour `maxRedirects`, so the RFC 7592 `/oauth2/register*` calls made through `bareRequest` in a browser follow a 307/308 under the browser's fetch rules. The §12 form POSTs are Node-only (`src/node/oidc.ts`). Found by reading; not probed. | `fetchOptions: { credentials: 'omit', redirect: 'error' }` in `oauth2RequestConfig` (or `'manual'` plus a status check). One line. |
+| C165-27 | Info | c | `README.md:33-37` | doc accuracy | "a 1.1.x release is `libaxiam.so.1.1.x` with SONAME `libaxiam.so.3` …, one built against 1.1.x keeps loading `libaxiam.so.2`" contradicts itself: 1.1.x shipped `.so.2`, and `.so.3` is the contract-1.65 release (the 1.2 line, D-N32). | "the contract-1.65 release has SONAME `libaxiam.so.3` (1.1.x was `.so.2`, 1.0.x `.so.1`), so a binary built against an earlier line keeps loading its own SONAME and the loader refuses to run it against this library until it is rebuilt." One sentence. |
+| C165-28 | Info | kotlin | `src/test/kotlin/io/axiam/sdk/oidc/OidcRefreshTest.kt:124-141` | test stability | `the refresh response's scope replaces the grant's` failed once in the fixer's full gate (`AssertionFailedError at OidcRefreshTest.kt:124`) and passed on re-run. The fix commit does not touch `oidcRefresh` or this test, which is unchanged since the C164-33 fix (`08825e8`). The reviewer ran `OidcRefreshTest` 5/5 green in isolation. So the flake is pre-existing and load-dependent, and C164-33's distinct-token change did not remove it. | Record and track; not blocking. Next step: run the full gate with `--info` until it reproduces, and log which assertion fails (the scope or the absent `idClaims`). |
+
+Also noted, below a finding. With D-N36 the begin URL's hint is pushed. An `axiam_idp_hint` passed as a begin
+*extra* over 256 bytes is now refused at PAR in TypeScript, Java, Swift, C and C++, and pushed as given in C#, Go,
+Python and Kotlin. Java and C++ also refuse an empty URL value that the others ignore. Only a hand-built request or an
+extra reaches this, and the server bounds the value. That is the C165-20 asymmetry Rust fixed at begin; aligning it is
+optional.
+
+**Counts (new):** Low 2 (C165-22, -23) · Informational 5 (C165-24 … -28). No Medium, High or Critical.
+
+### A1.5 Verdicts on the fixers' ten points
+
+1. **Rust.** Conformant on all three counts.
+   - *No `idp_hint` argument on `oidc_par`.* Amended rule 8 says that when the argument is unset, `oidc_par` pushes the
+     URL's hint. Rust's argument is always unset (the URL is its single source), so the rule reduces to what Rust does.
+     §34.9 item (3) itself lists Rust as needing no code. `par_idp_hint_argument_wins` is not applicable: it needs an
+     argument. Adding one would be a new public field on the exhaustive `OidcParParams`, a break for no gain. The
+     comment in `tests/contract_165_test.rs` saying so is the right record; the PR's review notes should say it too.
+     Rust's `par_idp_hint_from_begin_url_pushed` injects the hint through `with_extra_param`. The `with_idp_hint` path
+     the contract names is covered by the existing `par_idp_hint_in_pushed_body`.
+   - *`retry_after` on `AxiamError::Auth`.* Acceptable. §37.3 asks for it "wherever the SDK exposes it on that
+     error", and in Rust *that error* is the `Auth` variant carrying `oauth: Some(OAuthProtocolError)`. The variant is
+     `#[non_exhaustive]` (`src/error.rs:87`), so the field is additive. `OAuthProtocolError` has all-public fields and is
+     not `non_exhaustive`, so a field there would break every downstream struct literal. It is surfaced on a 429 only.
+   - *C165-14.* The claim is true and this review was wrong. `http_bare` is `redirect::Policy::none()`
+     (`src/client.rs:579-581`), and every `/oauth2/*` POST goes through `idp_form_post` on it
+     (`par`, `exchange`, `token_exchange`, `ciba`, `device`, `uma`). §3 cited the session transport's same-host
+     policy (`:547-563`), which `/oauth2/*` never rides. `token_post_does_not_follow_redirect` now pins it. See C165-24
+     for the record text.
+2. **Swift.** Verified by reading.
+   - `HTTPTransport` is an internal protocol (`HTTP/HTTPTransport.swift:47`), so no caller can inject another
+     transport. Its one production implementation sets `redirectConfiguration = .disallow` (`:63`). `URLSession`
+     appears in `Sources/` only in comments.
+   - Every OIDC, CIBA, registration and UMA call reaches `umaSendAbsolute`, where `refuseOAuth2Redirect` now runs
+     (`AxiamClient.swift:1175-1176`, `:1189-1198`). `bareSend` does not retry that refusal (`BareRequest.swift:85-94`).
+     Nothing in Swift can follow a redirect.
+   - Residual: the path match is under `config.baseURL.path` only. With a non-empty base path, a discovery-given root
+     `/oauth2/*` endpoint gets the generic `3xx` mapping instead of the named `NetworkError`. It is still not followed.
+     Negligible.
+   - The new `testRedirectToOtherHostIsNotFollowedOverTheWire` uses real sockets. CI is green.
+3. **Python.** The change is correct, and the test is still meaningful.
+   - §12.3 rule 3, §37.3 (dispatch on a non-empty `error` at any status) and RFC 6749 §5.2 (`error_description`
+     optional) all make a 4xx/5xx `{"error":…}` an `OAuthProtocolError`. A 5xx *with* a description already was one
+     before the change, so this only removes a description-presence distinction the contract never drew.
+     `oidc_exchange`, `oidc_refresh` and `login_client_credentials` take no §16 retry, so no retry behaviour changes.
+   - The edited single-flight tests still assert what they exist for: one wire call, and every waiter gets the same
+     `NetworkError`. They do it with a body-less 500, which is still a `NetworkError`.
+   - No device-poll regression. `_handle_device_poll_response` maps a 5xx (whatever its body) and any 429 *before*
+     calling `_handle_token_response` (`_oidc.py:1871-1901`), so §14.2 rules 6 and 9 are untouched. A body-only 400
+     poll answer (`authorization_pending` without a description) now dispatches on `error` instead of reading as a
+     transport failure, which is rule 5's reading.
+   - The full suite is green (2061).
+4. **PHP.**
+   - *`\InvalidArgumentException`.* Conformant: rule 4 allows "the §2 `ValidationError` **or** the programming-error
+     type". `\InvalidArgumentException` is PHP's programming-error type and the one `assertIdpHint` already throws, so
+     the two helpers now agree, which was what C165-05 asked. PHP's `ValidationError` extends `NetworkError` and would
+     also have been allowed; the choice is the fixer's.
+   - *`allow_redirects => false` in `postForm`.* It does **not** cover every `/oauth2/*` POST. Three bypass it; see
+     C165-22.
+5. **TypeScript.** Still asserting the right thing. `recordSleeps` records a `setTimeout` only when the synchronous
+   stack includes `src/node/oidc` and now excludes any stack that also includes `/node_modules/axios/`. The loop's own
+   sleep is armed from `oidc.ts` after the POST's `await` has resolved, so no axios frame is on its stack. The timer
+   excluded is the request timeout axios's native `http` path arms from inside the POST (`maxRedirects: 0` bypasses
+   `follow-redirects`). `deviceFlow.test.ts` passes, and its delay assertions still see the loop's waits.
+6. **Java.** Fine. Under D-N36, a begin URL that carries a hint *must* be pushed, so the old no-hint assertion against
+   such a request contradicted the amended rule. A hint-less begin is the right fixture for "absent when unset". CI
+   (SDK CI — Java, Coverage) is green on `ae12455`, and the reviewer re-ran the three suites (14 + 7 + 1). The
+   redirect probe is C165-23, unrelated to this edit.
+7. **C.**
+   - *Caller-allocated.* Yes. There is no constructor, the SDK's tests and examples declare it on the stack, it is
+     embedded in no other public struct, and nothing asserts on its size.
+   - *Layout.* `oauth_error_description[256]` and `long oauth_retry_after_ms` are appended at the end. Both are
+     cleared by `axiam_error_reset`/`axiam_error_set` and filled only in `oidc_map_grant_error`.
+   - *Bump.* Riding the same SOVERSION 3 as C165-02 is consistent with the SDK's rule ("bumped whenever a
+     caller-allocated public struct changes size"). `readelf` shows `libaxiam.so.3`.
+   - *Percent-decoding* (`src/oidc_par.c:116-149`) is safe:
+     - a `%` is decoded only with two hex digits inside the segment;
+     - `o + 1 >= cap` is checked before every write, with `cap` = 257 into a 257-byte stack buffer, so at most 256
+       bytes plus NUL;
+     - an over-bound value is a local refusal before any request;
+     - `%00` only truncates.
+
+     Valgrind is clean on `test_idp_hint` and `test_native_sign_in`, and the percent-encoded test value round-trips.
+   - *Remarks.* `oauth_retry_after_ms` is filled at any status that carries `Retry-After`, not only 429. That is
+     harmless and documented as "of the OAuth2 error response". The README sentence on the SONAME is C165-27.
+8. **C++.** SOVERSION 5 is consistent with the D-N37 decision and the 1.1.1 precedent. `readelf` shows
+   `libaxiam_cpp.so.5`, and `abi_soname` passes. The URL-hint fallback (`src/oidc.cpp:251-280`, `:2133`) decodes into
+   a `std::string`. It is bounds-checked (`i + 2 < size`), deliberately does no `+` decoding (begin emits `%20`), and
+   the result goes through `check_idp_hint`, so an over-256-byte value is `std::invalid_argument` before any request.
+   1669 cases pass.
+9. **Kotlin.** Pre-existing flake, recorded as Informational C165-28, not attributed to the fix round: the fix
+   touched only `oidcPar`, and the test is unchanged since `08825e8`. Not blocking.
+10. **C#.** Confirmed. No code references the removed parameter; the remaining mentions are the "there is none"
+    sentences and `DeviceLoginAsync`'s README paragraph. The test asserts its absence by reflection.
+    `OAuthProtocolError.RetryAfter` is `public … { get; init; }` (`Core/OAuthProtocolError.cs:48`) and set on a 429
+    only. Making a getter public is additive.
+
+### A1.6 Before W5
+
+- **Must fix** (the amended §12.1 rule 3 is a MUST, and the 1.2.0 SDKs should not ship breaking their own contract):
+  - **C165-22** (PHP, three call sites);
+  - **C165-23** (Java and Kotlin, one redirect-free OkHttp client each).
+
+  Both are small and need no contract change. Once each lands, the SDK's C165-14 row reads Closed.
+- **Should, cheap:** C165-27 (one C README sentence) and C165-26 (one TS line). Both can ride the same fix commits.
+- **May defer:** C165-24 (record text; next contract text pass), C165-25 (mapper ordering), C165-28 (tracked
+  flake), and the extra-hint asymmetry note.
+- **Still to confirm:** the C and C++ CI runs on `3476b7d` / `7e45f76` were in progress when read; the local C and
+  C++ runs above are green.
+
+Everything else from the fix list (C165-01 … -21) is closed.

@@ -55,7 +55,7 @@ rcgen = { workspace = true }
 # The in-process test directory (tests/support): the server half of the LDAP
 # codec, a rustls acceptor, and the framing glue between them. Test-only; none
 # of these reaches the production graph.
-ldap3_proto = "0.8.1"
+ldap3_proto = "0.9.0"
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3", features = ["sink"] }
 tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }

@@ -614,9 +614,12 @@ impl Session {
                 LdapOp::BindRequest(req) => {
                     let password = match req.cred {
                         LdapBindCred::Simple(pw) => pw,
-                        // A SASL bind carries no simple password. Give it a value no
-                        // entry or service secret can equal, so it is never accepted.
-                        LdapBindCred::SASL(_) => uuid::Uuid::new_v4().to_string(),
+                        // A SASL bind, or one whose credential choice the codec does not
+                        // recognise, carries no simple password. Give it a value no entry
+                        // or service secret can equal, so it is never accepted.
+                        LdapBindCred::SASL(_) | LdapBindCred::Unsupported => {
+                            uuid::Uuid::new_v4().to_string()
+                        }
                     };
                     self.record(Event::Bind {
                         dn: req.dn.clone(),

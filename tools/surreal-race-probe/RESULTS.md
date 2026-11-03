@@ -21,6 +21,30 @@ failure: a row consumed but claimable by nobody is a burned credential.
 
 ---
 
+## surrealdb 3.3.5 / surrealdb-core 3.3.5 / surrealkv 0.21.4
+
+**Taken:** 2026-11-03, for the Dependabot update in PR #848. It moved `surrealdb` and
+`surrealdb-core` from 3.3.4 to 3.3.5; `surrealkv` stayed at 0.21.4 and the in-memory
+engine `surrealmx` was not touched.
+**Host:** Linux x86_64, 4 vCPU, embedded engines, multi-threaded tokio, otherwise
+idle. Each `surrealkv` run used its own fresh `PROBE_DIR`, as CI does.
+**Probe commit:** the one that re-pinned this lockfile to `=3.3.5`.
+
+| Datastore      | Mechanism | Rounds × racers | Rounds with >1 winner | Rounds with 0 winners | Attempts the engine aborted |
+|----------------|-----------|-----------------|-----------------------|-----------------------|-----------------------------|
+| `kv-surrealkv` | `tx`      | 5000 × 8        | **0**                 | 0                     | 14 531 / 40 000 (36%)       |
+| `kv-surrealkv` | `nonce`   | 5000 × 8        | **0**                 | 0                     | 0 / 40 000                  |
+
+`kv-mem` and `rocksdb` were not re-measured. Neither is part of the CI gate.
+
+### What changed against 3.3.4
+
+Nothing in the property AXIAM depends on. `surrealkv` still gives zero double
+winners and zero burned rounds over 40 000 contended attempts in both shapes, and
+its `tx` abort rate (36%, 14 531 against 14 548) is indistinguishable from the 3.3.4 run.
+
+---
+
 ## surrealdb 3.3.4 / surrealdb-core 3.3.4 / surrealkv 0.21.4
 
 **Taken:** 2026-10-14, for the Dependabot update in PR #662. It moved `surrealdb` and

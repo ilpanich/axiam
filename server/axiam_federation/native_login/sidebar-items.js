@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PUBLIC_REFUSAL_DESCRIPTION"],"enum":["NativeLoginError","NativeLoginRefusal"],"struct":["NativeIdTokenRequest","NativeSubject"]};

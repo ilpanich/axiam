@@ -1,0 +1,947 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-oauth2/src/provider_id_token.rs`."><title>provider_id_token.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_oauth2/</div>provider_id_token.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! G-A — native sign-in with a provider ID token: the grant (W2.3).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Design: `claude_dev/social-login-gap-plan-2026-10-30.md` §3.1, D-N1, D-N6.
+<a href=#4 id=4 data-nosnippet>4</a>//! The rule the whole feature applies:
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! &gt; **An ID token is accepted as a sign-in only when it was issued to us.**
+<a href=#7 id=7 data-nosnippet>7</a>//!
+<a href=#8 id=8 data-nosnippet>8</a>//! `axiam-federation`'s `native_login` decides *whether* a provider ID token
+<a href=#9 id=9 data-nosnippet>9</a>//! proves a sign-in and *who* signed in (§3.1 steps 2–7). This module turns
+<a href=#10 id=10 data-nosnippet>10</a>//! that answer into the client's ordinary sign-in token set (step 8) and owns
+<a href=#11 id=11 data-nosnippet>11</a>//! the gate in front of it (step 1). The token endpoint dispatches here and
+<a href=#12 id=12 data-nosnippet>12</a>//! writes the audit record (step 9).
+<a href=#13 id=13 data-nosnippet>13</a>//!
+<a href=#14 id=14 data-nosnippet>14</a>//! # The wire
+<a href=#15 id=15 data-nosnippet>15</a>//!
+<a href=#16 id=16 data-nosnippet>16</a>//! `POST /oauth2/token` with
+<a href=#17 id=17 data-nosnippet>17</a>//! `grant_type=`[`PROVIDER_ID_TOKEN_GRANT_TYPE`], `provider` (the federation
+<a href=#18 id=18 data-nosnippet>18</a>//! provider's UUID or `provider_slug`), `id_token`, `nonce` (the raw nonce the
+<a href=#19 id=19 data-nosnippet>19</a>//! app generated; the provider's SDK was given its SHA-256 hex, which is what
+<a href=#20 id=20 data-nosnippet>20</a>//! the token carries — D-N16), optional `scope` and RFC 8707 `resource`, and
+<a href=#21 id=21 data-nosnippet>21</a>//! the client's usual authentication — a public (mobile) client sends
+<a href=#22 id=22 data-nosnippet>22</a>//! `client_id` only.
+<a href=#23 id=23 data-nosnippet>23</a>//!
+<a href=#24 id=24 data-nosnippet>24</a>//! # Why a vendor URN, and this one
+<a href=#25 id=25 data-nosnippet>25</a>//!
+<a href=#26 id=26 data-nosnippet>26</a>//! The grant is AXIAM's own: no IETF or OIDF registry defines "sign in with a
+<a href=#27 id=27 data-nosnippet>27</a>//! third party's ID token" as a grant, and RFC 8693 is the wrong shape (X4
+<a href=#28 id=28 data-nosnippet>28</a>//! refuses ID tokens by design; §3.1). RFC 6749 §4.5 extension grants are
+<a href=#29 id=29 data-nosnippet>29</a>//! named by absolute URI, and the tree already has exactly one vendor grant
+<a href=#30 id=30 data-nosnippet>30</a>//! URN, `urn:axiam:params:oauth:grant-type:may-impersonate`
+<a href=#31 id=31 data-nosnippet>31</a>//! (`crate::token_exchange::MAY_IMPERSONATE_GRANT`). This one follows it
+<a href=#32 id=32 data-nosnippet>32</a>//! segment for segment, so the two read as one family and no new namespace is
+<a href=#33 id=33 data-nosnippet>33</a>//! opened. Nothing else in the tree, the SDK contract or the discovery
+<a href=#34 id=34 data-nosnippet>34</a>//! document spells `provider-id-token`.
+<a href=#35 id=35 data-nosnippet>35</a>//!
+<a href=#36 id=36 data-nosnippet>36</a>//! # Order, and what each step may write
+<a href=#37 id=37 data-nosnippet>37</a>//!
+<a href=#38 id=38 data-nosnippet>38</a>//! 1. **The client** is read and authenticates by its registered method — a
+<a href=#39 id=39 data-nosnippet>39</a>//!    public client by presenting nothing, a confidential one by its
+<a href=#40 id=40 data-nosnippet>40</a>//!    credential ([`TokenService::authenticate_provider_id_token_client`]).
+<a href=#41 id=41 data-nosnippet>41</a>//!    The profile's request-time rules run (`fapi::enforce_token_request`),
+<a href=#42 id=42 data-nosnippet>42</a>//!    the registration must list the grant (`unauthorized_client`
+<a href=#43 id=43 data-nosnippet>43</a>//!    otherwise), and the binding the registration asks for (`cnf`: DPoP,
+<a href=#44 id=44 data-nosnippet>44</a>//!    certificate) is decided — refused, not downgraded, when the request
+<a href=#45 id=45 data-nosnippet>45</a>//!    cannot satisfy it. The REST layer then applies the
+<a href=#46 id=46 data-nosnippet>46</a>//!    `oauth2_provider_id_token` bucket. Nothing has been written.
+<a href=#47 id=47 data-nosnippet>47</a>//! 2. **The request**: `provider`, `id_token` and `nonce` present; `scope`
+<a href=#48 id=48 data-nosnippet>48</a>//!    within the client's registered set (after the external-client ceiling);
+<a href=#49 id=49 data-nosnippet>49</a>//!    `resource` one the client may address
+<a href=#50 id=50 data-nosnippet>50</a>//!    ([`TokenService::prepare_provider_id_token_grant`]). Still nothing
+<a href=#51 id=51 data-nosnippet>51</a>//!    written, so a malformed request does not spend the token.
+<a href=#52 id=52 data-nosnippet>52</a>//! 3. **Steps 2–7** run in `axiam-federation` (the provider, the signature,
+<a href=#53 id=53 data-nosnippet>53</a>//!    the claims, the shape, the replay record, the user). Every refusal is
+<a href=#54 id=54 data-nosnippet>54</a>//!    one `invalid_grant` on the wire ([`refusal_for`]). The token endpoint
+<a href=#55 id=55 data-nosnippet>55</a>//!    then fires `login.post_auth` for the resolved user (CONTRACT §22,
+<a href=#56 id=56 data-nosnippet>56</a>//!    F4-W2-01) — the gate every interactive sign-in passes — and a veto is
+<a href=#57 id=57 data-nosnippet>57</a>//!    the same `invalid_grant`.
+<a href=#58 id=58 data-nosnippet>58</a>//! 4. **Consent** (D-N6): a scope that would need a consent ceremony is
+<a href=#59 id=59 data-nosnippet>59</a>//!    `consent_required` ([`decide_consent`]) — there is nobody to ask on
+<a href=#60 id=60 data-nosnippet>60</a>//!    this request, so it is answered as `prompt=none` is at `/authorize`.
+<a href=#61 id=61 data-nosnippet>61</a>//! 5. **Issue** ([`TokenService::issue_provider_id_token_grant`]): a session
+<a href=#62 id=62 data-nosnippet>62</a>//!    recording the federated authentication, the access token, a refresh
+<a href=#63 id=63 data-nosnippet>63</a>//!    token when the client holds `refresh_token`, and an ID token carrying
+<a href=#64 id=64 data-nosnippet>64</a>//!    the request's nonce when `openid` was granted.
+<a href=#65 id=65 data-nosnippet>65</a>//!
+<a href=#66 id=66 data-nosnippet>66</a>//! # The session, and what it records
+<a href=#67 id=67 data-nosnippet>67</a>//!
+<a href=#68 id=68 data-nosnippet>68</a>//! A federated *browser* sign-in creates a session whose evidence is
+<a href=#69 id=69 data-nosnippet>69</a>//! `AuthenticationEvidence::upstream(auth_time, now, [fed])`, and a code
+<a href=#70 id=70 data-nosnippet>70</a>//! issued from it carries that session in `sid` and that evidence onward.
+<a href=#71 id=71 data-nosnippet>71</a>//! The native sign-in records the same: one session row with the provider's
+<a href=#72 id=72 data-nosnippet>72</a>//! `auth_time` (clamped to now) and `amr = [fed]`, no browser cookie, and a
+<a href=#73 id=73 data-nosnippet>73</a>//! console refresh credential nobody is given. The access token names it in
+<a href=#74 id=74 data-nosnippet>74</a>//! `sid`, so UserInfo and the session-validated API admit the token, ending
+<a href=#75 id=75 data-nosnippet>75</a>//! the session (logout, password reset, an administrator's revocation) ends
+<a href=#76 id=76 data-nosnippet>76</a>//! the tokens, and the user's session list shows the device. No claim is new.
+<a href=#77 id=77 data-nosnippet>77</a>//!
+<a href=#78 id=78 data-nosnippet>78</a>//! "Ends the tokens" includes the refresh token (D-N39, #839): a single-session
+<a href=#79 id=79 data-nosnippet>79</a>//! logout (`AuthService::logout`, behind `/auth/logout`, RP-initiated logout
+<a href=#80 id=80 data-nosnippet>80</a>//! and SAML single logout) revokes every refresh token issued under the
+<a href=#81 id=81 data-nosnippet>81</a>//! session, and the user-wide revocations revoke all of the user's. The token
+<a href=#82 id=82 data-nosnippet>82</a>//! endpoint records the client as a participant of the session it creates
+<a href=#83 id=83 data-nosnippet>83</a>//! ([`NativeSignIn::session_id`]), so back-channel logout reaches a client
+<a href=#84 id=84 data-nosnippet>84</a>//! that registered a `backchannel_logout_uri`.
+<a href=#85 id=85 data-nosnippet>85</a>
+<a href=#86 id=86 data-nosnippet>86</a></span><span class="kw">use </span>axiam_auth::token::{
+<a href=#87 id=87 data-nosnippet>87</a>    CnfClaim, IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_id_token,
+<a href=#88 id=88 data-nosnippet>88</a>};
+<a href=#89 id=89 data-nosnippet>89</a><span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#90 id=90 data-nosnippet>90</a><span class="kw">use </span>axiam_core::models::oauth2_client::{CreateRefreshToken, OAuth2Client};
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">use </span>axiam_core::models::session::{Amr, AuthenticationEvidence, CreateSession};
+<a href=#92 id=92 data-nosnippet>92</a><span class="kw">use </span>axiam_core::repository::{
+<a href=#93 id=93 data-nosnippet>93</a>    AuditLogRepository, AuthorizationCodeRepository, OAuth2ClientRepository,
+<a href=#94 id=94 data-nosnippet>94</a>    RefreshTokenRepository, ServiceAccountRepository, SessionRepository, TenantRepository,
+<a href=#95 id=95 data-nosnippet>95</a>    UserRepository,
+<a href=#96 id=96 data-nosnippet>96</a>};
+<a href=#97 id=97 data-nosnippet>97</a><span class="kw">use </span>axiam_federation::native_login::{
+<a href=#98 id=98 data-nosnippet>98</a>    NativeIdTokenRequest, NativeLoginError, NativeLoginRefusal, NativeSubject,
+<a href=#99 id=99 data-nosnippet>99</a>};
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a><span class="doccomment">/// The one `invalid_grant` description every refusal of §3.1 steps 2–7
+<a href=#102 id=102 data-nosnippet>102</a>/// carries, re-exported so the token endpoint answers with the federation
+<a href=#103 id=103 data-nosnippet>103</a>/// module's own wording.
+<a href=#104 id=104 data-nosnippet>104</a></span><span class="kw">pub use </span>axiam_federation::native_login::PUBLIC_REFUSAL_DESCRIPTION;
+<a href=#105 id=105 data-nosnippet>105</a><span class="kw">use </span>chrono::Utc;
+<a href=#106 id=106 data-nosnippet>106</a><span class="kw">use </span>uuid::Uuid;
+<a href=#107 id=107 data-nosnippet>107</a>
+<a href=#108 id=108 data-nosnippet>108</a><span class="kw">use super</span>::{
+<a href=#109 id=109 data-nosnippet>109</a>    CLIENT_AUTH_FAILED, TokenRequest, TokenRequestContext, TokenResponse, TokenService,
+<a href=#110 id=110 data-nosnippet>110</a>    resolve_client_id, spend_one_verify,
+<a href=#111 id=111 data-nosnippet>111</a>};
+<a href=#112 id=112 data-nosnippet>112</a><span class="kw">use </span><span class="kw">crate</span>::error::OAuth2Error;
+<a href=#113 id=113 data-nosnippet>113</a>
+<a href=#114 id=114 data-nosnippet>114</a><span class="doccomment">/// The grant type of a native sign-in with a provider ID token.
+<a href=#115 id=115 data-nosnippet>115</a></span><span class="kw">pub const </span>PROVIDER_ID_TOKEN_GRANT_TYPE: <span class="kw-2">&amp;</span>str =
+<a href=#116 id=116 data-nosnippet>116</a>    <span class="string">"urn:axiam:params:oauth:grant-type:provider-id-token"</span>;
+<a href=#117 id=117 data-nosnippet>117</a>
+<a href=#118 id=118 data-nosnippet>118</a><span class="doccomment">/// The audit action every native sign-in attempt that reached the grant is
+<a href=#119 id=119 data-nosnippet>119</a>/// recorded under, accepted or refused. Never carries the token or the nonce.
+<a href=#120 id=120 data-nosnippet>120</a></span><span class="kw">pub const </span>NATIVE_LOGIN_AUDIT_ACTION: <span class="kw-2">&amp;</span>str = <span class="string">"federation.native_login"</span>;
+<a href=#121 id=121 data-nosnippet>121</a>
+<a href=#122 id=122 data-nosnippet>122</a><span class="doccomment">/// The `server_error` description for a refusal that is the datastore's
+<a href=#123 id=123 data-nosnippet>123</a>/// fault. As generic as [`PUBLIC_REFUSAL_DESCRIPTION`], for the same reason.
+<a href=#124 id=124 data-nosnippet>124</a></span><span class="kw">pub const </span>SERVER_REFUSAL_DESCRIPTION: <span class="kw-2">&amp;</span>str = <span class="string">"the sign-in could not be completed; retry shortly"</span>;
+<a href=#125 id=125 data-nosnippet>125</a>
+<a href=#126 id=126 data-nosnippet>126</a><span class="doccomment">/// The longest `nonce` the grant accepts, in bytes (F4-W2-09).
+<a href=#127 id=127 data-nosnippet>127</a>///
+<a href=#128 id=128 data-nosnippet>128</a>/// The nonce is hashed and echoed into the signed AXIAM ID token, so it is
+<a href=#129 id=129 data-nosnippet>129</a>/// bounded like every other caller-supplied value that reaches a token. A
+<a href=#130 id=130 data-nosnippet>130</a>/// nonce is a random value: 512 bytes is sixteen times the 32 random bytes a
+<a href=#131 id=131 data-nosnippet>131</a>/// careful app generates, hex- or base64-encoded with room to spare, and the
+<a href=#132 id=132 data-nosnippet>132</a>/// same bound `native_login` puts on a listed client ID.
+<a href=#133 id=133 data-nosnippet>133</a></span><span class="kw">pub const </span>MAX_NONCE_BYTES: usize = <span class="number">512</span>;
+<a href=#134 id=134 data-nosnippet>134</a>
+<a href=#135 id=135 data-nosnippet>135</a><span class="doccomment">/// Whether a client's registration lists this grant.
+<a href=#136 id=136 data-nosnippet>136</a></span><span class="kw">pub fn </span>holds_provider_id_token_grant(grant_types: <span class="kw-2">&amp;</span>[String]) -&gt; bool {
+<a href=#137 id=137 data-nosnippet>137</a>    grant_types
+<a href=#138 id=138 data-nosnippet>138</a>        .iter()
+<a href=#139 id=139 data-nosnippet>139</a>        .any(|g| g == PROVIDER_ID_TOKEN_GRANT_TYPE)
+<a href=#140 id=140 data-nosnippet>140</a>}
+<a href=#141 id=141 data-nosnippet>141</a>
+<a href=#142 id=142 data-nosnippet>142</a><span class="doccomment">/// The three grant parameters, borrowed from the request, or
+<a href=#143 id=143 data-nosnippet>143</a>/// `invalid_request` naming the first one that is missing or empty, or a
+<a href=#144 id=144 data-nosnippet>144</a>/// `nonce` longer than [`MAX_NONCE_BYTES`].
+<a href=#145 id=145 data-nosnippet>145</a>///
+<a href=#146 id=146 data-nosnippet>146</a>/// # Errors
+<a href=#147 id=147 data-nosnippet>147</a>///
+<a href=#148 id=148 data-nosnippet>148</a>/// `invalid_request` when `provider`, `id_token` or `nonce` is absent or
+<a href=#149 id=149 data-nosnippet>149</a>/// empty, or `nonce` is too long.
+<a href=#150 id=150 data-nosnippet>150</a></span><span class="kw">pub fn </span>native_request(req: <span class="kw-2">&amp;</span>TokenRequest) -&gt; <span class="prelude-ty">Result</span>&lt;NativeIdTokenRequest&lt;<span class="lifetime">'_</span>&gt;, OAuth2Error&gt; {
+<a href=#151 id=151 data-nosnippet>151</a>    <span class="kw">fn </span>required&lt;<span class="lifetime">'a</span>&gt;(value: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>String&gt;, name: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span>str, OAuth2Error&gt; {
+<a href=#152 id=152 data-nosnippet>152</a>        value
+<a href=#153 id=153 data-nosnippet>153</a>            .map(String::as_str)
+<a href=#154 id=154 data-nosnippet>154</a>            .filter(|v| !v.trim().is_empty())
+<a href=#155 id=155 data-nosnippet>155</a>            .ok_or_else(|| {
+<a href=#156 id=156 data-nosnippet>156</a>                OAuth2Error::InvalidRequest(<span class="macro">format!</span>(
+<a href=#157 id=157 data-nosnippet>157</a>                    <span class="string">"{name} is required for the provider-id-token grant"
+<a href=#158 id=158 data-nosnippet>158</a>                </span>))
+<a href=#159 id=159 data-nosnippet>159</a>            })
+<a href=#160 id=160 data-nosnippet>160</a>    }
+<a href=#161 id=161 data-nosnippet>161</a>    <span class="kw">let </span>request = NativeIdTokenRequest {
+<a href=#162 id=162 data-nosnippet>162</a>        provider: required(req.provider.as_ref(), <span class="string">"provider"</span>)<span class="question-mark">?</span>,
+<a href=#163 id=163 data-nosnippet>163</a>        id_token: required(req.id_token.as_ref(), <span class="string">"id_token"</span>)<span class="question-mark">?</span>,
+<a href=#164 id=164 data-nosnippet>164</a>        nonce: required(req.nonce.as_ref(), <span class="string">"nonce"</span>)<span class="question-mark">?</span>,
+<a href=#165 id=165 data-nosnippet>165</a>    };
+<a href=#166 id=166 data-nosnippet>166</a>    <span class="kw">if </span>request.nonce.len() &gt; MAX_NONCE_BYTES {
+<a href=#167 id=167 data-nosnippet>167</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(OAuth2Error::InvalidRequest(<span class="macro">format!</span>(
+<a href=#168 id=168 data-nosnippet>168</a>            <span class="string">"nonce must be at most {MAX_NONCE_BYTES} bytes"
+<a href=#169 id=169 data-nosnippet>169</a>        </span>)));
+<a href=#170 id=170 data-nosnippet>170</a>    }
+<a href=#171 id=171 data-nosnippet>171</a>    <span class="prelude-val">Ok</span>(request)
+<a href=#172 id=172 data-nosnippet>172</a>}
+<a href=#173 id=173 data-nosnippet>173</a>
+<a href=#174 id=174 data-nosnippet>174</a><span class="doccomment">/// The scopes this grant issues: the requested ones, each of which must be
+<a href=#175 id=175 data-nosnippet>175</a>/// in the client's registered set.
+<a href=#176 id=176 data-nosnippet>176</a>///
+<a href=#177 id=177 data-nosnippet>177</a>/// The result is the intersection of the request with the registration, and
+<a href=#178 id=178 data-nosnippet>178</a>/// a requested scope outside it is **refused** (`invalid_scope`) rather than
+<a href=#179 id=179 data-nosnippet>179</a>/// dropped — the rule `/oauth2/authorize` applies to the same registration,
+<a href=#180 id=180 data-nosnippet>180</a>/// so a scope that would be refused there is not quietly narrowed away here.
+<a href=#181 id=181 data-nosnippet>181</a>/// An absent or empty `scope` is the empty set, as at `/authorize`: no
+<a href=#182 id=182 data-nosnippet>182</a>/// `openid`, so no ID token. Order is the request's; duplicates collapse.
+<a href=#183 id=183 data-nosnippet>183</a>///
+<a href=#184 id=184 data-nosnippet>184</a>/// `registered` is the client's set after the external-client ceiling.
+<a href=#185 id=185 data-nosnippet>185</a>///
+<a href=#186 id=186 data-nosnippet>186</a>/// # Errors
+<a href=#187 id=187 data-nosnippet>187</a>///
+<a href=#188 id=188 data-nosnippet>188</a>/// `invalid_scope` naming every requested scope the client is not registered
+<a href=#189 id=189 data-nosnippet>189</a>/// for.
+<a href=#190 id=190 data-nosnippet>190</a></span><span class="kw">pub fn </span>requested_scopes(
+<a href=#191 id=191 data-nosnippet>191</a>    raw: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;,
+<a href=#192 id=192 data-nosnippet>192</a>    registered: <span class="kw-2">&amp;</span>[String],
+<a href=#193 id=193 data-nosnippet>193</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Vec&lt;String&gt;, OAuth2Error&gt; {
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="kw">let </span><span class="kw-2">mut </span>scopes: Vec&lt;String&gt; = Vec::new();
+<a href=#195 id=195 data-nosnippet>195</a>    <span class="kw">for </span>scope <span class="kw">in </span>raw.unwrap_or(<span class="string">""</span>).split_whitespace() {
+<a href=#196 id=196 data-nosnippet>196</a>        <span class="kw">if </span>!scopes.iter().any(|s| s == scope) {
+<a href=#197 id=197 data-nosnippet>197</a>            scopes.push(scope.to_owned());
+<a href=#198 id=198 data-nosnippet>198</a>        }
+<a href=#199 id=199 data-nosnippet>199</a>    }
+<a href=#200 id=200 data-nosnippet>200</a>    <span class="kw">let </span>unregistered: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = scopes
+<a href=#201 id=201 data-nosnippet>201</a>        .iter()
+<a href=#202 id=202 data-nosnippet>202</a>        .filter(|s| !registered.contains(s))
+<a href=#203 id=203 data-nosnippet>203</a>        .map(String::as_str)
+<a href=#204 id=204 data-nosnippet>204</a>        .collect();
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="kw">if </span>!unregistered.is_empty() {
+<a href=#206 id=206 data-nosnippet>206</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(OAuth2Error::InvalidScope(<span class="macro">format!</span>(
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="string">"unregistered scopes: {}"</span>,
+<a href=#208 id=208 data-nosnippet>208</a>            unregistered.join(<span class="string">", "</span>)
+<a href=#209 id=209 data-nosnippet>209</a>        )));
+<a href=#210 id=210 data-nosnippet>210</a>    }
+<a href=#211 id=211 data-nosnippet>211</a>    <span class="prelude-val">Ok</span>(scopes)
+<a href=#212 id=212 data-nosnippet>212</a>}
+<a href=#213 id=213 data-nosnippet>213</a>
+<a href=#214 id=214 data-nosnippet>214</a><span class="doccomment">/// What the REST layer resolved about the consent this sign-in's scopes need,
+<a href=#215 id=215 data-nosnippet>215</a>/// for the user [`NativeSubject`] named.
+<a href=#216 id=216 data-nosnippet>216</a>///
+<a href=#217 id=217 data-nosnippet>217</a>/// The same two questions `/oauth2/authorize` asks, resolved by the same
+<a href=#218 id=218 data-nosnippet>218</a>/// functions over the same records — this crate decides, it does not fetch.
+<a href=#219 id=219 data-nosnippet>219</a>/// The default is the state of a request from an administrator's client
+<a href=#220 id=220 data-nosnippet>220</a>/// asking for nothing sensitive.
+<a href=#221 id=221 data-nosnippet>221</a></span><span class="attr">#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+<a href=#222 id=222 data-nosnippet>222</a></span><span class="kw">pub struct </span>ConsentState {
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="doccomment">/// W7: the GDPR-sensitive scopes (`address`, `phone`).
+<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="kw">pub </span>sensitive: <span class="kw">crate</span>::sensitive::Requested,
+<a href=#225 id=225 data-nosnippet>225</a>    <span class="doccomment">/// W7: the tenant's effective settings have the sensitive scopes off.
+<a href=#226 id=226 data-nosnippet>226</a>    </span><span class="kw">pub </span>sensitive_switch_off: bool,
+<a href=#227 id=227 data-nosnippet>227</a>    <span class="doccomment">/// T21.4 / D4: an externally registered client acting as the user.
+<a href=#228 id=228 data-nosnippet>228</a>    </span><span class="kw">pub </span>external: <span class="kw">crate</span>::external_consent::Requested,
+<a href=#229 id=229 data-nosnippet>229</a>}
+<a href=#230 id=230 data-nosnippet>230</a>
+<a href=#231 id=231 data-nosnippet>231</a><span class="doccomment">/// What [`decide_consent`] and [`refuse_switched_off_sensitive_scopes`] answer
+<a href=#232 id=232 data-nosnippet>232</a>/// for the GDPR-sensitive scopes the tenant has switched off.
+<a href=#233 id=233 data-nosnippet>233</a></span><span class="kw">const </span>SENSITIVE_SWITCHED_OFF: <span class="kw-2">&amp;</span>str = <span class="string">"the address and phone scopes are not enabled for this tenant"</span>;
+<a href=#234 id=234 data-nosnippet>234</a>
+<a href=#235 id=235 data-nosnippet>235</a><span class="doccomment">/// F4-W2-05 (D-N14): the tenant's sensitive-scope switch does not depend on
+<a href=#236 id=236 data-nosnippet>236</a>/// the user, so it is decided with the other request checks, before the
+<a href=#237 id=237 data-nosnippet>237</a>/// provider token is verified and spent. `switched_off` is true when the
+<a href=#238 id=238 data-nosnippet>238</a>/// request asks for `address` or `phone` and the tenant's effective settings
+<a href=#239 id=239 data-nosnippet>239</a>/// have them off.
+<a href=#240 id=240 data-nosnippet>240</a>///
+<a href=#241 id=241 data-nosnippet>241</a>/// # Errors
+<a href=#242 id=242 data-nosnippet>242</a>///
+<a href=#243 id=243 data-nosnippet>243</a>/// `invalid_scope`, worded as [`decide_consent`] words it.
+<a href=#244 id=244 data-nosnippet>244</a></span><span class="kw">pub fn </span>refuse_switched_off_sensitive_scopes(switched_off: bool) -&gt; <span class="prelude-ty">Result</span>&lt;(), OAuth2Error&gt; {
+<a href=#245 id=245 data-nosnippet>245</a>    <span class="kw">if </span>switched_off {
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="prelude-val">Err</span>(OAuth2Error::InvalidScope(SENSITIVE_SWITCHED_OFF.into()))
+<a href=#247 id=247 data-nosnippet>247</a>    } <span class="kw">else </span>{
+<a href=#248 id=248 data-nosnippet>248</a>        <span class="prelude-val">Ok</span>(())
+<a href=#249 id=249 data-nosnippet>249</a>    }
+<a href=#250 id=250 data-nosnippet>250</a>}
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a><span class="doccomment">/// D-N6: refuse any scope that would need a consent ceremony.
+<a href=#253 id=253 data-nosnippet>253</a>///
+<a href=#254 id=254 data-nosnippet>254</a>/// This grant has no interaction to offer — no browser, no consent screen —
+<a href=#255 id=255 data-nosnippet>255</a>/// so it is decided exactly as an `/authorize` request carrying `prompt=none`
+<a href=#256 id=256 data-nosnippet>256</a>/// on its first leg: what is consented (or needs no consent, which the
+<a href=#257 id=257 data-nosnippet>257</a>/// client's registration decides as it does today) proceeds, and what would
+<a href=#258 id=258 data-nosnippet>258</a>/// need the screen is `consent_required`. There is no implicit-consent switch
+<a href=#259 id=259 data-nosnippet>259</a>/// for first-party clients; that is a separate decision (D-N6).
+<a href=#260 id=260 data-nosnippet>260</a>///
+<a href=#261 id=261 data-nosnippet>261</a>/// # Errors
+<a href=#262 id=262 data-nosnippet>262</a>///
+<a href=#263 id=263 data-nosnippet>263</a>/// `invalid_scope` when the sensitive scopes are switched off for the tenant;
+<a href=#264 id=264 data-nosnippet>264</a>/// `consent_required` when a consent record is missing.
+<a href=#265 id=265 data-nosnippet>265</a></span><span class="kw">pub fn </span>decide_consent(state: ConsentState) -&gt; <span class="prelude-ty">Result</span>&lt;(), OAuth2Error&gt; {
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="kw">use </span><span class="kw">crate</span>::external_consent <span class="kw">as </span>external;
+<a href=#267 id=267 data-nosnippet>267</a>    <span class="kw">use </span><span class="kw">crate</span>::sensitive;
+<a href=#268 id=268 data-nosnippet>268</a>
+<a href=#269 id=269 data-nosnippet>269</a>    <span class="kw">match </span>sensitive::decide(state.sensitive, state.sensitive_switch_off, <span class="bool-val">false</span>, <span class="bool-val">true</span>) {
+<a href=#270 id=270 data-nosnippet>270</a>        sensitive::Decision::Proceed =&gt; {}
+<a href=#271 id=271 data-nosnippet>271</a>        <span class="comment">// Reached only if the switch changed between the early check and
+<a href=#272 id=272 data-nosnippet>272</a>        // here; the early check is what normally answers it.
+<a href=#273 id=273 data-nosnippet>273</a>        </span>sensitive::Decision::Refuse(sensitive::Refusal::Disabled) =&gt; {
+<a href=#274 id=274 data-nosnippet>274</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(OAuth2Error::InvalidScope(SENSITIVE_SWITCHED_OFF.into()));
+<a href=#275 id=275 data-nosnippet>275</a>        }
+<a href=#276 id=276 data-nosnippet>276</a>        <span class="comment">// `AskForConsent` cannot come back with `prompt_none`, and `Declined`
+<a href=#277 id=277 data-nosnippet>277</a>        // cannot without a consent leg; both are answered as what they would
+<a href=#278 id=278 data-nosnippet>278</a>        // need — a ceremony this grant cannot hold.
+<a href=#279 id=279 data-nosnippet>279</a>        </span>sensitive::Decision::AskForConsent
+<a href=#280 id=280 data-nosnippet>280</a>        | sensitive::Decision::Refuse(
+<a href=#281 id=281 data-nosnippet>281</a>            sensitive::Refusal::ConsentRequired | sensitive::Refusal::Declined,
+<a href=#282 id=282 data-nosnippet>282</a>        ) =&gt; {
+<a href=#283 id=283 data-nosnippet>283</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(OAuth2Error::ConsentRequired(
+<a href=#284 id=284 data-nosnippet>284</a>                <span class="string">"releasing the requested scopes needs the end user's consent, which this grant \
+<a href=#285 id=285 data-nosnippet>285</a>                 cannot ask for; obtain it through an authorization request first"
+<a href=#286 id=286 data-nosnippet>286</a>                    </span>.into(),
+<a href=#287 id=287 data-nosnippet>287</a>            ));
+<a href=#288 id=288 data-nosnippet>288</a>        }
+<a href=#289 id=289 data-nosnippet>289</a>    }
+<a href=#290 id=290 data-nosnippet>290</a>    <span class="kw">match </span>external::decide(state.external, <span class="bool-val">false</span>, <span class="bool-val">true</span>) {
+<a href=#291 id=291 data-nosnippet>291</a>        external::Decision::Proceed =&gt; <span class="prelude-val">Ok</span>(()),
+<a href=#292 id=292 data-nosnippet>292</a>        external::Decision::AskForConsent | external::Decision::Refuse(<span class="kw">_</span>) =&gt; {
+<a href=#293 id=293 data-nosnippet>293</a>            <span class="prelude-val">Err</span>(OAuth2Error::ConsentRequired(
+<a href=#294 id=294 data-nosnippet>294</a>                <span class="string">"this client was not registered by an administrator of this tenant, so the end \
+<a href=#295 id=295 data-nosnippet>295</a>                 user must consent before it may act as them, which this grant cannot ask for; \
+<a href=#296 id=296 data-nosnippet>296</a>                 obtain it through an authorization request first"
+<a href=#297 id=297 data-nosnippet>297</a>                    </span>.into(),
+<a href=#298 id=298 data-nosnippet>298</a>            ))
+<a href=#299 id=299 data-nosnippet>299</a>        }
+<a href=#300 id=300 data-nosnippet>300</a>    }
+<a href=#301 id=301 data-nosnippet>301</a>}
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a><span class="doccomment">/// What the wire sees for a refusal of §3.1 steps 2–7.
+<a href=#304 id=304 data-nosnippet>304</a>///
+<a href=#305 id=305 data-nosnippet>305</a>/// One `invalid_grant` with [`PUBLIC_REFUSAL_DESCRIPTION`] for every refusal
+<a href=#306 id=306 data-nosnippet>306</a>/// about the token or the configuration — a wrong token and a wrong
+<a href=#307 id=307 data-nosnippet>307</a>/// configuration are told apart only in the server log and the audit record
+<a href=#308 id=308 data-nosnippet>308</a>/// ([`NativeLoginError::reason_code`]) — and one generic `server_error` for a
+<a href=#309 id=309 data-nosnippet>309</a>/// datastore failure, the replay store's included.
+<a href=#310 id=310 data-nosnippet>310</a></span><span class="kw">pub fn </span>refusal_for(e: <span class="kw-2">&amp;</span>NativeLoginError) -&gt; OAuth2Error {
+<a href=#311 id=311 data-nosnippet>311</a>    <span class="kw">match </span>e.refusal() {
+<a href=#312 id=312 data-nosnippet>312</a>        NativeLoginRefusal::InvalidGrant =&gt; {
+<a href=#313 id=313 data-nosnippet>313</a>            OAuth2Error::InvalidGrant(PUBLIC_REFUSAL_DESCRIPTION.into())
+<a href=#314 id=314 data-nosnippet>314</a>        }
+<a href=#315 id=315 data-nosnippet>315</a>        NativeLoginRefusal::ServerError =&gt; {
+<a href=#316 id=316 data-nosnippet>316</a>            OAuth2Error::ServerError(SERVER_REFUSAL_DESCRIPTION.into())
+<a href=#317 id=317 data-nosnippet>317</a>        }
+<a href=#318 id=318 data-nosnippet>318</a>    }
+<a href=#319 id=319 data-nosnippet>319</a>}
+<a href=#320 id=320 data-nosnippet>320</a>
+<a href=#321 id=321 data-nosnippet>321</a><span class="doccomment">/// A client that passed step 1: authenticated, on a live tenant, within its
+<a href=#322 id=322 data-nosnippet>322</a>/// profile's rules, holding the grant, with its token binding decided.
+<a href=#323 id=323 data-nosnippet>323</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#324 id=324 data-nosnippet>324</a></span><span class="kw">pub struct </span>ProviderIdTokenClient {
+<a href=#325 id=325 data-nosnippet>325</a>    client: OAuth2Client,
+<a href=#326 id=326 data-nosnippet>326</a>    organization_id: Uuid,
+<a href=#327 id=327 data-nosnippet>327</a>    cnf: <span class="prelude-ty">Option</span>&lt;CnfClaim&gt;,
+<a href=#328 id=328 data-nosnippet>328</a>}
+<a href=#329 id=329 data-nosnippet>329</a>
+<a href=#330 id=330 data-nosnippet>330</a><span class="kw">impl </span>ProviderIdTokenClient {
+<a href=#331 id=331 data-nosnippet>331</a>    <span class="doccomment">/// The authenticated client's registration.
+<a href=#332 id=332 data-nosnippet>332</a>    </span><span class="kw">pub fn </span>client(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>OAuth2Client {
+<a href=#333 id=333 data-nosnippet>333</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.client
+<a href=#334 id=334 data-nosnippet>334</a>    }
+<a href=#335 id=335 data-nosnippet>335</a>}
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a><span class="doccomment">/// A request that passed step 2 as well: its scopes and target are decided.
+<a href=#338 id=338 data-nosnippet>338</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#339 id=339 data-nosnippet>339</a></span><span class="kw">pub struct </span>ProviderIdTokenGrant {
+<a href=#340 id=340 data-nosnippet>340</a>    client: ProviderIdTokenClient,
+<a href=#341 id=341 data-nosnippet>341</a>    scopes: Vec&lt;String&gt;,
+<a href=#342 id=342 data-nosnippet>342</a>    resource: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#343 id=343 data-nosnippet>343</a>}
+<a href=#344 id=344 data-nosnippet>344</a>
+<a href=#345 id=345 data-nosnippet>345</a><span class="kw">impl </span>ProviderIdTokenGrant {
+<a href=#346 id=346 data-nosnippet>346</a>    <span class="doccomment">/// The authenticated client's registration.
+<a href=#347 id=347 data-nosnippet>347</a>    </span><span class="kw">pub fn </span>client(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>OAuth2Client {
+<a href=#348 id=348 data-nosnippet>348</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.client.client
+<a href=#349 id=349 data-nosnippet>349</a>    }
+<a href=#350 id=350 data-nosnippet>350</a>
+<a href=#351 id=351 data-nosnippet>351</a>    <span class="doccomment">/// The scopes this sign-in will be granted, in request order.
+<a href=#352 id=352 data-nosnippet>352</a>    </span><span class="kw">pub fn </span>scopes(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span>[String] {
+<a href=#353 id=353 data-nosnippet>353</a>        <span class="kw-2">&amp;</span><span class="self">self</span>.scopes
+<a href=#354 id=354 data-nosnippet>354</a>    }
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="doccomment">/// The organization of the requesting tenant, as the client
+<a href=#357 id=357 data-nosnippet>357</a>    /// authentication read it — what `login.post_auth` is told (F4-W2-01).
+<a href=#358 id=358 data-nosnippet>358</a>    </span><span class="kw">pub fn </span>organization_id(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Uuid {
+<a href=#359 id=359 data-nosnippet>359</a>        <span class="self">self</span>.client.organization_id
+<a href=#360 id=360 data-nosnippet>360</a>    }
+<a href=#361 id=361 data-nosnippet>361</a>}
+<a href=#362 id=362 data-nosnippet>362</a>
+<a href=#363 id=363 data-nosnippet>363</a><span class="doccomment">/// Where the sign-in came from, for the session row. Both values are already
+<a href=#364 id=364 data-nosnippet>364</a>/// bounded by the REST layer's extractors.
+<a href=#365 id=365 data-nosnippet>365</a></span><span class="attr">#[derive(Debug, Clone, Default)]
+<a href=#366 id=366 data-nosnippet>366</a></span><span class="kw">pub struct </span>SignInOrigin {
+<a href=#367 id=367 data-nosnippet>367</a>    <span class="doccomment">/// The caller's address, as the login paths record it.
+<a href=#368 id=368 data-nosnippet>368</a>    </span><span class="kw">pub </span>ip_address: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="doccomment">/// The caller's `User-Agent`.
+<a href=#370 id=370 data-nosnippet>370</a>    </span><span class="kw">pub </span>user_agent: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#371 id=371 data-nosnippet>371</a>}
+<a href=#372 id=372 data-nosnippet>372</a>
+<a href=#373 id=373 data-nosnippet>373</a><span class="doccomment">/// What a native sign-in issued: the token set for the wire, and the session
+<a href=#374 id=374 data-nosnippet>374</a>/// it was issued under.
+<a href=#375 id=375 data-nosnippet>375</a>///
+<a href=#376 id=376 data-nosnippet>376</a>/// The session id is returned so the token endpoint can record the client as
+<a href=#377 id=377 data-nosnippet>377</a>/// a **participant** of that session — the row back-channel logout iterates
+<a href=#378 id=378 data-nosnippet>378</a>/// (D-N39, #839) — as `/oauth2/authorize` does when it issues a code. It is
+<a href=#379 id=379 data-nosnippet>379</a>/// the `sid` the access and ID tokens already carry, never sent separately.
+<a href=#380 id=380 data-nosnippet>380</a></span><span class="attr">#[derive(Debug)]
+<a href=#381 id=381 data-nosnippet>381</a></span><span class="kw">pub struct </span>NativeSignIn {
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="doccomment">/// The token response, exactly as it goes on the wire.
+<a href=#383 id=383 data-nosnippet>383</a>    </span><span class="kw">pub </span>response: TokenResponse,
+<a href=#384 id=384 data-nosnippet>384</a>    <span class="doccomment">/// The session the tokens name (`sid`).
+<a href=#385 id=385 data-nosnippet>385</a>    </span><span class="kw">pub </span>session_id: Uuid,
+<a href=#386 id=386 data-nosnippet>386</a>}
+<a href=#387 id=387 data-nosnippet>387</a>
+<a href=#388 id=388 data-nosnippet>388</a><span class="kw">impl</span>&lt;OC, AC, TR, RT, UR, SA, SR, AR&gt; TokenService&lt;OC, AC, TR, RT, UR, SA, SR, AR&gt;
+<a href=#389 id=389 data-nosnippet>389</a><span class="kw">where
+<a href=#390 id=390 data-nosnippet>390</a>    </span>OC: OAuth2ClientRepository,
+<a href=#391 id=391 data-nosnippet>391</a>    SA: ServiceAccountRepository,
+<a href=#392 id=392 data-nosnippet>392</a>    AC: AuthorizationCodeRepository,
+<a href=#393 id=393 data-nosnippet>393</a>    TR: TenantRepository,
+<a href=#394 id=394 data-nosnippet>394</a>    RT: RefreshTokenRepository,
+<a href=#395 id=395 data-nosnippet>395</a>    UR: UserRepository,
+<a href=#396 id=396 data-nosnippet>396</a>    SR: SessionRepository,
+<a href=#397 id=397 data-nosnippet>397</a>    AR: AuditLogRepository,
+<a href=#398 id=398 data-nosnippet>398</a>{
+<a href=#399 id=399 data-nosnippet>399</a>    <span class="doccomment">/// Step 1: authenticate the client of a provider-id-token request and
+<a href=#400 id=400 data-nosnippet>400</a>    /// decide its token binding.
+<a href=#401 id=401 data-nosnippet>401</a>    ///
+<a href=#402 id=402 data-nosnippet>402</a>    /// A public client authenticates by presenting nothing and is refused if
+<a href=#403 id=403 data-nosnippet>403</a>    /// it presents a credential; a confidential one by the method its
+<a href=#404 id=404 data-nosnippet>404</a>    /// registration names (SEC-093). After authentication, and only then, the
+<a href=#405 id=405 data-nosnippet>405</a>    /// profile's request-time rules run and the grant must be registered —
+<a href=#406 id=406 data-nosnippet>406</a>    /// so `unauthorized_client` is learnt only by the credential's holder
+<a href=#407 id=407 data-nosnippet>407</a>    /// (SEC-086's ordering). The binding is decided last: a client registered
+<a href=#408 id=408 data-nosnippet>408</a>    /// for DPoP- or certificate-bound tokens whose request carries no proof
+<a href=#409 id=409 data-nosnippet>409</a>    /// is refused here, before the provider token is looked at.
+<a href=#410 id=410 data-nosnippet>410</a>    ///
+<a href=#411 id=411 data-nosnippet>411</a>    /// # Errors
+<a href=#412 id=412 data-nosnippet>412</a>    ///
+<a href=#413 id=413 data-nosnippet>413</a>    /// `invalid_request` without a `client_id`; `invalid_client` for an
+<a href=#414 id=414 data-nosnippet>414</a>    /// unknown client, a failed credential, a tombstoned tenant or an
+<a href=#415 id=415 data-nosnippet>415</a>    /// unsatisfiable binding; the codes of `fapi::enforce_token_request`;
+<a href=#416 id=416 data-nosnippet>416</a>    /// `unauthorized_client` for a client not registered for the grant.
+<a href=#417 id=417 data-nosnippet>417</a>    </span><span class="kw">pub async fn </span>authenticate_provider_id_token_client(
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#419 id=419 data-nosnippet>419</a>        tenant_id: Uuid,
+<a href=#420 id=420 data-nosnippet>420</a>        req: <span class="kw-2">&amp;</span>TokenRequest,
+<a href=#421 id=421 data-nosnippet>421</a>        ctx: <span class="kw-2">&amp;</span>TokenRequestContext,
+<a href=#422 id=422 data-nosnippet>422</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;ProviderIdTokenClient, OAuth2Error&gt; {
+<a href=#423 id=423 data-nosnippet>423</a>        <span class="kw">let </span>client_id = resolve_client_id(req.client_id.as_deref(), ctx)<span class="question-mark">?</span>;
+<a href=#424 id=424 data-nosnippet>424</a>        <span class="kw">let </span>client_secret = req.client_secret.as_deref();
+<a href=#425 id=425 data-nosnippet>425</a>        <span class="kw">let </span>refused = || OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into());
+<a href=#426 id=426 data-nosnippet>426</a>        <span class="kw">let </span>client = <span class="kw">match </span><span class="self">self
+<a href=#427 id=427 data-nosnippet>427</a>            </span>.client_repo
+<a href=#428 id=428 data-nosnippet>428</a>            .get_by_client_id(tenant_id, client_id)
+<a href=#429 id=429 data-nosnippet>429</a>            .<span class="kw">await
+<a href=#430 id=430 data-nosnippet>430</a>        </span>{
+<a href=#431 id=431 data-nosnippet>431</a>            <span class="prelude-val">Ok</span>(client) =&gt; client,
+<a href=#432 id=432 data-nosnippet>432</a>            <span class="prelude-val">Err</span>(AxiamError::NotFound { .. }) =&gt; {
+<a href=#433 id=433 data-nosnippet>433</a>                <span class="comment">// #679: a refusal costs the verify a wrong secret costs.
+<a href=#434 id=434 data-nosnippet>434</a>                </span>spend_one_verify(client_secret, ctx);
+<a href=#435 id=435 data-nosnippet>435</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(refused());
+<a href=#436 id=436 data-nosnippet>436</a>            }
+<a href=#437 id=437 data-nosnippet>437</a>            <span class="comment">// QUAL-03/D-11: a datastore fault is not bad client credentials.
+<a href=#438 id=438 data-nosnippet>438</a>            </span><span class="prelude-val">Err</span>(other) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(OAuth2Error::ServerError(other.to_string())),
+<a href=#439 id=439 data-nosnippet>439</a>        };
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="comment">// Defence in depth: the lookup is tenant-scoped in SQL.
+<a href=#441 id=441 data-nosnippet>441</a>        </span><span class="kw">if </span>client.tenant_id != tenant_id {
+<a href=#442 id=442 data-nosnippet>442</a>            spend_one_verify(client_secret, ctx);
+<a href=#443 id=443 data-nosnippet>443</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(refused());
+<a href=#444 id=444 data-nosnippet>444</a>        }
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="comment">// The public arm inside refuses a credential presented by a public
+<a href=#446 id=446 data-nosnippet>446</a>        // client; a confidential client with none is refused as a wrong one.
+<a href=#447 id=447 data-nosnippet>447</a>        </span><span class="kw">let </span>tenant = <span class="self">self
+<a href=#448 id=448 data-nosnippet>448</a>            </span>.authenticate_client_credential(tenant_id, <span class="kw-2">&amp;</span>client, client_secret, ctx)
+<a href=#449 id=449 data-nosnippet>449</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#450 id=450 data-nosnippet>450</a>        <span class="kw">crate</span>::fapi::enforce_token_request(<span class="kw-2">&amp;</span>client, ctx.evidence())<span class="question-mark">?</span>;
+<a href=#451 id=451 data-nosnippet>451</a>        <span class="kw">if </span>!holds_provider_id_token_grant(<span class="kw-2">&amp;</span>client.grant_types) {
+<a href=#452 id=452 data-nosnippet>452</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(OAuth2Error::UnauthorizedClient(
+<a href=#453 id=453 data-nosnippet>453</a>                <span class="string">"client is not registered for the provider-id-token grant"</span>.into(),
+<a href=#454 id=454 data-nosnippet>454</a>            ));
+<a href=#455 id=455 data-nosnippet>455</a>        }
+<a href=#456 id=456 data-nosnippet>456</a>        <span class="kw">let </span>cnf = <span class="self">self</span>.certificate_binding_for(<span class="kw-2">&amp;</span>client, ctx)<span class="question-mark">?</span>;
+<a href=#457 id=457 data-nosnippet>457</a>        <span class="prelude-val">Ok</span>(ProviderIdTokenClient {
+<a href=#458 id=458 data-nosnippet>458</a>            client,
+<a href=#459 id=459 data-nosnippet>459</a>            organization_id: tenant.organization_id,
+<a href=#460 id=460 data-nosnippet>460</a>            cnf,
+<a href=#461 id=461 data-nosnippet>461</a>        })
+<a href=#462 id=462 data-nosnippet>462</a>    }
+<a href=#463 id=463 data-nosnippet>463</a>
+<a href=#464 id=464 data-nosnippet>464</a>    <span class="doccomment">/// Step 2: the request's own parameters, decided before the provider token
+<a href=#465 id=465 data-nosnippet>465</a>    /// is verified — so a malformed request does not spend it.
+<a href=#466 id=466 data-nosnippet>466</a>    ///
+<a href=#467 id=467 data-nosnippet>467</a>    /// The scopes are checked against the client's registered set after the
+<a href=#468 id=468 data-nosnippet>468</a>    /// tenant's external-client ceiling (#613), and the RFC 8707 `resource`
+<a href=#469 id=469 data-nosnippet>469</a>    /// against its `allowed_resources`, exactly as `/oauth2/authorize` checks
+<a href=#470 id=470 data-nosnippet>470</a>    /// both.
+<a href=#471 id=471 data-nosnippet>471</a>    ///
+<a href=#472 id=472 data-nosnippet>472</a>    /// # Errors
+<a href=#473 id=473 data-nosnippet>473</a>    ///
+<a href=#474 id=474 data-nosnippet>474</a>    /// `invalid_request` for a missing grant parameter; `invalid_scope`;
+<a href=#475 id=475 data-nosnippet>475</a>    /// `invalid_target`; `server_error` when an external client's ceiling
+<a href=#476 id=476 data-nosnippet>476</a>    /// cannot be read.
+<a href=#477 id=477 data-nosnippet>477</a>    </span><span class="kw">pub async fn </span>prepare_provider_id_token_grant(
+<a href=#478 id=478 data-nosnippet>478</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#479 id=479 data-nosnippet>479</a>        client: ProviderIdTokenClient,
+<a href=#480 id=480 data-nosnippet>480</a>        req: <span class="kw-2">&amp;</span>TokenRequest,
+<a href=#481 id=481 data-nosnippet>481</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;ProviderIdTokenGrant, OAuth2Error&gt; {
+<a href=#482 id=482 data-nosnippet>482</a>        native_request(req)<span class="question-mark">?</span>;
+<a href=#483 id=483 data-nosnippet>483</a>        <span class="kw">let </span><span class="kw-2">mut </span>client = client;
+<a href=#484 id=484 data-nosnippet>484</a>        <span class="kw">crate</span>::scope_ceiling::apply_to_client(<span class="self">self</span>.scope_policy.as_ref(), <span class="kw-2">&amp;mut </span>client.client)
+<a href=#485 id=485 data-nosnippet>485</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#486 id=486 data-nosnippet>486</a>        <span class="kw">let </span>scopes = requested_scopes(req.scope.as_deref(), <span class="kw-2">&amp;</span>client.client.scopes)<span class="question-mark">?</span>;
+<a href=#487 id=487 data-nosnippet>487</a>        <span class="kw">let </span>resource = <span class="kw">crate</span>::resource::resolve_requested(
+<a href=#488 id=488 data-nosnippet>488</a>            <span class="kw-2">&amp;</span>client.client.allowed_resources,
+<a href=#489 id=489 data-nosnippet>489</a>            req.resource.as_deref(),
+<a href=#490 id=490 data-nosnippet>490</a>        )<span class="question-mark">?</span>;
+<a href=#491 id=491 data-nosnippet>491</a>        <span class="prelude-val">Ok</span>(ProviderIdTokenGrant {
+<a href=#492 id=492 data-nosnippet>492</a>            client,
+<a href=#493 id=493 data-nosnippet>493</a>            scopes,
+<a href=#494 id=494 data-nosnippet>494</a>            resource,
+<a href=#495 id=495 data-nosnippet>495</a>        })
+<a href=#496 id=496 data-nosnippet>496</a>    }
+<a href=#497 id=497 data-nosnippet>497</a>
+<a href=#498 id=498 data-nosnippet>498</a>    <span class="doccomment">/// Steps 4 and 5 (§3.1 step 8): decide consent, then issue the client's
+<a href=#499 id=499 data-nosnippet>499</a>    /// ordinary sign-in token set for the user the provider token signed in.
+<a href=#500 id=500 data-nosnippet>500</a>    ///
+<a href=#501 id=501 data-nosnippet>501</a>    /// `nonce` is the request's raw nonce, which the AXIAM ID token carries
+<a href=#502 id=502 data-nosnippet>502</a>    /// back when `openid` was granted. Evidence (`auth_time`, `amr = [fed]`,
+<a href=#503 id=503 data-nosnippet>503</a>    /// and the class it earns) is recorded on the session and the refresh
+<a href=#504 id=504 data-nosnippet>504</a>    /// token whatever the client's lane, and released in the ID token only to
+<a href=#505 id=505 data-nosnippet>505</a>    /// a client on the lane that emits it — the code flow's rule.
+<a href=#506 id=506 data-nosnippet>506</a>    ///
+<a href=#507 id=507 data-nosnippet>507</a>    /// # Errors
+<a href=#508 id=508 data-nosnippet>508</a>    ///
+<a href=#509 id=509 data-nosnippet>509</a>    /// `invalid_scope` / `consent_required` from [`decide_consent`];
+<a href=#510 id=510 data-nosnippet>510</a>    /// `invalid_grant` when a reactor vetoes issuance; `server_error` for a
+<a href=#511 id=511 data-nosnippet>511</a>    /// datastore or signing failure.
+<a href=#512 id=512 data-nosnippet>512</a>    </span><span class="attr">#[allow(clippy::too_many_arguments)]
+<a href=#513 id=513 data-nosnippet>513</a>    </span><span class="kw">pub async fn </span>issue_provider_id_token_grant(
+<a href=#514 id=514 data-nosnippet>514</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#515 id=515 data-nosnippet>515</a>        tenant_id: Uuid,
+<a href=#516 id=516 data-nosnippet>516</a>        grant: <span class="kw-2">&amp;</span>ProviderIdTokenGrant,
+<a href=#517 id=517 data-nosnippet>517</a>        subject: <span class="kw-2">&amp;</span>NativeSubject,
+<a href=#518 id=518 data-nosnippet>518</a>        nonce: <span class="kw-2">&amp;</span>str,
+<a href=#519 id=519 data-nosnippet>519</a>        consent: ConsentState,
+<a href=#520 id=520 data-nosnippet>520</a>        origin: SignInOrigin,
+<a href=#521 id=521 data-nosnippet>521</a>        ctx: <span class="kw-2">&amp;</span>TokenRequestContext,
+<a href=#522 id=522 data-nosnippet>522</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;NativeSignIn, OAuth2Error&gt; {
+<a href=#523 id=523 data-nosnippet>523</a>        decide_consent(consent)<span class="question-mark">?</span>;
+<a href=#524 id=524 data-nosnippet>524</a>        <span class="kw">if </span>subject.tenant_id != tenant_id {
+<a href=#525 id=525 data-nosnippet>525</a>            <span class="comment">// The federation service resolves users in the requesting tenant
+<a href=#526 id=526 data-nosnippet>526</a>            // only; a subject from anywhere else is an inconsistency, refused.
+<a href=#527 id=527 data-nosnippet>527</a>            </span><span class="kw">return </span><span class="prelude-val">Err</span>(OAuth2Error::ServerError(
+<a href=#528 id=528 data-nosnippet>528</a>                <span class="string">"native sign-in resolved a subject outside the requesting tenant"</span>.into(),
+<a href=#529 id=529 data-nosnippet>529</a>            ));
+<a href=#530 id=530 data-nosnippet>530</a>        }
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="kw">let </span>client = <span class="kw-2">&amp;</span>grant.client.client;
+<a href=#532 id=532 data-nosnippet>532</a>        <span class="kw">let </span>user_id = subject.user_id;
+<a href=#533 id=533 data-nosnippet>533</a>
+<a href=#534 id=534 data-nosnippet>534</a>        <span class="comment">// X1 — the `token.pre_issue` hook, before anything is written, so a
+<a href=#535 id=535 data-nosnippet>535</a>        // veto leaves no session behind.
+<a href=#536 id=536 data-nosnippet>536</a>        </span><span class="kw">let </span>ext = <span class="self">self
+<a href=#537 id=537 data-nosnippet>537</a>            </span>.pre_issue_ext_claims(
+<a href=#538 id=538 data-nosnippet>538</a>                tenant_id,
+<a href=#539 id=539 data-nosnippet>539</a>                <span class="kw-2">&amp;</span>user_id.to_string(),
+<a href=#540 id=540 data-nosnippet>540</a>                <span class="string">"user"</span>,
+<a href=#541 id=541 data-nosnippet>541</a>                <span class="kw-2">&amp;</span>client.client_id,
+<a href=#542 id=542 data-nosnippet>542</a>                <span class="kw-2">&amp;</span>grant.scopes,
+<a href=#543 id=543 data-nosnippet>543</a>            )
+<a href=#544 id=544 data-nosnippet>544</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#545 id=545 data-nosnippet>545</a>
+<a href=#546 id=546 data-nosnippet>546</a>        <span class="comment">// The session the federated browser sign-in would have created, with
+<a href=#547 id=547 data-nosnippet>547</a>        // the same evidence: the provider's `auth_time` clamped to now (D-10)
+<a href=#548 id=548 data-nosnippet>548</a>        // and `fed` alone (X7.2).
+<a href=#549 id=549 data-nosnippet>549</a>        </span><span class="kw">let </span>now = Utc::now();
+<a href=#550 id=550 data-nosnippet>550</a>        <span class="kw">let </span>evidence =
+<a href=#551 id=551 data-nosnippet>551</a>            AuthenticationEvidence::upstream(subject.upstream_auth_time, now, <span class="macro">vec!</span>[Amr::Fed]);
+<a href=#552 id=552 data-nosnippet>552</a>        <span class="kw">let </span>session = <span class="self">self
+<a href=#553 id=553 data-nosnippet>553</a>            </span>.session_repo
+<a href=#554 id=554 data-nosnippet>554</a>            .create(CreateSession {
+<a href=#555 id=555 data-nosnippet>555</a>                tenant_id,
+<a href=#556 id=556 data-nosnippet>556</a>                user_id,
+<a href=#557 id=557 data-nosnippet>557</a>                <span class="comment">// The console refresh credential of this session, which nobody
+<a href=#558 id=558 data-nosnippet>558</a>                // is given: the client refreshes through its OAuth2 refresh
+<a href=#559 id=559 data-nosnippet>559</a>                // token, and `/auth/refresh` can never rotate this row.
+<a href=#560 id=560 data-nosnippet>560</a>                </span>token_hash: hash_refresh_token(<span class="kw-2">&amp;</span>generate_refresh_token()),
+<a href=#561 id=561 data-nosnippet>561</a>                ip_address: origin.ip_address,
+<a href=#562 id=562 data-nosnippet>562</a>                user_agent: origin.user_agent,
+<a href=#563 id=563 data-nosnippet>563</a>                expires_at: now + chrono::Duration::seconds(<span class="self">self</span>.refresh_token_lifetime_secs),
+<a href=#564 id=564 data-nosnippet>564</a>                authenticated_at: evidence.authenticated_at,
+<a href=#565 id=565 data-nosnippet>565</a>                amr: evidence.amr.clone(),
+<a href=#566 id=566 data-nosnippet>566</a>                <span class="comment">// No browser, so no `axiam_op_session` cookie to match.
+<a href=#567 id=567 data-nosnippet>567</a>                </span>browser_token_hash: <span class="prelude-val">None</span>,
+<a href=#568 id=568 data-nosnippet>568</a>                lineage_id: <span class="prelude-val">None</span>,
+<a href=#569 id=569 data-nosnippet>569</a>            })
+<a href=#570 id=570 data-nosnippet>570</a>            .<span class="kw">await
+<a href=#571 id=571 data-nosnippet>571</a>            </span>.map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>;
+<a href=#572 id=572 data-nosnippet>572</a>
+<a href=#573 id=573 data-nosnippet>573</a>        <span class="comment">// W4 — the class this evidence earns, recorded only for a client on
+<a href=#574 id=574 data-nosnippet>574</a>        // the honour lane, as the authorization code records it.
+<a href=#575 id=575 data-nosnippet>575</a>        </span><span class="kw">let </span>acr = <span class="kw">crate</span>::fapi::honours_authn_params(client)
+<a href=#576 id=576 data-nosnippet>576</a>            .then(|| <span class="kw">crate</span>::acr::acr_for(<span class="kw-2">&amp;</span>evidence.amr).as_str().to_owned());
+<a href=#577 id=577 data-nosnippet>577</a>
+<a href=#578 id=578 data-nosnippet>578</a>        <span class="kw">let </span>cnf = grant.client.cnf.clone();
+<a href=#579 id=579 data-nosnippet>579</a>        <span class="kw">let </span>token_type = <span class="kw">crate</span>::dpop::token_type_for(cnf.as_ref());
+<a href=#580 id=580 data-nosnippet>580</a>        <span class="comment">// #681 — a public DPoP client's refresh token is bound to its key.
+<a href=#581 id=581 data-nosnippet>581</a>        </span><span class="kw">let </span>refresh_jkt = <span class="kw">crate</span>::dpop::refresh_token_binding(client, cnf.as_ref());
+<a href=#582 id=582 data-nosnippet>582</a>        <span class="kw">let </span>audience = grant
+<a href=#583 id=583 data-nosnippet>583</a>            .resource
+<a href=#584 id=584 data-nosnippet>584</a>            .as_deref()
+<a href=#585 id=585 data-nosnippet>585</a>            .unwrap_or(axiam_auth::token::AUD_USER)
+<a href=#586 id=586 data-nosnippet>586</a>            .to_owned();
+<a href=#587 id=587 data-nosnippet>587</a>        <span class="kw">let </span>minting = <span class="self">self</span>.minting_config(ctx.issuer.as_deref());
+<a href=#588 id=588 data-nosnippet>588</a>        <span class="kw">let </span>access_token = axiam_auth::token::AccessTokenSpec::user(
+<a href=#589 id=589 data-nosnippet>589</a>            user_id,
+<a href=#590 id=590 data-nosnippet>590</a>            tenant_id,
+<a href=#591 id=591 data-nosnippet>591</a>            grant.client.organization_id,
+<a href=#592 id=592 data-nosnippet>592</a>            Uuid::new_v4().to_string(),
+<a href=#593 id=593 data-nosnippet>593</a>        )
+<a href=#594 id=594 data-nosnippet>594</a>        .aud(<span class="kw-2">&amp;</span>audience)
+<a href=#595 id=595 data-nosnippet>595</a>        .scopes(<span class="kw-2">&amp;</span>grant.scopes)
+<a href=#596 id=596 data-nosnippet>596</a>        .cnf(cnf)
+<a href=#597 id=597 data-nosnippet>597</a>        .ext(ext)
+<a href=#598 id=598 data-nosnippet>598</a>        .client_id(<span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>client.client_id))
+<a href=#599 id=599 data-nosnippet>599</a>        .session(<span class="prelude-val">Some</span>(session.id))
+<a href=#600 id=600 data-nosnippet>600</a>        .issue(<span class="kw-2">&amp;</span>minting)
+<a href=#601 id=601 data-nosnippet>601</a>        .map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>;
+<a href=#602 id=602 data-nosnippet>602</a>
+<a href=#603 id=603 data-nosnippet>603</a>        <span class="kw">let </span>refresh_token = <span class="kw">if </span>client.grant_types.iter().any(|g| g == <span class="string">"refresh_token"</span>) {
+<a href=#604 id=604 data-nosnippet>604</a>            <span class="kw">let </span>raw_refresh = generate_refresh_token();
+<a href=#605 id=605 data-nosnippet>605</a>            <span class="self">self</span>.refresh_token_repo
+<a href=#606 id=606 data-nosnippet>606</a>                .create(CreateRefreshToken {
+<a href=#607 id=607 data-nosnippet>607</a>                    tenant_id,
+<a href=#608 id=608 data-nosnippet>608</a>                    token_hash: hash_refresh_token(<span class="kw-2">&amp;</span>raw_refresh),
+<a href=#609 id=609 data-nosnippet>609</a>                    client_id: client.client_id.clone(),
+<a href=#610 id=610 data-nosnippet>610</a>                    user_id: <span class="prelude-val">Some</span>(user_id),
+<a href=#611 id=611 data-nosnippet>611</a>                    scopes: grant.scopes.clone(),
+<a href=#612 id=612 data-nosnippet>612</a>                    session_id: <span class="prelude-val">Some</span>(session.id),
+<a href=#613 id=613 data-nosnippet>613</a>                    requested_userinfo_claims: Vec::new(),
+<a href=#614 id=614 data-nosnippet>614</a>                    <span class="comment">// RFC 8707 — the target travels with the grant.
+<a href=#615 id=615 data-nosnippet>615</a>                    </span>resource: grant.resource.clone(),
+<a href=#616 id=616 data-nosnippet>616</a>                    <span class="comment">// D-9 — the authentication this grant descends from, so a
+<a href=#617 id=617 data-nosnippet>617</a>                    // refreshed ID token reports the original.
+<a href=#618 id=618 data-nosnippet>618</a>                    </span>auth_time: <span class="prelude-val">Some</span>(evidence.authenticated_at),
+<a href=#619 id=619 data-nosnippet>619</a>                    acr: acr.clone(),
+<a href=#620 id=620 data-nosnippet>620</a>                    amr: evidence.amr.clone(),
+<a href=#621 id=621 data-nosnippet>621</a>                    dpop_jkt: refresh_jkt,
+<a href=#622 id=622 data-nosnippet>622</a>                    expires_at: now + chrono::Duration::seconds(<span class="self">self</span>.refresh_token_lifetime_secs),
+<a href=#623 id=623 data-nosnippet>623</a>                    lineage_id: <span class="prelude-val">None</span>,
+<a href=#624 id=624 data-nosnippet>624</a>                })
+<a href=#625 id=625 data-nosnippet>625</a>                .<span class="kw">await
+<a href=#626 id=626 data-nosnippet>626</a>                </span>.map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>;
+<a href=#627 id=627 data-nosnippet>627</a>            <span class="prelude-val">Some</span>(raw_refresh)
+<a href=#628 id=628 data-nosnippet>628</a>        } <span class="kw">else </span>{
+<a href=#629 id=629 data-nosnippet>629</a>            <span class="prelude-val">None
+<a href=#630 id=630 data-nosnippet>630</a>        </span>};
+<a href=#631 id=631 data-nosnippet>631</a>
+<a href=#632 id=632 data-nosnippet>632</a>        <span class="kw">let </span>id_token = <span class="kw">if </span>grant.scopes.iter().any(|s| s == <span class="string">"openid"</span>) {
+<a href=#633 id=633 data-nosnippet>633</a>            <span class="kw">let </span>user = <span class="self">self
+<a href=#634 id=634 data-nosnippet>634</a>                </span>.user_repo
+<a href=#635 id=635 data-nosnippet>635</a>                .get_by_id(tenant_id, user_id)
+<a href=#636 id=636 data-nosnippet>636</a>                .<span class="kw">await
+<a href=#637 id=637 data-nosnippet>637</a>                </span>.map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>;
+<a href=#638 id=638 data-nosnippet>638</a>            <span class="kw">let </span>claims_evidence = <span class="kw">if </span><span class="kw">crate</span>::fapi::emits_session_evidence(client) {
+<a href=#639 id=639 data-nosnippet>639</a>                <span class="kw">super</span>::evidence_from_snapshot(
+<a href=#640 id=640 data-nosnippet>640</a>                    <span class="prelude-val">Some</span>(evidence.authenticated_at),
+<a href=#641 id=641 data-nosnippet>641</a>                    acr.as_deref(),
+<a href=#642 id=642 data-nosnippet>642</a>                    <span class="kw-2">&amp;</span>evidence.amr,
+<a href=#643 id=643 data-nosnippet>643</a>                )
+<a href=#644 id=644 data-nosnippet>644</a>            } <span class="kw">else </span>{
+<a href=#645 id=645 data-nosnippet>645</a>                IdTokenEvidence::NONE
+<a href=#646 id=646 data-nosnippet>646</a>            };
+<a href=#647 id=647 data-nosnippet>647</a>            <span class="prelude-val">Some</span>(
+<a href=#648 id=648 data-nosnippet>648</a>                issue_id_token(
+<a href=#649 id=649 data-nosnippet>649</a>                    user_id,
+<a href=#650 id=650 data-nosnippet>650</a>                    <span class="kw-2">&amp;</span>client.client_id,
+<a href=#651 id=651 data-nosnippet>651</a>                    <span class="prelude-val">Some</span>(nonce),
+<a href=#652 id=652 data-nosnippet>652</a>                    <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>user.username),
+<a href=#653 id=653 data-nosnippet>653</a>                    <span class="kw-2">&amp;</span>grant.scopes,
+<a href=#654 id=654 data-nosnippet>654</a>                    <span class="kw-2">&amp;</span>minting,
+<a href=#655 id=655 data-nosnippet>655</a>                    <span class="prelude-val">Some</span>(session.id),
+<a href=#656 id=656 data-nosnippet>656</a>                    <span class="kw-2">&amp;</span>claims_evidence,
+<a href=#657 id=657 data-nosnippet>657</a>                )
+<a href=#658 id=658 data-nosnippet>658</a>                .map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>,
+<a href=#659 id=659 data-nosnippet>659</a>            )
+<a href=#660 id=660 data-nosnippet>660</a>        } <span class="kw">else </span>{
+<a href=#661 id=661 data-nosnippet>661</a>            <span class="prelude-val">None
+<a href=#662 id=662 data-nosnippet>662</a>        </span>};
+<a href=#663 id=663 data-nosnippet>663</a>
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="prelude-val">Ok</span>(NativeSignIn {
+<a href=#665 id=665 data-nosnippet>665</a>            response: TokenResponse {
+<a href=#666 id=666 data-nosnippet>666</a>                access_token,
+<a href=#667 id=667 data-nosnippet>667</a>                token_type,
+<a href=#668 id=668 data-nosnippet>668</a>                expires_in: <span class="self">self</span>.auth_config.access_token_lifetime_secs,
+<a href=#669 id=669 data-nosnippet>669</a>                refresh_token,
+<a href=#670 id=670 data-nosnippet>670</a>                scope: (!grant.scopes.is_empty()).then(|| grant.scopes.join(<span class="string">" "</span>)),
+<a href=#671 id=671 data-nosnippet>671</a>                id_token,
+<a href=#672 id=672 data-nosnippet>672</a>            },
+<a href=#673 id=673 data-nosnippet>673</a>            session_id: session.id,
+<a href=#674 id=674 data-nosnippet>674</a>        })
+<a href=#675 id=675 data-nosnippet>675</a>    }
+<a href=#676 id=676 data-nosnippet>676</a>}
+<a href=#677 id=677 data-nosnippet>677</a>
+<a href=#678 id=678 data-nosnippet>678</a><span class="attr">#[cfg(test)]
+<a href=#679 id=679 data-nosnippet>679</a></span><span class="kw">mod </span>tests {
+<a href=#680 id=680 data-nosnippet>680</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#681 id=681 data-nosnippet>681</a>    <span class="kw">use </span><span class="kw">crate</span>::external_consent::Requested <span class="kw">as </span>External;
+<a href=#682 id=682 data-nosnippet>682</a>    <span class="kw">use </span><span class="kw">crate</span>::sensitive::Requested <span class="kw">as </span>Sensitive;
+<a href=#683 id=683 data-nosnippet>683</a>
+<a href=#684 id=684 data-nosnippet>684</a>    <span class="kw">fn </span>strings(list: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str]) -&gt; Vec&lt;String&gt; {
+<a href=#685 id=685 data-nosnippet>685</a>        list.iter().map(|s| (<span class="kw-2">*</span>s).to_owned()).collect()
+<a href=#686 id=686 data-nosnippet>686</a>    }
+<a href=#687 id=687 data-nosnippet>687</a>
+<a href=#688 id=688 data-nosnippet>688</a>    <span class="kw">fn </span>request(grant: <span class="kw-2">&amp;</span>str) -&gt; TokenRequest {
+<a href=#689 id=689 data-nosnippet>689</a>        serde_json::from_value(<span class="macro">serde_json::json!</span>({ <span class="string">"grant_type"</span>: grant })).unwrap()
+<a href=#690 id=690 data-nosnippet>690</a>    }
+<a href=#691 id=691 data-nosnippet>691</a>
+<a href=#692 id=692 data-nosnippet>692</a>    <span class="doccomment">/// The URN is the vendor family's, and distinct from every grant X4 owns.
+<a href=#693 id=693 data-nosnippet>693</a>    </span><span class="attr">#[test]
+<a href=#694 id=694 data-nosnippet>694</a>    </span><span class="kw">fn </span>the_grant_urn_follows_the_vendor_family() {
+<a href=#695 id=695 data-nosnippet>695</a>        <span class="macro">assert_eq!</span>(
+<a href=#696 id=696 data-nosnippet>696</a>            PROVIDER_ID_TOKEN_GRANT_TYPE,
+<a href=#697 id=697 data-nosnippet>697</a>            <span class="string">"urn:axiam:params:oauth:grant-type:provider-id-token"
+<a href=#698 id=698 data-nosnippet>698</a>        </span>);
+<a href=#699 id=699 data-nosnippet>699</a>        <span class="kw">let </span>family = <span class="kw">crate</span>::token_exchange::MAY_IMPERSONATE_GRANT
+<a href=#700 id=700 data-nosnippet>700</a>            .rsplit_once(<span class="string">':'</span>)
+<a href=#701 id=701 data-nosnippet>701</a>            .unwrap()
+<a href=#702 id=702 data-nosnippet>702</a>            .<span class="number">0</span>;
+<a href=#703 id=703 data-nosnippet>703</a>        <span class="macro">assert_eq!</span>(
+<a href=#704 id=704 data-nosnippet>704</a>            PROVIDER_ID_TOKEN_GRANT_TYPE.rsplit_once(<span class="string">':'</span>).unwrap().<span class="number">0</span>,
+<a href=#705 id=705 data-nosnippet>705</a>            family
+<a href=#706 id=706 data-nosnippet>706</a>        );
+<a href=#707 id=707 data-nosnippet>707</a>        <span class="macro">assert_ne!</span>(
+<a href=#708 id=708 data-nosnippet>708</a>            PROVIDER_ID_TOKEN_GRANT_TYPE,
+<a href=#709 id=709 data-nosnippet>709</a>            <span class="kw">crate</span>::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE
+<a href=#710 id=710 data-nosnippet>710</a>        );
+<a href=#711 id=711 data-nosnippet>711</a>    }
+<a href=#712 id=712 data-nosnippet>712</a>
+<a href=#713 id=713 data-nosnippet>713</a>    <span class="doccomment">/// The gate is the registration's list and nothing else — no default set,
+<a href=#714 id=714 data-nosnippet>714</a>    /// and no near-miss spelling.
+<a href=#715 id=715 data-nosnippet>715</a>    </span><span class="attr">#[test]
+<a href=#716 id=716 data-nosnippet>716</a>    </span><span class="kw">fn </span>the_gate_is_an_exact_entry_in_the_registration() {
+<a href=#717 id=717 data-nosnippet>717</a>        <span class="macro">assert!</span>(holds_provider_id_token_grant(<span class="kw-2">&amp;</span>strings(<span class="kw-2">&amp;</span>[
+<a href=#718 id=718 data-nosnippet>718</a>            <span class="string">"authorization_code"</span>,
+<a href=#719 id=719 data-nosnippet>719</a>            PROVIDER_ID_TOKEN_GRANT_TYPE,
+<a href=#720 id=720 data-nosnippet>720</a>        ])));
+<a href=#721 id=721 data-nosnippet>721</a>        <span class="macro">assert!</span>(!holds_provider_id_token_grant(<span class="kw-2">&amp;</span>strings(<span class="kw-2">&amp;</span>[
+<a href=#722 id=722 data-nosnippet>722</a>            <span class="string">"authorization_code"</span>,
+<a href=#723 id=723 data-nosnippet>723</a>            <span class="string">"refresh_token"</span>,
+<a href=#724 id=724 data-nosnippet>724</a>        ])));
+<a href=#725 id=725 data-nosnippet>725</a>        <span class="macro">assert!</span>(!holds_provider_id_token_grant(<span class="kw-2">&amp;</span>strings(<span class="kw-2">&amp;</span>[
+<a href=#726 id=726 data-nosnippet>726</a>            <span class="kw">crate</span>::token_exchange::TOKEN_EXCHANGE_GRANT_TYPE,
+<a href=#727 id=727 data-nosnippet>727</a>            <span class="kw">crate</span>::token_exchange::MAY_IMPERSONATE_GRANT,
+<a href=#728 id=728 data-nosnippet>728</a>        ])));
+<a href=#729 id=729 data-nosnippet>729</a>        <span class="macro">assert!</span>(!holds_provider_id_token_grant(<span class="kw-2">&amp;</span>strings(<span class="kw-2">&amp;</span>[
+<a href=#730 id=730 data-nosnippet>730</a>            <span class="string">"urn:axiam:params:oauth:grant-type:provider-id-token "</span>,
+<a href=#731 id=731 data-nosnippet>731</a>            <span class="string">"provider-id-token"</span>,
+<a href=#732 id=732 data-nosnippet>732</a>        ])));
+<a href=#733 id=733 data-nosnippet>733</a>        <span class="macro">assert!</span>(!holds_provider_id_token_grant(<span class="kw-2">&amp;</span>[]));
+<a href=#734 id=734 data-nosnippet>734</a>    }
+<a href=#735 id=735 data-nosnippet>735</a>
+<a href=#736 id=736 data-nosnippet>736</a>    <span class="doccomment">/// Each parameter is required by name, and an empty one is absent.
+<a href=#737 id=737 data-nosnippet>737</a>    </span><span class="attr">#[test]
+<a href=#738 id=738 data-nosnippet>738</a>    </span><span class="kw">fn </span>the_three_parameters_are_required() {
+<a href=#739 id=739 data-nosnippet>739</a>        <span class="kw">let </span><span class="kw-2">mut </span>r = request(PROVIDER_ID_TOKEN_GRANT_TYPE);
+<a href=#740 id=740 data-nosnippet>740</a>        r.provider = <span class="prelude-val">Some</span>(<span class="string">"google"</span>.into());
+<a href=#741 id=741 data-nosnippet>741</a>        r.id_token = <span class="prelude-val">Some</span>(<span class="string">"a.b.c"</span>.into());
+<a href=#742 id=742 data-nosnippet>742</a>        r.nonce = <span class="prelude-val">Some</span>(<span class="string">"n-0S6_WzA2Mj"</span>.into());
+<a href=#743 id=743 data-nosnippet>743</a>        <span class="kw">let </span>ok = native_request(<span class="kw-2">&amp;</span>r).unwrap();
+<a href=#744 id=744 data-nosnippet>744</a>        <span class="macro">assert_eq!</span>(
+<a href=#745 id=745 data-nosnippet>745</a>            (ok.provider, ok.id_token, ok.nonce),
+<a href=#746 id=746 data-nosnippet>746</a>            (<span class="string">"google"</span>, <span class="string">"a.b.c"</span>, <span class="string">"n-0S6_WzA2Mj"</span>)
+<a href=#747 id=747 data-nosnippet>747</a>        );
+<a href=#748 id=748 data-nosnippet>748</a>
+<a href=#749 id=749 data-nosnippet>749</a>        <span class="kw">for </span>(name, clear) <span class="kw">in </span>[(<span class="string">"provider"</span>, <span class="number">0usize</span>), (<span class="string">"id_token"</span>, <span class="number">1</span>), (<span class="string">"nonce"</span>, <span class="number">2</span>)] {
+<a href=#750 id=750 data-nosnippet>750</a>            <span class="kw">for </span>value <span class="kw">in </span>[<span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(String::new()), <span class="prelude-val">Some</span>(<span class="string">"  "</span>.to_owned())] {
+<a href=#751 id=751 data-nosnippet>751</a>                <span class="kw">let </span><span class="kw-2">mut </span>r = r.clone_for_test();
+<a href=#752 id=752 data-nosnippet>752</a>                <span class="kw">match </span>clear {
+<a href=#753 id=753 data-nosnippet>753</a>                    <span class="number">0 </span>=&gt; r.provider = value.clone(),
+<a href=#754 id=754 data-nosnippet>754</a>                    <span class="number">1 </span>=&gt; r.id_token = value.clone(),
+<a href=#755 id=755 data-nosnippet>755</a>                    <span class="kw">_ </span>=&gt; r.nonce = value.clone(),
+<a href=#756 id=756 data-nosnippet>756</a>                }
+<a href=#757 id=757 data-nosnippet>757</a>                <span class="kw">match </span>native_request(<span class="kw-2">&amp;</span>r) {
+<a href=#758 id=758 data-nosnippet>758</a>                    <span class="prelude-val">Err</span>(OAuth2Error::InvalidRequest(m)) =&gt; <span class="macro">assert!</span>(m.starts_with(name), <span class="string">"{m}"</span>),
+<a href=#759 id=759 data-nosnippet>759</a>                    other =&gt; <span class="macro">panic!</span>(<span class="string">"{name} = {value:?}: {other:?}"</span>),
+<a href=#760 id=760 data-nosnippet>760</a>                }
+<a href=#761 id=761 data-nosnippet>761</a>            }
+<a href=#762 id=762 data-nosnippet>762</a>        }
+<a href=#763 id=763 data-nosnippet>763</a>    }
+<a href=#764 id=764 data-nosnippet>764</a>
+<a href=#765 id=765 data-nosnippet>765</a>    <span class="doccomment">/// F4-W2-09: the nonce is bounded, inclusively, at [`MAX_NONCE_BYTES`]
+<a href=#766 id=766 data-nosnippet>766</a>    /// bytes, counted in bytes rather than characters.
+<a href=#767 id=767 data-nosnippet>767</a>    </span><span class="attr">#[test]
+<a href=#768 id=768 data-nosnippet>768</a>    </span><span class="kw">fn </span>the_nonce_is_bounded() {
+<a href=#769 id=769 data-nosnippet>769</a>        <span class="kw">let </span><span class="kw-2">mut </span>r = request(PROVIDER_ID_TOKEN_GRANT_TYPE);
+<a href=#770 id=770 data-nosnippet>770</a>        r.provider = <span class="prelude-val">Some</span>(<span class="string">"google"</span>.into());
+<a href=#771 id=771 data-nosnippet>771</a>        r.id_token = <span class="prelude-val">Some</span>(<span class="string">"a.b.c"</span>.into());
+<a href=#772 id=772 data-nosnippet>772</a>        r.nonce = <span class="prelude-val">Some</span>(<span class="string">"n"</span>.repeat(MAX_NONCE_BYTES));
+<a href=#773 id=773 data-nosnippet>773</a>        <span class="macro">assert!</span>(native_request(<span class="kw-2">&amp;</span>r).is_ok(), <span class="string">"the bound itself is accepted"</span>);
+<a href=#774 id=774 data-nosnippet>774</a>        <span class="kw">for </span>long <span class="kw">in </span>[
+<a href=#775 id=775 data-nosnippet>775</a>            <span class="string">"n"</span>.repeat(MAX_NONCE_BYTES + <span class="number">1</span>),
+<a href=#776 id=776 data-nosnippet>776</a>            <span class="comment">// 171 three-byte characters: 513 bytes, 171 characters.
+<a href=#777 id=777 data-nosnippet>777</a>            </span><span class="string">"\u{20ac}"</span>.repeat(<span class="number">171</span>),
+<a href=#778 id=778 data-nosnippet>778</a>        ] {
+<a href=#779 id=779 data-nosnippet>779</a>            r.nonce = <span class="prelude-val">Some</span>(long);
+<a href=#780 id=780 data-nosnippet>780</a>            <span class="kw">match </span>native_request(<span class="kw-2">&amp;</span>r) {
+<a href=#781 id=781 data-nosnippet>781</a>                <span class="prelude-val">Err</span>(OAuth2Error::InvalidRequest(m)) =&gt; <span class="macro">assert!</span>(m.starts_with(<span class="string">"nonce"</span>), <span class="string">"{m}"</span>),
+<a href=#782 id=782 data-nosnippet>782</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"an over-long nonce: {other:?}"</span>),
+<a href=#783 id=783 data-nosnippet>783</a>            }
+<a href=#784 id=784 data-nosnippet>784</a>        }
+<a href=#785 id=785 data-nosnippet>785</a>    }
+<a href=#786 id=786 data-nosnippet>786</a>
+<a href=#787 id=787 data-nosnippet>787</a>    <span class="doccomment">/// The tenant's sensitive-scope switch is answered as `invalid_scope`, in
+<a href=#788 id=788 data-nosnippet>788</a>    /// the words `decide_consent` uses.
+<a href=#789 id=789 data-nosnippet>789</a>    </span><span class="attr">#[test]
+<a href=#790 id=790 data-nosnippet>790</a>    </span><span class="kw">fn </span>a_switched_off_sensitive_scope_is_invalid_scope_up_front() {
+<a href=#791 id=791 data-nosnippet>791</a>        <span class="macro">assert!</span>(refuse_switched_off_sensitive_scopes(<span class="bool-val">false</span>).is_ok());
+<a href=#792 id=792 data-nosnippet>792</a>        <span class="kw">let </span>early = refuse_switched_off_sensitive_scopes(<span class="bool-val">true</span>).unwrap_err();
+<a href=#793 id=793 data-nosnippet>793</a>        <span class="kw">let </span>late = decide_consent(ConsentState {
+<a href=#794 id=794 data-nosnippet>794</a>            sensitive: Sensitive::Disabled,
+<a href=#795 id=795 data-nosnippet>795</a>            sensitive_switch_off: <span class="bool-val">true</span>,
+<a href=#796 id=796 data-nosnippet>796</a>            external: External::NotApplicable,
+<a href=#797 id=797 data-nosnippet>797</a>        })
+<a href=#798 id=798 data-nosnippet>798</a>        .unwrap_err();
+<a href=#799 id=799 data-nosnippet>799</a>        <span class="macro">assert_eq!</span>(early.to_string(), late.to_string());
+<a href=#800 id=800 data-nosnippet>800</a>        <span class="macro">assert_eq!</span>(early.error_code(), <span class="string">"invalid_scope"</span>);
+<a href=#801 id=801 data-nosnippet>801</a>    }
+<a href=#802 id=802 data-nosnippet>802</a>
+<a href=#803 id=803 data-nosnippet>803</a>    <span class="doccomment">/// The issued scopes are the request within the registration; a scope
+<a href=#804 id=804 data-nosnippet>804</a>    /// outside it is refused by name, never silently dropped.
+<a href=#805 id=805 data-nosnippet>805</a>    </span><span class="attr">#[test]
+<a href=#806 id=806 data-nosnippet>806</a>    </span><span class="kw">fn </span>scopes_are_the_request_within_the_registration() {
+<a href=#807 id=807 data-nosnippet>807</a>        <span class="kw">let </span>registered = strings(<span class="kw-2">&amp;</span>[<span class="string">"openid"</span>, <span class="string">"profile"</span>, <span class="string">"email"</span>, <span class="string">"read:orders"</span>]);
+<a href=#808 id=808 data-nosnippet>808</a>        <span class="macro">assert_eq!</span>(
+<a href=#809 id=809 data-nosnippet>809</a>            requested_scopes(<span class="prelude-val">Some</span>(<span class="string">"openid profile openid"</span>), <span class="kw-2">&amp;</span>registered).unwrap(),
+<a href=#810 id=810 data-nosnippet>810</a>            strings(<span class="kw-2">&amp;</span>[<span class="string">"openid"</span>, <span class="string">"profile"</span>])
+<a href=#811 id=811 data-nosnippet>811</a>        );
+<a href=#812 id=812 data-nosnippet>812</a>        <span class="macro">assert!</span>(requested_scopes(<span class="prelude-val">None</span>, <span class="kw-2">&amp;</span>registered).unwrap().is_empty());
+<a href=#813 id=813 data-nosnippet>813</a>        <span class="macro">assert!</span>(
+<a href=#814 id=814 data-nosnippet>814</a>            requested_scopes(<span class="prelude-val">Some</span>(<span class="string">"   "</span>), <span class="kw-2">&amp;</span>registered)
+<a href=#815 id=815 data-nosnippet>815</a>                .unwrap()
+<a href=#816 id=816 data-nosnippet>816</a>                .is_empty()
+<a href=#817 id=817 data-nosnippet>817</a>        );
+<a href=#818 id=818 data-nosnippet>818</a>        <span class="kw">match </span>requested_scopes(<span class="prelude-val">Some</span>(<span class="string">"openid admin:all phone"</span>), <span class="kw-2">&amp;</span>registered) {
+<a href=#819 id=819 data-nosnippet>819</a>            <span class="prelude-val">Err</span>(OAuth2Error::InvalidScope(m)) =&gt; {
+<a href=#820 id=820 data-nosnippet>820</a>                <span class="macro">assert_eq!</span>(m, <span class="string">"unregistered scopes: admin:all, phone"</span>);
+<a href=#821 id=821 data-nosnippet>821</a>            }
+<a href=#822 id=822 data-nosnippet>822</a>            other =&gt; <span class="macro">panic!</span>(<span class="string">"{other:?}"</span>),
+<a href=#823 id=823 data-nosnippet>823</a>        }
+<a href=#824 id=824 data-nosnippet>824</a>    }
+<a href=#825 id=825 data-nosnippet>825</a>
+<a href=#826 id=826 data-nosnippet>826</a>    <span class="doccomment">/// An administrator's client asking for nothing sensitive proceeds, and
+<a href=#827 id=827 data-nosnippet>827</a>    /// so does a recorded consent.
+<a href=#828 id=828 data-nosnippet>828</a>    </span><span class="attr">#[test]
+<a href=#829 id=829 data-nosnippet>829</a>    </span><span class="kw">fn </span>what_needs_no_ceremony_proceeds() {
+<a href=#830 id=830 data-nosnippet>830</a>        <span class="macro">assert!</span>(decide_consent(ConsentState::default()).is_ok());
+<a href=#831 id=831 data-nosnippet>831</a>        <span class="macro">assert!</span>(
+<a href=#832 id=832 data-nosnippet>832</a>            decide_consent(ConsentState {
+<a href=#833 id=833 data-nosnippet>833</a>                sensitive: Sensitive::Consented,
+<a href=#834 id=834 data-nosnippet>834</a>                sensitive_switch_off: <span class="bool-val">false</span>,
+<a href=#835 id=835 data-nosnippet>835</a>                external: External::Consented,
+<a href=#836 id=836 data-nosnippet>836</a>            })
+<a href=#837 id=837 data-nosnippet>837</a>            .is_ok()
+<a href=#838 id=838 data-nosnippet>838</a>        );
+<a href=#839 id=839 data-nosnippet>839</a>    }
+<a href=#840 id=840 data-nosnippet>840</a>
+<a href=#841 id=841 data-nosnippet>841</a>    <span class="doccomment">/// D-N6: whatever would need the consent screen is `consent_required`.
+<a href=#842 id=842 data-nosnippet>842</a>    </span><span class="attr">#[test]
+<a href=#843 id=843 data-nosnippet>843</a>    </span><span class="kw">fn </span>a_scope_that_needs_a_ceremony_is_consent_required() {
+<a href=#844 id=844 data-nosnippet>844</a>        <span class="kw">for </span>state <span class="kw">in </span>[
+<a href=#845 id=845 data-nosnippet>845</a>            ConsentState {
+<a href=#846 id=846 data-nosnippet>846</a>                sensitive: Sensitive::ConsentMissing,
+<a href=#847 id=847 data-nosnippet>847</a>                ..ConsentState::default()
+<a href=#848 id=848 data-nosnippet>848</a>            },
+<a href=#849 id=849 data-nosnippet>849</a>            ConsentState {
+<a href=#850 id=850 data-nosnippet>850</a>                external: External::ConsentMissing,
+<a href=#851 id=851 data-nosnippet>851</a>                ..ConsentState::default()
+<a href=#852 id=852 data-nosnippet>852</a>            },
+<a href=#853 id=853 data-nosnippet>853</a>            ConsentState {
+<a href=#854 id=854 data-nosnippet>854</a>                sensitive: Sensitive::Consented,
+<a href=#855 id=855 data-nosnippet>855</a>                sensitive_switch_off: <span class="bool-val">false</span>,
+<a href=#856 id=856 data-nosnippet>856</a>                external: External::ConsentMissing,
+<a href=#857 id=857 data-nosnippet>857</a>            },
+<a href=#858 id=858 data-nosnippet>858</a>        ] {
+<a href=#859 id=859 data-nosnippet>859</a>            <span class="kw">let </span>e = decide_consent(state).unwrap_err();
+<a href=#860 id=860 data-nosnippet>860</a>            <span class="macro">assert_eq!</span>(e.error_code(), <span class="string">"consent_required"</span>, <span class="string">"{state:?}"</span>);
+<a href=#861 id=861 data-nosnippet>861</a>        }
+<a href=#862 id=862 data-nosnippet>862</a>    }
+<a href=#863 id=863 data-nosnippet>863</a>
+<a href=#864 id=864 data-nosnippet>864</a>    <span class="doccomment">/// The operator's switch outranks consent, here as at `/authorize`.
+<a href=#865 id=865 data-nosnippet>865</a>    </span><span class="attr">#[test]
+<a href=#866 id=866 data-nosnippet>866</a>    </span><span class="kw">fn </span>the_sensitive_switch_outranks_everything() {
+<a href=#867 id=867 data-nosnippet>867</a>        <span class="kw">for </span>sensitive <span class="kw">in </span>[Sensitive::Disabled, Sensitive::Consented] {
+<a href=#868 id=868 data-nosnippet>868</a>            <span class="kw">let </span>e = decide_consent(ConsentState {
+<a href=#869 id=869 data-nosnippet>869</a>                sensitive,
+<a href=#870 id=870 data-nosnippet>870</a>                sensitive_switch_off: <span class="bool-val">true</span>,
+<a href=#871 id=871 data-nosnippet>871</a>                external: External::NotApplicable,
+<a href=#872 id=872 data-nosnippet>872</a>            })
+<a href=#873 id=873 data-nosnippet>873</a>            .unwrap_err();
+<a href=#874 id=874 data-nosnippet>874</a>            <span class="macro">assert_eq!</span>(e.error_code(), <span class="string">"invalid_scope"</span>, <span class="string">"{sensitive:?}"</span>);
+<a href=#875 id=875 data-nosnippet>875</a>        }
+<a href=#876 id=876 data-nosnippet>876</a>    }
+<a href=#877 id=877 data-nosnippet>877</a>
+<a href=#878 id=878 data-nosnippet>878</a>    <span class="doccomment">/// Every refusal about the token or the configuration is one wire answer;
+<a href=#879 id=879 data-nosnippet>879</a>    /// only a datastore failure differs, and it names nothing either.
+<a href=#880 id=880 data-nosnippet>880</a>    </span><span class="attr">#[test]
+<a href=#881 id=881 data-nosnippet>881</a>    </span><span class="kw">fn </span>every_token_refusal_is_one_generic_invalid_grant() {
+<a href=#882 id=882 data-nosnippet>882</a>        <span class="kw">let </span>token_or_config = [
+<a href=#883 id=883 data-nosnippet>883</a>            NativeLoginError::ProviderNotFound,
+<a href=#884 id=884 data-nosnippet>884</a>            NativeLoginError::ProviderUnavailable(<span class="string">"dns"</span>.into()),
+<a href=#885 id=885 data-nosnippet>885</a>            NativeLoginError::AlgorithmRefused,
+<a href=#886 id=886 data-nosnippet>886</a>            NativeLoginError::UnknownKey,
+<a href=#887 id=887 data-nosnippet>887</a>            NativeLoginError::KeysUnavailable(<span class="string">"timeout"</span>.into()),
+<a href=#888 id=888 data-nosnippet>888</a>            NativeLoginError::BadSignature,
+<a href=#889 id=889 data-nosnippet>889</a>            NativeLoginError::WrongIssuer,
+<a href=#890 id=890 data-nosnippet>890</a>            NativeLoginError::WrongAudience,
+<a href=#891 id=891 data-nosnippet>891</a>            NativeLoginError::AuthorizedPartyRefused,
+<a href=#892 id=892 data-nosnippet>892</a>            NativeLoginError::Expired,
+<a href=#893 id=893 data-nosnippet>893</a>            NativeLoginError::TooOld,
+<a href=#894 id=894 data-nosnippet>894</a>            NativeLoginError::IssuedInFuture,
+<a href=#895 id=895 data-nosnippet>895</a>            NativeLoginError::ClaimRejected(<span class="string">"sub"</span>.into()),
+<a href=#896 id=896 data-nosnippet>896</a>            NativeLoginError::WrongTokenShape(<span class="string">"at+jwt"</span>.into()),
+<a href=#897 id=897 data-nosnippet>897</a>            NativeLoginError::NonceMissing,
+<a href=#898 id=898 data-nosnippet>898</a>            NativeLoginError::NonceMismatch,
+<a href=#899 id=899 data-nosnippet>899</a>            NativeLoginError::Replayed,
+<a href=#900 id=900 data-nosnippet>900</a>            NativeLoginError::SubjectUnmapped,
+<a href=#901 id=901 data-nosnippet>901</a>            NativeLoginError::AccountRefused(<span class="string">"locked"</span>.into()),
+<a href=#902 id=902 data-nosnippet>902</a>        ];
+<a href=#903 id=903 data-nosnippet>903</a>        <span class="kw">for </span>e <span class="kw">in </span><span class="kw-2">&amp;</span>token_or_config {
+<a href=#904 id=904 data-nosnippet>904</a>            <span class="kw">match </span>refusal_for(e) {
+<a href=#905 id=905 data-nosnippet>905</a>                OAuth2Error::InvalidGrant(m) =&gt; <span class="macro">assert_eq!</span>(m, PUBLIC_REFUSAL_DESCRIPTION, <span class="string">"{e:?}"</span>),
+<a href=#906 id=906 data-nosnippet>906</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"{e:?} -&gt; {other:?}"</span>),
+<a href=#907 id=907 data-nosnippet>907</a>            }
+<a href=#908 id=908 data-nosnippet>908</a>        }
+<a href=#909 id=909 data-nosnippet>909</a>        <span class="kw">for </span>e <span class="kw">in </span>[
+<a href=#910 id=910 data-nosnippet>910</a>            NativeLoginError::ReplayGuardUnavailable(<span class="string">"db down"</span>.into()),
+<a href=#911 id=911 data-nosnippet>911</a>            NativeLoginError::Server(<span class="string">"db down"</span>.into()),
+<a href=#912 id=912 data-nosnippet>912</a>        ] {
+<a href=#913 id=913 data-nosnippet>913</a>            <span class="kw">match </span>refusal_for(<span class="kw-2">&amp;</span>e) {
+<a href=#914 id=914 data-nosnippet>914</a>                OAuth2Error::ServerError(m) =&gt; {
+<a href=#915 id=915 data-nosnippet>915</a>                    <span class="macro">assert_eq!</span>(m, SERVER_REFUSAL_DESCRIPTION);
+<a href=#916 id=916 data-nosnippet>916</a>                    <span class="macro">assert!</span>(!m.contains(<span class="string">"db down"</span>), <span class="string">"the detail stays in the log"</span>);
+<a href=#917 id=917 data-nosnippet>917</a>                }
+<a href=#918 id=918 data-nosnippet>918</a>                other =&gt; <span class="macro">panic!</span>(<span class="string">"{e:?} -&gt; {other:?}"</span>),
+<a href=#919 id=919 data-nosnippet>919</a>            }
+<a href=#920 id=920 data-nosnippet>920</a>        }
+<a href=#921 id=921 data-nosnippet>921</a>    }
+<a href=#922 id=922 data-nosnippet>922</a>
+<a href=#923 id=923 data-nosnippet>923</a>    <span class="doccomment">/// The audit action is in the `federation.` family and within the action
+<a href=#924 id=924 data-nosnippet>924</a>    /// grammar the audit ingestion enforces.
+<a href=#925 id=925 data-nosnippet>925</a>    </span><span class="attr">#[test]
+<a href=#926 id=926 data-nosnippet>926</a>    </span><span class="kw">fn </span>the_audit_action_is_a_federation_action() {
+<a href=#927 id=927 data-nosnippet>927</a>        <span class="macro">assert_eq!</span>(NATIVE_LOGIN_AUDIT_ACTION, <span class="string">"federation.native_login"</span>);
+<a href=#928 id=928 data-nosnippet>928</a>        <span class="macro">assert!</span>(axiam_core::models::audit::is_valid_audit_action(
+<a href=#929 id=929 data-nosnippet>929</a>            NATIVE_LOGIN_AUDIT_ACTION
+<a href=#930 id=930 data-nosnippet>930</a>        ));
+<a href=#931 id=931 data-nosnippet>931</a>        <span class="macro">assert!</span>(
+<a href=#932 id=932 data-nosnippet>932</a>            axiam_core::models::audit::reserved_action_namespace(NATIVE_LOGIN_AUDIT_ACTION)
+<a href=#933 id=933 data-nosnippet>933</a>                .is_none()
+<a href=#934 id=934 data-nosnippet>934</a>        );
+<a href=#935 id=935 data-nosnippet>935</a>    }
+<a href=#936 id=936 data-nosnippet>936</a>
+<a href=#937 id=937 data-nosnippet>937</a>    <span class="kw">impl </span>TokenRequest {
+<a href=#938 id=938 data-nosnippet>938</a>        <span class="kw">fn </span>clone_for_test(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
+<a href=#939 id=939 data-nosnippet>939</a>            <span class="kw">let </span><span class="kw-2">mut </span>r = request(<span class="kw-2">&amp;</span><span class="self">self</span>.grant_type);
+<a href=#940 id=940 data-nosnippet>940</a>            r.provider = <span class="self">self</span>.provider.clone();
+<a href=#941 id=941 data-nosnippet>941</a>            r.id_token = <span class="self">self</span>.id_token.clone();
+<a href=#942 id=942 data-nosnippet>942</a>            r.nonce = <span class="self">self</span>.nonce.clone();
+<a href=#943 id=943 data-nosnippet>943</a>            r
+<a href=#944 id=944 data-nosnippet>944</a>        }
+<a href=#945 id=945 data-nosnippet>945</a>    }
+<a href=#946 id=946 data-nosnippet>946</a>}
+</code></pre></div></section></main></body></html>

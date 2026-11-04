@@ -1,0 +1,823 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-federation/src/native_login.rs`."><title>native_login.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_federation" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_federation/</div>native_login.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! G-A — a provider-issued **ID token**, presented by a native app, verified
+<a href=#2 id=2 data-nosnippet>2</a>//! as a sign-in.
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! Design: `claude_dev/social-login-gap-plan-2026-10-30.md` §3.1. The rule
+<a href=#5 id=5 data-nosnippet>5</a>//! every function here applies:
+<a href=#6 id=6 data-nosnippet>6</a>//!
+<a href=#7 id=7 data-nosnippet>7</a>//! &gt; **An ID token is accepted as a sign-in only when it was issued to us.**
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! "Us" is one of the client IDs an operator listed in the provider's
+<a href=#10 id=10 data-nosnippet>10</a>//! `native_login.client_ids` for exactly this purpose — not the provider's web
+<a href=#11 id=11 data-nosnippet>11</a>//! `client_id` unless it is listed, and never "any audience". The party a
+<a href=#12 id=12 data-nosnippet>12</a>//! token was issued to is its `azp` when it carries one, otherwise its single
+<a href=#13 id=13 data-nosnippet>13</a>//! `aud` (D-N17, see [`issued_to`]).
+<a href=#14 id=14 data-nosnippet>14</a>//!
+<a href=#15 id=15 data-nosnippet>15</a>//! This module answers one question: *which AXIAM user does this ID token
+<a href=#16 id=16 data-nosnippet>16</a>//! prove signed in, through which provider?* The grant that turns the answer
+<a href=#17 id=17 data-nosnippet>17</a>//! into a token set lives in `axiam-oauth2` (W2.3).
+<a href=#18 id=18 data-nosnippet>18</a>//!
+<a href=#19 id=19 data-nosnippet>19</a>//! # The order is the design
+<a href=#20 id=20 data-nosnippet>20</a>//!
+<a href=#21 id=21 data-nosnippet>21</a>//! [`OidcFederationService::verify_native_id_token`] runs these steps in this
+<a href=#22 id=22 data-nosnippet>22</a>//! order, each before the next (step 1, client authentication and the grant
+<a href=#23 id=23 data-nosnippet>23</a>//! gate, is the token endpoint's):
+<a href=#24 id=24 data-nosnippet>24</a>//!
+<a href=#25 id=25 data-nosnippet>25</a>//! 2. **Provider**: the request's `provider` (UUID or `provider_slug`) names
+<a href=#26 id=26 data-nosnippet>26</a>//!    an *effective* provider of the requesting tenant — its own, or inherited
+<a href=#27 id=27 data-nosnippet>27</a>//!    from its organization, exactly as the browser login's provider listing
+<a href=#28 id=28 data-nosnippet>28</a>//!    resolves it ([`crate::provider_resolution`]) — that is enabled, speaks
+<a href=#29 id=29 data-nosnippet>29</a>//!    OIDC and has `native_login.enabled`. A provider of another tenant is not
+<a href=#30 id=30 data-nosnippet>30</a>//!    found.
+<a href=#31 id=31 data-nosnippet>31</a>//! 3. **Header**: `alg=none` refused on the raw header, `alg` within the
+<a href=#32 id=32 data-nosnippet>32</a>//!    provider's `allowed_algorithms`, `kid` resolved through the JWKS cache
+<a href=#33 id=33 data-nosnippet>33</a>//!    with its rate-limited rollover refetch — no new fetch surface.
+<a href=#34 id=34 data-nosnippet>34</a>//! 4. **Signature and claims**, through the browser login's own verification
+<a href=#35 id=35 data-nosnippet>35</a>//!    core: `iss` exactly the discovered issuer; the token issued to a listed
+<a href=#36 id=36 data-nosnippet>36</a>//!    client ID, **azp-first** (D-N17): a listed `azp`, with `aud` (string or
+<a href=#37 id=37 data-nosnippet>37</a>//!    array) containing a listed ID or the provider's web `client_id` — the
+<a href=#38 id=38 data-nosnippet>38</a>//!    shape of Google's Android tokens — or, with no `azp`, a single listed
+<a href=#39 id=39 data-nosnippet>39</a>//!    `aud` (several audiences need an `azp`, OIDC Core §3.1.3.7); `exp` in
+<a href=#40 id=40 data-nosnippet>40</a>//!    the future within the 60 s leeway (D-05); `iat` neither older than
+<a href=#41 id=41 data-nosnippet>41</a>//!    `max_token_age_secs` nor in the future beyond the leeway.
+<a href=#42 id=42 data-nosnippet>42</a>//! 5. **Shape**: an ID token and nothing else — `nonce` present and equal, in
+<a href=#43 id=43 data-nosnippet>43</a>//!    constant time, to the SHA-256 hex of the request's nonce, the claim's
+<a href=#44 id=44 data-nosnippet>44</a>//!    hex letters compared without regard to case (D-N16, D-N21; the app gives
+<a href=#45 id=45 data-nosnippet>45</a>//!    the provider SDK the hash and AXIAM the raw value); an access-token
+<a href=#46 id=46 data-nosnippet>46</a>//!    `typ` (`at+jwt`) refused. The marker list is [`crate::token_shape`]'s,
+<a href=#47 id=47 data-nosnippet>47</a>//!    the same one X4 refuses by.
+<a href=#48 id=48 data-nosnippet>48</a>//! 6. **Replay**: the SHA-256 of the token's JWS signing input (the bytes
+<a href=#49 id=49 data-nosnippet>49</a>//!    before its second `.`) recorded in the replay store under its issuer,
+<a href=#50 id=50 data-nosnippet>50</a>//!    deployment-wide (D-N19), until `exp` plus twice the leeway; a second
+<a href=#51 id=51 data-nosnippet>51</a>//!    presentation through any tenant or configuration is refused, and a store
+<a href=#52 id=52 data-nosnippet>52</a>//!    that cannot record refuses too.
+<a href=#53 id=53 data-nosnippet>53</a>//! 7. **Subject**: the browser login's resolution, unchanged —
+<a href=#54 id=54 data-nosnippet>54</a>//!    `map_identity(provider_kind, attribute_map, claims)` and then
+<a href=#55 id=55 data-nosnippet>55</a>//!    `provision_or_link_identity`, provisioning on first sign-in, adopting no
+<a href=#56 id=56 data-nosnippet>56</a>//!    email as verified; then `account_may_act`. A first sign-in whose mapped
+<a href=#57 id=57 data-nosnippet>57</a>//!    username or email another account holds is the generic refusal
+<a href=#58 id=58 data-nosnippet>58</a>//!    (`provisioning_conflict`), not a server error (F4-W2-10).
+<a href=#59 id=59 data-nosnippet>59</a>//!
+<a href=#60 id=60 data-nosnippet>60</a>//! # Why the replay guard sits where it does
+<a href=#61 id=61 data-nosnippet>61</a>//!
+<a href=#62 id=62 data-nosnippet>62</a>//! The store is keyed on the SHA-256 of the token's **signing input** —
+<a href=#63 id=63 data-nosnippet>63</a>//! `base64url(header) "." base64url(payload)`, the exact bytes before the
+<a href=#64 id=64 data-nosnippet>64</a>//! second `.`, which the signature covers — and a row is written only once
+<a href=#65 id=65 data-nosnippet>65</a>//! steps 2–5 have all passed.
+<a href=#66 id=66 data-nosnippet>66</a>//!
+<a href=#67 id=67 data-nosnippet>67</a>//! The signature part is left out of the key on purpose (F4-W2-11). An
+<a href=#68 id=68 data-nosnippet>68</a>//! ECDSA signature has a second valid encoding (`s` → `n − s`), so an
+<a href=#69 id=69 data-nosnippet>69</a>//! ES256/ES384 token has two compact strings that both verify; hashing the
+<a href=#70 id=70 data-nosnippet>70</a>//! whole string recorded them as two tokens and let one be spent twice. The
+<a href=#71 id=71 data-nosnippet>71</a>//! signing input has one spelling per token: changing a byte of it breaks the
+<a href=#72 id=72 data-nosnippet>72</a>//! signature. That covers any malleable algorithm, not only ECDSA.
+<a href=#73 id=73 data-nosnippet>73</a>//!
+<a href=#74 id=74 data-nosnippet>74</a>//! * **Not before the signature (step 4).** Then anyone could write rows: a
+<a href=#75 id=75 data-nosnippet>75</a>//!   stream of garbage tokens would fill the table. A forged token can never
+<a href=#76 id=76 data-nosnippet>76</a>//!   take a genuine token's slot either way — its signed bytes, and so its
+<a href=#77 id=77 data-nosnippet>77</a>//!   hash, differ — but only a verified token, one the provider really issued to a
+<a href=#78 id=78 data-nosnippet>78</a>//!   listed client ID, is ever recorded.
+<a href=#79 id=79 data-nosnippet>79</a>//! * **Not before the nonce (step 5).** Then someone who obtained a victim's
+<a href=#80 id=80 data-nosnippet>80</a>//!   genuine token without the nonce it is bound to (from a log, a proxy, a
+<a href=#81 id=81 data-nosnippet>81</a>//!   crash report) could present it, fail the nonce check *after* burning its
+<a href=#82 id=82 data-nosnippet>82</a>//!   hash, and turn the victim's own sign-in into a "replay". Recorded after
+<a href=#83 id=83 data-nosnippet>83</a>//!   step 5, only a presenter holding both the token and its raw nonce — the
+<a href=#84 id=84 data-nosnippet>84</a>//!   app that started the sign-in — can spend it. That holds because the
+<a href=#85 id=85 data-nosnippet>85</a>//!   token carries only the nonce's SHA-256 (D-N16): the claim a token holder
+<a href=#86 id=86 data-nosnippet>86</a>//!   can read from the payload is not the value the request must carry. When
+<a href=#87 id=87 data-nosnippet>87</a>//!   the claim itself was accepted too, copying it passed (F4-W2-02).
+<a href=#88 id=88 data-nosnippet>88</a>//! * **Not after subject resolution (step 7).** Then two concurrent
+<a href=#89 id=89 data-nosnippet>89</a>//!   presentations would both resolve, and both sign in, before either
+<a href=#90 id=90 data-nosnippet>90</a>//!   recorded. The insert is the one atomic decision (a UNIQUE index), placed
+<a href=#91 id=91 data-nosnippet>91</a>//!   after everything that proves the presentation genuine and before anything
+<a href=#92 id=92 data-nosnippet>92</a>//!   that acts on it.
+<a href=#93 id=93 data-nosnippet>93</a>//!
+<a href=#94 id=94 data-nosnippet>94</a>//! # What the caller learns
+<a href=#95 id=95 data-nosnippet>95</a>//!
+<a href=#96 id=96 data-nosnippet>96</a>//! Every refusal past step 2 is one generic answer on the wire (the X4 rule:
+<a href=#97 id=97 data-nosnippet>97</a>//! a wrong token and a wrong configuration are told apart only in the server
+<a href=#98 id=98 data-nosnippet>98</a>//! log); [`NativeLoginError`] keeps the distinctions for logs, audit and tests.
+<a href=#99 id=99 data-nosnippet>99</a>//! The raw token is never logged, never stored, never returned.
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a></span><span class="kw">use </span>axiam_core::error::AxiamError;
+<a href=#102 id=102 data-nosnippet>102</a><span class="kw">use </span>axiam_core::models::federation::{FederationConfig, FederationProtocol, ProviderKind};
+<a href=#103 id=103 data-nosnippet>103</a><span class="kw">use </span>axiam_core::models::federation_claims::map_identity;
+<a href=#104 id=104 data-nosnippet>104</a><span class="kw">use </span>axiam_core::repository::{
+<a href=#105 id=105 data-nosnippet>105</a>    FederationConfigRepository, FederationLinkRepository, ProviderIdTokenReplayRepository,
+<a href=#106 id=106 data-nosnippet>106</a>    TenantRepository, UserRepository,
+<a href=#107 id=107 data-nosnippet>107</a>};
+<a href=#108 id=108 data-nosnippet>108</a><span class="kw">use </span>sha2::{Digest, Sha256};
+<a href=#109 id=109 data-nosnippet>109</a><span class="kw">use </span>subtle::ConstantTimeEq;
+<a href=#110 id=110 data-nosnippet>110</a><span class="kw">use </span>tracing::{debug, info, warn};
+<a href=#111 id=111 data-nosnippet>111</a><span class="kw">use </span>uuid::Uuid;
+<a href=#112 id=112 data-nosnippet>112</a>
+<a href=#113 id=113 data-nosnippet>113</a><span class="kw">use </span><span class="kw">crate</span>::error::FederationError;
+<a href=#114 id=114 data-nosnippet>114</a><span class="kw">use </span><span class="kw">crate</span>::oidc::{
+<a href=#115 id=115 data-nosnippet>115</a>    CLOCK_SKEW_LEEWAY_SECS, IdTokenCheckError, OidcFederationService, upstream_instant,
+<a href=#116 id=116 data-nosnippet>116</a>};
+<a href=#117 id=117 data-nosnippet>117</a><span class="kw">use </span><span class="kw">crate</span>::provider_resolution::effective_providers;
+<a href=#118 id=118 data-nosnippet>118</a><span class="kw">use </span><span class="kw">crate</span>::token_exchange::flatten_audience;
+<a href=#119 id=119 data-nosnippet>119</a><span class="kw">use </span><span class="kw">crate</span>::token_shape;
+<a href=#120 id=120 data-nosnippet>120</a>
+<a href=#121 id=121 data-nosnippet>121</a><span class="doccomment">/// The one description a client is given for any refusal (OAuth2
+<a href=#122 id=122 data-nosnippet>122</a>/// `invalid_grant`). Deliberately says nothing about which check failed.
+<a href=#123 id=123 data-nosnippet>123</a></span><span class="kw">pub const </span>PUBLIC_REFUSAL_DESCRIPTION: <span class="kw-2">&amp;</span>str = <span class="string">"the provider ID token is not acceptable"</span>;
+<a href=#124 id=124 data-nosnippet>124</a>
+<a href=#125 id=125 data-nosnippet>125</a><span class="doccomment">/// The ID-token marker this path requires. It is the first of the shared
+<a href=#126 id=126 data-nosnippet>126</a>/// list X4 refuses by; [`tests::native_requires_a_marker_x4_refuses`] holds
+<a href=#127 id=127 data-nosnippet>127</a>/// the two together.
+<a href=#128 id=128 data-nosnippet>128</a></span><span class="kw">const </span>REQUIRED_MARKER: <span class="kw-2">&amp;</span>str = <span class="string">"nonce"</span>;
+<a href=#129 id=129 data-nosnippet>129</a>
+<a href=#130 id=130 data-nosnippet>130</a><span class="doccomment">/// A native sign-in request, as the token endpoint received it.
+<a href=#131 id=131 data-nosnippet>131</a>///
+<a href=#132 id=132 data-nosnippet>132</a>/// Holds the token by reference only; nothing here is retained.
+<a href=#133 id=133 data-nosnippet>133</a></span><span class="attr">#[derive(Clone, Copy)]
+<a href=#134 id=134 data-nosnippet>134</a></span><span class="kw">pub struct </span>NativeIdTokenRequest&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="doccomment">/// The provider: its UUID, or its `provider_slug`.
+<a href=#136 id=136 data-nosnippet>136</a>    </span><span class="kw">pub </span>provider: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str,
+<a href=#137 id=137 data-nosnippet>137</a>    <span class="doccomment">/// The ID token the provider issued to the app.
+<a href=#138 id=138 data-nosnippet>138</a>    </span><span class="kw">pub </span>id_token: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str,
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="doccomment">/// The raw nonce the app generated. The provider's SDK was given its
+<a href=#140 id=140 data-nosnippet>140</a>    /// SHA-256 hex (lower case by convention, upper case accepted — D-N21),
+<a href=#141 id=141 data-nosnippet>141</a>    /// which is what the token's `nonce` claim holds.
+<a href=#142 id=142 data-nosnippet>142</a>    </span><span class="kw">pub </span>nonce: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>str,
+<a href=#143 id=143 data-nosnippet>143</a>}
+<a href=#144 id=144 data-nosnippet>144</a>
+<a href=#145 id=145 data-nosnippet>145</a><span class="kw">impl </span>std::fmt::Debug <span class="kw">for </span>NativeIdTokenRequest&lt;<span class="lifetime">'_</span>&gt; {
+<a href=#146 id=146 data-nosnippet>146</a>    <span class="comment">// Never the token, never the nonce.
+<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#148 id=148 data-nosnippet>148</a>        f.debug_struct(<span class="string">"NativeIdTokenRequest"</span>)
+<a href=#149 id=149 data-nosnippet>149</a>            .field(<span class="string">"provider"</span>, <span class="kw-2">&amp;</span><span class="self">self</span>.provider)
+<a href=#150 id=150 data-nosnippet>150</a>            .finish_non_exhaustive()
+<a href=#151 id=151 data-nosnippet>151</a>    }
+<a href=#152 id=152 data-nosnippet>152</a>}
+<a href=#153 id=153 data-nosnippet>153</a>
+<a href=#154 id=154 data-nosnippet>154</a><span class="doccomment">/// What a verified native sign-in established. Sibling of
+<a href=#155 id=155 data-nosnippet>155</a>/// [`crate::token_exchange::ExternalSubject`]. Carries no token.
+<a href=#156 id=156 data-nosnippet>156</a></span><span class="attr">#[derive(Debug, Clone)]
+<a href=#157 id=157 data-nosnippet>157</a></span><span class="kw">pub struct </span>NativeSubject {
+<a href=#158 id=158 data-nosnippet>158</a>    <span class="doccomment">/// The AXIAM user signed in, in the requesting tenant.
+<a href=#159 id=159 data-nosnippet>159</a>    </span><span class="kw">pub </span>user_id: Uuid,
+<a href=#160 id=160 data-nosnippet>160</a>    <span class="doccomment">/// The requesting tenant — where the user lives.
+<a href=#161 id=161 data-nosnippet>161</a>    </span><span class="kw">pub </span>tenant_id: Uuid,
+<a href=#162 id=162 data-nosnippet>162</a>    <span class="doccomment">/// The federation provider that issued the ID token.
+<a href=#163 id=163 data-nosnippet>163</a>    </span><span class="kw">pub </span>provider_id: Uuid,
+<a href=#164 id=164 data-nosnippet>164</a>    <span class="doccomment">/// The tenant that owns the provider: the requesting tenant, or its
+<a href=#165 id=165 data-nosnippet>165</a>    /// organization tenant when the provider is inherited.
+<a href=#166 id=166 data-nosnippet>166</a>    </span><span class="kw">pub </span>provider_tenant_id: Uuid,
+<a href=#167 id=167 data-nosnippet>167</a>    <span class="doccomment">/// Whether the provider is inherited from the organization.
+<a href=#168 id=168 data-nosnippet>168</a>    </span><span class="kw">pub </span>inherited: bool,
+<a href=#169 id=169 data-nosnippet>169</a>    <span class="doccomment">/// The provider's display name, for the audit record.
+<a href=#170 id=170 data-nosnippet>170</a>    </span><span class="kw">pub </span>provider_name: String,
+<a href=#171 id=171 data-nosnippet>171</a>    <span class="doccomment">/// The provider's kind, for the audit record.
+<a href=#172 id=172 data-nosnippet>172</a>    </span><span class="kw">pub </span>provider_kind: ProviderKind,
+<a href=#173 id=173 data-nosnippet>173</a>    <span class="doccomment">/// The verified issuer, exactly as the token spelled it.
+<a href=#174 id=174 data-nosnippet>174</a>    </span><span class="kw">pub </span>issuer: String,
+<a href=#175 id=175 data-nosnippet>175</a>    <span class="doccomment">/// The provider-local subject the user was resolved from (after the
+<a href=#176 id=176 data-nosnippet>176</a>    /// provider's `attribute_map`). Audit only.
+<a href=#177 id=177 data-nosnippet>177</a>    </span><span class="kw">pub </span>external_subject: String,
+<a href=#178 id=178 data-nosnippet>178</a>    <span class="doccomment">/// The listed client ID the token was issued to: its `azp` when it carries
+<a href=#179 id=179 data-nosnippet>179</a>    /// one, otherwise its single `aud`.
+<a href=#180 id=180 data-nosnippet>180</a>    </span><span class="kw">pub </span>audience: String,
+<a href=#181 id=181 data-nosnippet>181</a>    <span class="doccomment">/// True when this sign-in created the AXIAM user.
+<a href=#182 id=182 data-nosnippet>182</a>    </span><span class="kw">pub </span>newly_provisioned: bool,
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="doccomment">/// When the provider says the user authenticated (`auth_time`), if it did
+<a href=#184 id=184 data-nosnippet>184</a>    /// and the value is a date (X7.2). `None` means: use the moment of
+<a href=#185 id=185 data-nosnippet>185</a>    /// verification.
+<a href=#186 id=186 data-nosnippet>186</a>    </span><span class="kw">pub </span>upstream_auth_time: <span class="prelude-ty">Option</span>&lt;chrono::DateTime&lt;chrono::Utc&gt;&gt;,
+<a href=#187 id=187 data-nosnippet>187</a>    <span class="doccomment">/// The ID token's `exp`, as a NumericDate.
+<a href=#188 id=188 data-nosnippet>188</a>    </span><span class="kw">pub </span>id_token_exp: i64,
+<a href=#189 id=189 data-nosnippet>189</a>}
+<a href=#190 id=190 data-nosnippet>190</a>
+<a href=#191 id=191 data-nosnippet>191</a><span class="doccomment">/// What the token endpoint answers for a [`NativeLoginError`].
+<a href=#192 id=192 data-nosnippet>192</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#193 id=193 data-nosnippet>193</a></span><span class="kw">pub enum </span>NativeLoginRefusal {
+<a href=#194 id=194 data-nosnippet>194</a>    <span class="doccomment">/// `invalid_grant` with [`PUBLIC_REFUSAL_DESCRIPTION`] — every refusal
+<a href=#195 id=195 data-nosnippet>195</a>    /// about the token or the configuration.
+<a href=#196 id=196 data-nosnippet>196</a>    </span>InvalidGrant,
+<a href=#197 id=197 data-nosnippet>197</a>    <span class="doccomment">/// `server_error` — the datastore failed, including a replay store that
+<a href=#198 id=198 data-nosnippet>198</a>    /// could not record (which must not accept).
+<a href=#199 id=199 data-nosnippet>199</a>    </span>ServerError,
+<a href=#200 id=200 data-nosnippet>200</a>}
+<a href=#201 id=201 data-nosnippet>201</a>
+<a href=#202 id=202 data-nosnippet>202</a><span class="doccomment">/// Why a native sign-in was refused.
+<a href=#203 id=203 data-nosnippet>203</a>///
+<a href=#204 id=204 data-nosnippet>204</a>/// The variants are for the server log, the audit record and the tests; the
+<a href=#205 id=205 data-nosnippet>205</a>/// wire sees only [`NativeLoginError::refusal`]. No variant carries the token.
+<a href=#206 id=206 data-nosnippet>206</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#207 id=207 data-nosnippet>207</a></span><span class="kw">pub enum </span>NativeLoginError {
+<a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// Step 2: no effective, enabled, OIDC, native-login-enabled provider of
+<a href=#209 id=209 data-nosnippet>209</a>    /// this tenant is named by the request (unknown, another tenant's,
+<a href=#210 id=210 data-nosnippet>210</a>    /// disabled, SAML, OAuth2, native login off, or an unusable block).
+<a href=#211 id=211 data-nosnippet>211</a>    </span>ProviderNotFound,
+<a href=#212 id=212 data-nosnippet>212</a>    <span class="doccomment">/// Step 2: the provider's discovery document could not be read.
+<a href=#213 id=213 data-nosnippet>213</a>    </span>ProviderUnavailable(String),
+<a href=#214 id=214 data-nosnippet>214</a>    <span class="doccomment">/// Step 3: `alg` is `none` or not in the provider's `allowed_algorithms`.
+<a href=#215 id=215 data-nosnippet>215</a>    </span>AlgorithmRefused,
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="doccomment">/// Step 3: no JWKS key matches the `kid`, after one rollover refetch.
+<a href=#217 id=217 data-nosnippet>217</a>    </span>UnknownKey,
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="doccomment">/// Step 3: the provider's JWKS could not be fetched.
+<a href=#219 id=219 data-nosnippet>219</a>    </span>KeysUnavailable(String),
+<a href=#220 id=220 data-nosnippet>220</a>    <span class="doccomment">/// Step 4: the signature does not verify, or the token is not a JWS.
+<a href=#221 id=221 data-nosnippet>221</a>    </span>BadSignature,
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="doccomment">/// Step 4: `iss` is not the provider's discovered issuer.
+<a href=#223 id=223 data-nosnippet>223</a>    </span>WrongIssuer,
+<a href=#224 id=224 data-nosnippet>224</a>    <span class="doccomment">/// Step 4: with no `azp`, the single `aud` is not listed; with a listed
+<a href=#225 id=225 data-nosnippet>225</a>    /// `azp`, `aud` names neither a listed ID nor the provider's web
+<a href=#226 id=226 data-nosnippet>226</a>    /// `client_id`.
+<a href=#227 id=227 data-nosnippet>227</a>    </span>WrongAudience,
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="doccomment">/// Step 4: the `azp` is present and not listed (or not a string), or `aud`
+<a href=#229 id=229 data-nosnippet>229</a>    /// has several members and there is no `azp`.
+<a href=#230 id=230 data-nosnippet>230</a>    </span>AuthorizedPartyRefused,
+<a href=#231 id=231 data-nosnippet>231</a>    <span class="doccomment">/// Step 4: `exp` has passed, beyond the leeway.
+<a href=#232 id=232 data-nosnippet>232</a>    </span>Expired,
+<a href=#233 id=233 data-nosnippet>233</a>    <span class="doccomment">/// Step 4: `iat` is older than the provider's `max_token_age_secs`.
+<a href=#234 id=234 data-nosnippet>234</a>    </span>TooOld,
+<a href=#235 id=235 data-nosnippet>235</a>    <span class="doccomment">/// Step 4: `iat` is in the future beyond the leeway.
+<a href=#236 id=236 data-nosnippet>236</a>    </span>IssuedInFuture,
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="doccomment">/// Step 4: another claim was refused (missing, malformed, empty `sub`).
+<a href=#238 id=238 data-nosnippet>238</a>    </span>ClaimRejected(String),
+<a href=#239 id=239 data-nosnippet>239</a>    <span class="doccomment">/// Step 5: the token has an access-token or refresh/logout `typ`.
+<a href=#240 id=240 data-nosnippet>240</a>    </span>WrongTokenShape(String),
+<a href=#241 id=241 data-nosnippet>241</a>    <span class="doccomment">/// Step 5: the token has no `nonce` — it is not an ID token from a flow
+<a href=#242 id=242 data-nosnippet>242</a>    /// the app bound to a nonce.
+<a href=#243 id=243 data-nosnippet>243</a>    </span>NonceMissing,
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="doccomment">/// Step 5: the `nonce` is not the SHA-256 hex (in either case) of the
+<a href=#245 id=245 data-nosnippet>245</a>    /// request's nonce (a claim equal to the request's value unhashed
+<a href=#246 id=246 data-nosnippet>246</a>    /// included), or the request carried none.
+<a href=#247 id=247 data-nosnippet>247</a>    </span>NonceMismatch,
+<a href=#248 id=248 data-nosnippet>248</a>    <span class="doccomment">/// Step 6: this token was presented before.
+<a href=#249 id=249 data-nosnippet>249</a>    </span>Replayed,
+<a href=#250 id=250 data-nosnippet>250</a>    <span class="doccomment">/// Step 6: the replay store could not record the token, so it is refused.
+<a href=#251 id=251 data-nosnippet>251</a>    </span>ReplayGuardUnavailable(String),
+<a href=#252 id=252 data-nosnippet>252</a>    <span class="doccomment">/// Step 7: the provider's attribute map yields no external subject.
+<a href=#253 id=253 data-nosnippet>253</a>    </span>SubjectUnmapped,
+<a href=#254 id=254 data-nosnippet>254</a>    <span class="doccomment">/// Step 7: provisioning a first-time user collided with an existing
+<a href=#255 id=255 data-nosnippet>255</a>    /// account's username or email. Refused with the same generic answer as
+<a href=#256 id=256 data-nosnippet>256</a>    /// every other token problem, not as a server error (F4-W2-10), so it
+<a href=#257 id=257 data-nosnippet>257</a>    /// cannot be told apart from those refusals.
+<a href=#258 id=258 data-nosnippet>258</a>    ///
+<a href=#259 id=259 data-nosnippet>259</a>    /// It *can* be told apart from success: a caller who controls a provider
+<a href=#260 id=260 data-nosnippet>260</a>    /// identity whose email it chooses learns from refusal versus sign-in
+<a href=#261 id=261 data-nosnippet>261</a>    /// whether the mapped email or username is taken. That oracle is intrinsic
+<a href=#262 id=262 data-nosnippet>262</a>    /// to first-sign-in provisioning and is shared with the browser login; it
+<a href=#263 id=263 data-nosnippet>263</a>    /// is a recorded residual (F4-W2-12, D-N20, T-491), which a later release
+<a href=#264 id=264 data-nosnippet>264</a>    /// may remove by changing provisioning.
+<a href=#265 id=265 data-nosnippet>265</a>    </span>ProvisioningConflict,
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="doccomment">/// Step 7: the account may not act (locked, inactive, anonymized,
+<a href=#267 id=267 data-nosnippet>267</a>    /// deleted); the text is `account_may_act`'s.
+<a href=#268 id=268 data-nosnippet>268</a>    </span>AccountRefused(String),
+<a href=#269 id=269 data-nosnippet>269</a>    <span class="doccomment">/// A datastore failure outside the replay store.
+<a href=#270 id=270 data-nosnippet>270</a>    </span>Server(String),
+<a href=#271 id=271 data-nosnippet>271</a>}
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a><span class="kw">impl </span>std::fmt::Display <span class="kw">for </span>NativeLoginError {
+<a href=#274 id=274 data-nosnippet>274</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#275 id=275 data-nosnippet>275</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#276 id=276 data-nosnippet>276</a>            <span class="self">Self</span>::ProviderNotFound =&gt; <span class="macro">write!</span>(
+<a href=#277 id=277 data-nosnippet>277</a>                f,
+<a href=#278 id=278 data-nosnippet>278</a>                <span class="string">"no enabled OIDC provider with native sign-in is named by the request in this tenant"
+<a href=#279 id=279 data-nosnippet>279</a>            </span>),
+<a href=#280 id=280 data-nosnippet>280</a>            <span class="self">Self</span>::ProviderUnavailable(m) =&gt; <span class="macro">write!</span>(f, <span class="string">"provider discovery failed: {m}"</span>),
+<a href=#281 id=281 data-nosnippet>281</a>            <span class="self">Self</span>::AlgorithmRefused =&gt; <span class="macro">write!</span>(f, <span class="string">"the token's algorithm is not accepted"</span>),
+<a href=#282 id=282 data-nosnippet>282</a>            <span class="self">Self</span>::UnknownKey =&gt; <span class="macro">write!</span>(f, <span class="string">"no provider key matches the token's kid"</span>),
+<a href=#283 id=283 data-nosnippet>283</a>            <span class="self">Self</span>::KeysUnavailable(m) =&gt; <span class="macro">write!</span>(f, <span class="string">"the provider's JWKS is unavailable: {m}"</span>),
+<a href=#284 id=284 data-nosnippet>284</a>            <span class="self">Self</span>::BadSignature =&gt; <span class="macro">write!</span>(f, <span class="string">"the token's signature does not verify"</span>),
+<a href=#285 id=285 data-nosnippet>285</a>            <span class="self">Self</span>::WrongIssuer =&gt; <span class="macro">write!</span>(f, <span class="string">"the token's issuer is not the provider's"</span>),
+<a href=#286 id=286 data-nosnippet>286</a>            <span class="self">Self</span>::WrongAudience =&gt; {
+<a href=#287 id=287 data-nosnippet>287</a>                <span class="macro">write!</span>(
+<a href=#288 id=288 data-nosnippet>288</a>                    f,
+<a href=#289 id=289 data-nosnippet>289</a>                    <span class="string">"the token was not issued to a native client ID of the provider"
+<a href=#290 id=290 data-nosnippet>290</a>                </span>)
+<a href=#291 id=291 data-nosnippet>291</a>            }
+<a href=#292 id=292 data-nosnippet>292</a>            <span class="self">Self</span>::AuthorizedPartyRefused =&gt; <span class="macro">write!</span>(
+<a href=#293 id=293 data-nosnippet>293</a>                f,
+<a href=#294 id=294 data-nosnippet>294</a>                <span class="string">"the token's azp is not a native client ID, or it has several audiences and no azp"
+<a href=#295 id=295 data-nosnippet>295</a>            </span>),
+<a href=#296 id=296 data-nosnippet>296</a>            <span class="self">Self</span>::Expired =&gt; <span class="macro">write!</span>(f, <span class="string">"the token has expired"</span>),
+<a href=#297 id=297 data-nosnippet>297</a>            <span class="self">Self</span>::TooOld =&gt; <span class="macro">write!</span>(
+<a href=#298 id=298 data-nosnippet>298</a>                f,
+<a href=#299 id=299 data-nosnippet>299</a>                <span class="string">"the token was issued longer ago than the provider allows"
+<a href=#300 id=300 data-nosnippet>300</a>            </span>),
+<a href=#301 id=301 data-nosnippet>301</a>            <span class="self">Self</span>::IssuedInFuture =&gt; <span class="macro">write!</span>(f, <span class="string">"the token is issued in the future beyond the skew"</span>),
+<a href=#302 id=302 data-nosnippet>302</a>            <span class="self">Self</span>::ClaimRejected(m) =&gt; <span class="macro">write!</span>(f, <span class="string">"a claim was refused: {m}"</span>),
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="self">Self</span>::WrongTokenShape(t) =&gt; {
+<a href=#304 id=304 data-nosnippet>304</a>                <span class="macro">write!</span>(f, <span class="string">"the token's type '{t}' is not an ID token"</span>)
+<a href=#305 id=305 data-nosnippet>305</a>            }
+<a href=#306 id=306 data-nosnippet>306</a>            <span class="self">Self</span>::NonceMissing =&gt; <span class="macro">write!</span>(f, <span class="string">"the token carries no nonce"</span>),
+<a href=#307 id=307 data-nosnippet>307</a>            <span class="self">Self</span>::NonceMismatch =&gt; <span class="macro">write!</span>(f, <span class="string">"the token's nonce does not match the request"</span>),
+<a href=#308 id=308 data-nosnippet>308</a>            <span class="self">Self</span>::Replayed =&gt; <span class="macro">write!</span>(f, <span class="string">"the token was presented before"</span>),
+<a href=#309 id=309 data-nosnippet>309</a>            <span class="self">Self</span>::ReplayGuardUnavailable(m) =&gt; {
+<a href=#310 id=310 data-nosnippet>310</a>                <span class="macro">write!</span>(f, <span class="string">"the replay store could not record the token: {m}"</span>)
+<a href=#311 id=311 data-nosnippet>311</a>            }
+<a href=#312 id=312 data-nosnippet>312</a>            <span class="self">Self</span>::SubjectUnmapped =&gt; {
+<a href=#313 id=313 data-nosnippet>313</a>                <span class="macro">write!</span>(f, <span class="string">"no external subject could be mapped from the token"</span>)
+<a href=#314 id=314 data-nosnippet>314</a>            }
+<a href=#315 id=315 data-nosnippet>315</a>            <span class="self">Self</span>::ProvisioningConflict =&gt; <span class="macro">write!</span>(
+<a href=#316 id=316 data-nosnippet>316</a>                f,
+<a href=#317 id=317 data-nosnippet>317</a>                <span class="string">"a first sign-in collided with an existing account's username or email"
+<a href=#318 id=318 data-nosnippet>318</a>            </span>),
+<a href=#319 id=319 data-nosnippet>319</a>            <span class="self">Self</span>::AccountRefused(m) =&gt; <span class="macro">write!</span>(f, <span class="string">"the account may not sign in: {m}"</span>),
+<a href=#320 id=320 data-nosnippet>320</a>            <span class="self">Self</span>::Server(m) =&gt; <span class="macro">write!</span>(f, <span class="string">"{m}"</span>),
+<a href=#321 id=321 data-nosnippet>321</a>        }
+<a href=#322 id=322 data-nosnippet>322</a>    }
+<a href=#323 id=323 data-nosnippet>323</a>}
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a><span class="kw">impl </span>std::error::Error <span class="kw">for </span>NativeLoginError {}
+<a href=#326 id=326 data-nosnippet>326</a>
+<a href=#327 id=327 data-nosnippet>327</a><span class="kw">impl </span>NativeLoginError {
+<a href=#328 id=328 data-nosnippet>328</a>    <span class="doccomment">/// What the wire sees. Everything about the token or the configuration
+<a href=#329 id=329 data-nosnippet>329</a>    /// is one `invalid_grant`; only a datastore failure is `server_error`.
+<a href=#330 id=330 data-nosnippet>330</a>    </span><span class="kw">pub const fn </span>refusal(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; NativeLoginRefusal {
+<a href=#331 id=331 data-nosnippet>331</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#332 id=332 data-nosnippet>332</a>            <span class="self">Self</span>::ReplayGuardUnavailable(<span class="kw">_</span>) | <span class="self">Self</span>::Server(<span class="kw">_</span>) =&gt; NativeLoginRefusal::ServerError,
+<a href=#333 id=333 data-nosnippet>333</a>            <span class="kw">_ </span>=&gt; NativeLoginRefusal::InvalidGrant,
+<a href=#334 id=334 data-nosnippet>334</a>        }
+<a href=#335 id=335 data-nosnippet>335</a>    }
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="doccomment">/// A stable, low-cardinality label for the audit record and metrics.
+<a href=#338 id=338 data-nosnippet>338</a>    </span><span class="kw">pub const fn </span>reason_code(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str {
+<a href=#339 id=339 data-nosnippet>339</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#340 id=340 data-nosnippet>340</a>            <span class="self">Self</span>::ProviderNotFound =&gt; <span class="string">"provider_not_found"</span>,
+<a href=#341 id=341 data-nosnippet>341</a>            <span class="self">Self</span>::ProviderUnavailable(<span class="kw">_</span>) =&gt; <span class="string">"provider_unavailable"</span>,
+<a href=#342 id=342 data-nosnippet>342</a>            <span class="self">Self</span>::AlgorithmRefused =&gt; <span class="string">"algorithm_refused"</span>,
+<a href=#343 id=343 data-nosnippet>343</a>            <span class="self">Self</span>::UnknownKey =&gt; <span class="string">"unknown_key"</span>,
+<a href=#344 id=344 data-nosnippet>344</a>            <span class="self">Self</span>::KeysUnavailable(<span class="kw">_</span>) =&gt; <span class="string">"keys_unavailable"</span>,
+<a href=#345 id=345 data-nosnippet>345</a>            <span class="self">Self</span>::BadSignature =&gt; <span class="string">"bad_signature"</span>,
+<a href=#346 id=346 data-nosnippet>346</a>            <span class="self">Self</span>::WrongIssuer =&gt; <span class="string">"wrong_issuer"</span>,
+<a href=#347 id=347 data-nosnippet>347</a>            <span class="self">Self</span>::WrongAudience =&gt; <span class="string">"wrong_audience"</span>,
+<a href=#348 id=348 data-nosnippet>348</a>            <span class="self">Self</span>::AuthorizedPartyRefused =&gt; <span class="string">"azp_refused"</span>,
+<a href=#349 id=349 data-nosnippet>349</a>            <span class="self">Self</span>::Expired =&gt; <span class="string">"expired"</span>,
+<a href=#350 id=350 data-nosnippet>350</a>            <span class="self">Self</span>::TooOld =&gt; <span class="string">"too_old"</span>,
+<a href=#351 id=351 data-nosnippet>351</a>            <span class="self">Self</span>::IssuedInFuture =&gt; <span class="string">"issued_in_future"</span>,
+<a href=#352 id=352 data-nosnippet>352</a>            <span class="self">Self</span>::ClaimRejected(<span class="kw">_</span>) =&gt; <span class="string">"claim_rejected"</span>,
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="self">Self</span>::WrongTokenShape(<span class="kw">_</span>) =&gt; <span class="string">"wrong_token_shape"</span>,
+<a href=#354 id=354 data-nosnippet>354</a>            <span class="self">Self</span>::NonceMissing =&gt; <span class="string">"nonce_missing"</span>,
+<a href=#355 id=355 data-nosnippet>355</a>            <span class="self">Self</span>::NonceMismatch =&gt; <span class="string">"nonce_mismatch"</span>,
+<a href=#356 id=356 data-nosnippet>356</a>            <span class="self">Self</span>::Replayed =&gt; <span class="string">"replayed"</span>,
+<a href=#357 id=357 data-nosnippet>357</a>            <span class="self">Self</span>::ReplayGuardUnavailable(<span class="kw">_</span>) =&gt; <span class="string">"replay_guard_unavailable"</span>,
+<a href=#358 id=358 data-nosnippet>358</a>            <span class="self">Self</span>::SubjectUnmapped =&gt; <span class="string">"subject_unmapped"</span>,
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="self">Self</span>::ProvisioningConflict =&gt; <span class="string">"provisioning_conflict"</span>,
+<a href=#360 id=360 data-nosnippet>360</a>            <span class="self">Self</span>::AccountRefused(<span class="kw">_</span>) =&gt; <span class="string">"account_refused"</span>,
+<a href=#361 id=361 data-nosnippet>361</a>            <span class="self">Self</span>::Server(<span class="kw">_</span>) =&gt; <span class="string">"server_error"</span>,
+<a href=#362 id=362 data-nosnippet>362</a>        }
+<a href=#363 id=363 data-nosnippet>363</a>    }
+<a href=#364 id=364 data-nosnippet>364</a>
+<a href=#365 id=365 data-nosnippet>365</a>    <span class="doccomment">/// Map a refusal of the shared verification core (steps 3 and 4).
+<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="kw">fn </span>from_check(e: IdTokenCheckError) -&gt; <span class="self">Self </span>{
+<a href=#367 id=367 data-nosnippet>367</a>        <span class="kw">use </span>jsonwebtoken::errors::ErrorKind;
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="kw">match </span>e {
+<a href=#369 id=369 data-nosnippet>369</a>            IdTokenCheckError::Federation(f) =&gt; <span class="kw">match </span>f {
+<a href=#370 id=370 data-nosnippet>370</a>                FederationError::AlgorithmNotAllowed(<span class="kw">_</span>) =&gt; <span class="self">Self</span>::AlgorithmRefused,
+<a href=#371 id=371 data-nosnippet>371</a>                FederationError::JwtSignatureInvalid =&gt; <span class="self">Self</span>::BadSignature,
+<a href=#372 id=372 data-nosnippet>372</a>                FederationError::JwksKidUnknown =&gt; <span class="self">Self</span>::UnknownKey,
+<a href=#373 id=373 data-nosnippet>373</a>                FederationError::JwksFetchFailed(m) =&gt; <span class="self">Self</span>::KeysUnavailable(m),
+<a href=#374 id=374 data-nosnippet>374</a>                other =&gt; <span class="self">Self</span>::ClaimRejected(other.to_string()),
+<a href=#375 id=375 data-nosnippet>375</a>            },
+<a href=#376 id=376 data-nosnippet>376</a>            IdTokenCheckError::Claims(e) =&gt; <span class="kw">match </span>e.kind() {
+<a href=#377 id=377 data-nosnippet>377</a>                ErrorKind::InvalidIssuer =&gt; <span class="self">Self</span>::WrongIssuer,
+<a href=#378 id=378 data-nosnippet>378</a>                ErrorKind::InvalidAudience =&gt; <span class="self">Self</span>::WrongAudience,
+<a href=#379 id=379 data-nosnippet>379</a>                ErrorKind::ExpiredSignature =&gt; <span class="self">Self</span>::Expired,
+<a href=#380 id=380 data-nosnippet>380</a>                other =&gt; <span class="self">Self</span>::ClaimRejected(<span class="macro">format!</span>(<span class="string">"{other:?}"</span>)),
+<a href=#381 id=381 data-nosnippet>381</a>            },
+<a href=#382 id=382 data-nosnippet>382</a>        }
+<a href=#383 id=383 data-nosnippet>383</a>    }
+<a href=#384 id=384 data-nosnippet>384</a>}
+<a href=#385 id=385 data-nosnippet>385</a>
+<a href=#386 id=386 data-nosnippet>386</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#387 id=387 data-nosnippet>387</a>// Pure helpers
+<a href=#388 id=388 data-nosnippet>388</a>// ---------------------------------------------------------------------------
+<a href=#389 id=389 data-nosnippet>389</a>
+<a href=#390 id=390 data-nosnippet>390</a></span><span class="doccomment">/// Lowercase hex SHA-256 — the nonce form the token carries (D-N16), and
+<a href=#391 id=391 data-nosnippet>391</a>/// the replay key over a token's signing input ([`replay_key`]).
+<a href=#392 id=392 data-nosnippet>392</a></span><span class="kw">fn </span>sha256_hex(input: <span class="kw-2">&amp;</span>str) -&gt; String {
+<a href=#393 id=393 data-nosnippet>393</a>    hex::encode(Sha256::digest(input.as_bytes()))
+<a href=#394 id=394 data-nosnippet>394</a>}
+<a href=#395 id=395 data-nosnippet>395</a>
+<a href=#396 id=396 data-nosnippet>396</a><span class="doccomment">/// Step 6's replay key: the lowercase hex SHA-256 of the token's JWS signing
+<a href=#397 id=397 data-nosnippet>397</a>/// input, `base64url(header) "." base64url(payload)` — the exact bytes before
+<a href=#398 id=398 data-nosnippet>398</a>/// the second `.` — never of the whole compact token (F4-W2-11).
+<a href=#399 id=399 data-nosnippet>399</a>///
+<a href=#400 id=400 data-nosnippet>400</a>/// The signature is outside what it signs, and for ECDSA it has a second
+<a href=#401 id=401 data-nosnippet>401</a>/// valid encoding (`s` → `n − s`): hashing it too would key one token under
+<a href=#402 id=402 data-nosnippet>402</a>/// two strings. `None` for a string with fewer than two dots, which cannot
+<a href=#403 id=403 data-nosnippet>403</a>/// have passed verification.
+<a href=#404 id=404 data-nosnippet>404</a></span><span class="kw">fn </span>replay_key(token: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="kw">let </span><span class="kw-2">mut </span>dots = token.match_indices(<span class="string">'.'</span>).map(|(i, <span class="kw">_</span>)| i);
+<a href=#406 id=406 data-nosnippet>406</a>    dots.next()<span class="question-mark">?</span>;
+<a href=#407 id=407 data-nosnippet>407</a>    <span class="kw">let </span>second = dots.next()<span class="question-mark">?</span>;
+<a href=#408 id=408 data-nosnippet>408</a>    <span class="prelude-val">Some</span>(sha256_hex(<span class="kw-2">&amp;</span>token[..second]))
+<a href=#409 id=409 data-nosnippet>409</a>}
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a><span class="doccomment">/// The token's `nonce` claim with its ASCII hex letters `A`–`F` folded to
+<a href=#412 id=412 data-nosnippet>412</a>/// lower case and every other byte left as it is (D-N21, F4-W2-14). Only hex
+<a href=#413 id=413 data-nosnippet>413</a>/// case is forgiven: a claim with any non-hex character still differs from
+<a href=#414 id=414 data-nosnippet>414</a>/// every SHA-256 hex and is refused.
+<a href=#415 id=415 data-nosnippet>415</a></span><span class="kw">fn </span>fold_hex_case(claim: <span class="kw-2">&amp;</span>str) -&gt; Vec&lt;u8&gt; {
+<a href=#416 id=416 data-nosnippet>416</a>    claim
+<a href=#417 id=417 data-nosnippet>417</a>        .bytes()
+<a href=#418 id=418 data-nosnippet>418</a>        .map(|b| <span class="kw">match </span>b {
+<a href=#419 id=419 data-nosnippet>419</a>            <span class="string">b'A'</span>..=<span class="string">b'F' </span>=&gt; b.to_ascii_lowercase(),
+<a href=#420 id=420 data-nosnippet>420</a>            other =&gt; other,
+<a href=#421 id=421 data-nosnippet>421</a>        })
+<a href=#422 id=422 data-nosnippet>422</a>        .collect()
+<a href=#423 id=423 data-nosnippet>423</a>}
+<a href=#424 id=424 data-nosnippet>424</a>
+<a href=#425 id=425 data-nosnippet>425</a><span class="doccomment">/// Step 2's provider filter: what a provider must be to accept native sign-in
+<a href=#426 id=426 data-nosnippet>426</a>/// at all, independent of how the request named it.
+<a href=#427 id=427 data-nosnippet>427</a></span><span class="kw">fn </span>accepts_native_login(config: <span class="kw-2">&amp;</span>FederationConfig) -&gt; bool {
+<a href=#428 id=428 data-nosnippet>428</a>    config.enabled
+<a href=#429 id=429 data-nosnippet>429</a>        &amp;&amp; config.protocol == FederationProtocol::OidcConnect
+<a href=#430 id=430 data-nosnippet>430</a>        &amp;&amp; config.native_login.enabled
+<a href=#431 id=431 data-nosnippet>431</a>        &amp;&amp; config
+<a href=#432 id=432 data-nosnippet>432</a>            .native_login
+<a href=#433 id=433 data-nosnippet>433</a>            .validate_for_protocol(config.protocol)
+<a href=#434 id=434 data-nosnippet>434</a>            .is_ok()
+<a href=#435 id=435 data-nosnippet>435</a>}
+<a href=#436 id=436 data-nosnippet>436</a>
+<a href=#437 id=437 data-nosnippet>437</a><span class="doccomment">/// Step 2's name match: the provider's UUID, or its `provider_slug`.
+<a href=#438 id=438 data-nosnippet>438</a></span><span class="kw">fn </span>names(config: <span class="kw-2">&amp;</span>FederationConfig, provider: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="kw">match </span>Uuid::parse_str(provider) {
+<a href=#440 id=440 data-nosnippet>440</a>        <span class="prelude-val">Ok</span>(id) =&gt; config.id == id,
+<a href=#441 id=441 data-nosnippet>441</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; config.provider_slug.as_deref() == <span class="prelude-val">Some</span>(provider),
+<a href=#442 id=442 data-nosnippet>442</a>    }
+<a href=#443 id=443 data-nosnippet>443</a>}
+<a href=#444 id=444 data-nosnippet>444</a>
+<a href=#445 id=445 data-nosnippet>445</a><span class="doccomment">/// Step 4's audience rule beyond the decoder's: which listed client ID the
+<a href=#446 id=446 data-nosnippet>446</a>/// token was issued to — **azp-first** (D-N17, F4-W2-03).
+<a href=#447 id=447 data-nosnippet>447</a>///
+<a href=#448 id=448 data-nosnippet>448</a>/// * With an `azp`, the `azp` is the party the token was issued to (OIDC Core
+<a href=#449 id=449 data-nosnippet>449</a>///   §2), so it must be listed. `aud` must then contain a listed ID or the
+<a href=#450 id=450 data-nosnippet>450</a>///   provider's own web `client_id`: Google issues an Android app's token
+<a href=#451 id=451 data-nosnippet>451</a>///   for the *server* client it asks for, so `aud` is the web client and
+<a href=#452 id=452 data-nosnippet>452</a>///   `azp` the Android client. A token for some third party that merely
+<a href=#453 id=453 data-nosnippet>453</a>///   carries one of our IDs in `aud` has a foreign `azp`, and is refused.
+<a href=#454 id=454 data-nosnippet>454</a>/// * Without an `azp`, `aud` must be one listed value (an iOS token without a
+<a href=#455 id=455 data-nosnippet>455</a>///   server client). Several audiences need an `azp` (OIDC Core §3.1.3.7).
+<a href=#456 id=456 data-nosnippet>456</a>///
+<a href=#457 id=457 data-nosnippet>457</a>/// So a browser-flow token — `aud` the web client, `azp` the web client or
+<a href=#458 id=458 data-nosnippet>458</a>/// absent — is refused unless the operator lists the web client, which
+<a href=#459 id=459 data-nosnippet>459</a>/// admits exactly those tokens and which the docs advise against.
+<a href=#460 id=460 data-nosnippet>460</a>///
+<a href=#461 id=461 data-nosnippet>461</a>/// `web_client_id` is the provider's configured `client_id`; empty means
+<a href=#462 id=462 data-nosnippet>462</a>/// none, and matches nothing.
+<a href=#463 id=463 data-nosnippet>463</a></span><span class="kw">fn </span>issued_to(
+<a href=#464 id=464 data-nosnippet>464</a>    client_ids: <span class="kw-2">&amp;</span>[String],
+<a href=#465 id=465 data-nosnippet>465</a>    web_client_id: <span class="kw-2">&amp;</span>str,
+<a href=#466 id=466 data-nosnippet>466</a>    aud: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>serde_json::Value&gt;,
+<a href=#467 id=467 data-nosnippet>467</a>    azp: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>serde_json::Value&gt;,
+<a href=#468 id=468 data-nosnippet>468</a>) -&gt; <span class="prelude-ty">Result</span>&lt;String, NativeLoginError&gt; {
+<a href=#469 id=469 data-nosnippet>469</a>    <span class="kw">let </span>audiences = flatten_audience(aud);
+<a href=#470 id=470 data-nosnippet>470</a>    <span class="kw">let </span>listed = |v: <span class="kw-2">&amp;</span>str| client_ids.iter().any(|c| c == v);
+<a href=#471 id=471 data-nosnippet>471</a>    <span class="kw">if </span>audiences.is_empty() {
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::WrongAudience);
+<a href=#473 id=473 data-nosnippet>473</a>    }
+<a href=#474 id=474 data-nosnippet>474</a>    <span class="kw">match </span>azp {
+<a href=#475 id=475 data-nosnippet>475</a>        <span class="prelude-val">Some</span>(azp) =&gt; {
+<a href=#476 id=476 data-nosnippet>476</a>            <span class="kw">let </span>azp = azp
+<a href=#477 id=477 data-nosnippet>477</a>                .as_str()
+<a href=#478 id=478 data-nosnippet>478</a>                .filter(|azp| listed(azp))
+<a href=#479 id=479 data-nosnippet>479</a>                .ok_or(NativeLoginError::AuthorizedPartyRefused)<span class="question-mark">?</span>;
+<a href=#480 id=480 data-nosnippet>480</a>            <span class="kw">let </span>addressed = audiences
+<a href=#481 id=481 data-nosnippet>481</a>                .iter()
+<a href=#482 id=482 data-nosnippet>482</a>                .any(|a| listed(a) || (!web_client_id.is_empty() &amp;&amp; a == web_client_id));
+<a href=#483 id=483 data-nosnippet>483</a>            <span class="kw">if </span>addressed {
+<a href=#484 id=484 data-nosnippet>484</a>                <span class="prelude-val">Ok</span>(azp.to_owned())
+<a href=#485 id=485 data-nosnippet>485</a>            } <span class="kw">else </span>{
+<a href=#486 id=486 data-nosnippet>486</a>                <span class="prelude-val">Err</span>(NativeLoginError::WrongAudience)
+<a href=#487 id=487 data-nosnippet>487</a>            }
+<a href=#488 id=488 data-nosnippet>488</a>        }
+<a href=#489 id=489 data-nosnippet>489</a>        <span class="prelude-val">None </span>=&gt; <span class="kw">match </span>audiences.as_slice() {
+<a href=#490 id=490 data-nosnippet>490</a>            [one] <span class="kw">if </span>listed(one) =&gt; <span class="prelude-val">Ok</span>(one.clone()),
+<a href=#491 id=491 data-nosnippet>491</a>            [<span class="kw">_</span>] =&gt; <span class="prelude-val">Err</span>(NativeLoginError::WrongAudience),
+<a href=#492 id=492 data-nosnippet>492</a>            <span class="kw">_ </span>=&gt; <span class="prelude-val">Err</span>(NativeLoginError::AuthorizedPartyRefused),
+<a href=#493 id=493 data-nosnippet>493</a>        },
+<a href=#494 id=494 data-nosnippet>494</a>    }
+<a href=#495 id=495 data-nosnippet>495</a>}
+<a href=#496 id=496 data-nosnippet>496</a>
+<a href=#497 id=497 data-nosnippet>497</a><span class="doccomment">/// Step 4's age rule: `iat` neither in the future beyond the leeway nor older
+<a href=#498 id=498 data-nosnippet>498</a>/// than the provider allows. The bound is inclusive.
+<a href=#499 id=499 data-nosnippet>499</a></span><span class="kw">fn </span>check_iat(iat: <span class="prelude-ty">Option</span>&lt;u64&gt;, now: i64, max_age_secs: i64) -&gt; <span class="prelude-ty">Result</span>&lt;(), NativeLoginError&gt; {
+<a href=#500 id=500 data-nosnippet>500</a>    <span class="kw">let </span>iat = iat
+<a href=#501 id=501 data-nosnippet>501</a>        .and_then(|v| i64::try_from(v).ok())
+<a href=#502 id=502 data-nosnippet>502</a>        .ok_or_else(|| NativeLoginError::ClaimRejected(<span class="string">"no usable 'iat'"</span>.into()))<span class="question-mark">?</span>;
+<a href=#503 id=503 data-nosnippet>503</a>    <span class="kw">if </span>iat &gt; now + CLOCK_SKEW_LEEWAY_SECS <span class="kw">as </span>i64 {
+<a href=#504 id=504 data-nosnippet>504</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::IssuedInFuture);
+<a href=#505 id=505 data-nosnippet>505</a>    }
+<a href=#506 id=506 data-nosnippet>506</a>    <span class="kw">if </span>now - iat &gt; max_age_secs {
+<a href=#507 id=507 data-nosnippet>507</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::TooOld);
+<a href=#508 id=508 data-nosnippet>508</a>    }
+<a href=#509 id=509 data-nosnippet>509</a>    <span class="prelude-val">Ok</span>(())
+<a href=#510 id=510 data-nosnippet>510</a>}
+<a href=#511 id=511 data-nosnippet>511</a>
+<a href=#512 id=512 data-nosnippet>512</a><span class="doccomment">/// Step 5: the token is an ID token bound to this request's nonce.
+<a href=#513 id=513 data-nosnippet>513</a>///
+<a href=#514 id=514 data-nosnippet>514</a>/// `typ` (header or claim) must not name an access, refresh or logout token;
+<a href=#515 id=515 data-nosnippet>515</a>/// `nonce` must be present and equal, in constant time, to the lower-case
+<a href=#516 id=516 data-nosnippet>516</a>/// SHA-256 hex of the request nonce (D-N16, F4-W2-02), after the claim's hex
+<a href=#517 id=517 data-nosnippet>517</a>/// letters are folded to lower case, so an app whose hex helper emits upper
+<a href=#518 id=518 data-nosnippet>518</a>/// case is not refused (D-N21, F4-W2-14). The raw form — a claim
+<a href=#519 id=519 data-nosnippet>519</a>/// equal to the request's value — is **not** accepted: a JWT payload is
+<a href=#520 id=520 data-nosnippet>520</a>/// readable by whoever holds the token, so accepting the claim itself would
+<a href=#521 id=521 data-nosnippet>521</a>/// let a token's holder copy it into the request. With the hashed form the
+<a href=#522 id=522 data-nosnippet>522</a>/// value to present is a SHA-256 preimage of what the token carries.
+<a href=#523 id=523 data-nosnippet>523</a></span><span class="kw">fn </span>check_shape(
+<a href=#524 id=524 data-nosnippet>524</a>    header_typ: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;,
+<a href=#525 id=525 data-nosnippet>525</a>    raw: <span class="kw-2">&amp;</span>serde_json::Value,
+<a href=#526 id=526 data-nosnippet>526</a>    request_nonce: <span class="kw-2">&amp;</span>str,
+<a href=#527 id=527 data-nosnippet>527</a>) -&gt; <span class="prelude-ty">Result</span>&lt;(), NativeLoginError&gt; {
+<a href=#528 id=528 data-nosnippet>528</a>    <span class="kw">let </span>claim_typ = raw.get(<span class="string">"typ"</span>).and_then(serde_json::Value::as_str);
+<a href=#529 id=529 data-nosnippet>529</a>    <span class="kw">for </span>typ <span class="kw">in </span>[header_typ, claim_typ].into_iter().flatten() {
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="kw">let </span>normalized = token_shape::normalize_typ(typ);
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="kw">if </span>token_shape::refused_as_native_id_token(<span class="kw-2">&amp;</span>normalized) {
+<a href=#532 id=532 data-nosnippet>532</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::WrongTokenShape(normalized));
+<a href=#533 id=533 data-nosnippet>533</a>        }
+<a href=#534 id=534 data-nosnippet>534</a>    }
+<a href=#535 id=535 data-nosnippet>535</a>
+<a href=#536 id=536 data-nosnippet>536</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(token_nonce) = raw.get(REQUIRED_MARKER).and_then(serde_json::Value::as_str) <span class="kw">else </span>{
+<a href=#537 id=537 data-nosnippet>537</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::NonceMissing);
+<a href=#538 id=538 data-nosnippet>538</a>    };
+<a href=#539 id=539 data-nosnippet>539</a>    <span class="kw">if </span>request_nonce.is_empty() || token_nonce.is_empty() {
+<a href=#540 id=540 data-nosnippet>540</a>        <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::NonceMismatch);
+<a href=#541 id=541 data-nosnippet>541</a>    }
+<a href=#542 id=542 data-nosnippet>542</a>    <span class="kw">let </span>hashed = sha256_hex(request_nonce);
+<a href=#543 id=543 data-nosnippet>543</a>    <span class="kw">if </span>bool::from(
+<a href=#544 id=544 data-nosnippet>544</a>        fold_hex_case(token_nonce)
+<a href=#545 id=545 data-nosnippet>545</a>            .as_slice()
+<a href=#546 id=546 data-nosnippet>546</a>            .ct_eq(hashed.as_bytes()),
+<a href=#547 id=547 data-nosnippet>547</a>    ) {
+<a href=#548 id=548 data-nosnippet>548</a>        <span class="prelude-val">Ok</span>(())
+<a href=#549 id=549 data-nosnippet>549</a>    } <span class="kw">else </span>{
+<a href=#550 id=550 data-nosnippet>550</a>        <span class="prelude-val">Err</span>(NativeLoginError::NonceMismatch)
+<a href=#551 id=551 data-nosnippet>551</a>    }
+<a href=#552 id=552 data-nosnippet>552</a>}
+<a href=#553 id=553 data-nosnippet>553</a>
+<a href=#554 id=554 data-nosnippet>554</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#555 id=555 data-nosnippet>555</a>// The service method
+<a href=#556 id=556 data-nosnippet>556</a>// ---------------------------------------------------------------------------
+<a href=#557 id=557 data-nosnippet>557</a>
+<a href=#558 id=558 data-nosnippet>558</a></span><span class="kw">impl</span>&lt;FC, FL, UR&gt; OidcFederationService&lt;FC, FL, UR&gt;
+<a href=#559 id=559 data-nosnippet>559</a><span class="kw">where
+<a href=#560 id=560 data-nosnippet>560</a>    </span>FC: FederationConfigRepository,
+<a href=#561 id=561 data-nosnippet>561</a>    FL: FederationLinkRepository,
+<a href=#562 id=562 data-nosnippet>562</a>    UR: UserRepository,
+<a href=#563 id=563 data-nosnippet>563</a>{
+<a href=#564 id=564 data-nosnippet>564</a>    <span class="doccomment">/// Verify a provider-issued ID token presented for native sign-in into
+<a href=#565 id=565 data-nosnippet>565</a>    /// `tenant_id`, and resolve the AXIAM user it signs in.
+<a href=#566 id=566 data-nosnippet>566</a>    ///
+<a href=#567 id=567 data-nosnippet>567</a>    /// Runs §3.1 steps 2–7 in order (see the module documentation). `now` is
+<a href=#568 id=568 data-nosnippet>568</a>    /// the caller's clock in seconds since the epoch, used for the `iat`
+<a href=#569 id=569 data-nosnippet>569</a>    /// rules; `exp` is checked by the decoder against the system clock with
+<a href=#570 id=570 data-nosnippet>570</a>    /// the same 60 s leeway the browser login uses.
+<a href=#571 id=571 data-nosnippet>571</a>    ///
+<a href=#572 id=572 data-nosnippet>572</a>    /// The caller (W2.3) has authenticated the client and checked that it may
+<a href=#573 id=573 data-nosnippet>573</a>    /// use the grant; it maps every error through
+<a href=#574 id=574 data-nosnippet>574</a>    /// [`NativeLoginError::refusal`] and records
+<a href=#575 id=575 data-nosnippet>575</a>    /// [`NativeLoginError::reason_code`] in the audit trail.
+<a href=#576 id=576 data-nosnippet>576</a>    ///
+<a href=#577 id=577 data-nosnippet>577</a>    /// # Errors
+<a href=#578 id=578 data-nosnippet>578</a>    ///
+<a href=#579 id=579 data-nosnippet>579</a>    /// [`NativeLoginError`], one variant per refused check.
+<a href=#580 id=580 data-nosnippet>580</a>    </span><span class="kw">pub async fn </span>verify_native_id_token&lt;TR, RR&gt;(
+<a href=#581 id=581 data-nosnippet>581</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#582 id=582 data-nosnippet>582</a>        tenants: <span class="kw-2">&amp;</span>TR,
+<a href=#583 id=583 data-nosnippet>583</a>        replay: <span class="kw-2">&amp;</span>RR,
+<a href=#584 id=584 data-nosnippet>584</a>        tenant_id: Uuid,
+<a href=#585 id=585 data-nosnippet>585</a>        request: <span class="kw-2">&amp;</span>NativeIdTokenRequest&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#586 id=586 data-nosnippet>586</a>        now: i64,
+<a href=#587 id=587 data-nosnippet>587</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;NativeSubject, NativeLoginError&gt;
+<a href=#588 id=588 data-nosnippet>588</a>    <span class="kw">where
+<a href=#589 id=589 data-nosnippet>589</a>        </span>TR: TenantRepository,
+<a href=#590 id=590 data-nosnippet>590</a>        RR: ProviderIdTokenReplayRepository,
+<a href=#591 id=591 data-nosnippet>591</a>    {
+<a href=#592 id=592 data-nosnippet>592</a>        <span class="kw">let </span>result = <span class="self">self
+<a href=#593 id=593 data-nosnippet>593</a>            </span>.verify_native_id_token_inner(tenants, replay, tenant_id, request, now)
+<a href=#594 id=594 data-nosnippet>594</a>            .<span class="kw">await</span>;
+<a href=#595 id=595 data-nosnippet>595</a>        <span class="kw">if let </span><span class="prelude-val">Err</span>(<span class="kw-2">ref </span>e) = result {
+<a href=#596 id=596 data-nosnippet>596</a>            <span class="comment">// The reason, never the token. Configuration problems at warn so an
+<a href=#597 id=597 data-nosnippet>597</a>            // operator sees them; token problems at debug, because a stream of
+<a href=#598 id=598 data-nosnippet>598</a>            // bad tokens is a client's bug or an attack and not actionable here.
+<a href=#599 id=599 data-nosnippet>599</a>            </span><span class="kw">match </span>e {
+<a href=#600 id=600 data-nosnippet>600</a>                NativeLoginError::ProviderUnavailable(<span class="kw">_</span>)
+<a href=#601 id=601 data-nosnippet>601</a>                | NativeLoginError::KeysUnavailable(<span class="kw">_</span>)
+<a href=#602 id=602 data-nosnippet>602</a>                | NativeLoginError::ReplayGuardUnavailable(<span class="kw">_</span>)
+<a href=#603 id=603 data-nosnippet>603</a>                | NativeLoginError::Server(<span class="kw">_</span>) =&gt; <span class="macro">warn!</span>(
+<a href=#604 id=604 data-nosnippet>604</a>                    tenant_id = %tenant_id,
+<a href=#605 id=605 data-nosnippet>605</a>                    reason = e.reason_code(),
+<a href=#606 id=606 data-nosnippet>606</a>                    detail = %e,
+<a href=#607 id=607 data-nosnippet>607</a>                    <span class="string">"native sign-in refused"
+<a href=#608 id=608 data-nosnippet>608</a>                </span>),
+<a href=#609 id=609 data-nosnippet>609</a>                <span class="kw">_ </span>=&gt; <span class="macro">debug!</span>(
+<a href=#610 id=610 data-nosnippet>610</a>                    tenant_id = %tenant_id,
+<a href=#611 id=611 data-nosnippet>611</a>                    reason = e.reason_code(),
+<a href=#612 id=612 data-nosnippet>612</a>                    detail = %e,
+<a href=#613 id=613 data-nosnippet>613</a>                    <span class="string">"native sign-in refused"
+<a href=#614 id=614 data-nosnippet>614</a>                </span>),
+<a href=#615 id=615 data-nosnippet>615</a>            }
+<a href=#616 id=616 data-nosnippet>616</a>        }
+<a href=#617 id=617 data-nosnippet>617</a>        result
+<a href=#618 id=618 data-nosnippet>618</a>    }
+<a href=#619 id=619 data-nosnippet>619</a>
+<a href=#620 id=620 data-nosnippet>620</a>    <span class="kw">async fn </span>verify_native_id_token_inner&lt;TR, RR&gt;(
+<a href=#621 id=621 data-nosnippet>621</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#622 id=622 data-nosnippet>622</a>        tenants: <span class="kw-2">&amp;</span>TR,
+<a href=#623 id=623 data-nosnippet>623</a>        replay: <span class="kw-2">&amp;</span>RR,
+<a href=#624 id=624 data-nosnippet>624</a>        tenant_id: Uuid,
+<a href=#625 id=625 data-nosnippet>625</a>        request: <span class="kw-2">&amp;</span>NativeIdTokenRequest&lt;<span class="lifetime">'_</span>&gt;,
+<a href=#626 id=626 data-nosnippet>626</a>        now: i64,
+<a href=#627 id=627 data-nosnippet>627</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;NativeSubject, NativeLoginError&gt;
+<a href=#628 id=628 data-nosnippet>628</a>    <span class="kw">where
+<a href=#629 id=629 data-nosnippet>629</a>        </span>TR: TenantRepository,
+<a href=#630 id=630 data-nosnippet>630</a>        RR: ProviderIdTokenReplayRepository,
+<a href=#631 id=631 data-nosnippet>631</a>    {
+<a href=#632 id=632 data-nosnippet>632</a>        <span class="comment">// --- 2. Which provider? ---------------------------------------------
+<a href=#633 id=633 data-nosnippet>633</a>        </span><span class="kw">let </span>(config, inherited) = <span class="self">self
+<a href=#634 id=634 data-nosnippet>634</a>            </span>.resolve_native_provider(tenants, tenant_id, request.provider)
+<a href=#635 id=635 data-nosnippet>635</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#636 id=636 data-nosnippet>636</a>        <span class="kw">let </span>trust = <span class="kw-2">&amp;</span>config.native_login;
+<a href=#637 id=637 data-nosnippet>637</a>        <span class="kw">let </span>metadata_url = config.metadata_url.as_deref().ok_or_else(|| {
+<a href=#638 id=638 data-nosnippet>638</a>            NativeLoginError::ProviderUnavailable(<span class="string">"no metadata URL configured"</span>.into())
+<a href=#639 id=639 data-nosnippet>639</a>        })<span class="question-mark">?</span>;
+<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">let </span>discovery = <span class="self">self
+<a href=#641 id=641 data-nosnippet>641</a>            </span>.discover(metadata_url)
+<a href=#642 id=642 data-nosnippet>642</a>            .<span class="kw">await
+<a href=#643 id=643 data-nosnippet>643</a>            </span>.map_err(|e| NativeLoginError::ProviderUnavailable(e.to_string()))<span class="question-mark">?</span>;
+<a href=#644 id=644 data-nosnippet>644</a>
+<a href=#645 id=645 data-nosnippet>645</a>        <span class="comment">// --- 3 and 4. Header, key, signature, iss, aud, exp ------------------
+<a href=#646 id=646 data-nosnippet>646</a>        // The browser login's verification core, with the native client IDs
+<a href=#647 id=647 data-nosnippet>647</a>        // and the provider's web `client_id` as the audiences the decoder
+<a href=#648 id=648 data-nosnippet>648</a>        // admits, and the same JWKS cache key, so the two share one rollover
+<a href=#649 id=649 data-nosnippet>649</a>        // state for this provider. The web client is admitted here only so a
+<a href=#650 id=650 data-nosnippet>650</a>        // token addressed to it can reach `issued_to`, which accepts it solely
+<a href=#651 id=651 data-nosnippet>651</a>        // as the `aud` of a token whose `azp` is listed (D-N17).
+<a href=#652 id=652 data-nosnippet>652</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>audiences: Vec&lt;<span class="kw-2">&amp;</span>str&gt; = trust.client_ids.iter().map(String::as_str).collect();
+<a href=#653 id=653 data-nosnippet>653</a>        <span class="kw">if </span>!config.client_id.is_empty() &amp;&amp; !audiences.contains(<span class="kw-2">&amp;</span>config.client_id.as_str()) {
+<a href=#654 id=654 data-nosnippet>654</a>            audiences.push(config.client_id.as_str());
+<a href=#655 id=655 data-nosnippet>655</a>        }
+<a href=#656 id=656 data-nosnippet>656</a>        <span class="kw">let </span>checked = <span class="self">self
+<a href=#657 id=657 data-nosnippet>657</a>            </span>.verify_id_token_core(
+<a href=#658 id=658 data-nosnippet>658</a>                request.id_token,
+<a href=#659 id=659 data-nosnippet>659</a>                <span class="kw-2">&amp;</span>discovery,
+<a href=#660 id=660 data-nosnippet>660</a>                <span class="kw-2">&amp;</span>audiences,
+<a href=#661 id=661 data-nosnippet>661</a>                <span class="kw-2">&amp;</span>config.allowed_algorithms,
+<a href=#662 id=662 data-nosnippet>662</a>                <span class="kw-2">&amp;</span>config.allowed_issuer_tenants,
+<a href=#663 id=663 data-nosnippet>663</a>                (config.tenant_id, config.id),
+<a href=#664 id=664 data-nosnippet>664</a>            )
+<a href=#665 id=665 data-nosnippet>665</a>            .<span class="kw">await
+<a href=#666 id=666 data-nosnippet>666</a>            </span>.map_err(NativeLoginError::from_check)<span class="question-mark">?</span>;
+<a href=#667 id=667 data-nosnippet>667</a>        <span class="kw">let </span>claims = <span class="kw-2">&amp;</span>checked.verified.claims;
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="kw">let </span>raw = <span class="kw-2">&amp;</span>checked.verified.raw;
+<a href=#669 id=669 data-nosnippet>669</a>
+<a href=#670 id=670 data-nosnippet>670</a>        <span class="kw">let </span>audience = issued_to(
+<a href=#671 id=671 data-nosnippet>671</a>            <span class="kw-2">&amp;</span>trust.client_ids,
+<a href=#672 id=672 data-nosnippet>672</a>            <span class="kw-2">&amp;</span>config.client_id,
+<a href=#673 id=673 data-nosnippet>673</a>            claims.aud.as_ref(),
+<a href=#674 id=674 data-nosnippet>674</a>            raw.get(<span class="string">"azp"</span>),
+<a href=#675 id=675 data-nosnippet>675</a>        )<span class="question-mark">?</span>;
+<a href=#676 id=676 data-nosnippet>676</a>        check_iat(claims.iat, now, trust.max_token_age_secs)<span class="question-mark">?</span>;
+<a href=#677 id=677 data-nosnippet>677</a>        <span class="kw">let </span>id_token_exp = claims
+<a href=#678 id=678 data-nosnippet>678</a>            .exp
+<a href=#679 id=679 data-nosnippet>679</a>            .and_then(|v| i64::try_from(v).ok())
+<a href=#680 id=680 data-nosnippet>680</a>            .ok_or_else(|| NativeLoginError::ClaimRejected(<span class="string">"no usable 'exp'"</span>.into()))<span class="question-mark">?</span>;
+<a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">if </span>claims.sub.trim().is_empty() {
+<a href=#682 id=682 data-nosnippet>682</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::ClaimRejected(<span class="string">"empty 'sub'"</span>.into()));
+<a href=#683 id=683 data-nosnippet>683</a>        }
+<a href=#684 id=684 data-nosnippet>684</a>        <span class="kw">let </span>issuer = claims
+<a href=#685 id=685 data-nosnippet>685</a>            .iss
+<a href=#686 id=686 data-nosnippet>686</a>            .clone()
+<a href=#687 id=687 data-nosnippet>687</a>            .ok_or_else(|| NativeLoginError::ClaimRejected(<span class="string">"no 'iss'"</span>.into()))<span class="question-mark">?</span>;
+<a href=#688 id=688 data-nosnippet>688</a>
+<a href=#689 id=689 data-nosnippet>689</a>        <span class="comment">// --- 5. Shape: an ID token, bound to this request's nonce ------------
+<a href=#690 id=690 data-nosnippet>690</a>        </span>check_shape(checked.header.typ.as_deref(), raw, request.nonce)<span class="question-mark">?</span>;
+<a href=#691 id=691 data-nosnippet>691</a>
+<a href=#692 id=692 data-nosnippet>692</a>        <span class="comment">// --- 6. Replay: spend the token, once --------------------------------
+<a href=#693 id=693 data-nosnippet>693</a>        // After the signature (a forged token records nothing) and before the
+<a href=#694 id=694 data-nosnippet>694</a>        // subject (two concurrent presentations cannot both resolve). Keyed on
+<a href=#695 id=695 data-nosnippet>695</a>        // the issuer and the hash only (D-N19): a token is spent once across
+<a href=#696 id=696 data-nosnippet>696</a>        // the deployment, whichever tenant or provider configuration lists the
+<a href=#697 id=697 data-nosnippet>697</a>        // app it was issued to. The hash is over the signing input, not the
+<a href=#698 id=698 data-nosnippet>698</a>        // whole token, so an ECDSA signature's second encoding is the same
+<a href=#699 id=699 data-nosnippet>699</a>        // token (F4-W2-11).
+<a href=#700 id=700 data-nosnippet>700</a>        //
+<a href=#701 id=701 data-nosnippet>701</a>        // The row is kept to `exp` plus *twice* the leeway. `exp` is checked
+<a href=#702 id=702 data-nosnippet>702</a>        // here against this node's clock with one leeway; the sweep deletes by
+<a href=#703 id=703 data-nosnippet>703</a>        // the database's clock. The second leeway keeps a row alive while any
+<a href=#704 id=704 data-nosnippet>704</a>        // node within 60 s of the database would still accept the token.
+<a href=#705 id=705 data-nosnippet>705</a>        </span><span class="kw">let </span>expires_at = chrono::DateTime::&lt;chrono::Utc&gt;::from_timestamp(
+<a href=#706 id=706 data-nosnippet>706</a>            id_token_exp.saturating_add(<span class="number">2 </span>* CLOCK_SKEW_LEEWAY_SECS <span class="kw">as </span>i64),
+<a href=#707 id=707 data-nosnippet>707</a>            <span class="number">0</span>,
+<a href=#708 id=708 data-nosnippet>708</a>        )
+<a href=#709 id=709 data-nosnippet>709</a>        .ok_or_else(|| NativeLoginError::ClaimRejected(<span class="string">"'exp' is not a date"</span>.into()))<span class="question-mark">?</span>;
+<a href=#710 id=710 data-nosnippet>710</a>        <span class="kw">let </span>token_hash = replay_key(request.id_token)
+<a href=#711 id=711 data-nosnippet>711</a>            .ok_or_else(|| NativeLoginError::ClaimRejected(<span class="string">"not a compact JWS"</span>.into()))<span class="question-mark">?</span>;
+<a href=#712 id=712 data-nosnippet>712</a>        <span class="kw">match </span>replay
+<a href=#713 id=713 data-nosnippet>713</a>            .insert_id_token(<span class="kw-2">&amp;</span>issuer, <span class="kw-2">&amp;</span>token_hash, expires_at)
+<a href=#714 id=714 data-nosnippet>714</a>            .<span class="kw">await
+<a href=#715 id=715 data-nosnippet>715</a>        </span>{
+<a href=#716 id=716 data-nosnippet>716</a>            <span class="prelude-val">Ok</span>(()) =&gt; {}
+<a href=#717 id=717 data-nosnippet>717</a>            <span class="prelude-val">Err</span>(AxiamError::ReplayDetected) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::Replayed),
+<a href=#718 id=718 data-nosnippet>718</a>            <span class="comment">// A guard that cannot record must not accept: the token would be
+<a href=#719 id=719 data-nosnippet>719</a>            // single-use only while the datastore is up (the CIBA rule).
+<a href=#720 id=720 data-nosnippet>720</a>            </span><span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::ReplayGuardUnavailable(e.to_string())),
+<a href=#721 id=721 data-nosnippet>721</a>        }
+<a href=#722 id=722 data-nosnippet>722</a>
+<a href=#723 id=723 data-nosnippet>723</a>        <span class="comment">// --- 7. Which AXIAM user? --------------------------------------------
+<a href=#724 id=724 data-nosnippet>724</a>        // Exactly the browser login's resolution (D-N11): the provider's
+<a href=#725 id=725 data-nosnippet>725</a>        // attribute map over the verified claims, then the same link-or-
+<a href=#726 id=726 data-nosnippet>726</a>        // provision function. A native sign-in and a browser login with the
+<a href=#727 id=727 data-nosnippet>727</a>        // same claims are the same user.
+<a href=#728 id=728 data-nosnippet>728</a>        </span><span class="kw">let </span>identity = map_identity(config.provider_kind, <span class="kw-2">&amp;</span>config.attribute_map, raw)
+<a href=#729 id=729 data-nosnippet>729</a>            .ok_or(NativeLoginError::SubjectUnmapped)<span class="question-mark">?</span>;
+<a href=#730 id=730 data-nosnippet>730</a>        <span class="kw">let </span>resolved = <span class="self">self
+<a href=#731 id=731 data-nosnippet>731</a>            </span>.provision_or_link_identity(tenant_id, config.id, <span class="kw-2">&amp;</span>identity)
+<a href=#732 id=732 data-nosnippet>732</a>            .<span class="kw">await
+<a href=#733 id=733 data-nosnippet>733</a>            </span>.map_err(|e| <span class="kw">match </span>e {
+<a href=#734 id=734 data-nosnippet>734</a>                FederationError::ProvisioningConflict(<span class="kw">_</span>) =&gt; NativeLoginError::ProvisioningConflict,
+<a href=#735 id=735 data-nosnippet>735</a>                other =&gt; NativeLoginError::Server(other.to_string()),
+<a href=#736 id=736 data-nosnippet>736</a>            })<span class="question-mark">?</span>;
+<a href=#737 id=737 data-nosnippet>737</a>        axiam_auth::service::account_may_act(<span class="kw-2">&amp;</span>resolved.user)
+<a href=#738 id=738 data-nosnippet>738</a>            .map_err(|e| NativeLoginError::AccountRefused(e.to_string()))<span class="question-mark">?</span>;
+<a href=#739 id=739 data-nosnippet>739</a>
+<a href=#740 id=740 data-nosnippet>740</a>        <span class="kw">if </span>resolved.newly_provisioned {
+<a href=#741 id=741 data-nosnippet>741</a>            <span class="macro">info!</span>(
+<a href=#742 id=742 data-nosnippet>742</a>                target: <span class="string">"axiam::audit"</span>,
+<a href=#743 id=743 data-nosnippet>743</a>                event = <span class="string">"federation.jit_provision"</span>,
+<a href=#744 id=744 data-nosnippet>744</a>                tenant_id = %tenant_id,
+<a href=#745 id=745 data-nosnippet>745</a>                provider = %config.provider,
+<a href=#746 id=746 data-nosnippet>746</a>                user_id = %resolved.user.id,
+<a href=#747 id=747 data-nosnippet>747</a>                source = <span class="string">"native_login"</span>,
+<a href=#748 id=748 data-nosnippet>748</a>                <span class="string">"JIT-provisioned an AXIAM user from a native sign-in"
+<a href=#749 id=749 data-nosnippet>749</a>            </span>);
+<a href=#750 id=750 data-nosnippet>750</a>        }
+<a href=#751 id=751 data-nosnippet>751</a>
+<a href=#752 id=752 data-nosnippet>752</a>        <span class="prelude-val">Ok</span>(NativeSubject {
+<a href=#753 id=753 data-nosnippet>753</a>            user_id: resolved.user.id,
+<a href=#754 id=754 data-nosnippet>754</a>            tenant_id,
+<a href=#755 id=755 data-nosnippet>755</a>            provider_id: config.id,
+<a href=#756 id=756 data-nosnippet>756</a>            provider_tenant_id: config.tenant_id,
+<a href=#757 id=757 data-nosnippet>757</a>            inherited,
+<a href=#758 id=758 data-nosnippet>758</a>            provider_name: config.provider.clone(),
+<a href=#759 id=759 data-nosnippet>759</a>            provider_kind: config.provider_kind,
+<a href=#760 id=760 data-nosnippet>760</a>            issuer,
+<a href=#761 id=761 data-nosnippet>761</a>            external_subject: identity.external_subject,
+<a href=#762 id=762 data-nosnippet>762</a>            audience,
+<a href=#763 id=763 data-nosnippet>763</a>            newly_provisioned: resolved.newly_provisioned,
+<a href=#764 id=764 data-nosnippet>764</a>            upstream_auth_time: upstream_instant(claims.auth_time),
+<a href=#765 id=765 data-nosnippet>765</a>            id_token_exp,
+<a href=#766 id=766 data-nosnippet>766</a>        })
+<a href=#767 id=767 data-nosnippet>767</a>    }
+<a href=#768 id=768 data-nosnippet>768</a>
+<a href=#769 id=769 data-nosnippet>769</a>    <span class="doccomment">/// Step 2: the effective provider the request names, re-read in full from
+<a href=#770 id=770 data-nosnippet>770</a>    /// the tenant that owns it, as the browser login does.
+<a href=#771 id=771 data-nosnippet>771</a>    </span><span class="kw">async fn </span>resolve_native_provider&lt;TR: TenantRepository&gt;(
+<a href=#772 id=772 data-nosnippet>772</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#773 id=773 data-nosnippet>773</a>        tenants: <span class="kw-2">&amp;</span>TR,
+<a href=#774 id=774 data-nosnippet>774</a>        tenant_id: Uuid,
+<a href=#775 id=775 data-nosnippet>775</a>        provider: <span class="kw-2">&amp;</span>str,
+<a href=#776 id=776 data-nosnippet>776</a>    ) -&gt; <span class="prelude-ty">Result</span>&lt;(FederationConfig, bool), NativeLoginError&gt; {
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="kw">let </span>provider = provider.trim();
+<a href=#778 id=778 data-nosnippet>778</a>        <span class="kw">if </span>provider.is_empty() {
+<a href=#779 id=779 data-nosnippet>779</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::ProviderNotFound);
+<a href=#780 id=780 data-nosnippet>780</a>        }
+<a href=#781 id=781 data-nosnippet>781</a>        <span class="kw">let </span>tenant = tenants.get_by_id(tenant_id).<span class="kw">await</span>.map_err(|e| <span class="kw">match </span>e {
+<a href=#782 id=782 data-nosnippet>782</a>            AxiamError::NotFound { .. } =&gt; NativeLoginError::ProviderNotFound,
+<a href=#783 id=783 data-nosnippet>783</a>            other =&gt; NativeLoginError::Server(other.to_string()),
+<a href=#784 id=784 data-nosnippet>784</a>        })<span class="question-mark">?</span>;
+<a href=#785 id=785 data-nosnippet>785</a>        <span class="kw">let </span>effective = effective_providers(
+<a href=#786 id=786 data-nosnippet>786</a>            <span class="self">self</span>.federation_config_repo_ref(),
+<a href=#787 id=787 data-nosnippet>787</a>            tenants,
+<a href=#788 id=788 data-nosnippet>788</a>            tenant.organization_id,
+<a href=#789 id=789 data-nosnippet>789</a>            tenant_id,
+<a href=#790 id=790 data-nosnippet>790</a>        )
+<a href=#791 id=791 data-nosnippet>791</a>        .<span class="kw">await
+<a href=#792 id=792 data-nosnippet>792</a>        </span>.map_err(|e| NativeLoginError::Server(e.to_string()))<span class="question-mark">?</span>;
+<a href=#793 id=793 data-nosnippet>793</a>
+<a href=#794 id=794 data-nosnippet>794</a>        <span class="kw">let </span><span class="kw-2">mut </span>matching = effective
+<a href=#795 id=795 data-nosnippet>795</a>            .into_iter()
+<a href=#796 id=796 data-nosnippet>796</a>            .filter(|p| accepts_native_login(<span class="kw-2">&amp;</span>p.config) &amp;&amp; names(<span class="kw-2">&amp;</span>p.config, provider));
+<a href=#797 id=797 data-nosnippet>797</a>        <span class="kw">let </span>found = matching.next().ok_or(NativeLoginError::ProviderNotFound)<span class="question-mark">?</span>;
+<a href=#798 id=798 data-nosnippet>798</a>        <span class="comment">// Two effective providers sharing a slug (an OIDC and an OAuth2
+<a href=#799 id=799 data-nosnippet>799</a>        // generic one, say, of which only one could match here — or a
+<a href=#800 id=800 data-nosnippet>800</a>        // misconfiguration) must not be resolved by list order.
+<a href=#801 id=801 data-nosnippet>801</a>        </span><span class="kw">if </span>matching.next().is_some() {
+<a href=#802 id=802 data-nosnippet>802</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::ProviderNotFound);
+<a href=#803 id=803 data-nosnippet>803</a>        }
+<a href=#804 id=804 data-nosnippet>804</a>
+<a href=#805 id=805 data-nosnippet>805</a>        <span class="kw">let </span>full = <span class="self">self
+<a href=#806 id=806 data-nosnippet>806</a>            </span>.federation_config_repo_ref()
+<a href=#807 id=807 data-nosnippet>807</a>            .get_by_id(found.config.tenant_id, found.config.id)
+<a href=#808 id=808 data-nosnippet>808</a>            .<span class="kw">await
+<a href=#809 id=809 data-nosnippet>809</a>            </span>.map_err(|e| <span class="kw">match </span>e {
+<a href=#810 id=810 data-nosnippet>810</a>                AxiamError::NotFound { .. } =&gt; NativeLoginError::ProviderNotFound,
+<a href=#811 id=811 data-nosnippet>811</a>                other =&gt; NativeLoginError::Server(other.to_string()),
+<a href=#812 id=812 data-nosnippet>812</a>            })<span class="question-mark">?</span>;
+<a href=#813 id=813 data-nosnippet>813</a>        <span class="comment">// The listing and the row are read apart; the row decides.
+<a href=#814 id=814 data-nosnippet>814</a>        </span><span class="kw">if </span>!accepts_native_login(<span class="kw-2">&amp;</span>full) {
+<a href=#815 id=815 data-nosnippet>815</a>            <span class="kw">return </span><span class="prelude-val">Err</span>(NativeLoginError::ProviderNotFound);
+<a href=#816 id=816 data-nosnippet>816</a>        }
+<a href=#817 id=817 data-nosnippet>817</a>        <span class="prelude-val">Ok</span>((full, found.inherited))
+<a href=#818 id=818 data-nosnippet>818</a>    }
+<a href=#819 id=819 data-nosnippet>819</a>}
+<a href=#820 id=820 data-nosnippet>820</a>
+<a href=#821 id=821 data-nosnippet>821</a><span class="attr">#[cfg(test)]
+<a href=#822 id=822 data-nosnippet>822</a></span><span class="kw">mod </span>tests;
+</code></pre></div></section></main></body></html>

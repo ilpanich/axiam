@@ -1,0 +1,97 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="G-A (W2.3) — native sign-in with a provider ID token. A child module, as the CIBA grant is, so that it issues through this module’s private machinery; re-exported at the crate root as `crate::provider_id_token`. G-A — native sign-in with a provider ID token: the grant (W2.3)."><title>axiam_oauth2::token::provider_id_token - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_oauth2" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module provider_id_token</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../axiam_oauth2/index.html">axiam_<wbr>oauth2</a><span class="version">1.2.2</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module provider_<wbr>id_<wbr>token</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-wire" title="The wire">The wire</a></li><li><a href="#why-a-vendor-urn-and-this-one" title="Why a vendor URN, and this one">Why a vendor URN, and this one</a></li><li><a href="#order-and-what-each-step-may-write" title="Order, and what each step may write">Order, and what each step may write</a></li><li><a href="#the-session-and-what-it-records" title="The session, and what it records">The session, and what it records</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In axiam_<wbr>oauth2::<wbr>token</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">axiam_oauth2</a>::<wbr><a href="../index.html">token</a></div><h1>Module <span>provider_<wbr>id_<wbr>token</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/axiam_oauth2/provider_id_token.rs.html#1-946">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>G-A (W2.3) — native sign-in with a provider ID token. A child module, as
+the CIBA grant is, so that it issues through this module’s private
+machinery; re-exported at the crate root as <code>crate::provider_id_token</code>.
+G-A — native sign-in with a provider ID token: the grant (W2.3).</p>
+<p>Design: <code>claude_dev/social-login-gap-plan-2026-10-30.md</code> §3.1, D-N1, D-N6.
+The rule the whole feature applies:</p>
+<blockquote>
+<p><strong>An ID token is accepted as a sign-in only when it was issued to us.</strong></p>
+</blockquote>
+<p><code>axiam-federation</code>’s <code>native_login</code> decides <em>whether</em> a provider ID token
+proves a sign-in and <em>who</em> signed in (§3.1 steps 2–7). This module turns
+that answer into the client’s ordinary sign-in token set (step 8) and owns
+the gate in front of it (step 1). The token endpoint dispatches here and
+writes the audit record (step 9).</p>
+<h2 id="the-wire"><a class="doc-anchor" href="#the-wire">§</a>The wire</h2>
+<p><code>POST /oauth2/token</code> with
+<code>grant_type=</code>[<code>PROVIDER_ID_TOKEN_GRANT_TYPE</code>], <code>provider</code> (the federation
+provider’s UUID or <code>provider_slug</code>), <code>id_token</code>, <code>nonce</code> (the raw nonce the
+app generated; the provider’s SDK was given its SHA-256 hex, which is what
+the token carries — D-N16), optional <code>scope</code> and RFC 8707 <code>resource</code>, and
+the client’s usual authentication — a public (mobile) client sends
+<code>client_id</code> only.</p>
+<h2 id="why-a-vendor-urn-and-this-one"><a class="doc-anchor" href="#why-a-vendor-urn-and-this-one">§</a>Why a vendor URN, and this one</h2>
+<p>The grant is AXIAM’s own: no IETF or OIDF registry defines “sign in with a
+third party’s ID token” as a grant, and RFC 8693 is the wrong shape (X4
+refuses ID tokens by design; §3.1). RFC 6749 §4.5 extension grants are
+named by absolute URI, and the tree already has exactly one vendor grant
+URN, <code>urn:axiam:params:oauth:grant-type:may-impersonate</code>
+(<code>crate::token_exchange::MAY_IMPERSONATE_GRANT</code>). This one follows it
+segment for segment, so the two read as one family and no new namespace is
+opened. Nothing else in the tree, the SDK contract or the discovery
+document spells <code>provider-id-token</code>.</p>
+<h2 id="order-and-what-each-step-may-write"><a class="doc-anchor" href="#order-and-what-each-step-may-write">§</a>Order, and what each step may write</h2>
+<ol>
+<li><strong>The client</strong> is read and authenticates by its registered method — a
+public client by presenting nothing, a confidential one by its
+credential (<a href="../struct.TokenService.html#method.authenticate_provider_id_token_client" title="method axiam_oauth2::token::TokenService::authenticate_provider_id_token_client"><code>TokenService::authenticate_provider_id_token_client</code></a>).
+The profile’s request-time rules run (<code>fapi::enforce_token_request</code>),
+the registration must list the grant (<code>unauthorized_client</code>
+otherwise), and the binding the registration asks for (<code>cnf</code>: DPoP,
+certificate) is decided — refused, not downgraded, when the request
+cannot satisfy it. The REST layer then applies the
+<code>oauth2_provider_id_token</code> bucket. Nothing has been written.</li>
+<li><strong>The request</strong>: <code>provider</code>, <code>id_token</code> and <code>nonce</code> present; <code>scope</code>
+within the client’s registered set (after the external-client ceiling);
+<code>resource</code> one the client may address
+(<a href="../struct.TokenService.html#method.prepare_provider_id_token_grant" title="method axiam_oauth2::token::TokenService::prepare_provider_id_token_grant"><code>TokenService::prepare_provider_id_token_grant</code></a>). Still nothing
+written, so a malformed request does not spend the token.</li>
+<li><strong>Steps 2–7</strong> run in <code>axiam-federation</code> (the provider, the signature,
+the claims, the shape, the replay record, the user). Every refusal is
+one <code>invalid_grant</code> on the wire ([<code>refusal_for</code>]). The token endpoint
+then fires <code>login.post_auth</code> for the resolved user (CONTRACT §22,
+F4-W2-01) — the gate every interactive sign-in passes — and a veto is
+the same <code>invalid_grant</code>.</li>
+<li><strong>Consent</strong> (D-N6): a scope that would need a consent ceremony is
+<code>consent_required</code> ([<code>decide_consent</code>]) — there is nobody to ask on
+this request, so it is answered as <code>prompt=none</code> is at <code>/authorize</code>.</li>
+<li><strong>Issue</strong> (<a href="../struct.TokenService.html#method.issue_provider_id_token_grant" title="method axiam_oauth2::token::TokenService::issue_provider_id_token_grant"><code>TokenService::issue_provider_id_token_grant</code></a>): a session
+recording the federated authentication, the access token, a refresh
+token when the client holds <code>refresh_token</code>, and an ID token carrying
+the request’s nonce when <code>openid</code> was granted.</li>
+</ol>
+<h2 id="the-session-and-what-it-records"><a class="doc-anchor" href="#the-session-and-what-it-records">§</a>The session, and what it records</h2>
+<p>A federated <em>browser</em> sign-in creates a session whose evidence is
+<code>AuthenticationEvidence::upstream(auth_time, now, [fed])</code>, and a code
+issued from it carries that session in <code>sid</code> and that evidence onward.
+The native sign-in records the same: one session row with the provider’s
+<code>auth_time</code> (clamped to now) and <code>amr = [fed]</code>, no browser cookie, and a
+console refresh credential nobody is given. The access token names it in
+<code>sid</code>, so UserInfo and the session-validated API admit the token, ending
+the session (logout, password reset, an administrator’s revocation) ends
+the tokens, and the user’s session list shows the device. No claim is new.</p>
+<p>“Ends the tokens” includes the refresh token (D-N39, #839): a single-session
+logout (<code>AuthService::logout</code>, behind <code>/auth/logout</code>, RP-initiated logout
+and SAML single logout) revokes every refresh token issued under the
+session, and the user-wide revocations revoke all of the user’s. The token
+endpoint records the client as a participant of the session it creates
+([<code>NativeSignIn::session_id</code>]), so back-channel logout reaches a client
+that registered a <code>backchannel_logout_uri</code>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ConsentState.html" title="struct axiam_oauth2::token::provider_id_token::ConsentState">Consent<wbr>State</a></dt><dd>What the REST layer resolved about the consent this sign-in’s scopes need,
+for the user [<code>NativeSubject</code>] named.</dd><dt><a class="struct" href="struct.NativeSignIn.html" title="struct axiam_oauth2::token::provider_id_token::NativeSignIn">Native<wbr>Sign<wbr>In</a></dt><dd>What a native sign-in issued: the token set for the wire, and the session
+it was issued under.</dd><dt><a class="struct" href="struct.ProviderIdTokenClient.html" title="struct axiam_oauth2::token::provider_id_token::ProviderIdTokenClient">Provider<wbr>IdToken<wbr>Client</a></dt><dd>A client that passed step 1: authenticated, on a live tenant, within its
+profile’s rules, holding the grant, with its token binding decided.</dd><dt><a class="struct" href="struct.ProviderIdTokenGrant.html" title="struct axiam_oauth2::token::provider_id_token::ProviderIdTokenGrant">Provider<wbr>IdToken<wbr>Grant</a></dt><dd>A request that passed step 2 as well: its scopes and target are decided.</dd><dt><a class="struct" href="struct.SignInOrigin.html" title="struct axiam_oauth2::token::provider_id_token::SignInOrigin">Sign<wbr>InOrigin</a></dt><dd>Where the sign-in came from, for the session row. Both values are already
+bounded by the REST layer’s extractors.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_NONCE_BYTES.html" title="constant axiam_oauth2::token::provider_id_token::MAX_NONCE_BYTES">MAX_<wbr>NONCE_<wbr>BYTES</a></dt><dd>The longest <code>nonce</code> the grant accepts, in bytes (F4-W2-09).</dd><dt><a class="constant" href="constant.NATIVE_LOGIN_AUDIT_ACTION.html" title="constant axiam_oauth2::token::provider_id_token::NATIVE_LOGIN_AUDIT_ACTION">NATIVE_<wbr>LOGIN_<wbr>AUDIT_<wbr>ACTION</a></dt><dd>The audit action every native sign-in attempt that reached the grant is
+recorded under, accepted or refused. Never carries the token or the nonce.</dd><dt><a class="constant" href="constant.PROVIDER_ID_TOKEN_GRANT_TYPE.html" title="constant axiam_oauth2::token::provider_id_token::PROVIDER_ID_TOKEN_GRANT_TYPE">PROVIDER_<wbr>ID_<wbr>TOKEN_<wbr>GRANT_<wbr>TYPE</a></dt><dd>The grant type of a native sign-in with a provider ID token.</dd><dt><a class="constant" href="constant.PUBLIC_REFUSAL_DESCRIPTION.html" title="constant axiam_oauth2::token::provider_id_token::PUBLIC_REFUSAL_DESCRIPTION">PUBLIC_<wbr>REFUSAL_<wbr>DESCRIPTION</a></dt><dd>The one <code>invalid_grant</code> description every refusal of §3.1 steps 2–7
+carries, re-exported so the token endpoint answers with the federation
+module’s own wording.
+The one description a client is given for any refusal (OAuth2
+<code>invalid_grant</code>). Deliberately says nothing about which check failed.</dd><dt><a class="constant" href="constant.SERVER_REFUSAL_DESCRIPTION.html" title="constant axiam_oauth2::token::provider_id_token::SERVER_REFUSAL_DESCRIPTION">SERVER_<wbr>REFUSAL_<wbr>DESCRIPTION</a></dt><dd>The <code>server_error</code> description for a refusal that is the datastore’s
+fault. As generic as <a href="constant.PUBLIC_REFUSAL_DESCRIPTION.html" title="constant axiam_oauth2::token::provider_id_token::PUBLIC_REFUSAL_DESCRIPTION"><code>PUBLIC_REFUSAL_DESCRIPTION</code></a>, for the same reason.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.decide_consent.html" title="fn axiam_oauth2::token::provider_id_token::decide_consent">decide_<wbr>consent</a></dt><dd>D-N6: refuse any scope that would need a consent ceremony.</dd><dt><a class="fn" href="fn.holds_provider_id_token_grant.html" title="fn axiam_oauth2::token::provider_id_token::holds_provider_id_token_grant">holds_<wbr>provider_<wbr>id_<wbr>token_<wbr>grant</a></dt><dd>Whether a client’s registration lists this grant.</dd><dt><a class="fn" href="fn.native_request.html" title="fn axiam_oauth2::token::provider_id_token::native_request">native_<wbr>request</a></dt><dd>The three grant parameters, borrowed from the request, or
+<code>invalid_request</code> naming the first one that is missing or empty, or a
+<code>nonce</code> longer than <a href="constant.MAX_NONCE_BYTES.html" title="constant axiam_oauth2::token::provider_id_token::MAX_NONCE_BYTES"><code>MAX_NONCE_BYTES</code></a>.</dd><dt><a class="fn" href="fn.refusal_for.html" title="fn axiam_oauth2::token::provider_id_token::refusal_for">refusal_<wbr>for</a></dt><dd>What the wire sees for a refusal of §3.1 steps 2–7.</dd><dt><a class="fn" href="fn.refuse_switched_off_sensitive_scopes.html" title="fn axiam_oauth2::token::provider_id_token::refuse_switched_off_sensitive_scopes">refuse_<wbr>switched_<wbr>off_<wbr>sensitive_<wbr>scopes</a></dt><dd>F4-W2-05 (D-N14): the tenant’s sensitive-scope switch does not depend on
+the user, so it is decided with the other request checks, before the
+provider token is verified and spent. <code>switched_off</code> is true when the
+request asks for <code>address</code> or <code>phone</code> and the tenant’s effective settings
+have them off.</dd><dt><a class="fn" href="fn.requested_scopes.html" title="fn axiam_oauth2::token::provider_id_token::requested_scopes">requested_<wbr>scopes</a></dt><dd>The scopes this grant issues: the requested ones, each of which must be
+in the client’s registered set.</dd></dl></section></div></main></body></html>

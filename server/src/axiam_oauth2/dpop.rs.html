@@ -1144,53 +1144,54 @@
 <a href=#1144 id=1144 data-nosnippet>1144</a>            managed_by: ManagedBy::Admin,
 <a href=#1145 id=1145 data-nosnippet>1145</a>            last_authorized_at: <span class="prelude-val">None</span>,
 <a href=#1146 id=1146 data-nosnippet>1146</a>            ciba: Default::default(),
-<a href=#1147 id=1147 data-nosnippet>1147</a>        }
-<a href=#1148 id=1148 data-nosnippet>1148</a>    }
-<a href=#1149 id=1149 data-nosnippet>1149</a>
-<a href=#1150 id=1150 data-nosnippet>1150</a>    <span class="kw">fn </span>jkt(k: <span class="kw-2">&amp;</span>str) -&gt; CnfClaim {
-<a href=#1151 id=1151 data-nosnippet>1151</a>        CnfClaim::from_dpop_thumbprint(k)
-<a href=#1152 id=1152 data-nosnippet>1152</a>    }
-<a href=#1153 id=1153 data-nosnippet>1153</a>
-<a href=#1154 id=1154 data-nosnippet>1154</a>    <span class="doccomment">/// #681 — only a public DPoP-bound client's refresh token is bound.
-<a href=#1155 id=1155 data-nosnippet>1155</a>    </span><span class="attr">#[test]
-<a href=#1156 id=1156 data-nosnippet>1156</a>    </span><span class="kw">fn </span>only_a_public_dpop_bound_clients_refresh_token_is_bound() {
-<a href=#1157 id=1157 data-nosnippet>1157</a>        <span class="kw">let </span>public_dpop = client(ClientAuthMethod::None, <span class="bool-val">true</span>);
-<a href=#1158 id=1158 data-nosnippet>1158</a>        <span class="macro">assert_eq!</span>(
-<a href=#1159 id=1159 data-nosnippet>1159</a>            refresh_token_binding(<span class="kw-2">&amp;</span>public_dpop, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).as_deref(),
-<a href=#1160 id=1160 data-nosnippet>1160</a>            <span class="prelude-val">Some</span>(<span class="string">"k1"</span>)
-<a href=#1161 id=1161 data-nosnippet>1161</a>        );
-<a href=#1162 id=1162 data-nosnippet>1162</a>        <span class="kw">for </span>unbound <span class="kw">in </span>[
-<a href=#1163 id=1163 data-nosnippet>1163</a>            client(ClientAuthMethod::ClientSecretPost, <span class="bool-val">true</span>),
-<a href=#1164 id=1164 data-nosnippet>1164</a>            client(ClientAuthMethod::None, <span class="bool-val">false</span>),
-<a href=#1165 id=1165 data-nosnippet>1165</a>        ] {
-<a href=#1166 id=1166 data-nosnippet>1166</a>            <span class="macro">assert_eq!</span>(refresh_token_binding(<span class="kw-2">&amp;</span>unbound, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))), <span class="prelude-val">None</span>);
-<a href=#1167 id=1167 data-nosnippet>1167</a>        }
-<a href=#1168 id=1168 data-nosnippet>1168</a>        <span class="kw">let </span>cert_only = CnfClaim::from_certificate_thumbprint(<span class="string">"x5t"</span>);
-<a href=#1169 id=1169 data-nosnippet>1169</a>        <span class="macro">assert_eq!</span>(refresh_token_binding(<span class="kw-2">&amp;</span>public_dpop, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>cert_only)), <span class="prelude-val">None</span>);
-<a href=#1170 id=1170 data-nosnippet>1170</a>    }
-<a href=#1171 id=1171 data-nosnippet>1171</a>
-<a href=#1172 id=1172 data-nosnippet>1172</a>    <span class="doccomment">/// #681 — the bound key is admitted; another key, or none, is refused.
-<a href=#1173 id=1173 data-nosnippet>1173</a>    </span><span class="attr">#[test]
-<a href=#1174 id=1174 data-nosnippet>1174</a>    </span><span class="kw">fn </span>a_public_dpop_clients_refresh_needs_the_bound_key() {
-<a href=#1175 id=1175 data-nosnippet>1175</a>        <span class="kw">let </span>c = client(ClientAuthMethod::None, <span class="bool-val">true</span>);
-<a href=#1176 id=1176 data-nosnippet>1176</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>c, <span class="prelude-val">Some</span>(<span class="string">"k1"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).is_ok());
-<a href=#1177 id=1177 data-nosnippet>1177</a>        <span class="kw">for </span>bound <span class="kw">in </span>[<span class="prelude-val">Some</span>(<span class="string">"k2"</span>), <span class="prelude-val">None</span>] {
-<a href=#1178 id=1178 data-nosnippet>1178</a>            <span class="macro">assert!</span>(<span class="macro">matches!</span>(
-<a href=#1179 id=1179 data-nosnippet>1179</a>                enforce_refresh_token_binding(<span class="kw-2">&amp;</span>c, bound, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))),
-<a href=#1180 id=1180 data-nosnippet>1180</a>                <span class="prelude-val">Err</span>(<span class="kw">crate</span>::error::OAuth2Error::InvalidGrant(<span class="kw">_</span>))
-<a href=#1181 id=1181 data-nosnippet>1181</a>            ));
-<a href=#1182 id=1182 data-nosnippet>1182</a>        }
-<a href=#1183 id=1183 data-nosnippet>1183</a>    }
-<a href=#1184 id=1184 data-nosnippet>1184</a>
-<a href=#1185 id=1185 data-nosnippet>1185</a>    <span class="doccomment">/// #681 — a confidential client's refresh, and a non-DPoP public
-<a href=#1186 id=1186 data-nosnippet>1186</a>    /// client's, read no binding at all.
-<a href=#1187 id=1187 data-nosnippet>1187</a>    </span><span class="attr">#[test]
-<a href=#1188 id=1188 data-nosnippet>1188</a>    </span><span class="kw">fn </span>other_clients_refresh_is_unchanged() {
-<a href=#1189 id=1189 data-nosnippet>1189</a>        <span class="kw">let </span>confidential = client(ClientAuthMethod::ClientSecretPost, <span class="bool-val">true</span>);
-<a href=#1190 id=1190 data-nosnippet>1190</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>confidential, <span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).is_ok());
-<a href=#1191 id=1191 data-nosnippet>1191</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>confidential, <span class="prelude-val">Some</span>(<span class="string">"k2"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).is_ok());
-<a href=#1192 id=1192 data-nosnippet>1192</a>        <span class="kw">let </span>public_bearer = client(ClientAuthMethod::None, <span class="bool-val">false</span>);
-<a href=#1193 id=1193 data-nosnippet>1193</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>public_bearer, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>).is_ok());
-<a href=#1194 id=1194 data-nosnippet>1194</a>    }
-<a href=#1195 id=1195 data-nosnippet>1195</a>}
+<a href=#1147 id=1147 data-nosnippet>1147</a>            default_idp: <span class="prelude-val">None</span>,
+<a href=#1148 id=1148 data-nosnippet>1148</a>        }
+<a href=#1149 id=1149 data-nosnippet>1149</a>    }
+<a href=#1150 id=1150 data-nosnippet>1150</a>
+<a href=#1151 id=1151 data-nosnippet>1151</a>    <span class="kw">fn </span>jkt(k: <span class="kw-2">&amp;</span>str) -&gt; CnfClaim {
+<a href=#1152 id=1152 data-nosnippet>1152</a>        CnfClaim::from_dpop_thumbprint(k)
+<a href=#1153 id=1153 data-nosnippet>1153</a>    }
+<a href=#1154 id=1154 data-nosnippet>1154</a>
+<a href=#1155 id=1155 data-nosnippet>1155</a>    <span class="doccomment">/// #681 — only a public DPoP-bound client's refresh token is bound.
+<a href=#1156 id=1156 data-nosnippet>1156</a>    </span><span class="attr">#[test]
+<a href=#1157 id=1157 data-nosnippet>1157</a>    </span><span class="kw">fn </span>only_a_public_dpop_bound_clients_refresh_token_is_bound() {
+<a href=#1158 id=1158 data-nosnippet>1158</a>        <span class="kw">let </span>public_dpop = client(ClientAuthMethod::None, <span class="bool-val">true</span>);
+<a href=#1159 id=1159 data-nosnippet>1159</a>        <span class="macro">assert_eq!</span>(
+<a href=#1160 id=1160 data-nosnippet>1160</a>            refresh_token_binding(<span class="kw-2">&amp;</span>public_dpop, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).as_deref(),
+<a href=#1161 id=1161 data-nosnippet>1161</a>            <span class="prelude-val">Some</span>(<span class="string">"k1"</span>)
+<a href=#1162 id=1162 data-nosnippet>1162</a>        );
+<a href=#1163 id=1163 data-nosnippet>1163</a>        <span class="kw">for </span>unbound <span class="kw">in </span>[
+<a href=#1164 id=1164 data-nosnippet>1164</a>            client(ClientAuthMethod::ClientSecretPost, <span class="bool-val">true</span>),
+<a href=#1165 id=1165 data-nosnippet>1165</a>            client(ClientAuthMethod::None, <span class="bool-val">false</span>),
+<a href=#1166 id=1166 data-nosnippet>1166</a>        ] {
+<a href=#1167 id=1167 data-nosnippet>1167</a>            <span class="macro">assert_eq!</span>(refresh_token_binding(<span class="kw-2">&amp;</span>unbound, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))), <span class="prelude-val">None</span>);
+<a href=#1168 id=1168 data-nosnippet>1168</a>        }
+<a href=#1169 id=1169 data-nosnippet>1169</a>        <span class="kw">let </span>cert_only = CnfClaim::from_certificate_thumbprint(<span class="string">"x5t"</span>);
+<a href=#1170 id=1170 data-nosnippet>1170</a>        <span class="macro">assert_eq!</span>(refresh_token_binding(<span class="kw-2">&amp;</span>public_dpop, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>cert_only)), <span class="prelude-val">None</span>);
+<a href=#1171 id=1171 data-nosnippet>1171</a>    }
+<a href=#1172 id=1172 data-nosnippet>1172</a>
+<a href=#1173 id=1173 data-nosnippet>1173</a>    <span class="doccomment">/// #681 — the bound key is admitted; another key, or none, is refused.
+<a href=#1174 id=1174 data-nosnippet>1174</a>    </span><span class="attr">#[test]
+<a href=#1175 id=1175 data-nosnippet>1175</a>    </span><span class="kw">fn </span>a_public_dpop_clients_refresh_needs_the_bound_key() {
+<a href=#1176 id=1176 data-nosnippet>1176</a>        <span class="kw">let </span>c = client(ClientAuthMethod::None, <span class="bool-val">true</span>);
+<a href=#1177 id=1177 data-nosnippet>1177</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>c, <span class="prelude-val">Some</span>(<span class="string">"k1"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).is_ok());
+<a href=#1178 id=1178 data-nosnippet>1178</a>        <span class="kw">for </span>bound <span class="kw">in </span>[<span class="prelude-val">Some</span>(<span class="string">"k2"</span>), <span class="prelude-val">None</span>] {
+<a href=#1179 id=1179 data-nosnippet>1179</a>            <span class="macro">assert!</span>(<span class="macro">matches!</span>(
+<a href=#1180 id=1180 data-nosnippet>1180</a>                enforce_refresh_token_binding(<span class="kw-2">&amp;</span>c, bound, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))),
+<a href=#1181 id=1181 data-nosnippet>1181</a>                <span class="prelude-val">Err</span>(<span class="kw">crate</span>::error::OAuth2Error::InvalidGrant(<span class="kw">_</span>))
+<a href=#1182 id=1182 data-nosnippet>1182</a>            ));
+<a href=#1183 id=1183 data-nosnippet>1183</a>        }
+<a href=#1184 id=1184 data-nosnippet>1184</a>    }
+<a href=#1185 id=1185 data-nosnippet>1185</a>
+<a href=#1186 id=1186 data-nosnippet>1186</a>    <span class="doccomment">/// #681 — a confidential client's refresh, and a non-DPoP public
+<a href=#1187 id=1187 data-nosnippet>1187</a>    /// client's, read no binding at all.
+<a href=#1188 id=1188 data-nosnippet>1188</a>    </span><span class="attr">#[test]
+<a href=#1189 id=1189 data-nosnippet>1189</a>    </span><span class="kw">fn </span>other_clients_refresh_is_unchanged() {
+<a href=#1190 id=1190 data-nosnippet>1190</a>        <span class="kw">let </span>confidential = client(ClientAuthMethod::ClientSecretPost, <span class="bool-val">true</span>);
+<a href=#1191 id=1191 data-nosnippet>1191</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>confidential, <span class="prelude-val">None</span>, <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).is_ok());
+<a href=#1192 id=1192 data-nosnippet>1192</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>confidential, <span class="prelude-val">Some</span>(<span class="string">"k2"</span>), <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>jkt(<span class="string">"k1"</span>))).is_ok());
+<a href=#1193 id=1193 data-nosnippet>1193</a>        <span class="kw">let </span>public_bearer = client(ClientAuthMethod::None, <span class="bool-val">false</span>);
+<a href=#1194 id=1194 data-nosnippet>1194</a>        <span class="macro">assert!</span>(enforce_refresh_token_binding(<span class="kw-2">&amp;</span>public_bearer, <span class="prelude-val">None</span>, <span class="prelude-val">None</span>).is_ok());
+<a href=#1195 id=1195 data-nosnippet>1195</a>    }
+<a href=#1196 id=1196 data-nosnippet>1196</a>}
 </code></pre></div></section></main></body></html>

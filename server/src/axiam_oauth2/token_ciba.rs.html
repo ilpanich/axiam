@@ -286,60 +286,61 @@
 <a href=#286 id=286 data-nosnippet>286</a>                    </span>dpop_jkt: refresh_jkt.clone(),
 <a href=#287 id=287 data-nosnippet>287</a>                    expires_at: Utc::now()
 <a href=#288 id=288 data-nosnippet>288</a>                        + chrono::Duration::seconds(<span class="self">self</span>.refresh_token_lifetime_secs),
-<a href=#289 id=289 data-nosnippet>289</a>                })
-<a href=#290 id=290 data-nosnippet>290</a>                .<span class="kw">await
-<a href=#291 id=291 data-nosnippet>291</a>                </span>.map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>;
-<a href=#292 id=292 data-nosnippet>292</a>            <span class="prelude-val">Some</span>(raw_refresh)
-<a href=#293 id=293 data-nosnippet>293</a>        } <span class="kw">else </span>{
-<a href=#294 id=294 data-nosnippet>294</a>            <span class="prelude-val">None
-<a href=#295 id=295 data-nosnippet>295</a>        </span>};
-<a href=#296 id=296 data-nosnippet>296</a>
-<a href=#297 id=297 data-nosnippet>297</a>        <span class="comment">// CIBA Core §10.1.1: an ID token is returned when the scope carries
-<a href=#298 id=298 data-nosnippet>298</a>        // `openid`, which `bc-authorize` requires of every request. It reports
-<a href=#299 id=299 data-nosnippet>299</a>        // the approval: what was achieved, in the class the request asked for
-<a href=#300 id=300 data-nosnippet>300</a>        // when the achievement satisfies it. The scope ceiling above can remove
-<a href=#301 id=301 data-nosnippet>301</a>        // `openid` from an externally registered client's row (when the
-<a href=#302 id=302 data-nosnippet>302</a>        // tenant's `dcr_allowed_scopes` drops it, #642 (c)); an ID token then would be an
-<a href=#303 id=303 data-nosnippet>303</a>        // identity assertion the client holds no scope for, as the refresh
-<a href=#304 id=304 data-nosnippet>304</a>        // grant already withholds it, so none is minted and the access token stands.
-<a href=#305 id=305 data-nosnippet>305</a>        </span><span class="kw">let </span>id_token = <span class="kw">if </span>redeemed.scopes.iter().any(|s| s == <span class="string">"openid"</span>) {
-<a href=#306 id=306 data-nosnippet>306</a>            <span class="kw">let </span>achieved = Acr::from_wire(<span class="kw-2">&amp;</span>approval.acr).unwrap_or(Acr::SingleFactor);
-<a href=#307 id=307 data-nosnippet>307</a>            <span class="kw">let </span>evidence = IdTokenEvidence {
-<a href=#308 id=308 data-nosnippet>308</a>                auth_time: <span class="prelude-val">Some</span>(approval.auth_time.timestamp()),
-<a href=#309 id=309 data-nosnippet>309</a>                acr: <span class="prelude-val">Some</span>(report_acr(achieved, <span class="kw-2">&amp;</span>redeemed.acr_values).to_owned()),
-<a href=#310 id=310 data-nosnippet>310</a>                amr: axiam_core::models::session::Amr::encode_list(<span class="kw-2">&amp;</span>approval.amr),
-<a href=#311 id=311 data-nosnippet>311</a>            };
-<a href=#312 id=312 data-nosnippet>312</a>            <span class="prelude-val">Some</span>(
-<a href=#313 id=313 data-nosnippet>313</a>                issue_id_token(
-<a href=#314 id=314 data-nosnippet>314</a>                    user_id,
-<a href=#315 id=315 data-nosnippet>315</a>                    <span class="kw-2">&amp;</span>client.client_id,
-<a href=#316 id=316 data-nosnippet>316</a>                    <span class="prelude-val">None</span>,
-<a href=#317 id=317 data-nosnippet>317</a>                    <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>user.username),
-<a href=#318 id=318 data-nosnippet>318</a>                    <span class="kw-2">&amp;</span>redeemed.scopes,
-<a href=#319 id=319 data-nosnippet>319</a>                    <span class="kw-2">&amp;</span>minting,
-<a href=#320 id=320 data-nosnippet>320</a>                    <span class="prelude-val">Some</span>(approval.session_id),
-<a href=#321 id=321 data-nosnippet>321</a>                    <span class="kw-2">&amp;</span>evidence,
-<a href=#322 id=322 data-nosnippet>322</a>                )
-<a href=#323 id=323 data-nosnippet>323</a>                .map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>,
-<a href=#324 id=324 data-nosnippet>324</a>            )
-<a href=#325 id=325 data-nosnippet>325</a>        } <span class="kw">else </span>{
-<a href=#326 id=326 data-nosnippet>326</a>            <span class="prelude-val">None
-<a href=#327 id=327 data-nosnippet>327</a>        </span>};
-<a href=#328 id=328 data-nosnippet>328</a>
-<a href=#329 id=329 data-nosnippet>329</a>        <span class="macro">tracing::debug!</span>(
-<a href=#330 id=330 data-nosnippet>330</a>            client_id = %client.client_id,
-<a href=#331 id=331 data-nosnippet>331</a>            grant_type = CIBA_GRANT_TYPE,
-<a href=#332 id=332 data-nosnippet>332</a>            <span class="string">"CIBA request redeemed"
-<a href=#333 id=333 data-nosnippet>333</a>        </span>);
-<a href=#334 id=334 data-nosnippet>334</a>
-<a href=#335 id=335 data-nosnippet>335</a>        <span class="prelude-val">Ok</span>(TokenResponse {
-<a href=#336 id=336 data-nosnippet>336</a>            access_token,
-<a href=#337 id=337 data-nosnippet>337</a>            token_type,
-<a href=#338 id=338 data-nosnippet>338</a>            expires_in: <span class="self">self</span>.auth_config.access_token_lifetime_secs,
-<a href=#339 id=339 data-nosnippet>339</a>            refresh_token,
-<a href=#340 id=340 data-nosnippet>340</a>            scope: <span class="prelude-val">Some</span>(redeemed.scopes.join(<span class="string">" "</span>)),
-<a href=#341 id=341 data-nosnippet>341</a>            id_token,
-<a href=#342 id=342 data-nosnippet>342</a>        })
-<a href=#343 id=343 data-nosnippet>343</a>    }
-<a href=#344 id=344 data-nosnippet>344</a>}
+<a href=#289 id=289 data-nosnippet>289</a>                    lineage_id: <span class="prelude-val">None</span>,
+<a href=#290 id=290 data-nosnippet>290</a>                })
+<a href=#291 id=291 data-nosnippet>291</a>                .<span class="kw">await
+<a href=#292 id=292 data-nosnippet>292</a>                </span>.map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>;
+<a href=#293 id=293 data-nosnippet>293</a>            <span class="prelude-val">Some</span>(raw_refresh)
+<a href=#294 id=294 data-nosnippet>294</a>        } <span class="kw">else </span>{
+<a href=#295 id=295 data-nosnippet>295</a>            <span class="prelude-val">None
+<a href=#296 id=296 data-nosnippet>296</a>        </span>};
+<a href=#297 id=297 data-nosnippet>297</a>
+<a href=#298 id=298 data-nosnippet>298</a>        <span class="comment">// CIBA Core §10.1.1: an ID token is returned when the scope carries
+<a href=#299 id=299 data-nosnippet>299</a>        // `openid`, which `bc-authorize` requires of every request. It reports
+<a href=#300 id=300 data-nosnippet>300</a>        // the approval: what was achieved, in the class the request asked for
+<a href=#301 id=301 data-nosnippet>301</a>        // when the achievement satisfies it. The scope ceiling above can remove
+<a href=#302 id=302 data-nosnippet>302</a>        // `openid` from an externally registered client's row (when the
+<a href=#303 id=303 data-nosnippet>303</a>        // tenant's `dcr_allowed_scopes` drops it, #642 (c)); an ID token then would be an
+<a href=#304 id=304 data-nosnippet>304</a>        // identity assertion the client holds no scope for, as the refresh
+<a href=#305 id=305 data-nosnippet>305</a>        // grant already withholds it, so none is minted and the access token stands.
+<a href=#306 id=306 data-nosnippet>306</a>        </span><span class="kw">let </span>id_token = <span class="kw">if </span>redeemed.scopes.iter().any(|s| s == <span class="string">"openid"</span>) {
+<a href=#307 id=307 data-nosnippet>307</a>            <span class="kw">let </span>achieved = Acr::from_wire(<span class="kw-2">&amp;</span>approval.acr).unwrap_or(Acr::SingleFactor);
+<a href=#308 id=308 data-nosnippet>308</a>            <span class="kw">let </span>evidence = IdTokenEvidence {
+<a href=#309 id=309 data-nosnippet>309</a>                auth_time: <span class="prelude-val">Some</span>(approval.auth_time.timestamp()),
+<a href=#310 id=310 data-nosnippet>310</a>                acr: <span class="prelude-val">Some</span>(report_acr(achieved, <span class="kw-2">&amp;</span>redeemed.acr_values).to_owned()),
+<a href=#311 id=311 data-nosnippet>311</a>                amr: axiam_core::models::session::Amr::encode_list(<span class="kw-2">&amp;</span>approval.amr),
+<a href=#312 id=312 data-nosnippet>312</a>            };
+<a href=#313 id=313 data-nosnippet>313</a>            <span class="prelude-val">Some</span>(
+<a href=#314 id=314 data-nosnippet>314</a>                issue_id_token(
+<a href=#315 id=315 data-nosnippet>315</a>                    user_id,
+<a href=#316 id=316 data-nosnippet>316</a>                    <span class="kw-2">&amp;</span>client.client_id,
+<a href=#317 id=317 data-nosnippet>317</a>                    <span class="prelude-val">None</span>,
+<a href=#318 id=318 data-nosnippet>318</a>                    <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>user.username),
+<a href=#319 id=319 data-nosnippet>319</a>                    <span class="kw-2">&amp;</span>redeemed.scopes,
+<a href=#320 id=320 data-nosnippet>320</a>                    <span class="kw-2">&amp;</span>minting,
+<a href=#321 id=321 data-nosnippet>321</a>                    <span class="prelude-val">Some</span>(approval.session_id),
+<a href=#322 id=322 data-nosnippet>322</a>                    <span class="kw-2">&amp;</span>evidence,
+<a href=#323 id=323 data-nosnippet>323</a>                )
+<a href=#324 id=324 data-nosnippet>324</a>                .map_err(|e| OAuth2Error::ServerError(e.to_string()))<span class="question-mark">?</span>,
+<a href=#325 id=325 data-nosnippet>325</a>            )
+<a href=#326 id=326 data-nosnippet>326</a>        } <span class="kw">else </span>{
+<a href=#327 id=327 data-nosnippet>327</a>            <span class="prelude-val">None
+<a href=#328 id=328 data-nosnippet>328</a>        </span>};
+<a href=#329 id=329 data-nosnippet>329</a>
+<a href=#330 id=330 data-nosnippet>330</a>        <span class="macro">tracing::debug!</span>(
+<a href=#331 id=331 data-nosnippet>331</a>            client_id = %client.client_id,
+<a href=#332 id=332 data-nosnippet>332</a>            grant_type = CIBA_GRANT_TYPE,
+<a href=#333 id=333 data-nosnippet>333</a>            <span class="string">"CIBA request redeemed"
+<a href=#334 id=334 data-nosnippet>334</a>        </span>);
+<a href=#335 id=335 data-nosnippet>335</a>
+<a href=#336 id=336 data-nosnippet>336</a>        <span class="prelude-val">Ok</span>(TokenResponse {
+<a href=#337 id=337 data-nosnippet>337</a>            access_token,
+<a href=#338 id=338 data-nosnippet>338</a>            token_type,
+<a href=#339 id=339 data-nosnippet>339</a>            expires_in: <span class="self">self</span>.auth_config.access_token_lifetime_secs,
+<a href=#340 id=340 data-nosnippet>340</a>            refresh_token,
+<a href=#341 id=341 data-nosnippet>341</a>            scope: <span class="prelude-val">Some</span>(redeemed.scopes.join(<span class="string">" "</span>)),
+<a href=#342 id=342 data-nosnippet>342</a>            id_token,
+<a href=#343 id=343 data-nosnippet>343</a>        })
+<a href=#344 id=344 data-nosnippet>344</a>    }
+<a href=#345 id=345 data-nosnippet>345</a>}
 </code></pre></div></section></main></body></html>

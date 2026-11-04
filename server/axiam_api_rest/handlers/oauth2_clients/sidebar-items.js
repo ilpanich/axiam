@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["CLIENT_CONVERTED_TO_PUBLIC_ACTION"],"fn":["create","delete","get","list","update"],"struct":["CreateOAuth2ClientRequest","OAuth2ClientCreatedResponse","OAuth2ClientResponse","UpdateOAuth2ClientRequest"]};
+window.SIDEBAR_ITEMS = {"constant":["CLIENT_CONVERTED_TO_PUBLIC_ACTION","CLIENT_CREATED_ACTION","CLIENT_DELETED_ACTION","CLIENT_UPDATED_ACTION"],"fn":["create","delete","get","list","update"],"struct":["CreateOAuth2ClientRequest","OAuth2ClientCreatedResponse","OAuth2ClientResponse","UpdateOAuth2ClientRequest"]};

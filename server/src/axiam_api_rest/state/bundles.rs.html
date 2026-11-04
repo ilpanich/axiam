@@ -275,250 +275,255 @@
 <a href=#275 id=275 data-nosnippet>275</a>    /// redeems one is a federation callback.
 <a href=#276 id=276 data-nosnippet>276</a>    </span><span class="kw">pub </span>sso_handoff_code_repo: SurrealSsoHandoffCodeRepository&lt;C&gt;,
 <a href=#277 id=277 data-nosnippet>277</a>    <span class="kw">pub </span>assertion_replay_repo: SurrealAssertionReplayRepository&lt;C&gt;,
-<a href=#278 id=278 data-nosnippet>278</a>    <span class="doccomment">/// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
-<a href=#279 id=279 data-nosnippet>279</a>    /// OIDC federation encryption key is baked into `OidcFederationService`
-<a href=#280 id=280 data-nosnippet>280</a>    /// at construction, so absence is resolved once at startup rather than
-<a href=#281 id=281 data-nosnippet>281</a>    /// per-request (identical fail-closed error at the 4 call sites).
-<a href=#282 id=282 data-nosnippet>282</a>    </span><span class="kw">pub </span>oidc_federation_service: <span class="prelude-ty">Option</span>&lt;OidcFederationServiceT&lt;C&gt;&gt;,
-<a href=#283 id=283 data-nosnippet>283</a>    <span class="doccomment">/// Constructed unconditionally (SamlFederationService::new needs no
-<a href=#284 id=284 data-nosnippet>284</a>    /// encryption key) — but the FIELD itself stays `#[cfg(feature = "saml")]`
-<a href=#285 id=285 data-nosnippet>285</a>    /// gated. Why: `axiam_federation::saml` only exists when
-<a href=#286 id=286 data-nosnippet>286</a>    /// axiam-federation's OWN `saml` Cargo feature is on, and
-<a href=#287 id=287 data-nosnippet>287</a>    /// axiam-api-rest's `saml` feature intentionally forwards to it so
-<a href=#288 id=288 data-nosnippet>288</a>    /// `cargo build -p axiam-server --no-default-features` can still build
-<a href=#289 id=289 data-nosnippet>289</a>    /// without the `samael`/`libxml2` dependency chain (documented escape
-<a href=#290 id=290 data-nosnippet>290</a>    /// hatch for hosts with an incompatible system libxml2 — see
-<a href=#291 id=291 data-nosnippet>291</a>    /// `axiam-server/src/main.rs`'s `--dump-openapi` doc comment and
-<a href=#292 id=292 data-nosnippet>292</a>    /// `axiam-api-rest/Cargo.toml`). Un-gating this field would force
-<a href=#293 id=293 data-nosnippet>293</a>    /// `axiam-federation/saml` on unconditionally and break that hatch.
-<a href=#294 id=294 data-nosnippet>294</a>    </span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
-<a href=#295 id=295 data-nosnippet>295</a>    </span><span class="kw">pub </span>saml_federation_service: SamlFederationServiceT&lt;C&gt;,
-<a href=#296 id=296 data-nosnippet>296</a>}
-<a href=#297 id=297 data-nosnippet>297</a>
-<a href=#298 id=298 data-nosnippet>298</a><span class="doccomment">/// The LDAP / Active Directory identity source's management surface (G-3,
-<a href=#299 id=299 data-nosnippet>299</a>/// T23.3.8): the per-tenant configuration, the sync job's state row, and the
-<a href=#300 id=300 data-nosnippet>300</a>/// connector's address guard.
-<a href=#301 id=301 data-nosnippet>301</a>///
-<a href=#302 id=302 data-nosnippet>302</a>/// The configuration repository carries the optional `directory_encryption_key`
-<a href=#303 id=303 data-nosnippet>303</a>/// (D-15): without it a write that carries a bind secret is `503`, while reads,
-<a href=#304 id=304 data-nosnippet>304</a>/// `DELETE` and the sync status still answer. The client is the **one** the
-<a href=#305 id=305 data-nosnippet>305</a>/// sign-in path and the sync job use (the composition root shares it), so the
-<a href=#306 id=306 data-nosnippet>306</a>/// address policy a write is checked against is the policy every connection is
-<a href=#307 id=307 data-nosnippet>307</a>/// checked against.
-<a href=#308 id=308 data-nosnippet>308</a></span><span class="attr">#[derive(Clone)]
-<a href=#309 id=309 data-nosnippet>309</a></span><span class="kw">pub struct </span>DirectoryState&lt;C: Connection + Clone&gt; {
-<a href=#310 id=310 data-nosnippet>310</a>    <span class="doccomment">/// One row per tenant; the bind secret sealed in it.
-<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">pub </span>config_repo: axiam_db::SurrealDirectoryConfigRepository&lt;C&gt;,
-<a href=#312 id=312 data-nosnippet>312</a>    <span class="doccomment">/// What the sync job remembers about a tenant (deleted with the config).
-<a href=#313 id=313 data-nosnippet>313</a>    </span><span class="kw">pub </span>sync_state_repo: axiam_db::SurrealDirectorySyncStateRepository&lt;C&gt;,
-<a href=#314 id=314 data-nosnippet>314</a>    <span class="doccomment">/// The connector, for its address guard: `client.guard(url)` resolves the
-<a href=#315 id=315 data-nosnippet>315</a>    /// host and judges every address under the deployment's policy.
-<a href=#316 id=316 data-nosnippet>316</a>    </span><span class="kw">pub </span>client: Arc&lt;axiam_directory::DirectoryClient&gt;,
-<a href=#317 id=317 data-nosnippet>317</a>}
-<a href=#318 id=318 data-nosnippet>318</a>
-<a href=#319 id=319 data-nosnippet>319</a><span class="doccomment">/// The SAML 2.0 identity provider (G-2, T23.2.3, T23.2.5): the service-provider
-<a href=#320 id=320 data-nosnippet>320</a>/// registry, the pending `AuthnRequest`s held across the login hop, the
-<a href=#321 id=321 data-nosnippet>321</a>/// tenant's signing credential, and the issuer.
-<a href=#322 id=322 data-nosnippet>322</a>///
-<a href=#323 id=323 data-nosnippet>323</a>/// **Not behind `saml`** — contract §29's registry and credential routes are
-<a href=#324 id=324 data-nosnippet>324</a>/// compiled into every build (D-42), and they need only the plain-data pieces
-<a href=#325 id=325 data-nosnippet>325</a>/// below. The one member that exists only in a SAML build is the **issuer**, which
-<a href=#326 id=326 data-nosnippet>326</a>/// is `axiam_federation::saml_idp` (see [`FederationState::saml_federation_service`]
-<a href=#327 id=327 data-nosnippet>327</a>/// for why that gate is load-bearing): a build without `saml` mounts none of the
-<a href=#328 id=328 data-nosnippet>328</a>/// browser routes that read it.
-<a href=#329 id=329 data-nosnippet>329</a></span><span class="attr">#[derive(Clone)]
-<a href=#330 id=330 data-nosnippet>330</a></span><span class="kw">pub struct </span>SamlIdpState&lt;C: Connection + Clone&gt; {
-<a href=#331 id=331 data-nosnippet>331</a>    <span class="doccomment">/// The tenant's registered service providers (T23.2.1).
-<a href=#332 id=332 data-nosnippet>332</a>    </span><span class="kw">pub </span>sp_repo: axiam_db::SurrealSamlServiceProviderRepository&lt;C&gt;,
-<a href=#333 id=333 data-nosnippet>333</a>    <span class="doccomment">/// `AuthnRequest`s between the SSO endpoint's two legs (schema v73).
-<a href=#334 id=334 data-nosnippet>334</a>    </span><span class="kw">pub </span>pending_repo: axiam_db::SurrealPendingSamlRequestRepository&lt;C&gt;,
-<a href=#335 id=335 data-nosnippet>335</a>    <span class="doccomment">/// Which service providers hold which session, with the `NameID` and the
-<a href=#336 id=336 data-nosnippet>336</a>    /// per-SP `SessionIndex` each was given (schema v76, D-37). Written by the
-<a href=#337 id=337 data-nosnippet>337</a>    /// SSO endpoint's second leg before it signs; read by single logout.
-<a href=#338 id=338 data-nosnippet>338</a>    </span><span class="kw">pub </span>participant_repo: axiam_db::SurrealSamlSpSessionRepository&lt;C&gt;,
-<a href=#339 id=339 data-nosnippet>339</a>    <span class="doccomment">/// Logout runs: the replay guard of a `LogoutRequest` and the state of the
-<a href=#340 id=340 data-nosnippet>340</a>    /// front-channel chain (schema v76, D-38, D-39).
-<a href=#341 id=341 data-nosnippet>341</a>    </span><span class="kw">pub </span>logout_run_repo: axiam_db::SurrealSamlLogoutRunRepository&lt;C&gt;,
-<a href=#342 id=342 data-nosnippet>342</a>    <span class="doccomment">/// The tenant's signing credential, unsealed per issuance (D-21).
-<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">pub </span>credential_service: SamlIdpCredentialServiceT&lt;C&gt;,
-<a href=#344 id=344 data-nosnippet>344</a>    <span class="doccomment">/// The deployment's issuer: the root issuer every IdP entity id is built
-<a href=#345 id=345 data-nosnippet>345</a>    /// on, and the pairwise-identifier key (D-22). One per process. Behind
-<a href=#346 id=346 data-nosnippet>346</a>    /// `saml`, like the routes that issue with it.
-<a href=#347 id=347 data-nosnippet>347</a>    </span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
-<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="kw">pub </span>issuer: Arc&lt;axiam_federation::saml_idp::SamlIdpIssuer&gt;,
-<a href=#349 id=349 data-nosnippet>349</a>}
-<a href=#350 id=350 data-nosnippet>350</a>
-<a href=#351 id=351 data-nosnippet>351</a><span class="doccomment">/// The Shared Signals Framework transmitter (G-5, T23.5.2, T23.5.3): the
-<a href=#352 id=352 data-nosnippet>352</a>/// stream registry, the poll buffer, the outbox events go to, and the emitter
-<a href=#353 id=353 data-nosnippet>353</a>/// the change sites call.
-<a href=#354 id=354 data-nosnippet>354</a>///
-<a href=#355 id=355 data-nosnippet>355</a>/// In every build; it reads nothing behind a feature.
-<a href=#356 id=356 data-nosnippet>356</a></span><span class="attr">#[derive(Clone)]
-<a href=#357 id=357 data-nosnippet>357</a></span><span class="kw">pub struct </span>SsfState&lt;C: Connection + Clone&gt; {
-<a href=#358 id=358 data-nosnippet>358</a>    <span class="doccomment">/// The tenant's registered streams; seals the push `Authorization` header
-<a href=#359 id=359 data-nosnippet>359</a>    /// under `pki_encryption_key`.
-<a href=#360 id=360 data-nosnippet>360</a>    </span><span class="kw">pub </span>stream_repo: axiam_db::SurrealSsfStreamRepository&lt;C&gt;,
-<a href=#361 id=361 data-nosnippet>361</a>    <span class="doccomment">/// The per-stream bounded buffer: what a poll stream's receiver reads and a
-<a href=#362 id=362 data-nosnippet>362</a>    /// paused stream holds (D-48).
-<a href=#363 id=363 data-nosnippet>363</a>    </span><span class="kw">pub </span>buffer_repo: axiam_db::SurrealSsfEventBufferRepository&lt;C&gt;,
-<a href=#364 id=364 data-nosnippet>364</a>    <span class="doccomment">/// What the honour lane remembers about a step-up it sent a user to perform
-<a href=#365 id=365 data-nosnippet>365</a>    /// (D-53 (1)): written at the Interact leg, consumed once by the return leg.
-<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="kw">pub </span>step_up_repo: axiam_db::SurrealSsfStepUpRepository&lt;C&gt;,
-<a href=#367 id=367 data-nosnippet>367</a>    <span class="doccomment">/// Where produced events go (D-48): push enqueue, the poll buffer, or
-<a href=#368 id=368 data-nosnippet>368</a>    /// nothing for a disabled stream. `None` when delivery is not wired (a
-<a href=#369 id=369 data-nosnippet>369</a>    /// harness that does not test it) — the verification endpoint then answers
-<a href=#370 id=370 data-nosnippet>370</a>    /// `503`. Set through [`SsfState::bind_outbox`], which also wires the
-<a href=#371 id=371 data-nosnippet>371</a>    /// emitter.
-<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">pub </span>outbox: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SsfOutbox&gt;&gt;,
-<a href=#373 id=373 data-nosnippet>373</a>    <span class="doccomment">/// The one emitter every change site calls (D-52). A no-op until an outbox
-<a href=#374 id=374 data-nosnippet>374</a>    /// is bound.
-<a href=#375 id=375 data-nosnippet>375</a>    </span><span class="kw">pub </span>emitter: <span class="kw">crate</span>::ssf_emitter::SsfEmitter&lt;C&gt;,
-<a href=#376 id=376 data-nosnippet>376</a>    <span class="doccomment">/// The session repository's `session-revoked` port, bound to [`Self::emitter`]
-<a href=#377 id=377 data-nosnippet>377</a>    /// (D-52). A `Late` handle because the repository is built first.
-<a href=#378 id=378 data-nosnippet>378</a>    </span><span class="kw">pub </span>session_sink:
-<a href=#379 id=379 data-nosnippet>379</a>        Arc&lt;axiam_core::models::ssf::Late&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SessionRevocationSink&gt;&gt;,
-<a href=#380 id=380 data-nosnippet>380</a>    <span class="doccomment">/// The directory sync's `account-disabled` port, bound to [`Self::emitter`].
-<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="kw">pub </span>account_sink:
-<a href=#382 id=382 data-nosnippet>382</a>        Arc&lt;axiam_core::models::ssf::Late&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SsfSystemAccountSink&gt;&gt;,
-<a href=#383 id=383 data-nosnippet>383</a>    <span class="doccomment">/// The long polls currently waiting, one per stream (D-53 (11)).
-<a href=#384 id=384 data-nosnippet>384</a>    </span><span class="kw">pub </span>poll_waiters: Arc&lt;PollWaiters&gt;,
-<a href=#385 id=385 data-nosnippet>385</a>    <span class="doccomment">/// D-55: SSF requires per-tenant issuers in a deployment of more than one
-<a href=#386 id=386 data-nosnippet>386</a>    /// tenant. Asked where events are produced, where a SET is signed and at
-<a href=#387 id=387 data-nosnippet>387</a>    /// discovery; shared with the emitter and the push deliverer.
-<a href=#388 id=388 data-nosnippet>388</a>    </span><span class="kw">pub </span>gate: Arc&lt;axiam_oauth2::ssf::SsfIssuerGate&gt;,
-<a href=#389 id=389 data-nosnippet>389</a>}
-<a href=#390 id=390 data-nosnippet>390</a>
-<a href=#391 id=391 data-nosnippet>391</a><span class="doccomment">/// The streams that have a long poll waiting **on this instance**.
-<a href=#392 id=392 data-nosnippet>392</a>///
-<a href=#393 id=393 data-nosnippet>393</a>/// A long poll holds a request open for up to thirty seconds; a receiver that
-<a href=#394 id=394 data-nosnippet>394</a>/// opens many on one stream (a retry loop with no backoff, a bug) would hold as
-<a href=#395 id=395 data-nosnippet>395</a>/// many connections for no benefit, since RFC 8936 has one receiver draining one
-<a href=#396 id=396 data-nosnippet>396</a>/// stream in order. At most one waits per stream; a second answers at once.
-<a href=#397 id=397 data-nosnippet>397</a>/// Per instance on purpose: an exact cross-instance count would need shared
-<a href=#398 id=398 data-nosnippet>398</a>/// state for a bound that only has to be small.
-<a href=#399 id=399 data-nosnippet>399</a></span><span class="attr">#[derive(Debug, Default)]
-<a href=#400 id=400 data-nosnippet>400</a></span><span class="kw">pub struct </span>PollWaiters {
-<a href=#401 id=401 data-nosnippet>401</a>    waiting: std::sync::Mutex&lt;std::collections::HashSet&lt;uuid::Uuid&gt;&gt;,
-<a href=#402 id=402 data-nosnippet>402</a>}
-<a href=#403 id=403 data-nosnippet>403</a>
-<a href=#404 id=404 data-nosnippet>404</a><span class="doccomment">/// Holds a stream's wait slot; releases it when dropped — including when the
-<a href=#405 id=405 data-nosnippet>405</a>/// request is cancelled because the receiver hung up.
-<a href=#406 id=406 data-nosnippet>406</a></span><span class="attr">#[derive(Debug)]
-<a href=#407 id=407 data-nosnippet>407</a></span><span class="kw">pub struct </span>PollWaitGuard {
-<a href=#408 id=408 data-nosnippet>408</a>    owner: Arc&lt;PollWaiters&gt;,
-<a href=#409 id=409 data-nosnippet>409</a>    stream_id: uuid::Uuid,
-<a href=#410 id=410 data-nosnippet>410</a>}
-<a href=#411 id=411 data-nosnippet>411</a>
-<a href=#412 id=412 data-nosnippet>412</a><span class="kw">impl </span>PollWaiters {
-<a href=#413 id=413 data-nosnippet>413</a>    <span class="doccomment">/// Take `stream_id`'s wait slot, or `None` when a long poll already holds it.
-<a href=#414 id=414 data-nosnippet>414</a>    </span><span class="attr">#[must_use]
-<a href=#415 id=415 data-nosnippet>415</a>    </span><span class="kw">pub fn </span>try_enter(<span class="self">self</span>: <span class="kw-2">&amp;</span>Arc&lt;<span class="self">Self</span>&gt;, stream_id: uuid::Uuid) -&gt; <span class="prelude-ty">Option</span>&lt;PollWaitGuard&gt; {
-<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">let </span><span class="kw-2">mut </span>waiting = <span class="self">self</span>.waiting.lock().unwrap_or_else(|e| e.into_inner());
-<a href=#417 id=417 data-nosnippet>417</a>        waiting.insert(stream_id).then(|| PollWaitGuard {
-<a href=#418 id=418 data-nosnippet>418</a>            owner: Arc::clone(<span class="self">self</span>),
-<a href=#419 id=419 data-nosnippet>419</a>            stream_id,
-<a href=#420 id=420 data-nosnippet>420</a>        })
-<a href=#421 id=421 data-nosnippet>421</a>    }
-<a href=#422 id=422 data-nosnippet>422</a>
-<a href=#423 id=423 data-nosnippet>423</a>    <span class="doccomment">/// How many streams have a long poll waiting.
-<a href=#424 id=424 data-nosnippet>424</a>    </span><span class="attr">#[must_use]
-<a href=#425 id=425 data-nosnippet>425</a>    </span><span class="kw">pub fn </span>waiting(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-<a href=#426 id=426 data-nosnippet>426</a>        <span class="self">self</span>.waiting.lock().unwrap_or_else(|e| e.into_inner()).len()
-<a href=#427 id=427 data-nosnippet>427</a>    }
-<a href=#428 id=428 data-nosnippet>428</a>}
-<a href=#429 id=429 data-nosnippet>429</a>
-<a href=#430 id=430 data-nosnippet>430</a><span class="kw">impl </span>Drop <span class="kw">for </span>PollWaitGuard {
-<a href=#431 id=431 data-nosnippet>431</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
-<a href=#432 id=432 data-nosnippet>432</a>        <span class="self">self</span>.owner
-<a href=#433 id=433 data-nosnippet>433</a>            .waiting
-<a href=#434 id=434 data-nosnippet>434</a>            .lock()
-<a href=#435 id=435 data-nosnippet>435</a>            .unwrap_or_else(|e| e.into_inner())
-<a href=#436 id=436 data-nosnippet>436</a>            .remove(<span class="kw-2">&amp;</span><span class="self">self</span>.stream_id);
-<a href=#437 id=437 data-nosnippet>437</a>    }
-<a href=#438 id=438 data-nosnippet>438</a>}
-<a href=#439 id=439 data-nosnippet>439</a>
-<a href=#440 id=440 data-nosnippet>440</a><span class="kw">impl</span>&lt;C: Connection + Clone&gt; SsfState&lt;C&gt; {
-<a href=#441 id=441 data-nosnippet>441</a>    <span class="doccomment">/// Wire the outbox: producers (verification, a status change) and the
-<a href=#442 id=442 data-nosnippet>442</a>    /// emitter — and through it both ports — send events to it. The emitter
-<a href=#443 id=443 data-nosnippet>443</a>    /// keeps the first outbox it is given.
-<a href=#444 id=444 data-nosnippet>444</a>    </span><span class="kw">pub fn </span>bind_outbox(<span class="kw-2">&amp;mut </span><span class="self">self</span>, outbox: Arc&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SsfOutbox&gt;) {
-<a href=#445 id=445 data-nosnippet>445</a>        <span class="self">self</span>.emitter.bind_outbox(outbox.clone());
-<a href=#446 id=446 data-nosnippet>446</a>        <span class="self">self</span>.outbox = <span class="prelude-val">Some</span>(outbox);
-<a href=#447 id=447 data-nosnippet>447</a>    }
-<a href=#448 id=448 data-nosnippet>448</a>}
-<a href=#449 id=449 data-nosnippet>449</a>
-<a href=#450 id=450 data-nosnippet>450</a><span class="attr">#[cfg(test)]
-<a href=#451 id=451 data-nosnippet>451</a></span><span class="kw">mod </span>poll_waiter_tests {
-<a href=#452 id=452 data-nosnippet>452</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#453 id=453 data-nosnippet>453</a>
-<a href=#454 id=454 data-nosnippet>454</a>    <span class="attr">#[test]
-<a href=#455 id=455 data-nosnippet>455</a>    </span><span class="kw">fn </span>one_slot_per_stream_released_on_drop() {
-<a href=#456 id=456 data-nosnippet>456</a>        <span class="kw">let </span>waiters = Arc::new(PollWaiters::default());
-<a href=#457 id=457 data-nosnippet>457</a>        <span class="kw">let </span>(a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-<a href=#458 id=458 data-nosnippet>458</a>        <span class="kw">let </span>first = waiters.try_enter(a).expect(<span class="string">"the first takes the slot"</span>);
-<a href=#459 id=459 data-nosnippet>459</a>        <span class="macro">assert!</span>(waiters.try_enter(a).is_none(), <span class="string">"the second finds it taken"</span>);
-<a href=#460 id=460 data-nosnippet>460</a>        <span class="macro">assert!</span>(waiters.try_enter(b).is_some(), <span class="string">"another stream is free"</span>);
-<a href=#461 id=461 data-nosnippet>461</a>        <span class="macro">assert_eq!</span>(waiters.waiting(), <span class="number">1</span>, <span class="string">"b's guard was a temporary"</span>);
-<a href=#462 id=462 data-nosnippet>462</a>        drop(first);
-<a href=#463 id=463 data-nosnippet>463</a>        <span class="macro">assert!</span>(waiters.try_enter(a).is_some(), <span class="string">"released on drop"</span>);
-<a href=#464 id=464 data-nosnippet>464</a>        <span class="macro">assert_eq!</span>(waiters.waiting(), <span class="number">0</span>);
-<a href=#465 id=465 data-nosnippet>465</a>    }
-<a href=#466 id=466 data-nosnippet>466</a>}
-<a href=#467 id=467 data-nosnippet>467</a>
-<a href=#468 id=468 data-nosnippet>468</a><span class="doccomment">/// What starting an on-demand SCIM reconciliation came to (G-6, T23.6.4).
-<a href=#469 id=469 data-nosnippet>469</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-<a href=#470 id=470 data-nosnippet>470</a></span><span class="kw">pub enum </span>ScimReconcileStart {
-<a href=#471 id=471 data-nosnippet>471</a>    <span class="doccomment">/// The caller took the claim and the run is under way (`202`).
-<a href=#472 id=472 data-nosnippet>472</a>    </span>Started,
-<a href=#473 id=473 data-nosnippet>473</a>    <span class="doccomment">/// A run holds the claim, or ran within the on-demand window (`409`).
-<a href=#474 id=474 data-nosnippet>474</a>    </span>AlreadyClaimed,
-<a href=#475 id=475 data-nosnippet>475</a>    <span class="doccomment">/// The target is disabled: it receives nothing, so there is nothing to
-<a href=#476 id=476 data-nosnippet>476</a>    /// reconcile and no claim was taken (`409`).
-<a href=#477 id=477 data-nosnippet>477</a>    </span>TargetDisabled,
-<a href=#478 id=478 data-nosnippet>478</a>}
-<a href=#479 id=479 data-nosnippet>479</a>
-<a href=#480 id=480 data-nosnippet>480</a><span class="doccomment">/// The management API's way to start a reconciliation. A port, because the
-<a href=#481 id=481 data-nosnippet>481</a>/// deliverer that makes the run lives in `axiam-scim`, which sits **above**
-<a href=#482 id=482 data-nosnippet>482</a>/// this crate (layer 7) and so cannot be named here; `axiam-scim` implements
-<a href=#483 id=483 data-nosnippet>483</a>/// it (`ReconcileLauncher`) and the composition root binds it.
-<a href=#484 id=484 data-nosnippet>484</a></span><span class="kw">pub trait </span>ScimReconcileTrigger: Send + Sync {
-<a href=#485 id=485 data-nosnippet>485</a>    <span class="doccomment">/// Take the target's reconciliation claim and, when it is taken, make the
-<a href=#486 id=486 data-nosnippet>486</a>    /// run in the background. Answers as soon as the claim is decided.
-<a href=#487 id=487 data-nosnippet>487</a>    ///
-<a href=#488 id=488 data-nosnippet>488</a>    /// # Errors
-<a href=#489 id=489 data-nosnippet>489</a>    ///
-<a href=#490 id=490 data-nosnippet>490</a>    /// `NotFound` when the target does not exist in the tenant; any other
-<a href=#491 id=491 data-nosnippet>491</a>    /// failure of the datastore while claiming.
-<a href=#492 id=492 data-nosnippet>492</a>    </span><span class="kw">fn </span>start&lt;<span class="lifetime">'a</span>&gt;(
-<a href=#493 id=493 data-nosnippet>493</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
-<a href=#494 id=494 data-nosnippet>494</a>        tenant_id: uuid::Uuid,
-<a href=#495 id=495 data-nosnippet>495</a>        target_id: uuid::Uuid,
-<a href=#496 id=496 data-nosnippet>496</a>    ) -&gt; std::pin::Pin&lt;
-<a href=#497 id=497 data-nosnippet>497</a>        Box&lt;
-<a href=#498 id=498 data-nosnippet>498</a>            <span class="kw">dyn </span>std::future::Future&lt;
-<a href=#499 id=499 data-nosnippet>499</a>                    Output = <span class="prelude-ty">Result</span>&lt;ScimReconcileStart, axiam_core::error::AxiamError&gt;,
-<a href=#500 id=500 data-nosnippet>500</a>                &gt; + Send
-<a href=#501 id=501 data-nosnippet>501</a>                + <span class="lifetime">'a</span>,
-<a href=#502 id=502 data-nosnippet>502</a>        &gt;,
-<a href=#503 id=503 data-nosnippet>503</a>    &gt;;
-<a href=#504 id=504 data-nosnippet>504</a>}
-<a href=#505 id=505 data-nosnippet>505</a>
-<a href=#506 id=506 data-nosnippet>506</a><span class="doccomment">/// The outbound SCIM target registry (G-6, T23.6.4): the repository the
-<a href=#507 id=507 data-nosnippet>507</a>/// management routes write — which seals the credential under
-<a href=#508 id=508 data-nosnippet>508</a>/// `pki_encryption_key` — the delivery state they project, and the
-<a href=#509 id=509 data-nosnippet>509</a>/// reconciliation trigger.
-<a href=#510 id=510 data-nosnippet>510</a>///
-<a href=#511 id=511 data-nosnippet>511</a>/// In every build; it reads nothing behind a feature.
-<a href=#512 id=512 data-nosnippet>512</a></span><span class="attr">#[derive(Clone)]
-<a href=#513 id=513 data-nosnippet>513</a></span><span class="kw">pub struct </span>ScimTargetsState&lt;C: Connection + Clone&gt; {
-<a href=#514 id=514 data-nosnippet>514</a>    <span class="doccomment">/// The tenant's registered targets; seals the credential.
-<a href=#515 id=515 data-nosnippet>515</a>    </span><span class="kw">pub </span>target_repo: axiam_db::SurrealScimTargetRepository&lt;C&gt;,
-<a href=#516 id=516 data-nosnippet>516</a>    <span class="doccomment">/// Per-target delivery state, projected by `GET`.
-<a href=#517 id=517 data-nosnippet>517</a>    </span><span class="kw">pub </span>state_repo: axiam_db::SurrealScimTargetStateRepository&lt;C&gt;,
-<a href=#518 id=518 data-nosnippet>518</a>    <span class="doccomment">/// Starts an on-demand reconciliation, and the one a newly enabled target
-<a href=#519 id=519 data-nosnippet>519</a>    /// begins with. `None` when delivery is not wired (a harness that does not
-<a href=#520 id=520 data-nosnippet>520</a>    /// test it): *reconcile now* then answers `503`, and enabling a target
-<a href=#521 id=521 data-nosnippet>521</a>    /// starts nothing.
-<a href=#522 id=522 data-nosnippet>522</a>    </span><span class="kw">pub </span>reconcile: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>ScimReconcileTrigger&gt;&gt;,
-<a href=#523 id=523 data-nosnippet>523</a>}
+<a href=#278 id=278 data-nosnippet>278</a>    <span class="doccomment">/// G-A (W2.3) — where a provider ID token presented for native sign-in is
+<a href=#279 id=279 data-nosnippet>279</a>    /// spent (`federation_id_token_replay`, D-N10). Beside the SAML assertion
+<a href=#280 id=280 data-nosnippet>280</a>    /// guard for the same reason: what it guards is an upstream provider's
+<a href=#281 id=281 data-nosnippet>281</a>    /// assertion, and the native sign-in grant is its only writer.
+<a href=#282 id=282 data-nosnippet>282</a>    </span><span class="kw">pub </span>provider_id_token_replay_repo: axiam_db::SurrealProviderIdTokenReplayRepository&lt;C&gt;,
+<a href=#283 id=283 data-nosnippet>283</a>    <span class="doccomment">/// `None` when `AXIAM__AUTH__FEDERATION_ENCRYPTION_KEY` is unset — the
+<a href=#284 id=284 data-nosnippet>284</a>    /// OIDC federation encryption key is baked into `OidcFederationService`
+<a href=#285 id=285 data-nosnippet>285</a>    /// at construction, so absence is resolved once at startup rather than
+<a href=#286 id=286 data-nosnippet>286</a>    /// per-request (identical fail-closed error at the 4 call sites).
+<a href=#287 id=287 data-nosnippet>287</a>    </span><span class="kw">pub </span>oidc_federation_service: <span class="prelude-ty">Option</span>&lt;OidcFederationServiceT&lt;C&gt;&gt;,
+<a href=#288 id=288 data-nosnippet>288</a>    <span class="doccomment">/// Constructed unconditionally (SamlFederationService::new needs no
+<a href=#289 id=289 data-nosnippet>289</a>    /// encryption key) — but the FIELD itself stays `#[cfg(feature = "saml")]`
+<a href=#290 id=290 data-nosnippet>290</a>    /// gated. Why: `axiam_federation::saml` only exists when
+<a href=#291 id=291 data-nosnippet>291</a>    /// axiam-federation's OWN `saml` Cargo feature is on, and
+<a href=#292 id=292 data-nosnippet>292</a>    /// axiam-api-rest's `saml` feature intentionally forwards to it so
+<a href=#293 id=293 data-nosnippet>293</a>    /// `cargo build -p axiam-server --no-default-features` can still build
+<a href=#294 id=294 data-nosnippet>294</a>    /// without the `samael`/`libxml2` dependency chain (documented escape
+<a href=#295 id=295 data-nosnippet>295</a>    /// hatch for hosts with an incompatible system libxml2 — see
+<a href=#296 id=296 data-nosnippet>296</a>    /// `axiam-server/src/main.rs`'s `--dump-openapi` doc comment and
+<a href=#297 id=297 data-nosnippet>297</a>    /// `axiam-api-rest/Cargo.toml`). Un-gating this field would force
+<a href=#298 id=298 data-nosnippet>298</a>    /// `axiam-federation/saml` on unconditionally and break that hatch.
+<a href=#299 id=299 data-nosnippet>299</a>    </span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
+<a href=#300 id=300 data-nosnippet>300</a>    </span><span class="kw">pub </span>saml_federation_service: SamlFederationServiceT&lt;C&gt;,
+<a href=#301 id=301 data-nosnippet>301</a>}
+<a href=#302 id=302 data-nosnippet>302</a>
+<a href=#303 id=303 data-nosnippet>303</a><span class="doccomment">/// The LDAP / Active Directory identity source's management surface (G-3,
+<a href=#304 id=304 data-nosnippet>304</a>/// T23.3.8): the per-tenant configuration, the sync job's state row, and the
+<a href=#305 id=305 data-nosnippet>305</a>/// connector's address guard.
+<a href=#306 id=306 data-nosnippet>306</a>///
+<a href=#307 id=307 data-nosnippet>307</a>/// The configuration repository carries the optional `directory_encryption_key`
+<a href=#308 id=308 data-nosnippet>308</a>/// (D-15): without it a write that carries a bind secret is `503`, while reads,
+<a href=#309 id=309 data-nosnippet>309</a>/// `DELETE` and the sync status still answer. The client is the **one** the
+<a href=#310 id=310 data-nosnippet>310</a>/// sign-in path and the sync job use (the composition root shares it), so the
+<a href=#311 id=311 data-nosnippet>311</a>/// address policy a write is checked against is the policy every connection is
+<a href=#312 id=312 data-nosnippet>312</a>/// checked against.
+<a href=#313 id=313 data-nosnippet>313</a></span><span class="attr">#[derive(Clone)]
+<a href=#314 id=314 data-nosnippet>314</a></span><span class="kw">pub struct </span>DirectoryState&lt;C: Connection + Clone&gt; {
+<a href=#315 id=315 data-nosnippet>315</a>    <span class="doccomment">/// One row per tenant; the bind secret sealed in it.
+<a href=#316 id=316 data-nosnippet>316</a>    </span><span class="kw">pub </span>config_repo: axiam_db::SurrealDirectoryConfigRepository&lt;C&gt;,
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="doccomment">/// What the sync job remembers about a tenant (deleted with the config).
+<a href=#318 id=318 data-nosnippet>318</a>    </span><span class="kw">pub </span>sync_state_repo: axiam_db::SurrealDirectorySyncStateRepository&lt;C&gt;,
+<a href=#319 id=319 data-nosnippet>319</a>    <span class="doccomment">/// The connector, for its address guard: `client.guard(url)` resolves the
+<a href=#320 id=320 data-nosnippet>320</a>    /// host and judges every address under the deployment's policy.
+<a href=#321 id=321 data-nosnippet>321</a>    </span><span class="kw">pub </span>client: Arc&lt;axiam_directory::DirectoryClient&gt;,
+<a href=#322 id=322 data-nosnippet>322</a>}
+<a href=#323 id=323 data-nosnippet>323</a>
+<a href=#324 id=324 data-nosnippet>324</a><span class="doccomment">/// The SAML 2.0 identity provider (G-2, T23.2.3, T23.2.5): the service-provider
+<a href=#325 id=325 data-nosnippet>325</a>/// registry, the pending `AuthnRequest`s held across the login hop, the
+<a href=#326 id=326 data-nosnippet>326</a>/// tenant's signing credential, and the issuer.
+<a href=#327 id=327 data-nosnippet>327</a>///
+<a href=#328 id=328 data-nosnippet>328</a>/// **Not behind `saml`** — contract §29's registry and credential routes are
+<a href=#329 id=329 data-nosnippet>329</a>/// compiled into every build (D-42), and they need only the plain-data pieces
+<a href=#330 id=330 data-nosnippet>330</a>/// below. The one member that exists only in a SAML build is the **issuer**, which
+<a href=#331 id=331 data-nosnippet>331</a>/// is `axiam_federation::saml_idp` (see [`FederationState::saml_federation_service`]
+<a href=#332 id=332 data-nosnippet>332</a>/// for why that gate is load-bearing): a build without `saml` mounts none of the
+<a href=#333 id=333 data-nosnippet>333</a>/// browser routes that read it.
+<a href=#334 id=334 data-nosnippet>334</a></span><span class="attr">#[derive(Clone)]
+<a href=#335 id=335 data-nosnippet>335</a></span><span class="kw">pub struct </span>SamlIdpState&lt;C: Connection + Clone&gt; {
+<a href=#336 id=336 data-nosnippet>336</a>    <span class="doccomment">/// The tenant's registered service providers (T23.2.1).
+<a href=#337 id=337 data-nosnippet>337</a>    </span><span class="kw">pub </span>sp_repo: axiam_db::SurrealSamlServiceProviderRepository&lt;C&gt;,
+<a href=#338 id=338 data-nosnippet>338</a>    <span class="doccomment">/// `AuthnRequest`s between the SSO endpoint's two legs (schema v73).
+<a href=#339 id=339 data-nosnippet>339</a>    </span><span class="kw">pub </span>pending_repo: axiam_db::SurrealPendingSamlRequestRepository&lt;C&gt;,
+<a href=#340 id=340 data-nosnippet>340</a>    <span class="doccomment">/// Which service providers hold which session, with the `NameID` and the
+<a href=#341 id=341 data-nosnippet>341</a>    /// per-SP `SessionIndex` each was given (schema v76, D-37). Written by the
+<a href=#342 id=342 data-nosnippet>342</a>    /// SSO endpoint's second leg before it signs; read by single logout.
+<a href=#343 id=343 data-nosnippet>343</a>    </span><span class="kw">pub </span>participant_repo: axiam_db::SurrealSamlSpSessionRepository&lt;C&gt;,
+<a href=#344 id=344 data-nosnippet>344</a>    <span class="doccomment">/// Logout runs: the replay guard of a `LogoutRequest` and the state of the
+<a href=#345 id=345 data-nosnippet>345</a>    /// front-channel chain (schema v76, D-38, D-39).
+<a href=#346 id=346 data-nosnippet>346</a>    </span><span class="kw">pub </span>logout_run_repo: axiam_db::SurrealSamlLogoutRunRepository&lt;C&gt;,
+<a href=#347 id=347 data-nosnippet>347</a>    <span class="doccomment">/// The tenant's signing credential, unsealed per issuance (D-21).
+<a href=#348 id=348 data-nosnippet>348</a>    </span><span class="kw">pub </span>credential_service: SamlIdpCredentialServiceT&lt;C&gt;,
+<a href=#349 id=349 data-nosnippet>349</a>    <span class="doccomment">/// The deployment's issuer: the root issuer every IdP entity id is built
+<a href=#350 id=350 data-nosnippet>350</a>    /// on, and the pairwise-identifier key (D-22). One per process. Behind
+<a href=#351 id=351 data-nosnippet>351</a>    /// `saml`, like the routes that issue with it.
+<a href=#352 id=352 data-nosnippet>352</a>    </span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
+<a href=#353 id=353 data-nosnippet>353</a>    </span><span class="kw">pub </span>issuer: Arc&lt;axiam_federation::saml_idp::SamlIdpIssuer&gt;,
+<a href=#354 id=354 data-nosnippet>354</a>}
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a><span class="doccomment">/// The Shared Signals Framework transmitter (G-5, T23.5.2, T23.5.3): the
+<a href=#357 id=357 data-nosnippet>357</a>/// stream registry, the poll buffer, the outbox events go to, and the emitter
+<a href=#358 id=358 data-nosnippet>358</a>/// the change sites call.
+<a href=#359 id=359 data-nosnippet>359</a>///
+<a href=#360 id=360 data-nosnippet>360</a>/// In every build; it reads nothing behind a feature.
+<a href=#361 id=361 data-nosnippet>361</a></span><span class="attr">#[derive(Clone)]
+<a href=#362 id=362 data-nosnippet>362</a></span><span class="kw">pub struct </span>SsfState&lt;C: Connection + Clone&gt; {
+<a href=#363 id=363 data-nosnippet>363</a>    <span class="doccomment">/// The tenant's registered streams; seals the push `Authorization` header
+<a href=#364 id=364 data-nosnippet>364</a>    /// under `pki_encryption_key`.
+<a href=#365 id=365 data-nosnippet>365</a>    </span><span class="kw">pub </span>stream_repo: axiam_db::SurrealSsfStreamRepository&lt;C&gt;,
+<a href=#366 id=366 data-nosnippet>366</a>    <span class="doccomment">/// The per-stream bounded buffer: what a poll stream's receiver reads and a
+<a href=#367 id=367 data-nosnippet>367</a>    /// paused stream holds (D-48).
+<a href=#368 id=368 data-nosnippet>368</a>    </span><span class="kw">pub </span>buffer_repo: axiam_db::SurrealSsfEventBufferRepository&lt;C&gt;,
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="doccomment">/// What the honour lane remembers about a step-up it sent a user to perform
+<a href=#370 id=370 data-nosnippet>370</a>    /// (D-53 (1)): written at the Interact leg, consumed once by the return leg.
+<a href=#371 id=371 data-nosnippet>371</a>    </span><span class="kw">pub </span>step_up_repo: axiam_db::SurrealSsfStepUpRepository&lt;C&gt;,
+<a href=#372 id=372 data-nosnippet>372</a>    <span class="doccomment">/// Where produced events go (D-48): push enqueue, the poll buffer, or
+<a href=#373 id=373 data-nosnippet>373</a>    /// nothing for a disabled stream. `None` when delivery is not wired (a
+<a href=#374 id=374 data-nosnippet>374</a>    /// harness that does not test it) — the verification endpoint then answers
+<a href=#375 id=375 data-nosnippet>375</a>    /// `503`. Set through [`SsfState::bind_outbox`], which also wires the
+<a href=#376 id=376 data-nosnippet>376</a>    /// emitter.
+<a href=#377 id=377 data-nosnippet>377</a>    </span><span class="kw">pub </span>outbox: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SsfOutbox&gt;&gt;,
+<a href=#378 id=378 data-nosnippet>378</a>    <span class="doccomment">/// The one emitter every change site calls (D-52). A no-op until an outbox
+<a href=#379 id=379 data-nosnippet>379</a>    /// is bound.
+<a href=#380 id=380 data-nosnippet>380</a>    </span><span class="kw">pub </span>emitter: <span class="kw">crate</span>::ssf_emitter::SsfEmitter&lt;C&gt;,
+<a href=#381 id=381 data-nosnippet>381</a>    <span class="doccomment">/// The session repository's `session-revoked` port, bound to [`Self::emitter`]
+<a href=#382 id=382 data-nosnippet>382</a>    /// (D-52). A `Late` handle because the repository is built first.
+<a href=#383 id=383 data-nosnippet>383</a>    </span><span class="kw">pub </span>session_sink:
+<a href=#384 id=384 data-nosnippet>384</a>        Arc&lt;axiam_core::models::ssf::Late&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SessionRevocationSink&gt;&gt;,
+<a href=#385 id=385 data-nosnippet>385</a>    <span class="doccomment">/// The directory sync's `account-disabled` port, bound to [`Self::emitter`].
+<a href=#386 id=386 data-nosnippet>386</a>    </span><span class="kw">pub </span>account_sink:
+<a href=#387 id=387 data-nosnippet>387</a>        Arc&lt;axiam_core::models::ssf::Late&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SsfSystemAccountSink&gt;&gt;,
+<a href=#388 id=388 data-nosnippet>388</a>    <span class="doccomment">/// The long polls currently waiting, one per stream (D-53 (11)).
+<a href=#389 id=389 data-nosnippet>389</a>    </span><span class="kw">pub </span>poll_waiters: Arc&lt;PollWaiters&gt;,
+<a href=#390 id=390 data-nosnippet>390</a>    <span class="doccomment">/// D-55: SSF requires per-tenant issuers in a deployment of more than one
+<a href=#391 id=391 data-nosnippet>391</a>    /// tenant. Asked where events are produced, where a SET is signed and at
+<a href=#392 id=392 data-nosnippet>392</a>    /// discovery; shared with the emitter and the push deliverer.
+<a href=#393 id=393 data-nosnippet>393</a>    </span><span class="kw">pub </span>gate: Arc&lt;axiam_oauth2::ssf::SsfIssuerGate&gt;,
+<a href=#394 id=394 data-nosnippet>394</a>}
+<a href=#395 id=395 data-nosnippet>395</a>
+<a href=#396 id=396 data-nosnippet>396</a><span class="doccomment">/// The streams that have a long poll waiting **on this instance**.
+<a href=#397 id=397 data-nosnippet>397</a>///
+<a href=#398 id=398 data-nosnippet>398</a>/// A long poll holds a request open for up to thirty seconds; a receiver that
+<a href=#399 id=399 data-nosnippet>399</a>/// opens many on one stream (a retry loop with no backoff, a bug) would hold as
+<a href=#400 id=400 data-nosnippet>400</a>/// many connections for no benefit, since RFC 8936 has one receiver draining one
+<a href=#401 id=401 data-nosnippet>401</a>/// stream in order. At most one waits per stream; a second answers at once.
+<a href=#402 id=402 data-nosnippet>402</a>/// Per instance on purpose: an exact cross-instance count would need shared
+<a href=#403 id=403 data-nosnippet>403</a>/// state for a bound that only has to be small.
+<a href=#404 id=404 data-nosnippet>404</a></span><span class="attr">#[derive(Debug, Default)]
+<a href=#405 id=405 data-nosnippet>405</a></span><span class="kw">pub struct </span>PollWaiters {
+<a href=#406 id=406 data-nosnippet>406</a>    waiting: std::sync::Mutex&lt;std::collections::HashSet&lt;uuid::Uuid&gt;&gt;,
+<a href=#407 id=407 data-nosnippet>407</a>}
+<a href=#408 id=408 data-nosnippet>408</a>
+<a href=#409 id=409 data-nosnippet>409</a><span class="doccomment">/// Holds a stream's wait slot; releases it when dropped — including when the
+<a href=#410 id=410 data-nosnippet>410</a>/// request is cancelled because the receiver hung up.
+<a href=#411 id=411 data-nosnippet>411</a></span><span class="attr">#[derive(Debug)]
+<a href=#412 id=412 data-nosnippet>412</a></span><span class="kw">pub struct </span>PollWaitGuard {
+<a href=#413 id=413 data-nosnippet>413</a>    owner: Arc&lt;PollWaiters&gt;,
+<a href=#414 id=414 data-nosnippet>414</a>    stream_id: uuid::Uuid,
+<a href=#415 id=415 data-nosnippet>415</a>}
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a><span class="kw">impl </span>PollWaiters {
+<a href=#418 id=418 data-nosnippet>418</a>    <span class="doccomment">/// Take `stream_id`'s wait slot, or `None` when a long poll already holds it.
+<a href=#419 id=419 data-nosnippet>419</a>    </span><span class="attr">#[must_use]
+<a href=#420 id=420 data-nosnippet>420</a>    </span><span class="kw">pub fn </span>try_enter(<span class="self">self</span>: <span class="kw-2">&amp;</span>Arc&lt;<span class="self">Self</span>&gt;, stream_id: uuid::Uuid) -&gt; <span class="prelude-ty">Option</span>&lt;PollWaitGuard&gt; {
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="kw">let </span><span class="kw-2">mut </span>waiting = <span class="self">self</span>.waiting.lock().unwrap_or_else(|e| e.into_inner());
+<a href=#422 id=422 data-nosnippet>422</a>        waiting.insert(stream_id).then(|| PollWaitGuard {
+<a href=#423 id=423 data-nosnippet>423</a>            owner: Arc::clone(<span class="self">self</span>),
+<a href=#424 id=424 data-nosnippet>424</a>            stream_id,
+<a href=#425 id=425 data-nosnippet>425</a>        })
+<a href=#426 id=426 data-nosnippet>426</a>    }
+<a href=#427 id=427 data-nosnippet>427</a>
+<a href=#428 id=428 data-nosnippet>428</a>    <span class="doccomment">/// How many streams have a long poll waiting.
+<a href=#429 id=429 data-nosnippet>429</a>    </span><span class="attr">#[must_use]
+<a href=#430 id=430 data-nosnippet>430</a>    </span><span class="kw">pub fn </span>waiting(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
+<a href=#431 id=431 data-nosnippet>431</a>        <span class="self">self</span>.waiting.lock().unwrap_or_else(|e| e.into_inner()).len()
+<a href=#432 id=432 data-nosnippet>432</a>    }
+<a href=#433 id=433 data-nosnippet>433</a>}
+<a href=#434 id=434 data-nosnippet>434</a>
+<a href=#435 id=435 data-nosnippet>435</a><span class="kw">impl </span>Drop <span class="kw">for </span>PollWaitGuard {
+<a href=#436 id=436 data-nosnippet>436</a>    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+<a href=#437 id=437 data-nosnippet>437</a>        <span class="self">self</span>.owner
+<a href=#438 id=438 data-nosnippet>438</a>            .waiting
+<a href=#439 id=439 data-nosnippet>439</a>            .lock()
+<a href=#440 id=440 data-nosnippet>440</a>            .unwrap_or_else(|e| e.into_inner())
+<a href=#441 id=441 data-nosnippet>441</a>            .remove(<span class="kw-2">&amp;</span><span class="self">self</span>.stream_id);
+<a href=#442 id=442 data-nosnippet>442</a>    }
+<a href=#443 id=443 data-nosnippet>443</a>}
+<a href=#444 id=444 data-nosnippet>444</a>
+<a href=#445 id=445 data-nosnippet>445</a><span class="kw">impl</span>&lt;C: Connection + Clone&gt; SsfState&lt;C&gt; {
+<a href=#446 id=446 data-nosnippet>446</a>    <span class="doccomment">/// Wire the outbox: producers (verification, a status change) and the
+<a href=#447 id=447 data-nosnippet>447</a>    /// emitter — and through it both ports — send events to it. The emitter
+<a href=#448 id=448 data-nosnippet>448</a>    /// keeps the first outbox it is given.
+<a href=#449 id=449 data-nosnippet>449</a>    </span><span class="kw">pub fn </span>bind_outbox(<span class="kw-2">&amp;mut </span><span class="self">self</span>, outbox: Arc&lt;<span class="kw">dyn </span>axiam_core::models::ssf::SsfOutbox&gt;) {
+<a href=#450 id=450 data-nosnippet>450</a>        <span class="self">self</span>.emitter.bind_outbox(outbox.clone());
+<a href=#451 id=451 data-nosnippet>451</a>        <span class="self">self</span>.outbox = <span class="prelude-val">Some</span>(outbox);
+<a href=#452 id=452 data-nosnippet>452</a>    }
+<a href=#453 id=453 data-nosnippet>453</a>}
+<a href=#454 id=454 data-nosnippet>454</a>
+<a href=#455 id=455 data-nosnippet>455</a><span class="attr">#[cfg(test)]
+<a href=#456 id=456 data-nosnippet>456</a></span><span class="kw">mod </span>poll_waiter_tests {
+<a href=#457 id=457 data-nosnippet>457</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#458 id=458 data-nosnippet>458</a>
+<a href=#459 id=459 data-nosnippet>459</a>    <span class="attr">#[test]
+<a href=#460 id=460 data-nosnippet>460</a>    </span><span class="kw">fn </span>one_slot_per_stream_released_on_drop() {
+<a href=#461 id=461 data-nosnippet>461</a>        <span class="kw">let </span>waiters = Arc::new(PollWaiters::default());
+<a href=#462 id=462 data-nosnippet>462</a>        <span class="kw">let </span>(a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+<a href=#463 id=463 data-nosnippet>463</a>        <span class="kw">let </span>first = waiters.try_enter(a).expect(<span class="string">"the first takes the slot"</span>);
+<a href=#464 id=464 data-nosnippet>464</a>        <span class="macro">assert!</span>(waiters.try_enter(a).is_none(), <span class="string">"the second finds it taken"</span>);
+<a href=#465 id=465 data-nosnippet>465</a>        <span class="macro">assert!</span>(waiters.try_enter(b).is_some(), <span class="string">"another stream is free"</span>);
+<a href=#466 id=466 data-nosnippet>466</a>        <span class="macro">assert_eq!</span>(waiters.waiting(), <span class="number">1</span>, <span class="string">"b's guard was a temporary"</span>);
+<a href=#467 id=467 data-nosnippet>467</a>        drop(first);
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="macro">assert!</span>(waiters.try_enter(a).is_some(), <span class="string">"released on drop"</span>);
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="macro">assert_eq!</span>(waiters.waiting(), <span class="number">0</span>);
+<a href=#470 id=470 data-nosnippet>470</a>    }
+<a href=#471 id=471 data-nosnippet>471</a>}
+<a href=#472 id=472 data-nosnippet>472</a>
+<a href=#473 id=473 data-nosnippet>473</a><span class="doccomment">/// What starting an on-demand SCIM reconciliation came to (G-6, T23.6.4).
+<a href=#474 id=474 data-nosnippet>474</a></span><span class="attr">#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+<a href=#475 id=475 data-nosnippet>475</a></span><span class="kw">pub enum </span>ScimReconcileStart {
+<a href=#476 id=476 data-nosnippet>476</a>    <span class="doccomment">/// The caller took the claim and the run is under way (`202`).
+<a href=#477 id=477 data-nosnippet>477</a>    </span>Started,
+<a href=#478 id=478 data-nosnippet>478</a>    <span class="doccomment">/// A run holds the claim, or ran within the on-demand window (`409`).
+<a href=#479 id=479 data-nosnippet>479</a>    </span>AlreadyClaimed,
+<a href=#480 id=480 data-nosnippet>480</a>    <span class="doccomment">/// The target is disabled: it receives nothing, so there is nothing to
+<a href=#481 id=481 data-nosnippet>481</a>    /// reconcile and no claim was taken (`409`).
+<a href=#482 id=482 data-nosnippet>482</a>    </span>TargetDisabled,
+<a href=#483 id=483 data-nosnippet>483</a>}
+<a href=#484 id=484 data-nosnippet>484</a>
+<a href=#485 id=485 data-nosnippet>485</a><span class="doccomment">/// The management API's way to start a reconciliation. A port, because the
+<a href=#486 id=486 data-nosnippet>486</a>/// deliverer that makes the run lives in `axiam-scim`, which sits **above**
+<a href=#487 id=487 data-nosnippet>487</a>/// this crate (layer 7) and so cannot be named here; `axiam-scim` implements
+<a href=#488 id=488 data-nosnippet>488</a>/// it (`ReconcileLauncher`) and the composition root binds it.
+<a href=#489 id=489 data-nosnippet>489</a></span><span class="kw">pub trait </span>ScimReconcileTrigger: Send + Sync {
+<a href=#490 id=490 data-nosnippet>490</a>    <span class="doccomment">/// Take the target's reconciliation claim and, when it is taken, make the
+<a href=#491 id=491 data-nosnippet>491</a>    /// run in the background. Answers as soon as the claim is decided.
+<a href=#492 id=492 data-nosnippet>492</a>    ///
+<a href=#493 id=493 data-nosnippet>493</a>    /// # Errors
+<a href=#494 id=494 data-nosnippet>494</a>    ///
+<a href=#495 id=495 data-nosnippet>495</a>    /// `NotFound` when the target does not exist in the tenant; any other
+<a href=#496 id=496 data-nosnippet>496</a>    /// failure of the datastore while claiming.
+<a href=#497 id=497 data-nosnippet>497</a>    </span><span class="kw">fn </span>start&lt;<span class="lifetime">'a</span>&gt;(
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="self">self</span>,
+<a href=#499 id=499 data-nosnippet>499</a>        tenant_id: uuid::Uuid,
+<a href=#500 id=500 data-nosnippet>500</a>        target_id: uuid::Uuid,
+<a href=#501 id=501 data-nosnippet>501</a>    ) -&gt; std::pin::Pin&lt;
+<a href=#502 id=502 data-nosnippet>502</a>        Box&lt;
+<a href=#503 id=503 data-nosnippet>503</a>            <span class="kw">dyn </span>std::future::Future&lt;
+<a href=#504 id=504 data-nosnippet>504</a>                    Output = <span class="prelude-ty">Result</span>&lt;ScimReconcileStart, axiam_core::error::AxiamError&gt;,
+<a href=#505 id=505 data-nosnippet>505</a>                &gt; + Send
+<a href=#506 id=506 data-nosnippet>506</a>                + <span class="lifetime">'a</span>,
+<a href=#507 id=507 data-nosnippet>507</a>        &gt;,
+<a href=#508 id=508 data-nosnippet>508</a>    &gt;;
+<a href=#509 id=509 data-nosnippet>509</a>}
+<a href=#510 id=510 data-nosnippet>510</a>
+<a href=#511 id=511 data-nosnippet>511</a><span class="doccomment">/// The outbound SCIM target registry (G-6, T23.6.4): the repository the
+<a href=#512 id=512 data-nosnippet>512</a>/// management routes write — which seals the credential under
+<a href=#513 id=513 data-nosnippet>513</a>/// `pki_encryption_key` — the delivery state they project, and the
+<a href=#514 id=514 data-nosnippet>514</a>/// reconciliation trigger.
+<a href=#515 id=515 data-nosnippet>515</a>///
+<a href=#516 id=516 data-nosnippet>516</a>/// In every build; it reads nothing behind a feature.
+<a href=#517 id=517 data-nosnippet>517</a></span><span class="attr">#[derive(Clone)]
+<a href=#518 id=518 data-nosnippet>518</a></span><span class="kw">pub struct </span>ScimTargetsState&lt;C: Connection + Clone&gt; {
+<a href=#519 id=519 data-nosnippet>519</a>    <span class="doccomment">/// The tenant's registered targets; seals the credential.
+<a href=#520 id=520 data-nosnippet>520</a>    </span><span class="kw">pub </span>target_repo: axiam_db::SurrealScimTargetRepository&lt;C&gt;,
+<a href=#521 id=521 data-nosnippet>521</a>    <span class="doccomment">/// Per-target delivery state, projected by `GET`.
+<a href=#522 id=522 data-nosnippet>522</a>    </span><span class="kw">pub </span>state_repo: axiam_db::SurrealScimTargetStateRepository&lt;C&gt;,
+<a href=#523 id=523 data-nosnippet>523</a>    <span class="doccomment">/// Starts an on-demand reconciliation, and the one a newly enabled target
+<a href=#524 id=524 data-nosnippet>524</a>    /// begins with. `None` when delivery is not wired (a harness that does not
+<a href=#525 id=525 data-nosnippet>525</a>    /// test it): *reconcile now* then answers `503`, and enabling a target
+<a href=#526 id=526 data-nosnippet>526</a>    /// starts nothing.
+<a href=#527 id=527 data-nosnippet>527</a>    </span><span class="kw">pub </span>reconcile: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">dyn </span>ScimReconcileTrigger&gt;&gt;,
+<a href=#528 id=528 data-nosnippet>528</a>}
 </code></pre></div></section></main></body></html>

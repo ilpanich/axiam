@@ -602,778 +602,781 @@
 <a href=#602 id=602 data-nosnippet>602</a>        <span class="comment">// X4 — external-IdP token-exchange trust.
 <a href=#603 id=603 data-nosnippet>603</a>        </span>handlers::federation::TokenExchangeTrustRequest,
 <a href=#604 id=604 data-nosnippet>604</a>        handlers::federation::TokenExchangeTrustResponse,
-<a href=#605 id=605 data-nosnippet>605</a>        handlers::federation::OidcAuthorizeRequest,
-<a href=#606 id=606 data-nosnippet>606</a>        handlers::federation::OidcCallbackRequest,
-<a href=#607 id=607 data-nosnippet>607</a>        handlers::federation::OidcCallbackResponse,
-<a href=#608 id=608 data-nosnippet>608</a>        <span class="comment">// SAML SP schemas live in `SamlApiDoc` (feature-gated).
-<a href=#609 id=609 data-nosnippet>609</a>        </span>handlers::federation::FederationLinkResponse,
-<a href=#610 id=610 data-nosnippet>610</a>        handlers::federation_login::PublicFederationProvider,
-<a href=#611 id=611 data-nosnippet>611</a>        handlers::federation_login::PublicFederationProvidersResponse,
-<a href=#612 id=612 data-nosnippet>612</a>        handlers::federation_login::OAuth2StartRequest,
-<a href=#613 id=613 data-nosnippet>613</a>        handlers::federation_login::OAuth2StartResponse,
-<a href=#614 id=614 data-nosnippet>614</a>        handlers::federation_login::OAuth2CallbackRequest,
-<a href=#615 id=615 data-nosnippet>615</a>        handlers::federation_login::SsoHandoffRequest,
-<a href=#616 id=616 data-nosnippet>616</a>        axiam_core::models::federation::FederationProtocol,
-<a href=#617 id=617 data-nosnippet>617</a>        <span class="comment">// OAuth2 Flow
-<a href=#618 id=618 data-nosnippet>618</a>        </span>handlers::oauth2::OAuth2ErrorResponse,
-<a href=#619 id=619 data-nosnippet>619</a>        axiam_oauth2::token::TokenResponse,
-<a href=#620 id=620 data-nosnippet>620</a>        axiam_oauth2::token::RevokeRequest,
-<a href=#621 id=621 data-nosnippet>621</a>        axiam_oauth2::token::IntrospectRequest,
-<a href=#622 id=622 data-nosnippet>622</a>        axiam_oauth2::token::IntrospectionResponse,
-<a href=#623 id=623 data-nosnippet>623</a>        axiam_oauth2::token::TokenRequest,
-<a href=#624 id=624 data-nosnippet>624</a>        <span class="comment">// Device Authorization Grant (RFC 8628, B2)
-<a href=#625 id=625 data-nosnippet>625</a>        </span>axiam_oauth2::device_service::DeviceAuthorizationRequest,
-<a href=#626 id=626 data-nosnippet>626</a>        axiam_oauth2::ciba::BackchannelAuthenticationRequest,
-<a href=#627 id=627 data-nosnippet>627</a>        axiam_oauth2::ciba::BackchannelAuthenticationResponse,
-<a href=#628 id=628 data-nosnippet>628</a>        axiam_core::models::ciba::CibaDeliveryMode,
-<a href=#629 id=629 data-nosnippet>629</a>        axiam_core::models::ciba::CibaPingNotification,
-<a href=#630 id=630 data-nosnippet>630</a>        axiam_oauth2::device_service::DeviceAuthorizationResponse,
-<a href=#631 id=631 data-nosnippet>631</a>        handlers::oauth2::PushedAuthorizationRequest,
-<a href=#632 id=632 data-nosnippet>632</a>        handlers::oauth2::PushedAuthorizationResponse,
-<a href=#633 id=633 data-nosnippet>633</a>        handlers::device::VerifyResponse,
-<a href=#634 id=634 data-nosnippet>634</a>        handlers::device::DecideRequest,
-<a href=#635 id=635 data-nosnippet>635</a>        handlers::device::DecideResponse,
-<a href=#636 id=636 data-nosnippet>636</a>        handlers::ciba_approval::CibaApprovalPage,
-<a href=#637 id=637 data-nosnippet>637</a>        handlers::ciba_approval::CibaPendingList,
-<a href=#638 id=638 data-nosnippet>638</a>        handlers::ciba_approval::CibaDecisionBody,
-<a href=#639 id=639 data-nosnippet>639</a>        handlers::ciba_approval::CibaDecisionResponse,
-<a href=#640 id=640 data-nosnippet>640</a>        handlers::ciba_approval::CibaStepUpRequired,
-<a href=#641 id=641 data-nosnippet>641</a>        <span class="comment">// Token Exchange (RFC 8693, B3). The request rides on `TokenRequest`
-<a href=#642 id=642 data-nosnippet>642</a>        // at `POST /oauth2/token`; these are the projected shape and the
-<a href=#643 id=643 data-nosnippet>643</a>        // distinct response body, both of which an SDK generator needs.
-<a href=#644 id=644 data-nosnippet>644</a>        </span>axiam_oauth2::token_exchange::TokenExchangeRequest,
-<a href=#645 id=645 data-nosnippet>645</a>        axiam_oauth2::token_exchange::TokenExchangeResponse,
-<a href=#646 id=646 data-nosnippet>646</a>        <span class="comment">// UMA 2.0 (X2). The ticket grant's request rides on `TokenRequest` at
-<a href=#647 id=647 data-nosnippet>647</a>        // `POST /oauth2/token` — the `ticket` / `claim_token` fields — so only
-<a href=#648 id=648 data-nosnippet>648</a>        // the Protection API's own bodies and the discovery document are
-<a href=#649 id=649 data-nosnippet>649</a>        // distinct shapes an SDK generator needs.
-<a href=#650 id=650 data-nosnippet>650</a>        </span>axiam_core::models::uma::RequestedPermission,
-<a href=#651 id=651 data-nosnippet>651</a>        axiam_core::models::uma::RptPermission,
-<a href=#652 id=652 data-nosnippet>652</a>        handlers::uma::PermissionRequestBody,
-<a href=#653 id=653 data-nosnippet>653</a>        handlers::uma::PermissionTicketResponse,
-<a href=#654 id=654 data-nosnippet>654</a>        handlers::uma::Uma2Configuration,
-<a href=#655 id=655 data-nosnippet>655</a>        handlers::uma::ResourceSet,
-<a href=#656 id=656 data-nosnippet>656</a>        <span class="comment">// OIDC
-<a href=#657 id=657 data-nosnippet>657</a>        </span>axiam_oauth2::oidc::OidcDiscoveryDocument,
-<a href=#658 id=658 data-nosnippet>658</a>        <span class="comment">// RFC 8705 §5. Registered explicitly because it is reachable only as an
-<a href=#659 id=659 data-nosnippet>659</a>        // optional field of the document above, and utoipa emits a `$ref` to a
-<a href=#660 id=660 data-nosnippet>660</a>        // component it was never told to generate — the spec would validate as
-<a href=#661 id=661 data-nosnippet>661</a>        // JSON and dangle for every generator the eleven SDKs run.
-<a href=#662 id=662 data-nosnippet>662</a>        </span>axiam_oauth2::oidc::MtlsEndpointAliases,
-<a href=#663 id=663 data-nosnippet>663</a>        axiam_oauth2::oidc::JwksDocument,
-<a href=#664 id=664 data-nosnippet>664</a>        handlers::oauth2::RevocationFeedDocument,
-<a href=#665 id=665 data-nosnippet>665</a>        axiam_oauth2::oidc::Jwk,
-<a href=#666 id=666 data-nosnippet>666</a>        axiam_oauth2::oidc::UserInfoResponse,
-<a href=#667 id=667 data-nosnippet>667</a>        handlers::oauth2::UserInfoPostForm,
-<a href=#668 id=668 data-nosnippet>668</a>        <span class="comment">// W7 — the `address` claim's structure, referenced by
-<a href=#669 id=669 data-nosnippet>669</a>        // `UserInfoResponse`. Without it the spec would name a schema it does
-<a href=#670 id=670 data-nosnippet>670</a>        // not define, which is the one shape of drift the digest gate cannot
-<a href=#671 id=671 data-nosnippet>671</a>        // catch by itself.
-<a href=#672 id=672 data-nosnippet>672</a>        </span>axiam_core::models::user::Address,
-<a href=#673 id=673 data-nosnippet>673</a>        handlers::gdpr::ConsentView,
-<a href=#674 id=674 data-nosnippet>674</a>        handlers::gdpr::GrantScopeConsent,
-<a href=#675 id=675 data-nosnippet>675</a>        <span class="comment">// Settings
-<a href=#676 id=676 data-nosnippet>676</a>        </span>axiam_core::models::settings::SecuritySettings,
-<a href=#677 id=677 data-nosnippet>677</a>        axiam_core::models::settings::SetOrgSettings,
-<a href=#678 id=678 data-nosnippet>678</a>        axiam_core::models::settings::TenantSettingsOverride,
-<a href=#679 id=679 data-nosnippet>679</a>        axiam_core::models::settings::SettingsScope,
-<a href=#680 id=680 data-nosnippet>680</a>        axiam_core::models::settings::PasswordPolicy,
-<a href=#681 id=681 data-nosnippet>681</a>        axiam_core::models::settings::MfaPolicy,
-<a href=#682 id=682 data-nosnippet>682</a>        axiam_core::models::settings::LockoutPolicy,
-<a href=#683 id=683 data-nosnippet>683</a>        axiam_core::models::settings::TokenPolicy,
-<a href=#684 id=684 data-nosnippet>684</a>        axiam_core::models::settings::EmailVerificationPolicy,
-<a href=#685 id=685 data-nosnippet>685</a>        axiam_core::models::settings::CertificatePolicy,
-<a href=#686 id=686 data-nosnippet>686</a>        axiam_core::models::settings::NotificationPolicy,
-<a href=#687 id=687 data-nosnippet>687</a>        <span class="comment">// Directory (G-3, T23.3.8). The component names are the ones CONTRACT
-<a href=#688 id=688 data-nosnippet>688</a>        // §30.1 pins and the registry's `sensitive_request_fields` names.
-<a href=#689 id=689 data-nosnippet>689</a>        </span>axiam_core::models::directory::DirectoryConfig,
-<a href=#690 id=690 data-nosnippet>690</a>        axiam_core::models::directory::DirectoryKind,
-<a href=#691 id=691 data-nosnippet>691</a>        axiam_core::models::directory::UserAttributeMap,
-<a href=#692 id=692 data-nosnippet>692</a>        axiam_core::models::directory::GroupMapping,
-<a href=#693 id=693 data-nosnippet>693</a>        handlers::directory::SetDirectoryConfig,
-<a href=#694 id=694 data-nosnippet>694</a>        handlers::directory::UpdateDirectoryConfig,
-<a href=#695 id=695 data-nosnippet>695</a>        handlers::directory::LinkDirectoryAccount,
-<a href=#696 id=696 data-nosnippet>696</a>        handlers::directory::DirectoryLinkResult,
-<a href=#697 id=697 data-nosnippet>697</a>        handlers::directory::DirectorySyncStatus,
-<a href=#698 id=698 data-nosnippet>698</a>        <span class="comment">// SAML registry (G-2, T23.2.5). The component names are the ones CONTRACT
-<a href=#699 id=699 data-nosnippet>699</a>        // §29.1 pins.
-<a href=#700 id=700 data-nosnippet>700</a>        </span>axiam_core::models::saml_sp::SamlServiceProvider,
-<a href=#701 id=701 data-nosnippet>701</a>        axiam_core::models::saml_sp::SamlServiceProviderInput,
-<a href=#702 id=702 data-nosnippet>702</a>        axiam_core::models::saml_sp::AcsEndpoint,
-<a href=#703 id=703 data-nosnippet>703</a>        axiam_core::models::saml_sp::AttributeMapping,
-<a href=#704 id=704 data-nosnippet>704</a>        axiam_core::models::saml_sp::AttributeSource,
-<a href=#705 id=705 data-nosnippet>705</a>        axiam_core::models::saml_sp::NameIdFormat,
-<a href=#706 id=706 data-nosnippet>706</a>        axiam_core::models::saml_sp::SamlBinding,
-<a href=#707 id=707 data-nosnippet>707</a>        handlers::saml_admin::SamlIdpInfo,
-<a href=#708 id=708 data-nosnippet>708</a>        handlers::saml_admin::SamlIdpCredential,
-<a href=#709 id=709 data-nosnippet>709</a>        handlers::saml_admin::SamlIdpCredentialStatus,
-<a href=#710 id=710 data-nosnippet>710</a>        handlers::saml_admin::SamlIdpCredentialPromotion,
-<a href=#711 id=711 data-nosnippet>711</a>        handlers::saml_admin::SamlIdpSlot,
-<a href=#712 id=712 data-nosnippet>712</a>        handlers::saml_admin::IssueSamlIdpCredential,
-<a href=#713 id=713 data-nosnippet>713</a>        handlers::saml_admin::ParseSamlSpMetadata,
-<a href=#714 id=714 data-nosnippet>714</a>        handlers::saml_admin::SamlSpMetadataDraft,
-<a href=#715 id=715 data-nosnippet>715</a>        <span class="comment">// SSF (G-5, T23.5.2). The component names are the ones CONTRACT §32
-<a href=#716 id=716 data-nosnippet>716</a>        // pins.
-<a href=#717 id=717 data-nosnippet>717</a>        </span>handlers::ssf_admin::SsfStream,
-<a href=#718 id=718 data-nosnippet>718</a>        handlers::ssf_admin::SsfStreamInput,
-<a href=#719 id=719 data-nosnippet>719</a>        handlers::scim_targets::ScimTargetResponse,
-<a href=#720 id=720 data-nosnippet>720</a>        handlers::scim_targets::ScimTargetInput,
-<a href=#721 id=721 data-nosnippet>721</a>        handlers::scim_targets::ScimTargetDeliveryState,
-<a href=#722 id=722 data-nosnippet>722</a>        handlers::scim_targets::ScimReconcileAccepted,
-<a href=#723 id=723 data-nosnippet>723</a>        handlers::network::NetworkSegmentResponse,
-<a href=#724 id=724 data-nosnippet>724</a>        handlers::network::CreateNetworkSegmentRequest,
-<a href=#725 id=725 data-nosnippet>725</a>        handlers::network::ReplaceNetworkSegmentRequest,
-<a href=#726 id=726 data-nosnippet>726</a>        handlers::network::CreateReplyProfileRequest,
-<a href=#727 id=727 data-nosnippet>727</a>        handlers::network::ReplaceReplyProfileRequest,
-<a href=#728 id=728 data-nosnippet>728</a>        handlers::network::NetworkPolicyResponse,
-<a href=#729 id=729 data-nosnippet>729</a>        handlers::network::ReplaceNetworkPolicyRequest,
-<a href=#730 id=730 data-nosnippet>730</a>        handlers::network::NetworkConflictResponse,
-<a href=#731 id=731 data-nosnippet>731</a>        handlers::network::NetworkConflictReason,
-<a href=#732 id=732 data-nosnippet>732</a>        axiam_core::models::network::NetworkSegmentKind,
-<a href=#733 id=733 data-nosnippet>733</a>        axiam_core::models::network::ReplyProfile,
-<a href=#734 id=734 data-nosnippet>734</a>        handlers::network_decide::NetworkDecisionRequest,
-<a href=#735 id=735 data-nosnippet>735</a>        handlers::network_decide::NetworkDecisionResponse,
-<a href=#736 id=736 data-nosnippet>736</a>        axiam_core::models::radius_reply::RenderedReply,
-<a href=#737 id=737 data-nosnippet>737</a>        axiam_core::models::radius_reply::ReplyAttribute,
-<a href=#738 id=738 data-nosnippet>738</a>        axiam_core::models::radius_reply::ReplyValue,
-<a href=#739 id=739 data-nosnippet>739</a>        axiam_core::models::radius_reply::ReplyProfileInput,
-<a href=#740 id=740 data-nosnippet>740</a>        axiam_core::models::radius_reply::TerminationAction,
-<a href=#741 id=741 data-nosnippet>741</a>        axiam_core::models::radius_reply::ServiceType,
-<a href=#742 id=742 data-nosnippet>742</a>        axiam_core::models::scim_target::ScimTargetAuth,
-<a href=#743 id=743 data-nosnippet>743</a>        axiam_core::models::scim_target::ScimTargetScope,
-<a href=#744 id=744 data-nosnippet>744</a>        axiam_core::models::scim_target::UserNameSource,
-<a href=#745 id=745 data-nosnippet>745</a>        axiam_core::models::scim_target::DeprovisionPolicy,
-<a href=#746 id=746 data-nosnippet>746</a>        axiam_core::models::ssf::SsfEventType,
-<a href=#747 id=747 data-nosnippet>747</a>        axiam_core::models::ssf::SsfDeliveryMethod,
-<a href=#748 id=748 data-nosnippet>748</a>        axiam_core::models::ssf::SsfStreamStatus,
-<a href=#749 id=749 data-nosnippet>749</a>        axiam_core::models::ssf::SsfStatusActor,
-<a href=#750 id=750 data-nosnippet>750</a>        axiam_core::models::ssf::SsfSubjectFormat,
-<a href=#751 id=751 data-nosnippet>751</a>        axiam_oauth2::ssf::SsfConfiguration,
-<a href=#752 id=752 data-nosnippet>752</a>        axiam_oauth2::ssf::SsfAuthorizationScheme,
-<a href=#753 id=753 data-nosnippet>753</a>        axiam_oauth2::ssf::SsfStreamConfiguration,
-<a href=#754 id=754 data-nosnippet>754</a>        axiam_oauth2::ssf::SsfDeliveryView,
-<a href=#755 id=755 data-nosnippet>755</a>        axiam_oauth2::ssf::ReceiverStreamUpdate,
-<a href=#756 id=756 data-nosnippet>756</a>        axiam_oauth2::ssf::ReceiverDelivery,
-<a href=#757 id=757 data-nosnippet>757</a>        handlers::ssf::SsfStreamStatusView,
-<a href=#758 id=758 data-nosnippet>758</a>        handlers::ssf::SsfStatusUpdate,
-<a href=#759 id=759 data-nosnippet>759</a>        handlers::ssf::SsfVerificationRequest,
-<a href=#760 id=760 data-nosnippet>760</a>        handlers::ssf::SsfPollRequest,
-<a href=#761 id=761 data-nosnippet>761</a>        handlers::ssf::SsfSetError,
-<a href=#762 id=762 data-nosnippet>762</a>        handlers::ssf::SsfPollResponse,
-<a href=#763 id=763 data-nosnippet>763</a>        <span class="comment">// Email Config (FUNC-03 / D-13)
-<a href=#764 id=764 data-nosnippet>764</a>        </span>axiam_core::models::email::EmailConfig,
-<a href=#765 id=765 data-nosnippet>765</a>        axiam_core::models::email::EmailConfigOverride,
-<a href=#766 id=766 data-nosnippet>766</a>        axiam_core::models::email::SetOrgEmailConfig,
-<a href=#767 id=767 data-nosnippet>767</a>        handlers::email_config::EmailTestResult,
-<a href=#768 id=768 data-nosnippet>768</a>        axiam_core::models::email::ProviderConfig,
-<a href=#769 id=769 data-nosnippet>769</a>        axiam_core::models::email::SmtpConfig,
-<a href=#770 id=770 data-nosnippet>770</a>        axiam_core::models::email::ApiProviderConfig,
-<a href=#771 id=771 data-nosnippet>771</a>        axiam_core::models::email::EmailProviderKind,
-<a href=#772 id=772 data-nosnippet>772</a>        <span class="comment">// First-time SSO — public OIDC start/callback (FUNC-01 / D-12)
-<a href=#773 id=773 data-nosnippet>773</a>        </span>handlers::federation::OidcStartRequest,
-<a href=#774 id=774 data-nosnippet>774</a>        handlers::federation::OidcStartResponse,
-<a href=#775 id=775 data-nosnippet>775</a>        handlers::federation::OidcPublicCallbackRequest,
-<a href=#776 id=776 data-nosnippet>776</a>        handlers::federation::SsoLoginSuccessResponse,
-<a href=#777 id=777 data-nosnippet>777</a>        <span class="comment">// Email Verification
-<a href=#778 id=778 data-nosnippet>778</a>        </span>handlers::email_verification::VerifyEmailRequest,
-<a href=#779 id=779 data-nosnippet>779</a>        handlers::email_verification::ResendVerificationRequest,
-<a href=#780 id=780 data-nosnippet>780</a>        <span class="comment">// Password Reset
-<a href=#781 id=781 data-nosnippet>781</a>        </span>handlers::password_reset::RequestResetBody,
-<a href=#782 id=782 data-nosnippet>782</a>        handlers::password_reset::ConfirmResetBody,
-<a href=#783 id=783 data-nosnippet>783</a>        <span class="comment">// Notification Rules
-<a href=#784 id=784 data-nosnippet>784</a>        </span>handlers::notification_rules::CreateNotificationRuleRequest,
-<a href=#785 id=785 data-nosnippet>785</a>        handlers::notification_rules::UpdateNotificationRuleRequest,
-<a href=#786 id=786 data-nosnippet>786</a>        handlers::notification_rules::NotificationRuleResponse,
-<a href=#787 id=787 data-nosnippet>787</a>        axiam_core::models::notification_rule::NotificationRule,
-<a href=#788 id=788 data-nosnippet>788</a>        axiam_core::models::notification_rule::NotificationEventType,
-<a href=#789 id=789 data-nosnippet>789</a>        <span class="comment">// Authz check (FND-04)
-<a href=#790 id=790 data-nosnippet>790</a>        </span>handlers::authz_check::CheckAccessBody,
-<a href=#791 id=791 data-nosnippet>791</a>        handlers::authz_check::CheckAccessResponse,
-<a href=#792 id=792 data-nosnippet>792</a>        handlers::authz_check::BatchCheckAccessBody,
-<a href=#793 id=793 data-nosnippet>793</a>        handlers::authz_check::BatchCheckAccessResponse,
-<a href=#794 id=794 data-nosnippet>794</a>        <span class="comment">// Pagination
-<a href=#795 id=795 data-nosnippet>795</a>        </span>axiam_core::repository::Pagination,
-<a href=#796 id=796 data-nosnippet>796</a>        <span class="comment">// WebAuthn Attestation Policy (X3 wave 3)
-<a href=#797 id=797 data-nosnippet>797</a>        </span>axiam_core::models::webauthn_policy::WebauthnAttestationPolicy,
-<a href=#798 id=798 data-nosnippet>798</a>        axiam_core::models::webauthn_policy::AttestationMode,
-<a href=#799 id=799 data-nosnippet>799</a>        axiam_core::models::webauthn_policy::UnknownAaguidAction,
-<a href=#800 id=800 data-nosnippet>800</a>        axiam_core::models::webauthn_policy::AttestationDenyReason,
-<a href=#801 id=801 data-nosnippet>801</a>        axiam_core::models::mds::CertificationLevel,
-<a href=#802 id=802 data-nosnippet>802</a>        handlers::webauthn_policy::PolicyResponse,
-<a href=#803 id=803 data-nosnippet>803</a>        handlers::webauthn_policy::ComplianceReportEntry,
-<a href=#804 id=804 data-nosnippet>804</a>        <span class="comment">// FIDO MDS3 (X3 wave 3)
-<a href=#805 id=805 data-nosnippet>805</a>        </span>handlers::mds::MdsStatusResponse,
-<a href=#806 id=806 data-nosnippet>806</a>        handlers::mds::MdsRefreshOutcome,
-<a href=#807 id=807 data-nosnippet>807</a>    )),
-<a href=#808 id=808 data-nosnippet>808</a>    tags(
-<a href=#809 id=809 data-nosnippet>809</a>        (name = <span class="string">"health"</span>, description = <span class="string">"Health and readiness probes"</span>),
-<a href=#810 id=810 data-nosnippet>810</a>        (name = <span class="string">"auth"</span>, description = <span class="string">"Authentication — login, logout, refresh, MFA"</span>),
-<a href=#811 id=811 data-nosnippet>811</a>        (name = <span class="string">"webauthn"</span>, description = <span class="string">"WebAuthn passkey registration and authentication"</span>),
-<a href=#812 id=812 data-nosnippet>812</a>        (name = <span class="string">"organizations"</span>, description = <span class="string">"Organization management"</span>),
-<a href=#813 id=813 data-nosnippet>813</a>        (name = <span class="string">"tenants"</span>, description = <span class="string">"Tenant management"</span>),
-<a href=#814 id=814 data-nosnippet>814</a>        (name = <span class="string">"users"</span>, description = <span class="string">"User management"</span>),
-<a href=#815 id=815 data-nosnippet>815</a>        (name = <span class="string">"groups"</span>, description = <span class="string">"Group management and membership"</span>),
-<a href=#816 id=816 data-nosnippet>816</a>        (name = <span class="string">"roles"</span>, description = <span class="string">"Role management and assignment"</span>),
-<a href=#817 id=817 data-nosnippet>817</a>        (name = <span class="string">"permissions"</span>, description = <span class="string">"Permission management and grants"</span>),
-<a href=#818 id=818 data-nosnippet>818</a>        (name = <span class="string">"resources"</span>, description = <span class="string">"Resource management and hierarchy"</span>),
-<a href=#819 id=819 data-nosnippet>819</a>        (name = <span class="string">"scopes"</span>, description = <span class="string">"Scope management (sub-resource permissions)"</span>),
-<a href=#820 id=820 data-nosnippet>820</a>        (name = <span class="string">"ca-certificates"</span>, description = <span class="string">"CA certificate management"</span>),
-<a href=#821 id=821 data-nosnippet>821</a>        (name = <span class="string">"certificates"</span>, description = <span class="string">"Tenant certificate lifecycle"</span>),
-<a href=#822 id=822 data-nosnippet>822</a>        (name = <span class="string">"pki"</span>, description = <span class="string">"Public PKI distribution — each issuing CA's certificate revocation list, unauthenticated (RFC 5280 §5)"</span>),
-<a href=#823 id=823 data-nosnippet>823</a>        (name = <span class="string">"pgp-keys"</span>, description = <span class="string">"OpenPGP key management and audit signing"</span>),
-<a href=#824 id=824 data-nosnippet>824</a>        (name = <span class="string">"audit"</span>, description = <span class="string">"Audit log queries"</span>),
-<a href=#825 id=825 data-nosnippet>825</a>        (name = <span class="string">"webhooks"</span>, description = <span class="string">"Webhook registration and management"</span>),
-<a href=#826 id=826 data-nosnippet>826</a>        (name = <span class="string">"service-accounts"</span>, description = <span class="string">"Service account management"</span>),
-<a href=#827 id=827 data-nosnippet>827</a>        (name = <span class="string">"oauth2-clients"</span>, description = <span class="string">"OAuth2 client registration and management"</span>),
-<a href=#828 id=828 data-nosnippet>828</a>        (name = <span class="string">"oauth2"</span>, description = <span class="string">"OAuth2 authorization and token endpoints"</span>),
-<a href=#829 id=829 data-nosnippet>829</a>        (name = <span class="string">"oidc"</span>, description = <span class="string">"OpenID Connect discovery, JWKS, and UserInfo"</span>),
-<a href=#830 id=830 data-nosnippet>830</a>        (name = <span class="string">"settings"</span>, description = <span class="string">"Organization and tenant security settings"</span>),
-<a href=#831 id=831 data-nosnippet>831</a>        (name = <span class="string">"email-config"</span>, description = <span class="string">"Organization and tenant email provider configuration"</span>),
-<a href=#832 id=832 data-nosnippet>832</a>        (name = <span class="string">"saml"</span>, description = <span class="string">"SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"</span>),
-<a href=#833 id=833 data-nosnippet>833</a>        (name = <span class="string">"ssf"</span>, description = <span class="string">"Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"</span>),
-<a href=#834 id=834 data-nosnippet>834</a>        (name = <span class="string">"scim-targets"</span>, description = <span class="string">"Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"</span>),
-<a href=#835 id=835 data-nosnippet>835</a>        (name = <span class="string">"network"</span>, description = <span class="string">"Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS Live profile, claude_dev/radius-reply-profile-design.md)"</span>),
-<a href=#836 id=836 data-nosnippet>836</a>        (name = <span class="string">"ssf-receiver"</span>, description = <span class="string">"Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"</span>),
-<a href=#837 id=837 data-nosnippet>837</a>        (name = <span class="string">"directory"</span>, description = <span class="string">"Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"</span>),
-<a href=#838 id=838 data-nosnippet>838</a>        (name = <span class="string">"federation"</span>, description = <span class="string">"OIDC and SAML federation with external IdPs"</span>),
-<a href=#839 id=839 data-nosnippet>839</a>        (name = <span class="string">"federation-sso"</span>, description = <span class="string">"First-time SSO — public OIDC/SAML start and callback endpoints"</span>),
-<a href=#840 id=840 data-nosnippet>840</a>        (name = <span class="string">"notification_rules"</span>, description = <span class="string">"Notification rule management"</span>),
-<a href=#841 id=841 data-nosnippet>841</a>        (name = <span class="string">"authz"</span>, description = <span class="string">"Authorization check (FND-04 REST surface)"</span>),
-<a href=#842 id=842 data-nosnippet>842</a>        (name = <span class="string">"webauthn-policy"</span>, description = <span class="string">"Tenant WebAuthn attestation policy and compliance reporting (X3)"</span>),
-<a href=#843 id=843 data-nosnippet>843</a>        (name = <span class="string">"mds"</span>, description = <span class="string">"FIDO Alliance Metadata Service (MDS3) ingestion admin (X3)"</span>),
-<a href=#844 id=844 data-nosnippet>844</a>        (name = <span class="string">"gdpr"</span>, description = <span class="string">"Data-subject export (Art. 15) and erasure (Art. 17)"</span>),
-<a href=#845 id=845 data-nosnippet>845</a>    ),
-<a href=#846 id=846 data-nosnippet>846</a>    modifiers(<span class="kw-2">&amp;</span>SecurityAddon),
-<a href=#847 id=847 data-nosnippet>847</a>)]
-<a href=#848 id=848 data-nosnippet>848</a></span><span class="kw">pub struct </span>ApiDoc;
-<a href=#849 id=849 data-nosnippet>849</a>
-<a href=#850 id=850 data-nosnippet>850</a><span class="doccomment">/// SAML SP paths and schemas, compiled only with the `saml` feature.
-<a href=#851 id=851 data-nosnippet>851</a>///
-<a href=#852 id=852 data-nosnippet>852</a>/// Kept separate from [`ApiDoc`] because utoipa's `paths()`/`schemas()` macro
-<a href=#853 id=853 data-nosnippet>853</a>/// arguments can't be `#[cfg]`-gated individually. [`api_doc`] merges this into
-<a href=#854 id=854 data-nosnippet>854</a>/// the main document when the feature is on.
-<a href=#855 id=855 data-nosnippet>855</a></span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
-<a href=#856 id=856 data-nosnippet>856</a>#[derive(OpenApi)]
-<a href=#857 id=857 data-nosnippet>857</a>#[openapi(
-<a href=#858 id=858 data-nosnippet>858</a>    paths(
-<a href=#859 id=859 data-nosnippet>859</a>        handlers::federation::saml_authn_request,
-<a href=#860 id=860 data-nosnippet>860</a>        handlers::federation::saml_acs,
-<a href=#861 id=861 data-nosnippet>861</a>        handlers::federation::saml_metadata,
-<a href=#862 id=862 data-nosnippet>862</a>        <span class="comment">// First-time SSO — public SAML login/ACS (FUNC-01 / D-12).
-<a href=#863 id=863 data-nosnippet>863</a>        </span>handlers::federation::saml_login_public,
-<a href=#864 id=864 data-nosnippet>864</a>        handlers::federation::saml_acs_public,
-<a href=#865 id=865 data-nosnippet>865</a>        <span class="comment">// The form-encoded ACS a real IdP posts to (the JSON sibling above is
-<a href=#866 id=866 data-nosnippet>866</a>        // the SDK-facing one).
-<a href=#867 id=867 data-nosnippet>867</a>        </span>handlers::federation_login::saml_acs_form_public,
-<a href=#868 id=868 data-nosnippet>868</a>    ),
-<a href=#869 id=869 data-nosnippet>869</a>    components(schemas(
-<a href=#870 id=870 data-nosnippet>870</a>        handlers::federation::SamlAuthnRequestRequest,
-<a href=#871 id=871 data-nosnippet>871</a>        handlers::federation::SamlAuthnRequestResponse,
-<a href=#872 id=872 data-nosnippet>872</a>        handlers::federation::SamlAcsRequest,
-<a href=#873 id=873 data-nosnippet>873</a>        handlers::federation::SamlMetadataQuery,
-<a href=#874 id=874 data-nosnippet>874</a>        handlers::federation::SamlLoginRequest,
-<a href=#875 id=875 data-nosnippet>875</a>        handlers::federation::SamlLoginResponse,
-<a href=#876 id=876 data-nosnippet>876</a>        handlers::federation::SamlAcsPublicRequest,
-<a href=#877 id=877 data-nosnippet>877</a>    ))
-<a href=#878 id=878 data-nosnippet>878</a>)]
-<a href=#879 id=879 data-nosnippet>879</a></span><span class="kw">struct </span>SamlApiDoc;
-<a href=#880 id=880 data-nosnippet>880</a>
-<a href=#881 id=881 data-nosnippet>881</a><span class="doccomment">/// Build the full OpenAPI document, merging in the SAML SP endpoints when the
-<a href=#882 id=882 data-nosnippet>882</a>/// `saml` feature is enabled. Use this instead of `ApiDoc::openapi()` directly.
-<a href=#883 id=883 data-nosnippet>883</a></span><span class="kw">pub fn </span>api_doc() -&gt; utoipa::openapi::OpenApi {
-<a href=#884 id=884 data-nosnippet>884</a>    <span class="kw">let </span>doc = ApiDoc::openapi();
-<a href=#885 id=885 data-nosnippet>885</a>    <span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
-<a href=#886 id=886 data-nosnippet>886</a>    </span><span class="kw">let </span>doc = doc.merge_from(SamlApiDoc::openapi());
-<a href=#887 id=887 data-nosnippet>887</a>    <span class="kw">let </span><span class="kw-2">mut </span>doc = doc;
-<a href=#888 id=888 data-nosnippet>888</a>    add_oauth_authorization_server_alias(<span class="kw-2">&amp;mut </span>doc);
-<a href=#889 id=889 data-nosnippet>889</a>    stamp_spec_digest(doc)
-<a href=#890 id=890 data-nosnippet>890</a>}
-<a href=#891 id=891 data-nosnippet>891</a>
-<a href=#892 id=892 data-nosnippet>892</a><span class="doccomment">/// Documents `GET /.well-known/oauth-authorization-server` (T21.1) by cloning
-<a href=#893 id=893 data-nosnippet>893</a>/// the already-generated `PathItem` for `/.well-known/openid-configuration`
-<a href=#894 id=894 data-nosnippet>894</a>/// rather than hand-writing a second `#[utoipa::path]` annotation on a second
-<a href=#895 id=895 data-nosnippet>895</a>/// handler. `server.rs` routes both paths to the literal same
-<a href=#896 id=896 data-nosnippet>896</a>/// `handlers::oauth2::discovery` function, so the two are one operation with
-<a href=#897 id=897 data-nosnippet>897</a>/// two conventional entry points — a second annotation could drift from the
-<a href=#898 id=898 data-nosnippet>898</a>/// first (a changed summary, an added parameter) in a way the compiler would
-<a href=#899 id=899 data-nosnippet>899</a>/// never catch, where cloning the generated item cannot.
-<a href=#900 id=900 data-nosnippet>900</a>///
-<a href=#901 id=901 data-nosnippet>901</a>/// Missing the source entry is a bug in `ApiDoc::paths(..)`, not something
-<a href=#902 id=902 data-nosnippet>902</a>/// this function can recover from, so it is deliberately silent rather than
-<a href=#903 id=903 data-nosnippet>903</a>/// panicking: `docs-ci.yml`'s OpenAPI parse-check and the digest test in this
-<a href=#904 id=904 data-nosnippet>904</a>/// module already fail loudly if `ApiDoc` stops documenting discovery at all.
-<a href=#905 id=905 data-nosnippet>905</a></span><span class="kw">fn </span>add_oauth_authorization_server_alias(doc: <span class="kw-2">&amp;mut </span>utoipa::openapi::OpenApi) {
-<a href=#906 id=906 data-nosnippet>906</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(discovery_item) = doc
-<a href=#907 id=907 data-nosnippet>907</a>        .paths
-<a href=#908 id=908 data-nosnippet>908</a>        .paths
-<a href=#909 id=909 data-nosnippet>909</a>        .get(<span class="string">"/.well-known/openid-configuration"</span>)
-<a href=#910 id=910 data-nosnippet>910</a>        .cloned()
-<a href=#911 id=911 data-nosnippet>911</a>    {
-<a href=#912 id=912 data-nosnippet>912</a>        doc.paths.paths.insert(
-<a href=#913 id=913 data-nosnippet>913</a>            <span class="string">"/.well-known/oauth-authorization-server"</span>.to_string(),
-<a href=#914 id=914 data-nosnippet>914</a>            discovery_item,
-<a href=#915 id=915 data-nosnippet>915</a>        );
-<a href=#916 id=916 data-nosnippet>916</a>    }
-<a href=#917 id=917 data-nosnippet>917</a>}
-<a href=#918 id=918 data-nosnippet>918</a>
-<a href=#919 id=919 data-nosnippet>919</a><span class="doccomment">/// The extension key carrying the specification's content digest.
-<a href=#920 id=920 data-nosnippet>920</a>///
-<a href=#921 id=921 data-nosnippet>921</a>/// `x-`-prefixed, which is what the OpenAPI specification reserves for extensions, so a
-<a href=#922 id=922 data-nosnippet>922</a>/// validator and a code generator both ignore it.
-<a href=#923 id=923 data-nosnippet>923</a></span><span class="kw">pub const </span>SPEC_DIGEST_KEY: <span class="kw-2">&amp;</span>str = <span class="string">"x-axiam-spec-digest"</span>;
-<a href=#924 id=924 data-nosnippet>924</a>
-<a href=#925 id=925 data-nosnippet>925</a><span class="doccomment">/// Stamp `info.x-axiam-spec-digest` with a SHA-256 over this document's own content.
-<a href=#926 id=926 data-nosnippet>926</a>///
-<a href=#927 id=927 data-nosnippet>927</a>/// **Why `info.version` is not enough.** It tracks `CARGO_PKG_VERSION`, which is the
-<a href=#928 id=928 data-nosnippet>928</a>/// release version — it moves when a release is cut, not when a path is added. Two builds
-<a href=#929 id=929 data-nosnippet>929</a>/// can therefore describe genuinely different APIs under the same string, and they have:
-<a href=#930 id=930 data-nosnippet>930</a>/// `main` and a release branch both reported `1.0.0-alpha44` while differing by two paths
-<a href=#931 id=931 data-nosnippet>931</a>/// (`ca-certificates/{id}/migrate-custody` and `.../mtls-trust-anchor`). A consumer pinning
-<a href=#932 id=932 data-nosnippet>932</a>/// on `info.version` — an SDK deciding whether to regenerate, a gateway caching a spec, a
-<a href=#933 id=933 data-nosnippet>933</a>/// contract test asserting it is current — could not tell those exports apart, and nothing
-<a href=#934 id=934 data-nosnippet>934</a>/// in the document let it.
-<a href=#935 id=935 data-nosnippet>935</a>///
-<a href=#936 id=936 data-nosnippet>936</a>/// The version keeps its meaning: it is the API's semantic version, and consumers should
-<a href=#937 id=937 data-nosnippet>937</a>/// keep reading it as one. This is the other question — "is this the same document?" —
-<a href=#938 id=938 data-nosnippet>938</a>/// answered separately and exactly.
-<a href=#939 id=939 data-nosnippet>939</a>///
-<a href=#940 id=940 data-nosnippet>940</a>/// **`info.version` is inside the digest**, so a release bump changes it even when no path
-<a href=#941 id=941 data-nosnippet>941</a>/// did. Deliberate: "same document" is checkable, where "same API" would need an argument
-<a href=#942 id=942 data-nosnippet>942</a>/// about whether a description, a tag or an example counts. A consumer wanting the narrower
-<a href=#943 id=943 data-nosnippet>943</a>/// question can compare the members they care about.
-<a href=#944 id=944 data-nosnippet>944</a>///
-<a href=#945 id=945 data-nosnippet>945</a>/// Computed over the document with this field ABSENT, so the digest is a function of the
-<a href=#946 id=946 data-nosnippet>946</a>/// spec's content rather than of itself, and so re-stamping an already-stamped document is
-<a href=#947 id=947 data-nosnippet>947</a>/// idempotent.
-<a href=#948 id=948 data-nosnippet>948</a></span><span class="kw">fn </span>stamp_spec_digest(<span class="kw-2">mut </span>doc: utoipa::openapi::OpenApi) -&gt; utoipa::openapi::OpenApi {
-<a href=#949 id=949 data-nosnippet>949</a>    <span class="kw">use </span>sha2::{Digest, Sha256};
-<a href=#950 id=950 data-nosnippet>950</a>
-<a href=#951 id=951 data-nosnippet>951</a>    <span class="comment">// Absent, not empty: an empty `extensions` map serializes as no key at all here (the
-<a href=#952 id=952 data-nosnippet>952</a>    // field is `Option` and flattened), but clearing it explicitly is what makes the digest
-<a href=#953 id=953 data-nosnippet>953</a>    // computed below independent of whatever was there before.
-<a href=#954 id=954 data-nosnippet>954</a>    </span>doc.info.extensions = <span class="prelude-val">None</span>;
-<a href=#955 id=955 data-nosnippet>955</a>
-<a href=#956 id=956 data-nosnippet>956</a>    <span class="kw">let </span>canonical = serde_json::to_vec(<span class="kw-2">&amp;</span>doc).expect(<span class="string">"OpenAPI serialization failed"</span>);
-<a href=#957 id=957 data-nosnippet>957</a>    <span class="kw">let </span>digest = hex::encode(Sha256::digest(<span class="kw-2">&amp;</span>canonical));
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="comment">// G-A — native sign-in trust.
+<a href=#606 id=606 data-nosnippet>606</a>        </span>handlers::federation::NativeLoginTrustRequest,
+<a href=#607 id=607 data-nosnippet>607</a>        handlers::federation::NativeLoginTrustResponse,
+<a href=#608 id=608 data-nosnippet>608</a>        handlers::federation::OidcAuthorizeRequest,
+<a href=#609 id=609 data-nosnippet>609</a>        handlers::federation::OidcCallbackRequest,
+<a href=#610 id=610 data-nosnippet>610</a>        handlers::federation::OidcCallbackResponse,
+<a href=#611 id=611 data-nosnippet>611</a>        <span class="comment">// SAML SP schemas live in `SamlApiDoc` (feature-gated).
+<a href=#612 id=612 data-nosnippet>612</a>        </span>handlers::federation::FederationLinkResponse,
+<a href=#613 id=613 data-nosnippet>613</a>        handlers::federation_login::PublicFederationProvider,
+<a href=#614 id=614 data-nosnippet>614</a>        handlers::federation_login::PublicFederationProvidersResponse,
+<a href=#615 id=615 data-nosnippet>615</a>        handlers::federation_login::OAuth2StartRequest,
+<a href=#616 id=616 data-nosnippet>616</a>        handlers::federation_login::OAuth2StartResponse,
+<a href=#617 id=617 data-nosnippet>617</a>        handlers::federation_login::OAuth2CallbackRequest,
+<a href=#618 id=618 data-nosnippet>618</a>        handlers::federation_login::SsoHandoffRequest,
+<a href=#619 id=619 data-nosnippet>619</a>        axiam_core::models::federation::FederationProtocol,
+<a href=#620 id=620 data-nosnippet>620</a>        <span class="comment">// OAuth2 Flow
+<a href=#621 id=621 data-nosnippet>621</a>        </span>handlers::oauth2::OAuth2ErrorResponse,
+<a href=#622 id=622 data-nosnippet>622</a>        axiam_oauth2::token::TokenResponse,
+<a href=#623 id=623 data-nosnippet>623</a>        axiam_oauth2::token::RevokeRequest,
+<a href=#624 id=624 data-nosnippet>624</a>        axiam_oauth2::token::IntrospectRequest,
+<a href=#625 id=625 data-nosnippet>625</a>        axiam_oauth2::token::IntrospectionResponse,
+<a href=#626 id=626 data-nosnippet>626</a>        axiam_oauth2::token::TokenRequest,
+<a href=#627 id=627 data-nosnippet>627</a>        <span class="comment">// Device Authorization Grant (RFC 8628, B2)
+<a href=#628 id=628 data-nosnippet>628</a>        </span>axiam_oauth2::device_service::DeviceAuthorizationRequest,
+<a href=#629 id=629 data-nosnippet>629</a>        axiam_oauth2::ciba::BackchannelAuthenticationRequest,
+<a href=#630 id=630 data-nosnippet>630</a>        axiam_oauth2::ciba::BackchannelAuthenticationResponse,
+<a href=#631 id=631 data-nosnippet>631</a>        axiam_core::models::ciba::CibaDeliveryMode,
+<a href=#632 id=632 data-nosnippet>632</a>        axiam_core::models::ciba::CibaPingNotification,
+<a href=#633 id=633 data-nosnippet>633</a>        axiam_oauth2::device_service::DeviceAuthorizationResponse,
+<a href=#634 id=634 data-nosnippet>634</a>        handlers::oauth2::PushedAuthorizationRequest,
+<a href=#635 id=635 data-nosnippet>635</a>        handlers::oauth2::PushedAuthorizationResponse,
+<a href=#636 id=636 data-nosnippet>636</a>        handlers::device::VerifyResponse,
+<a href=#637 id=637 data-nosnippet>637</a>        handlers::device::DecideRequest,
+<a href=#638 id=638 data-nosnippet>638</a>        handlers::device::DecideResponse,
+<a href=#639 id=639 data-nosnippet>639</a>        handlers::ciba_approval::CibaApprovalPage,
+<a href=#640 id=640 data-nosnippet>640</a>        handlers::ciba_approval::CibaPendingList,
+<a href=#641 id=641 data-nosnippet>641</a>        handlers::ciba_approval::CibaDecisionBody,
+<a href=#642 id=642 data-nosnippet>642</a>        handlers::ciba_approval::CibaDecisionResponse,
+<a href=#643 id=643 data-nosnippet>643</a>        handlers::ciba_approval::CibaStepUpRequired,
+<a href=#644 id=644 data-nosnippet>644</a>        <span class="comment">// Token Exchange (RFC 8693, B3). The request rides on `TokenRequest`
+<a href=#645 id=645 data-nosnippet>645</a>        // at `POST /oauth2/token`; these are the projected shape and the
+<a href=#646 id=646 data-nosnippet>646</a>        // distinct response body, both of which an SDK generator needs.
+<a href=#647 id=647 data-nosnippet>647</a>        </span>axiam_oauth2::token_exchange::TokenExchangeRequest,
+<a href=#648 id=648 data-nosnippet>648</a>        axiam_oauth2::token_exchange::TokenExchangeResponse,
+<a href=#649 id=649 data-nosnippet>649</a>        <span class="comment">// UMA 2.0 (X2). The ticket grant's request rides on `TokenRequest` at
+<a href=#650 id=650 data-nosnippet>650</a>        // `POST /oauth2/token` — the `ticket` / `claim_token` fields — so only
+<a href=#651 id=651 data-nosnippet>651</a>        // the Protection API's own bodies and the discovery document are
+<a href=#652 id=652 data-nosnippet>652</a>        // distinct shapes an SDK generator needs.
+<a href=#653 id=653 data-nosnippet>653</a>        </span>axiam_core::models::uma::RequestedPermission,
+<a href=#654 id=654 data-nosnippet>654</a>        axiam_core::models::uma::RptPermission,
+<a href=#655 id=655 data-nosnippet>655</a>        handlers::uma::PermissionRequestBody,
+<a href=#656 id=656 data-nosnippet>656</a>        handlers::uma::PermissionTicketResponse,
+<a href=#657 id=657 data-nosnippet>657</a>        handlers::uma::Uma2Configuration,
+<a href=#658 id=658 data-nosnippet>658</a>        handlers::uma::ResourceSet,
+<a href=#659 id=659 data-nosnippet>659</a>        <span class="comment">// OIDC
+<a href=#660 id=660 data-nosnippet>660</a>        </span>axiam_oauth2::oidc::OidcDiscoveryDocument,
+<a href=#661 id=661 data-nosnippet>661</a>        <span class="comment">// RFC 8705 §5. Registered explicitly because it is reachable only as an
+<a href=#662 id=662 data-nosnippet>662</a>        // optional field of the document above, and utoipa emits a `$ref` to a
+<a href=#663 id=663 data-nosnippet>663</a>        // component it was never told to generate — the spec would validate as
+<a href=#664 id=664 data-nosnippet>664</a>        // JSON and dangle for every generator the eleven SDKs run.
+<a href=#665 id=665 data-nosnippet>665</a>        </span>axiam_oauth2::oidc::MtlsEndpointAliases,
+<a href=#666 id=666 data-nosnippet>666</a>        axiam_oauth2::oidc::JwksDocument,
+<a href=#667 id=667 data-nosnippet>667</a>        handlers::oauth2::RevocationFeedDocument,
+<a href=#668 id=668 data-nosnippet>668</a>        axiam_oauth2::oidc::Jwk,
+<a href=#669 id=669 data-nosnippet>669</a>        axiam_oauth2::oidc::UserInfoResponse,
+<a href=#670 id=670 data-nosnippet>670</a>        handlers::oauth2::UserInfoPostForm,
+<a href=#671 id=671 data-nosnippet>671</a>        <span class="comment">// W7 — the `address` claim's structure, referenced by
+<a href=#672 id=672 data-nosnippet>672</a>        // `UserInfoResponse`. Without it the spec would name a schema it does
+<a href=#673 id=673 data-nosnippet>673</a>        // not define, which is the one shape of drift the digest gate cannot
+<a href=#674 id=674 data-nosnippet>674</a>        // catch by itself.
+<a href=#675 id=675 data-nosnippet>675</a>        </span>axiam_core::models::user::Address,
+<a href=#676 id=676 data-nosnippet>676</a>        handlers::gdpr::ConsentView,
+<a href=#677 id=677 data-nosnippet>677</a>        handlers::gdpr::GrantScopeConsent,
+<a href=#678 id=678 data-nosnippet>678</a>        <span class="comment">// Settings
+<a href=#679 id=679 data-nosnippet>679</a>        </span>axiam_core::models::settings::SecuritySettings,
+<a href=#680 id=680 data-nosnippet>680</a>        axiam_core::models::settings::SetOrgSettings,
+<a href=#681 id=681 data-nosnippet>681</a>        axiam_core::models::settings::TenantSettingsOverride,
+<a href=#682 id=682 data-nosnippet>682</a>        axiam_core::models::settings::SettingsScope,
+<a href=#683 id=683 data-nosnippet>683</a>        axiam_core::models::settings::PasswordPolicy,
+<a href=#684 id=684 data-nosnippet>684</a>        axiam_core::models::settings::MfaPolicy,
+<a href=#685 id=685 data-nosnippet>685</a>        axiam_core::models::settings::LockoutPolicy,
+<a href=#686 id=686 data-nosnippet>686</a>        axiam_core::models::settings::TokenPolicy,
+<a href=#687 id=687 data-nosnippet>687</a>        axiam_core::models::settings::EmailVerificationPolicy,
+<a href=#688 id=688 data-nosnippet>688</a>        axiam_core::models::settings::CertificatePolicy,
+<a href=#689 id=689 data-nosnippet>689</a>        axiam_core::models::settings::NotificationPolicy,
+<a href=#690 id=690 data-nosnippet>690</a>        <span class="comment">// Directory (G-3, T23.3.8). The component names are the ones CONTRACT
+<a href=#691 id=691 data-nosnippet>691</a>        // §30.1 pins and the registry's `sensitive_request_fields` names.
+<a href=#692 id=692 data-nosnippet>692</a>        </span>axiam_core::models::directory::DirectoryConfig,
+<a href=#693 id=693 data-nosnippet>693</a>        axiam_core::models::directory::DirectoryKind,
+<a href=#694 id=694 data-nosnippet>694</a>        axiam_core::models::directory::UserAttributeMap,
+<a href=#695 id=695 data-nosnippet>695</a>        axiam_core::models::directory::GroupMapping,
+<a href=#696 id=696 data-nosnippet>696</a>        handlers::directory::SetDirectoryConfig,
+<a href=#697 id=697 data-nosnippet>697</a>        handlers::directory::UpdateDirectoryConfig,
+<a href=#698 id=698 data-nosnippet>698</a>        handlers::directory::LinkDirectoryAccount,
+<a href=#699 id=699 data-nosnippet>699</a>        handlers::directory::DirectoryLinkResult,
+<a href=#700 id=700 data-nosnippet>700</a>        handlers::directory::DirectorySyncStatus,
+<a href=#701 id=701 data-nosnippet>701</a>        <span class="comment">// SAML registry (G-2, T23.2.5). The component names are the ones CONTRACT
+<a href=#702 id=702 data-nosnippet>702</a>        // §29.1 pins.
+<a href=#703 id=703 data-nosnippet>703</a>        </span>axiam_core::models::saml_sp::SamlServiceProvider,
+<a href=#704 id=704 data-nosnippet>704</a>        axiam_core::models::saml_sp::SamlServiceProviderInput,
+<a href=#705 id=705 data-nosnippet>705</a>        axiam_core::models::saml_sp::AcsEndpoint,
+<a href=#706 id=706 data-nosnippet>706</a>        axiam_core::models::saml_sp::AttributeMapping,
+<a href=#707 id=707 data-nosnippet>707</a>        axiam_core::models::saml_sp::AttributeSource,
+<a href=#708 id=708 data-nosnippet>708</a>        axiam_core::models::saml_sp::NameIdFormat,
+<a href=#709 id=709 data-nosnippet>709</a>        axiam_core::models::saml_sp::SamlBinding,
+<a href=#710 id=710 data-nosnippet>710</a>        handlers::saml_admin::SamlIdpInfo,
+<a href=#711 id=711 data-nosnippet>711</a>        handlers::saml_admin::SamlIdpCredential,
+<a href=#712 id=712 data-nosnippet>712</a>        handlers::saml_admin::SamlIdpCredentialStatus,
+<a href=#713 id=713 data-nosnippet>713</a>        handlers::saml_admin::SamlIdpCredentialPromotion,
+<a href=#714 id=714 data-nosnippet>714</a>        handlers::saml_admin::SamlIdpSlot,
+<a href=#715 id=715 data-nosnippet>715</a>        handlers::saml_admin::IssueSamlIdpCredential,
+<a href=#716 id=716 data-nosnippet>716</a>        handlers::saml_admin::ParseSamlSpMetadata,
+<a href=#717 id=717 data-nosnippet>717</a>        handlers::saml_admin::SamlSpMetadataDraft,
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="comment">// SSF (G-5, T23.5.2). The component names are the ones CONTRACT §32
+<a href=#719 id=719 data-nosnippet>719</a>        // pins.
+<a href=#720 id=720 data-nosnippet>720</a>        </span>handlers::ssf_admin::SsfStream,
+<a href=#721 id=721 data-nosnippet>721</a>        handlers::ssf_admin::SsfStreamInput,
+<a href=#722 id=722 data-nosnippet>722</a>        handlers::scim_targets::ScimTargetResponse,
+<a href=#723 id=723 data-nosnippet>723</a>        handlers::scim_targets::ScimTargetInput,
+<a href=#724 id=724 data-nosnippet>724</a>        handlers::scim_targets::ScimTargetDeliveryState,
+<a href=#725 id=725 data-nosnippet>725</a>        handlers::scim_targets::ScimReconcileAccepted,
+<a href=#726 id=726 data-nosnippet>726</a>        handlers::network::NetworkSegmentResponse,
+<a href=#727 id=727 data-nosnippet>727</a>        handlers::network::CreateNetworkSegmentRequest,
+<a href=#728 id=728 data-nosnippet>728</a>        handlers::network::ReplaceNetworkSegmentRequest,
+<a href=#729 id=729 data-nosnippet>729</a>        handlers::network::CreateReplyProfileRequest,
+<a href=#730 id=730 data-nosnippet>730</a>        handlers::network::ReplaceReplyProfileRequest,
+<a href=#731 id=731 data-nosnippet>731</a>        handlers::network::NetworkPolicyResponse,
+<a href=#732 id=732 data-nosnippet>732</a>        handlers::network::ReplaceNetworkPolicyRequest,
+<a href=#733 id=733 data-nosnippet>733</a>        handlers::network::NetworkConflictResponse,
+<a href=#734 id=734 data-nosnippet>734</a>        handlers::network::NetworkConflictReason,
+<a href=#735 id=735 data-nosnippet>735</a>        axiam_core::models::network::NetworkSegmentKind,
+<a href=#736 id=736 data-nosnippet>736</a>        axiam_core::models::network::ReplyProfile,
+<a href=#737 id=737 data-nosnippet>737</a>        handlers::network_decide::NetworkDecisionRequest,
+<a href=#738 id=738 data-nosnippet>738</a>        handlers::network_decide::NetworkDecisionResponse,
+<a href=#739 id=739 data-nosnippet>739</a>        axiam_core::models::radius_reply::RenderedReply,
+<a href=#740 id=740 data-nosnippet>740</a>        axiam_core::models::radius_reply::ReplyAttribute,
+<a href=#741 id=741 data-nosnippet>741</a>        axiam_core::models::radius_reply::ReplyValue,
+<a href=#742 id=742 data-nosnippet>742</a>        axiam_core::models::radius_reply::ReplyProfileInput,
+<a href=#743 id=743 data-nosnippet>743</a>        axiam_core::models::radius_reply::TerminationAction,
+<a href=#744 id=744 data-nosnippet>744</a>        axiam_core::models::radius_reply::ServiceType,
+<a href=#745 id=745 data-nosnippet>745</a>        axiam_core::models::scim_target::ScimTargetAuth,
+<a href=#746 id=746 data-nosnippet>746</a>        axiam_core::models::scim_target::ScimTargetScope,
+<a href=#747 id=747 data-nosnippet>747</a>        axiam_core::models::scim_target::UserNameSource,
+<a href=#748 id=748 data-nosnippet>748</a>        axiam_core::models::scim_target::DeprovisionPolicy,
+<a href=#749 id=749 data-nosnippet>749</a>        axiam_core::models::ssf::SsfEventType,
+<a href=#750 id=750 data-nosnippet>750</a>        axiam_core::models::ssf::SsfDeliveryMethod,
+<a href=#751 id=751 data-nosnippet>751</a>        axiam_core::models::ssf::SsfStreamStatus,
+<a href=#752 id=752 data-nosnippet>752</a>        axiam_core::models::ssf::SsfStatusActor,
+<a href=#753 id=753 data-nosnippet>753</a>        axiam_core::models::ssf::SsfSubjectFormat,
+<a href=#754 id=754 data-nosnippet>754</a>        axiam_oauth2::ssf::SsfConfiguration,
+<a href=#755 id=755 data-nosnippet>755</a>        axiam_oauth2::ssf::SsfAuthorizationScheme,
+<a href=#756 id=756 data-nosnippet>756</a>        axiam_oauth2::ssf::SsfStreamConfiguration,
+<a href=#757 id=757 data-nosnippet>757</a>        axiam_oauth2::ssf::SsfDeliveryView,
+<a href=#758 id=758 data-nosnippet>758</a>        axiam_oauth2::ssf::ReceiverStreamUpdate,
+<a href=#759 id=759 data-nosnippet>759</a>        axiam_oauth2::ssf::ReceiverDelivery,
+<a href=#760 id=760 data-nosnippet>760</a>        handlers::ssf::SsfStreamStatusView,
+<a href=#761 id=761 data-nosnippet>761</a>        handlers::ssf::SsfStatusUpdate,
+<a href=#762 id=762 data-nosnippet>762</a>        handlers::ssf::SsfVerificationRequest,
+<a href=#763 id=763 data-nosnippet>763</a>        handlers::ssf::SsfPollRequest,
+<a href=#764 id=764 data-nosnippet>764</a>        handlers::ssf::SsfSetError,
+<a href=#765 id=765 data-nosnippet>765</a>        handlers::ssf::SsfPollResponse,
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="comment">// Email Config (FUNC-03 / D-13)
+<a href=#767 id=767 data-nosnippet>767</a>        </span>axiam_core::models::email::EmailConfig,
+<a href=#768 id=768 data-nosnippet>768</a>        axiam_core::models::email::EmailConfigOverride,
+<a href=#769 id=769 data-nosnippet>769</a>        axiam_core::models::email::SetOrgEmailConfig,
+<a href=#770 id=770 data-nosnippet>770</a>        handlers::email_config::EmailTestResult,
+<a href=#771 id=771 data-nosnippet>771</a>        axiam_core::models::email::ProviderConfig,
+<a href=#772 id=772 data-nosnippet>772</a>        axiam_core::models::email::SmtpConfig,
+<a href=#773 id=773 data-nosnippet>773</a>        axiam_core::models::email::ApiProviderConfig,
+<a href=#774 id=774 data-nosnippet>774</a>        axiam_core::models::email::EmailProviderKind,
+<a href=#775 id=775 data-nosnippet>775</a>        <span class="comment">// First-time SSO — public OIDC start/callback (FUNC-01 / D-12)
+<a href=#776 id=776 data-nosnippet>776</a>        </span>handlers::federation::OidcStartRequest,
+<a href=#777 id=777 data-nosnippet>777</a>        handlers::federation::OidcStartResponse,
+<a href=#778 id=778 data-nosnippet>778</a>        handlers::federation::OidcPublicCallbackRequest,
+<a href=#779 id=779 data-nosnippet>779</a>        handlers::federation::SsoLoginSuccessResponse,
+<a href=#780 id=780 data-nosnippet>780</a>        <span class="comment">// Email Verification
+<a href=#781 id=781 data-nosnippet>781</a>        </span>handlers::email_verification::VerifyEmailRequest,
+<a href=#782 id=782 data-nosnippet>782</a>        handlers::email_verification::ResendVerificationRequest,
+<a href=#783 id=783 data-nosnippet>783</a>        <span class="comment">// Password Reset
+<a href=#784 id=784 data-nosnippet>784</a>        </span>handlers::password_reset::RequestResetBody,
+<a href=#785 id=785 data-nosnippet>785</a>        handlers::password_reset::ConfirmResetBody,
+<a href=#786 id=786 data-nosnippet>786</a>        <span class="comment">// Notification Rules
+<a href=#787 id=787 data-nosnippet>787</a>        </span>handlers::notification_rules::CreateNotificationRuleRequest,
+<a href=#788 id=788 data-nosnippet>788</a>        handlers::notification_rules::UpdateNotificationRuleRequest,
+<a href=#789 id=789 data-nosnippet>789</a>        handlers::notification_rules::NotificationRuleResponse,
+<a href=#790 id=790 data-nosnippet>790</a>        axiam_core::models::notification_rule::NotificationRule,
+<a href=#791 id=791 data-nosnippet>791</a>        axiam_core::models::notification_rule::NotificationEventType,
+<a href=#792 id=792 data-nosnippet>792</a>        <span class="comment">// Authz check (FND-04)
+<a href=#793 id=793 data-nosnippet>793</a>        </span>handlers::authz_check::CheckAccessBody,
+<a href=#794 id=794 data-nosnippet>794</a>        handlers::authz_check::CheckAccessResponse,
+<a href=#795 id=795 data-nosnippet>795</a>        handlers::authz_check::BatchCheckAccessBody,
+<a href=#796 id=796 data-nosnippet>796</a>        handlers::authz_check::BatchCheckAccessResponse,
+<a href=#797 id=797 data-nosnippet>797</a>        <span class="comment">// Pagination
+<a href=#798 id=798 data-nosnippet>798</a>        </span>axiam_core::repository::Pagination,
+<a href=#799 id=799 data-nosnippet>799</a>        <span class="comment">// WebAuthn Attestation Policy (X3 wave 3)
+<a href=#800 id=800 data-nosnippet>800</a>        </span>axiam_core::models::webauthn_policy::WebauthnAttestationPolicy,
+<a href=#801 id=801 data-nosnippet>801</a>        axiam_core::models::webauthn_policy::AttestationMode,
+<a href=#802 id=802 data-nosnippet>802</a>        axiam_core::models::webauthn_policy::UnknownAaguidAction,
+<a href=#803 id=803 data-nosnippet>803</a>        axiam_core::models::webauthn_policy::AttestationDenyReason,
+<a href=#804 id=804 data-nosnippet>804</a>        axiam_core::models::mds::CertificationLevel,
+<a href=#805 id=805 data-nosnippet>805</a>        handlers::webauthn_policy::PolicyResponse,
+<a href=#806 id=806 data-nosnippet>806</a>        handlers::webauthn_policy::ComplianceReportEntry,
+<a href=#807 id=807 data-nosnippet>807</a>        <span class="comment">// FIDO MDS3 (X3 wave 3)
+<a href=#808 id=808 data-nosnippet>808</a>        </span>handlers::mds::MdsStatusResponse,
+<a href=#809 id=809 data-nosnippet>809</a>        handlers::mds::MdsRefreshOutcome,
+<a href=#810 id=810 data-nosnippet>810</a>    )),
+<a href=#811 id=811 data-nosnippet>811</a>    tags(
+<a href=#812 id=812 data-nosnippet>812</a>        (name = <span class="string">"health"</span>, description = <span class="string">"Health and readiness probes"</span>),
+<a href=#813 id=813 data-nosnippet>813</a>        (name = <span class="string">"auth"</span>, description = <span class="string">"Authentication — login, logout, refresh, MFA"</span>),
+<a href=#814 id=814 data-nosnippet>814</a>        (name = <span class="string">"webauthn"</span>, description = <span class="string">"WebAuthn passkey registration and authentication"</span>),
+<a href=#815 id=815 data-nosnippet>815</a>        (name = <span class="string">"organizations"</span>, description = <span class="string">"Organization management"</span>),
+<a href=#816 id=816 data-nosnippet>816</a>        (name = <span class="string">"tenants"</span>, description = <span class="string">"Tenant management"</span>),
+<a href=#817 id=817 data-nosnippet>817</a>        (name = <span class="string">"users"</span>, description = <span class="string">"User management"</span>),
+<a href=#818 id=818 data-nosnippet>818</a>        (name = <span class="string">"groups"</span>, description = <span class="string">"Group management and membership"</span>),
+<a href=#819 id=819 data-nosnippet>819</a>        (name = <span class="string">"roles"</span>, description = <span class="string">"Role management and assignment"</span>),
+<a href=#820 id=820 data-nosnippet>820</a>        (name = <span class="string">"permissions"</span>, description = <span class="string">"Permission management and grants"</span>),
+<a href=#821 id=821 data-nosnippet>821</a>        (name = <span class="string">"resources"</span>, description = <span class="string">"Resource management and hierarchy"</span>),
+<a href=#822 id=822 data-nosnippet>822</a>        (name = <span class="string">"scopes"</span>, description = <span class="string">"Scope management (sub-resource permissions)"</span>),
+<a href=#823 id=823 data-nosnippet>823</a>        (name = <span class="string">"ca-certificates"</span>, description = <span class="string">"CA certificate management"</span>),
+<a href=#824 id=824 data-nosnippet>824</a>        (name = <span class="string">"certificates"</span>, description = <span class="string">"Tenant certificate lifecycle"</span>),
+<a href=#825 id=825 data-nosnippet>825</a>        (name = <span class="string">"pki"</span>, description = <span class="string">"Public PKI distribution — each issuing CA's certificate revocation list, unauthenticated (RFC 5280 §5)"</span>),
+<a href=#826 id=826 data-nosnippet>826</a>        (name = <span class="string">"pgp-keys"</span>, description = <span class="string">"OpenPGP key management and audit signing"</span>),
+<a href=#827 id=827 data-nosnippet>827</a>        (name = <span class="string">"audit"</span>, description = <span class="string">"Audit log queries"</span>),
+<a href=#828 id=828 data-nosnippet>828</a>        (name = <span class="string">"webhooks"</span>, description = <span class="string">"Webhook registration and management"</span>),
+<a href=#829 id=829 data-nosnippet>829</a>        (name = <span class="string">"service-accounts"</span>, description = <span class="string">"Service account management"</span>),
+<a href=#830 id=830 data-nosnippet>830</a>        (name = <span class="string">"oauth2-clients"</span>, description = <span class="string">"OAuth2 client registration and management"</span>),
+<a href=#831 id=831 data-nosnippet>831</a>        (name = <span class="string">"oauth2"</span>, description = <span class="string">"OAuth2 authorization and token endpoints"</span>),
+<a href=#832 id=832 data-nosnippet>832</a>        (name = <span class="string">"oidc"</span>, description = <span class="string">"OpenID Connect discovery, JWKS, and UserInfo"</span>),
+<a href=#833 id=833 data-nosnippet>833</a>        (name = <span class="string">"settings"</span>, description = <span class="string">"Organization and tenant security settings"</span>),
+<a href=#834 id=834 data-nosnippet>834</a>        (name = <span class="string">"email-config"</span>, description = <span class="string">"Organization and tenant email provider configuration"</span>),
+<a href=#835 id=835 data-nosnippet>835</a>        (name = <span class="string">"saml"</span>, description = <span class="string">"SAML 2.0 identity provider — service-provider registry, SP metadata import and the IdP signing credential (CONTRACT §29)"</span>),
+<a href=#836 id=836 data-nosnippet>836</a>        (name = <span class="string">"ssf"</span>, description = <span class="string">"Shared Signals Framework transmitter — the registry of SSF streams a tenant administrator manages (CONTRACT §32)"</span>),
+<a href=#837 id=837 data-nosnippet>837</a>        (name = <span class="string">"scim-targets"</span>, description = <span class="string">"Outbound SCIM provisioning — the registry of downstream SCIM 2.0 service providers a tenant administrator manages, with each target's delivery state (CONTRACT §31)"</span>),
+<a href=#838 id=838 data-nosnippet>838</a>        (name = <span class="string">"network"</span>, description = <span class="string">"Network segments and RADIUS reply profiles — the reserved /network subtree of the resource tree and the typed reply profile each segment owns (RADIUS Live profile, claude_dev/radius-reply-profile-design.md)"</span>),
+<a href=#839 id=839 data-nosnippet>839</a>        (name = <span class="string">"ssf-receiver"</span>, description = <span class="string">"Shared Signals Framework 1.0 — transmitter metadata and the stream management API a receiver calls with its client-credentials token (CONTRACT §32.6)"</span>),
+<a href=#840 id=840 data-nosnippet>840</a>        (name = <span class="string">"directory"</span>, description = <span class="string">"Tenant LDAP / Active Directory identity source — configuration, account linking and sync status (CONTRACT §30)"</span>),
+<a href=#841 id=841 data-nosnippet>841</a>        (name = <span class="string">"federation"</span>, description = <span class="string">"OIDC and SAML federation with external IdPs"</span>),
+<a href=#842 id=842 data-nosnippet>842</a>        (name = <span class="string">"federation-sso"</span>, description = <span class="string">"First-time SSO — public OIDC/SAML start and callback endpoints"</span>),
+<a href=#843 id=843 data-nosnippet>843</a>        (name = <span class="string">"notification_rules"</span>, description = <span class="string">"Notification rule management"</span>),
+<a href=#844 id=844 data-nosnippet>844</a>        (name = <span class="string">"authz"</span>, description = <span class="string">"Authorization check (FND-04 REST surface)"</span>),
+<a href=#845 id=845 data-nosnippet>845</a>        (name = <span class="string">"webauthn-policy"</span>, description = <span class="string">"Tenant WebAuthn attestation policy and compliance reporting (X3)"</span>),
+<a href=#846 id=846 data-nosnippet>846</a>        (name = <span class="string">"mds"</span>, description = <span class="string">"FIDO Alliance Metadata Service (MDS3) ingestion admin (X3)"</span>),
+<a href=#847 id=847 data-nosnippet>847</a>        (name = <span class="string">"gdpr"</span>, description = <span class="string">"Data-subject export (Art. 15) and erasure (Art. 17)"</span>),
+<a href=#848 id=848 data-nosnippet>848</a>    ),
+<a href=#849 id=849 data-nosnippet>849</a>    modifiers(<span class="kw-2">&amp;</span>SecurityAddon),
+<a href=#850 id=850 data-nosnippet>850</a>)]
+<a href=#851 id=851 data-nosnippet>851</a></span><span class="kw">pub struct </span>ApiDoc;
+<a href=#852 id=852 data-nosnippet>852</a>
+<a href=#853 id=853 data-nosnippet>853</a><span class="doccomment">/// SAML SP paths and schemas, compiled only with the `saml` feature.
+<a href=#854 id=854 data-nosnippet>854</a>///
+<a href=#855 id=855 data-nosnippet>855</a>/// Kept separate from [`ApiDoc`] because utoipa's `paths()`/`schemas()` macro
+<a href=#856 id=856 data-nosnippet>856</a>/// arguments can't be `#[cfg]`-gated individually. [`api_doc`] merges this into
+<a href=#857 id=857 data-nosnippet>857</a>/// the main document when the feature is on.
+<a href=#858 id=858 data-nosnippet>858</a></span><span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
+<a href=#859 id=859 data-nosnippet>859</a>#[derive(OpenApi)]
+<a href=#860 id=860 data-nosnippet>860</a>#[openapi(
+<a href=#861 id=861 data-nosnippet>861</a>    paths(
+<a href=#862 id=862 data-nosnippet>862</a>        handlers::federation::saml_authn_request,
+<a href=#863 id=863 data-nosnippet>863</a>        handlers::federation::saml_acs,
+<a href=#864 id=864 data-nosnippet>864</a>        handlers::federation::saml_metadata,
+<a href=#865 id=865 data-nosnippet>865</a>        <span class="comment">// First-time SSO — public SAML login/ACS (FUNC-01 / D-12).
+<a href=#866 id=866 data-nosnippet>866</a>        </span>handlers::federation::saml_login_public,
+<a href=#867 id=867 data-nosnippet>867</a>        handlers::federation::saml_acs_public,
+<a href=#868 id=868 data-nosnippet>868</a>        <span class="comment">// The form-encoded ACS a real IdP posts to (the JSON sibling above is
+<a href=#869 id=869 data-nosnippet>869</a>        // the SDK-facing one).
+<a href=#870 id=870 data-nosnippet>870</a>        </span>handlers::federation_login::saml_acs_form_public,
+<a href=#871 id=871 data-nosnippet>871</a>    ),
+<a href=#872 id=872 data-nosnippet>872</a>    components(schemas(
+<a href=#873 id=873 data-nosnippet>873</a>        handlers::federation::SamlAuthnRequestRequest,
+<a href=#874 id=874 data-nosnippet>874</a>        handlers::federation::SamlAuthnRequestResponse,
+<a href=#875 id=875 data-nosnippet>875</a>        handlers::federation::SamlAcsRequest,
+<a href=#876 id=876 data-nosnippet>876</a>        handlers::federation::SamlMetadataQuery,
+<a href=#877 id=877 data-nosnippet>877</a>        handlers::federation::SamlLoginRequest,
+<a href=#878 id=878 data-nosnippet>878</a>        handlers::federation::SamlLoginResponse,
+<a href=#879 id=879 data-nosnippet>879</a>        handlers::federation::SamlAcsPublicRequest,
+<a href=#880 id=880 data-nosnippet>880</a>    ))
+<a href=#881 id=881 data-nosnippet>881</a>)]
+<a href=#882 id=882 data-nosnippet>882</a></span><span class="kw">struct </span>SamlApiDoc;
+<a href=#883 id=883 data-nosnippet>883</a>
+<a href=#884 id=884 data-nosnippet>884</a><span class="doccomment">/// Build the full OpenAPI document, merging in the SAML SP endpoints when the
+<a href=#885 id=885 data-nosnippet>885</a>/// `saml` feature is enabled. Use this instead of `ApiDoc::openapi()` directly.
+<a href=#886 id=886 data-nosnippet>886</a></span><span class="kw">pub fn </span>api_doc() -&gt; utoipa::openapi::OpenApi {
+<a href=#887 id=887 data-nosnippet>887</a>    <span class="kw">let </span>doc = ApiDoc::openapi();
+<a href=#888 id=888 data-nosnippet>888</a>    <span class="attr">#[cfg(feature = <span class="string">"saml"</span>)]
+<a href=#889 id=889 data-nosnippet>889</a>    </span><span class="kw">let </span>doc = doc.merge_from(SamlApiDoc::openapi());
+<a href=#890 id=890 data-nosnippet>890</a>    <span class="kw">let </span><span class="kw-2">mut </span>doc = doc;
+<a href=#891 id=891 data-nosnippet>891</a>    add_oauth_authorization_server_alias(<span class="kw-2">&amp;mut </span>doc);
+<a href=#892 id=892 data-nosnippet>892</a>    stamp_spec_digest(doc)
+<a href=#893 id=893 data-nosnippet>893</a>}
+<a href=#894 id=894 data-nosnippet>894</a>
+<a href=#895 id=895 data-nosnippet>895</a><span class="doccomment">/// Documents `GET /.well-known/oauth-authorization-server` (T21.1) by cloning
+<a href=#896 id=896 data-nosnippet>896</a>/// the already-generated `PathItem` for `/.well-known/openid-configuration`
+<a href=#897 id=897 data-nosnippet>897</a>/// rather than hand-writing a second `#[utoipa::path]` annotation on a second
+<a href=#898 id=898 data-nosnippet>898</a>/// handler. `server.rs` routes both paths to the literal same
+<a href=#899 id=899 data-nosnippet>899</a>/// `handlers::oauth2::discovery` function, so the two are one operation with
+<a href=#900 id=900 data-nosnippet>900</a>/// two conventional entry points — a second annotation could drift from the
+<a href=#901 id=901 data-nosnippet>901</a>/// first (a changed summary, an added parameter) in a way the compiler would
+<a href=#902 id=902 data-nosnippet>902</a>/// never catch, where cloning the generated item cannot.
+<a href=#903 id=903 data-nosnippet>903</a>///
+<a href=#904 id=904 data-nosnippet>904</a>/// Missing the source entry is a bug in `ApiDoc::paths(..)`, not something
+<a href=#905 id=905 data-nosnippet>905</a>/// this function can recover from, so it is deliberately silent rather than
+<a href=#906 id=906 data-nosnippet>906</a>/// panicking: `docs-ci.yml`'s OpenAPI parse-check and the digest test in this
+<a href=#907 id=907 data-nosnippet>907</a>/// module already fail loudly if `ApiDoc` stops documenting discovery at all.
+<a href=#908 id=908 data-nosnippet>908</a></span><span class="kw">fn </span>add_oauth_authorization_server_alias(doc: <span class="kw-2">&amp;mut </span>utoipa::openapi::OpenApi) {
+<a href=#909 id=909 data-nosnippet>909</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(discovery_item) = doc
+<a href=#910 id=910 data-nosnippet>910</a>        .paths
+<a href=#911 id=911 data-nosnippet>911</a>        .paths
+<a href=#912 id=912 data-nosnippet>912</a>        .get(<span class="string">"/.well-known/openid-configuration"</span>)
+<a href=#913 id=913 data-nosnippet>913</a>        .cloned()
+<a href=#914 id=914 data-nosnippet>914</a>    {
+<a href=#915 id=915 data-nosnippet>915</a>        doc.paths.paths.insert(
+<a href=#916 id=916 data-nosnippet>916</a>            <span class="string">"/.well-known/oauth-authorization-server"</span>.to_string(),
+<a href=#917 id=917 data-nosnippet>917</a>            discovery_item,
+<a href=#918 id=918 data-nosnippet>918</a>        );
+<a href=#919 id=919 data-nosnippet>919</a>    }
+<a href=#920 id=920 data-nosnippet>920</a>}
+<a href=#921 id=921 data-nosnippet>921</a>
+<a href=#922 id=922 data-nosnippet>922</a><span class="doccomment">/// The extension key carrying the specification's content digest.
+<a href=#923 id=923 data-nosnippet>923</a>///
+<a href=#924 id=924 data-nosnippet>924</a>/// `x-`-prefixed, which is what the OpenAPI specification reserves for extensions, so a
+<a href=#925 id=925 data-nosnippet>925</a>/// validator and a code generator both ignore it.
+<a href=#926 id=926 data-nosnippet>926</a></span><span class="kw">pub const </span>SPEC_DIGEST_KEY: <span class="kw-2">&amp;</span>str = <span class="string">"x-axiam-spec-digest"</span>;
+<a href=#927 id=927 data-nosnippet>927</a>
+<a href=#928 id=928 data-nosnippet>928</a><span class="doccomment">/// Stamp `info.x-axiam-spec-digest` with a SHA-256 over this document's own content.
+<a href=#929 id=929 data-nosnippet>929</a>///
+<a href=#930 id=930 data-nosnippet>930</a>/// **Why `info.version` is not enough.** It tracks `CARGO_PKG_VERSION`, which is the
+<a href=#931 id=931 data-nosnippet>931</a>/// release version — it moves when a release is cut, not when a path is added. Two builds
+<a href=#932 id=932 data-nosnippet>932</a>/// can therefore describe genuinely different APIs under the same string, and they have:
+<a href=#933 id=933 data-nosnippet>933</a>/// `main` and a release branch both reported `1.0.0-alpha44` while differing by two paths
+<a href=#934 id=934 data-nosnippet>934</a>/// (`ca-certificates/{id}/migrate-custody` and `.../mtls-trust-anchor`). A consumer pinning
+<a href=#935 id=935 data-nosnippet>935</a>/// on `info.version` — an SDK deciding whether to regenerate, a gateway caching a spec, a
+<a href=#936 id=936 data-nosnippet>936</a>/// contract test asserting it is current — could not tell those exports apart, and nothing
+<a href=#937 id=937 data-nosnippet>937</a>/// in the document let it.
+<a href=#938 id=938 data-nosnippet>938</a>///
+<a href=#939 id=939 data-nosnippet>939</a>/// The version keeps its meaning: it is the API's semantic version, and consumers should
+<a href=#940 id=940 data-nosnippet>940</a>/// keep reading it as one. This is the other question — "is this the same document?" —
+<a href=#941 id=941 data-nosnippet>941</a>/// answered separately and exactly.
+<a href=#942 id=942 data-nosnippet>942</a>///
+<a href=#943 id=943 data-nosnippet>943</a>/// **`info.version` is inside the digest**, so a release bump changes it even when no path
+<a href=#944 id=944 data-nosnippet>944</a>/// did. Deliberate: "same document" is checkable, where "same API" would need an argument
+<a href=#945 id=945 data-nosnippet>945</a>/// about whether a description, a tag or an example counts. A consumer wanting the narrower
+<a href=#946 id=946 data-nosnippet>946</a>/// question can compare the members they care about.
+<a href=#947 id=947 data-nosnippet>947</a>///
+<a href=#948 id=948 data-nosnippet>948</a>/// Computed over the document with this field ABSENT, so the digest is a function of the
+<a href=#949 id=949 data-nosnippet>949</a>/// spec's content rather than of itself, and so re-stamping an already-stamped document is
+<a href=#950 id=950 data-nosnippet>950</a>/// idempotent.
+<a href=#951 id=951 data-nosnippet>951</a></span><span class="kw">fn </span>stamp_spec_digest(<span class="kw-2">mut </span>doc: utoipa::openapi::OpenApi) -&gt; utoipa::openapi::OpenApi {
+<a href=#952 id=952 data-nosnippet>952</a>    <span class="kw">use </span>sha2::{Digest, Sha256};
+<a href=#953 id=953 data-nosnippet>953</a>
+<a href=#954 id=954 data-nosnippet>954</a>    <span class="comment">// Absent, not empty: an empty `extensions` map serializes as no key at all here (the
+<a href=#955 id=955 data-nosnippet>955</a>    // field is `Option` and flattened), but clearing it explicitly is what makes the digest
+<a href=#956 id=956 data-nosnippet>956</a>    // computed below independent of whatever was there before.
+<a href=#957 id=957 data-nosnippet>957</a>    </span>doc.info.extensions = <span class="prelude-val">None</span>;
 <a href=#958 id=958 data-nosnippet>958</a>
-<a href=#959 id=959 data-nosnippet>959</a>    <span class="comment">// Exactly one extension, deliberately. `Extensions` is a flattened `HashMap`, whose
-<a href=#960 id=960 data-nosnippet>960</a>    // iteration order is not stable across runs, so two or more entries here would make the
-<a href=#961 id=961 data-nosnippet>961</a>    // serialized bytes vary between builds — and the SDK OpenAPI drift gate compares them
-<a href=#962 id=962 data-nosnippet>962</a>    // byte for byte. A second extension needs an ordered map first.
-<a href=#963 id=963 data-nosnippet>963</a>    </span>doc.info.extensions = <span class="prelude-val">Some</span>(
-<a href=#964 id=964 data-nosnippet>964</a>        utoipa::openapi::extensions::ExtensionsBuilder::new()
-<a href=#965 id=965 data-nosnippet>965</a>            .add(SPEC_DIGEST_KEY, <span class="macro">format!</span>(<span class="string">"sha256:{digest}"</span>))
-<a href=#966 id=966 data-nosnippet>966</a>            .build(),
-<a href=#967 id=967 data-nosnippet>967</a>    );
-<a href=#968 id=968 data-nosnippet>968</a>    doc
-<a href=#969 id=969 data-nosnippet>969</a>}
-<a href=#970 id=970 data-nosnippet>970</a>
-<a href=#971 id=971 data-nosnippet>971</a><span class="doccomment">/// Adds the two Bearer JWT security schemes to the OpenAPI spec.
-<a href=#972 id=972 data-nosnippet>972</a>///
-<a href=#973 id=973 data-nosnippet>973</a>/// Both are the same HTTP mechanism; they differ in who may hold the token,
-<a href=#974 id=974 data-nosnippet>974</a>/// which is the `aud` claim. An operation that admits a service account lists
-<a href=#975 id=975 data-nosnippet>975</a>/// both as alternatives, so the document says which routes a machine may call
-<a href=#976 id=976 data-nosnippet>976</a>/// rather than leaving it to the prose (S-9, D-5). `bearer` alone means a
-<a href=#977 id=977 data-nosnippet>977</a>/// person.
-<a href=#978 id=978 data-nosnippet>978</a></span><span class="kw">struct </span>SecurityAddon;
-<a href=#979 id=979 data-nosnippet>979</a>
-<a href=#980 id=980 data-nosnippet>980</a><span class="kw">impl </span>utoipa::Modify <span class="kw">for </span>SecurityAddon {
-<a href=#981 id=981 data-nosnippet>981</a>    <span class="kw">fn </span>modify(<span class="kw-2">&amp;</span><span class="self">self</span>, openapi: <span class="kw-2">&amp;mut </span>utoipa::openapi::OpenApi) {
-<a href=#982 id=982 data-nosnippet>982</a>        <span class="kw">use </span>utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
-<a href=#983 id=983 data-nosnippet>983</a>
-<a href=#984 id=984 data-nosnippet>984</a>        <span class="kw">let </span>components = openapi.components.get_or_insert_with(Default::default);
-<a href=#985 id=985 data-nosnippet>985</a>        components.add_security_scheme(
-<a href=#986 id=986 data-nosnippet>986</a>            <span class="string">"bearer"</span>,
-<a href=#987 id=987 data-nosnippet>987</a>            SecurityScheme::Http(
-<a href=#988 id=988 data-nosnippet>988</a>                HttpBuilder::new()
-<a href=#989 id=989 data-nosnippet>989</a>                    .scheme(HttpAuthScheme::Bearer)
-<a href=#990 id=990 data-nosnippet>990</a>                    .bearer_format(<span class="string">"JWT"</span>)
-<a href=#991 id=991 data-nosnippet>991</a>                    .description(<span class="prelude-val">Some</span>(
-<a href=#992 id=992 data-nosnippet>992</a>                        <span class="string">"An AXIAM access token issued to a user (`aud` = `axiam:user`), \
-<a href=#993 id=993 data-nosnippet>993</a>                         from the `axiam_access` cookie or the `Authorization` header."</span>,
-<a href=#994 id=994 data-nosnippet>994</a>                    ))
-<a href=#995 id=995 data-nosnippet>995</a>                    .build(),
-<a href=#996 id=996 data-nosnippet>996</a>            ),
-<a href=#997 id=997 data-nosnippet>997</a>        );
-<a href=#998 id=998 data-nosnippet>998</a>        components.add_security_scheme(
-<a href=#999 id=999 data-nosnippet>999</a>            SERVICE_ACCOUNT_SECURITY_SCHEME,
-<a href=#1000 id=1000 data-nosnippet>1000</a>            SecurityScheme::Http(
-<a href=#1001 id=1001 data-nosnippet>1001</a>                HttpBuilder::new()
-<a href=#1002 id=1002 data-nosnippet>1002</a>                    .scheme(HttpAuthScheme::Bearer)
-<a href=#1003 id=1003 data-nosnippet>1003</a>                    .bearer_format(<span class="string">"JWT"</span>)
-<a href=#1004 id=1004 data-nosnippet>1004</a>                    .description(<span class="prelude-val">Some</span>(
-<a href=#1005 id=1005 data-nosnippet>1005</a>                        <span class="string">"An AXIAM access token issued to a service account \
-<a href=#1006 id=1006 data-nosnippet>1006</a>                         (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from \
-<a href=#1007 id=1007 data-nosnippet>1007</a>                         client credentials or the mTLS device login. Accepted only \
-<a href=#1008 id=1008 data-nosnippet>1008</a>                         by the operations that list this scheme — the management \
-<a href=#1009 id=1009 data-nosnippet>1009</a>                         families resources, scopes, permissions, roles, groups, \
-<a href=#1010 id=1010 data-nosnippet>1010</a>                         service accounts, certificates and webhooks, and the \
-<a href=#1011 id=1011 data-nosnippet>1011</a>                         authorization checks — and authorized there by the roles \
-<a href=#1012 id=1012 data-nosnippet>1012</a>                         assigned to the account, exactly as a user is. \
-<a href=#1013 id=1013 data-nosnippet>1013</a>                         `X-Axiam-Tenant` is honoured only for an account living in \
-<a href=#1014 id=1014 data-nosnippet>1014</a>                         the organization scope, as for a user; a service account \
-<a href=#1015 id=1015 data-nosnippet>1015</a>                         never issues under the organization CA. A certificate-bound token \
-<a href=#1016 id=1016 data-nosnippet>1016</a>                         (`cnf.x5t#S256`) must be presented over mTLS with that \
-<a href=#1017 id=1017 data-nosnippet>1017</a>                         certificate."</span>,
-<a href=#1018 id=1018 data-nosnippet>1018</a>                    ))
-<a href=#1019 id=1019 data-nosnippet>1019</a>                    .build(),
-<a href=#1020 id=1020 data-nosnippet>1020</a>            ),
-<a href=#1021 id=1021 data-nosnippet>1021</a>        );
-<a href=#1022 id=1022 data-nosnippet>1022</a>        <span class="comment">// T23.4.1 / RFC 7592. Not a JWT and not an AXIAM principal: an opaque
-<a href=#1023 id=1023 data-nosnippet>1023</a>        // 256-bit handle that authorizes management of one dynamically
-<a href=#1024 id=1024 data-nosnippet>1024</a>        // registered client, and nothing else. Its own scheme so that no
-<a href=#1025 id=1025 data-nosnippet>1025</a>        // generator mistakes it for `bearer` and offers a user's token.
-<a href=#1026 id=1026 data-nosnippet>1026</a>        </span>components.add_security_scheme(
-<a href=#1027 id=1027 data-nosnippet>1027</a>            REGISTRATION_ACCESS_TOKEN_SECURITY_SCHEME,
-<a href=#1028 id=1028 data-nosnippet>1028</a>            SecurityScheme::Http(
-<a href=#1029 id=1029 data-nosnippet>1029</a>                HttpBuilder::new()
-<a href=#1030 id=1030 data-nosnippet>1030</a>                    .scheme(HttpAuthScheme::Bearer)
-<a href=#1031 id=1031 data-nosnippet>1031</a>                    .description(<span class="prelude-val">Some</span>(
-<a href=#1032 id=1032 data-nosnippet>1032</a>                        <span class="string">"The RFC 7592 registration access token `POST /oauth2/register` \
-<a href=#1033 id=1033 data-nosnippet>1033</a>                         returned (and each `PUT` rotates). Opaque, shown once, \
-<a href=#1034 id=1034 data-nosnippet>1034</a>                         **sensitive**: it authorizes reading, replacing and deleting \
-<a href=#1035 id=1035 data-nosnippet>1035</a>                         that one client's registration and nothing else. Accepted only \
-<a href=#1036 id=1036 data-nosnippet>1036</a>                         in the `Authorization` header; a user or service-account access \
-<a href=#1037 id=1037 data-nosnippet>1037</a>                         token is refused."</span>,
-<a href=#1038 id=1038 data-nosnippet>1038</a>                    ))
-<a href=#1039 id=1039 data-nosnippet>1039</a>                    .build(),
-<a href=#1040 id=1040 data-nosnippet>1040</a>            ),
-<a href=#1041 id=1041 data-nosnippet>1041</a>        );
-<a href=#1042 id=1042 data-nosnippet>1042</a>    }
-<a href=#1043 id=1043 data-nosnippet>1043</a>}
-<a href=#1044 id=1044 data-nosnippet>1044</a>
-<a href=#1045 id=1045 data-nosnippet>1045</a><span class="doccomment">/// The name of the security scheme the RFC 7592 client configuration
-<a href=#1046 id=1046 data-nosnippet>1046</a>/// operations list (T23.4.1).
-<a href=#1047 id=1047 data-nosnippet>1047</a></span><span class="kw">pub const </span>REGISTRATION_ACCESS_TOKEN_SECURITY_SCHEME: <span class="kw-2">&amp;</span>str = <span class="string">"registration_access_token"</span>;
-<a href=#1048 id=1048 data-nosnippet>1048</a>
-<a href=#1049 id=1049 data-nosnippet>1049</a><span class="doccomment">/// The name of the security scheme an operation lists when it admits a
-<a href=#1050 id=1050 data-nosnippet>1050</a>/// service-account token.
-<a href=#1051 id=1051 data-nosnippet>1051</a></span><span class="kw">pub const </span>SERVICE_ACCOUNT_SECURITY_SCHEME: <span class="kw-2">&amp;</span>str = <span class="string">"service_account"</span>;
-<a href=#1052 id=1052 data-nosnippet>1052</a>
-<a href=#1053 id=1053 data-nosnippet>1053</a><span class="attr">#[cfg(test)]
-<a href=#1054 id=1054 data-nosnippet>1054</a></span><span class="kw">mod </span>spec_digest_tests {
-<a href=#1055 id=1055 data-nosnippet>1055</a>    <span class="kw">use super</span>::{SPEC_DIGEST_KEY, api_doc};
-<a href=#1056 id=1056 data-nosnippet>1056</a>
-<a href=#1057 id=1057 data-nosnippet>1057</a>    <span class="doccomment">/// The digest is present, and says which algorithm produced it.
-<a href=#1058 id=1058 data-nosnippet>1058</a>    </span><span class="attr">#[test]
-<a href=#1059 id=1059 data-nosnippet>1059</a>    </span><span class="kw">fn </span>the_document_carries_a_digest() {
-<a href=#1060 id=1060 data-nosnippet>1060</a>        <span class="kw">let </span>doc = api_doc();
-<a href=#1061 id=1061 data-nosnippet>1061</a>        <span class="kw">let </span>extensions = doc
-<a href=#1062 id=1062 data-nosnippet>1062</a>            .info
-<a href=#1063 id=1063 data-nosnippet>1063</a>            .extensions
-<a href=#1064 id=1064 data-nosnippet>1064</a>            .as_ref()
-<a href=#1065 id=1065 data-nosnippet>1065</a>            .expect(<span class="string">"info carries no extensions"</span>);
-<a href=#1066 id=1066 data-nosnippet>1066</a>        <span class="kw">let </span>value = extensions
-<a href=#1067 id=1067 data-nosnippet>1067</a>            .get(SPEC_DIGEST_KEY)
-<a href=#1068 id=1068 data-nosnippet>1068</a>            .and_then(|v| v.as_str())
-<a href=#1069 id=1069 data-nosnippet>1069</a>            .expect(<span class="string">"info carries no spec digest"</span>);
-<a href=#1070 id=1070 data-nosnippet>1070</a>
-<a href=#1071 id=1071 data-nosnippet>1071</a>        <span class="comment">// `sha256:` + 64 hex characters. Naming the algorithm inline is what lets this
-<a href=#1072 id=1072 data-nosnippet>1072</a>        // change one day without every consumer having to guess from the length.
-<a href=#1073 id=1073 data-nosnippet>1073</a>        </span><span class="macro">assert!</span>(
-<a href=#1074 id=1074 data-nosnippet>1074</a>            value.starts_with(<span class="string">"sha256:"</span>),
-<a href=#1075 id=1075 data-nosnippet>1075</a>            <span class="string">"unexpected digest form: {value}"
-<a href=#1076 id=1076 data-nosnippet>1076</a>        </span>);
-<a href=#1077 id=1077 data-nosnippet>1077</a>        <span class="macro">assert_eq!</span>(value.len(), <span class="string">"sha256:"</span>.len() + <span class="number">64</span>);
-<a href=#1078 id=1078 data-nosnippet>1078</a>        <span class="macro">assert!</span>(
-<a href=#1079 id=1079 data-nosnippet>1079</a>            value[<span class="string">"sha256:"</span>.len()..]
-<a href=#1080 id=1080 data-nosnippet>1080</a>                .chars()
-<a href=#1081 id=1081 data-nosnippet>1081</a>                .all(|c| c.is_ascii_hexdigit())
-<a href=#1082 id=1082 data-nosnippet>1082</a>        );
-<a href=#1083 id=1083 data-nosnippet>1083</a>    }
-<a href=#1084 id=1084 data-nosnippet>1084</a>
-<a href=#1085 id=1085 data-nosnippet>1085</a>    <span class="doccomment">/// Two exports of the same build agree.
-<a href=#1086 id=1086 data-nosnippet>1086</a>    ///
-<a href=#1087 id=1087 data-nosnippet>1087</a>    /// Not a tautology: the digest is computed over a serialization of the whole document,
-<a href=#1088 id=1088 data-nosnippet>1088</a>    /// and if any part of that serialization were order-unstable — a `HashMap` somewhere in
-<a href=#1089 id=1089 data-nosnippet>1089</a>    /// the tree — this would flake. It is the same property the SDK OpenAPI drift gate
-<a href=#1090 id=1090 data-nosnippet>1090</a>    /// depends on, asserted here where the failure names its cause.
-<a href=#1091 id=1091 data-nosnippet>1091</a>    </span><span class="attr">#[test]
-<a href=#1092 id=1092 data-nosnippet>1092</a>    </span><span class="kw">fn </span>the_digest_is_stable_across_exports() {
-<a href=#1093 id=1093 data-nosnippet>1093</a>        <span class="kw">let </span>first = api_doc();
-<a href=#1094 id=1094 data-nosnippet>1094</a>        <span class="kw">let </span>second = api_doc();
-<a href=#1095 id=1095 data-nosnippet>1095</a>        <span class="macro">assert_eq!</span>(
-<a href=#1096 id=1096 data-nosnippet>1096</a>            first.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
-<a href=#1097 id=1097 data-nosnippet>1097</a>            second
-<a href=#1098 id=1098 data-nosnippet>1098</a>                .info
-<a href=#1099 id=1099 data-nosnippet>1099</a>                .extensions
-<a href=#1100 id=1100 data-nosnippet>1100</a>                .as_ref()
-<a href=#1101 id=1101 data-nosnippet>1101</a>                .unwrap()
-<a href=#1102 id=1102 data-nosnippet>1102</a>                .get(SPEC_DIGEST_KEY),
-<a href=#1103 id=1103 data-nosnippet>1103</a>        );
-<a href=#1104 id=1104 data-nosnippet>1104</a>        <span class="macro">assert_eq!</span>(
-<a href=#1105 id=1105 data-nosnippet>1105</a>            serde_json::to_string(<span class="kw-2">&amp;</span>first).unwrap(),
-<a href=#1106 id=1106 data-nosnippet>1106</a>            serde_json::to_string(<span class="kw-2">&amp;</span>second).unwrap(),
-<a href=#1107 id=1107 data-nosnippet>1107</a>        );
-<a href=#1108 id=1108 data-nosnippet>1108</a>    }
-<a href=#1109 id=1109 data-nosnippet>1109</a>
-<a href=#1110 id=1110 data-nosnippet>1110</a>    <span class="doccomment">/// A document that differs by one path gets a different digest.
-<a href=#1111 id=1111 data-nosnippet>1111</a>    ///
-<a href=#1112 id=1112 data-nosnippet>1112</a>    /// This is the whole point of the field, and the reason `info.version` could not serve:
-<a href=#1113 id=1113 data-nosnippet>1113</a>    /// the version is the release version and moves when a release is cut, so two builds
-<a href=#1114 id=1114 data-nosnippet>1114</a>    /// describing genuinely different APIs can and do report the same string. `main` and a
-<a href=#1115 id=1115 data-nosnippet>1115</a>    /// release branch both said `1.0.0-alpha44` while differing by two paths.
-<a href=#1116 id=1116 data-nosnippet>1116</a>    </span><span class="attr">#[test]
-<a href=#1117 id=1117 data-nosnippet>1117</a>    </span><span class="kw">fn </span>removing_a_path_changes_the_digest() {
-<a href=#1118 id=1118 data-nosnippet>1118</a>        <span class="kw">let </span>full = api_doc();
-<a href=#1119 id=1119 data-nosnippet>1119</a>        <span class="kw">let </span>before = full
-<a href=#1120 id=1120 data-nosnippet>1120</a>            .info
-<a href=#1121 id=1121 data-nosnippet>1121</a>            .extensions
-<a href=#1122 id=1122 data-nosnippet>1122</a>            .as_ref()
-<a href=#1123 id=1123 data-nosnippet>1123</a>            .unwrap()
-<a href=#1124 id=1124 data-nosnippet>1124</a>            .get(SPEC_DIGEST_KEY)
-<a href=#1125 id=1125 data-nosnippet>1125</a>            .cloned()
-<a href=#1126 id=1126 data-nosnippet>1126</a>            .unwrap();
-<a href=#1127 id=1127 data-nosnippet>1127</a>
-<a href=#1128 id=1128 data-nosnippet>1128</a>        <span class="kw">let </span><span class="kw-2">mut </span>trimmed = api_doc();
-<a href=#1129 id=1129 data-nosnippet>1129</a>        <span class="kw">let </span>victim = trimmed
-<a href=#1130 id=1130 data-nosnippet>1130</a>            .paths
-<a href=#1131 id=1131 data-nosnippet>1131</a>            .paths
-<a href=#1132 id=1132 data-nosnippet>1132</a>            .keys()
-<a href=#1133 id=1133 data-nosnippet>1133</a>            .next()
-<a href=#1134 id=1134 data-nosnippet>1134</a>            .expect(<span class="string">"the spec has no paths"</span>)
-<a href=#1135 id=1135 data-nosnippet>1135</a>            .clone();
-<a href=#1136 id=1136 data-nosnippet>1136</a>        <span class="comment">// `remove`, not `shift_remove`: `preserve_path_order` is off in this build, so
-<a href=#1137 id=1137 data-nosnippet>1137</a>        // `PathsMap` is a `BTreeMap`. That is also why the digest is stable — a BTreeMap
-<a href=#1138 id=1138 data-nosnippet>1138</a>        // serializes in key order rather than in insertion order.
-<a href=#1139 id=1139 data-nosnippet>1139</a>        </span>trimmed.paths.paths.remove(<span class="kw-2">&amp;</span>victim);
-<a href=#1140 id=1140 data-nosnippet>1140</a>        <span class="kw">let </span>after = <span class="kw">super</span>::stamp_spec_digest(trimmed)
-<a href=#1141 id=1141 data-nosnippet>1141</a>            .info
-<a href=#1142 id=1142 data-nosnippet>1142</a>            .extensions
-<a href=#1143 id=1143 data-nosnippet>1143</a>            .as_ref()
-<a href=#1144 id=1144 data-nosnippet>1144</a>            .unwrap()
-<a href=#1145 id=1145 data-nosnippet>1145</a>            .get(SPEC_DIGEST_KEY)
-<a href=#1146 id=1146 data-nosnippet>1146</a>            .cloned()
-<a href=#1147 id=1147 data-nosnippet>1147</a>            .unwrap();
-<a href=#1148 id=1148 data-nosnippet>1148</a>
-<a href=#1149 id=1149 data-nosnippet>1149</a>        <span class="macro">assert_ne!</span>(
-<a href=#1150 id=1150 data-nosnippet>1150</a>            before, after,
-<a href=#1151 id=1151 data-nosnippet>1151</a>            <span class="string">"dropping {victim} left the digest unchanged, so it does not distinguish content"
-<a href=#1152 id=1152 data-nosnippet>1152</a>        </span>);
-<a href=#1153 id=1153 data-nosnippet>1153</a>    }
-<a href=#1154 id=1154 data-nosnippet>1154</a>
-<a href=#1155 id=1155 data-nosnippet>1155</a>    <span class="doccomment">/// Re-stamping an already-stamped document is a no-op.
-<a href=#1156 id=1156 data-nosnippet>1156</a>    ///
-<a href=#1157 id=1157 data-nosnippet>1157</a>    /// The digest is computed with the field cleared, so it is a function of the content
-<a href=#1158 id=1158 data-nosnippet>1158</a>    /// rather than of itself. Were it not, stamping twice would produce a different value
-<a href=#1159 id=1159 data-nosnippet>1159</a>    /// the second time and the field would be unusable for comparison.
-<a href=#1160 id=1160 data-nosnippet>1160</a>    </span><span class="attr">#[test]
-<a href=#1161 id=1161 data-nosnippet>1161</a>    </span><span class="kw">fn </span>stamping_is_idempotent() {
-<a href=#1162 id=1162 data-nosnippet>1162</a>        <span class="kw">let </span>once = api_doc();
-<a href=#1163 id=1163 data-nosnippet>1163</a>        <span class="kw">let </span>expected = once
-<a href=#1164 id=1164 data-nosnippet>1164</a>            .info
-<a href=#1165 id=1165 data-nosnippet>1165</a>            .extensions
-<a href=#1166 id=1166 data-nosnippet>1166</a>            .as_ref()
-<a href=#1167 id=1167 data-nosnippet>1167</a>            .unwrap()
-<a href=#1168 id=1168 data-nosnippet>1168</a>            .get(SPEC_DIGEST_KEY)
-<a href=#1169 id=1169 data-nosnippet>1169</a>            .cloned()
-<a href=#1170 id=1170 data-nosnippet>1170</a>            .unwrap();
-<a href=#1171 id=1171 data-nosnippet>1171</a>
-<a href=#1172 id=1172 data-nosnippet>1172</a>        <span class="kw">let </span>twice = <span class="kw">super</span>::stamp_spec_digest(once);
-<a href=#1173 id=1173 data-nosnippet>1173</a>        <span class="macro">assert_eq!</span>(
-<a href=#1174 id=1174 data-nosnippet>1174</a>            twice.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
-<a href=#1175 id=1175 data-nosnippet>1175</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>expected)
-<a href=#1176 id=1176 data-nosnippet>1176</a>        );
-<a href=#1177 id=1177 data-nosnippet>1177</a>    }
-<a href=#1178 id=1178 data-nosnippet>1178</a>}
-<a href=#1179 id=1179 data-nosnippet>1179</a>
-<a href=#1180 id=1180 data-nosnippet>1180</a><span class="attr">#[cfg(test)]
-<a href=#1181 id=1181 data-nosnippet>1181</a></span><span class="kw">mod </span>discovery_alias_tests {
-<a href=#1182 id=1182 data-nosnippet>1182</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
-<a href=#1183 id=1183 data-nosnippet>1183</a>
-<a href=#1184 id=1184 data-nosnippet>1184</a>    <span class="doccomment">/// I9 — the RFC 8414 alias route (T21.1) is documented alongside the OIDC
-<a href=#1185 id=1185 data-nosnippet>1185</a>    /// discovery path it mirrors, not merely routed.
-<a href=#1186 id=1186 data-nosnippet>1186</a>    </span><span class="attr">#[test]
-<a href=#1187 id=1187 data-nosnippet>1187</a>    </span><span class="kw">fn </span>rfc8414_alias_is_documented() {
-<a href=#1188 id=1188 data-nosnippet>1188</a>        <span class="kw">let </span>doc = api_doc();
-<a href=#1189 id=1189 data-nosnippet>1189</a>        <span class="macro">assert!</span>(
-<a href=#1190 id=1190 data-nosnippet>1190</a>            doc.paths
-<a href=#1191 id=1191 data-nosnippet>1191</a>                .paths
-<a href=#1192 id=1192 data-nosnippet>1192</a>                .contains_key(<span class="string">"/.well-known/oauth-authorization-server"</span>),
-<a href=#1193 id=1193 data-nosnippet>1193</a>            <span class="string">"the RFC 8414 alias must be a documented OpenAPI path"
-<a href=#1194 id=1194 data-nosnippet>1194</a>        </span>);
-<a href=#1195 id=1195 data-nosnippet>1195</a>    }
-<a href=#1196 id=1196 data-nosnippet>1196</a>
-<a href=#1197 id=1197 data-nosnippet>1197</a>    <span class="doccomment">/// The alias's documented operation is exactly the OIDC discovery one —
-<a href=#1198 id=1198 data-nosnippet>1198</a>    /// cloned, not independently authored, so the two can never drift (I1).
-<a href=#1199 id=1199 data-nosnippet>1199</a>    ///
-<a href=#1200 id=1200 data-nosnippet>1200</a>    /// Compared via their JSON serialization rather than `assert_eq!` on the
-<a href=#1201 id=1201 data-nosnippet>1201</a>    /// `PathItem`s directly: `utoipa::openapi::PathItem` implements
-<a href=#1202 id=1202 data-nosnippet>1202</a>    /// `PartialEq` but not `Debug` in this build (`Debug` is behind utoipa's
-<a href=#1203 id=1203 data-nosnippet>1203</a>    /// own `debug` feature, which this workspace does not enable), so a
-<a href=#1204 id=1204 data-nosnippet>1204</a>    /// direct `assert_eq!` fails to compile.
-<a href=#1205 id=1205 data-nosnippet>1205</a>    </span><span class="attr">#[test]
-<a href=#1206 id=1206 data-nosnippet>1206</a>    </span><span class="kw">fn </span>rfc8414_alias_matches_oidc_discovery_operation() {
-<a href=#1207 id=1207 data-nosnippet>1207</a>        <span class="kw">let </span>doc = api_doc();
-<a href=#1208 id=1208 data-nosnippet>1208</a>        <span class="kw">let </span>oidc = doc
-<a href=#1209 id=1209 data-nosnippet>1209</a>            .paths
-<a href=#1210 id=1210 data-nosnippet>1210</a>            .paths
-<a href=#1211 id=1211 data-nosnippet>1211</a>            .get(<span class="string">"/.well-known/openid-configuration"</span>)
-<a href=#1212 id=1212 data-nosnippet>1212</a>            .expect(<span class="string">"OIDC discovery must be documented"</span>);
-<a href=#1213 id=1213 data-nosnippet>1213</a>        <span class="kw">let </span>alias = doc
-<a href=#1214 id=1214 data-nosnippet>1214</a>            .paths
-<a href=#1215 id=1215 data-nosnippet>1215</a>            .paths
-<a href=#1216 id=1216 data-nosnippet>1216</a>            .get(<span class="string">"/.well-known/oauth-authorization-server"</span>)
-<a href=#1217 id=1217 data-nosnippet>1217</a>            .expect(<span class="string">"the RFC 8414 alias must be documented"</span>);
-<a href=#1218 id=1218 data-nosnippet>1218</a>        <span class="macro">assert_eq!</span>(
-<a href=#1219 id=1219 data-nosnippet>1219</a>            serde_json::to_value(oidc).unwrap(),
-<a href=#1220 id=1220 data-nosnippet>1220</a>            serde_json::to_value(alias).unwrap()
-<a href=#1221 id=1221 data-nosnippet>1221</a>        );
-<a href=#1222 id=1222 data-nosnippet>1222</a>    }
-<a href=#1223 id=1223 data-nosnippet>1223</a>}
-<a href=#1224 id=1224 data-nosnippet>1224</a>
-<a href=#1225 id=1225 data-nosnippet>1225</a><span class="attr">#[cfg(test)]
-<a href=#1226 id=1226 data-nosnippet>1226</a></span><span class="kw">mod </span>saml_schema_tests {
-<a href=#1227 id=1227 data-nosnippet>1227</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
-<a href=#1228 id=1228 data-nosnippet>1228</a>
-<a href=#1229 id=1229 data-nosnippet>1229</a>    <span class="doccomment">/// F4 W4 P23W4-05: `AcsEndpoint.index` is a `u16` in the model and in
-<a href=#1230 id=1230 data-nosnippet>1230</a>    /// contract §29.2, so the published schema bounds it to `0..=65535`. Without
-<a href=#1231 id=1231 data-nosnippet>1231</a>    /// the maximum a generated SDK types it as an unbounded 32-bit integer and
-<a href=#1232 id=1232 data-nosnippet>1232</a>    /// learns of the bound from a `400`.
-<a href=#1233 id=1233 data-nosnippet>1233</a>    </span><span class="attr">#[test]
-<a href=#1234 id=1234 data-nosnippet>1234</a>    </span><span class="kw">fn </span>the_acs_endpoint_index_is_bounded_to_sixteen_bits() {
-<a href=#1235 id=1235 data-nosnippet>1235</a>        <span class="kw">let </span>doc = serde_json::to_value(api_doc()).unwrap();
-<a href=#1236 id=1236 data-nosnippet>1236</a>        <span class="kw">let </span>index = <span class="kw-2">&amp;</span>doc[<span class="string">"components"</span>][<span class="string">"schemas"</span>][<span class="string">"AcsEndpoint"</span>][<span class="string">"properties"</span>][<span class="string">"index"</span>];
-<a href=#1237 id=1237 data-nosnippet>1237</a>        <span class="macro">assert_eq!</span>(index[<span class="string">"minimum"</span>], <span class="number">0</span>, <span class="string">"{index}"</span>);
-<a href=#1238 id=1238 data-nosnippet>1238</a>        <span class="macro">assert_eq!</span>(index[<span class="string">"maximum"</span>], <span class="number">65_535</span>, <span class="string">"{index}"</span>);
-<a href=#1239 id=1239 data-nosnippet>1239</a>    }
-<a href=#1240 id=1240 data-nosnippet>1240</a>}
-<a href=#1241 id=1241 data-nosnippet>1241</a>
-<a href=#1242 id=1242 data-nosnippet>1242</a><span class="doccomment">/// R111-06 (#756): four refusals the handlers return must be declared in the
-<a href=#1243 id=1243 data-nosnippet>1243</a>/// spec. There is no variant checker (D-8); this list is the checker, so a
-<a href=#1244 id=1244 data-nosnippet>1244</a>/// handler that starts returning one of these must be added here, and one that
-<a href=#1245 id=1245 data-nosnippet>1245</a>/// is added here without declaring it fails.
-<a href=#1246 id=1246 data-nosnippet>1246</a></span><span class="attr">#[cfg(test)]
-<a href=#1247 id=1247 data-nosnippet>1247</a></span><span class="kw">mod </span>declared_refusal_tests {
-<a href=#1248 id=1248 data-nosnippet>1248</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
-<a href=#1249 id=1249 data-nosnippet>1249</a>
-<a href=#1250 id=1250 data-nosnippet>1250</a>    <span class="kw">const </span>TENANT_ROUTES: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
-<a href=#1251 id=1251 data-nosnippet>1251</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/organizations/{org_id}/tenants"</span>),
-<a href=#1252 id=1252 data-nosnippet>1252</a>        (<span class="string">"put"</span>, <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}"</span>),
-<a href=#1253 id=1253 data-nosnippet>1253</a>    ];
-<a href=#1254 id=1254 data-nosnippet>1254</a>
-<a href=#1255 id=1255 data-nosnippet>1255</a>    <span class="doccomment">/// `409 already_exists`: the unique issuer + serial indexes.
-<a href=#1256 id=1256 data-nosnippet>1256</a>    </span><span class="kw">const </span>ALREADY_EXISTS: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
-<a href=#1257 id=1257 data-nosnippet>1257</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates"</span>),
-<a href=#1258 id=1258 data-nosnippet>1258</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates/sign-csr"</span>),
-<a href=#1259 id=1259 data-nosnippet>1259</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/organizations/{org_id}/ca-certificates"</span>),
-<a href=#1260 id=1260 data-nosnippet>1260</a>        (
-<a href=#1261 id=1261 data-nosnippet>1261</a>            <span class="string">"post"</span>,
-<a href=#1262 id=1262 data-nosnippet>1262</a>            <span class="string">"/api/v1/organizations/{org_id}/ca-certificates/import"</span>,
-<a href=#1263 id=1263 data-nosnippet>1263</a>        ),
-<a href=#1264 id=1264 data-nosnippet>1264</a>        (
-<a href=#1265 id=1265 data-nosnippet>1265</a>            <span class="string">"post"</span>,
-<a href=#1266 id=1266 data-nosnippet>1266</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas"</span>,
-<a href=#1267 id=1267 data-nosnippet>1267</a>        ),
-<a href=#1268 id=1268 data-nosnippet>1268</a>        (
-<a href=#1269 id=1269 data-nosnippet>1269</a>            <span class="string">"post"</span>,
-<a href=#1270 id=1270 data-nosnippet>1270</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr"</span>,
-<a href=#1271 id=1271 data-nosnippet>1271</a>        ),
-<a href=#1272 id=1272 data-nosnippet>1272</a>    ];
-<a href=#1273 id=1273 data-nosnippet>1273</a>
-<a href=#1274 id=1274 data-nosnippet>1274</a>    <span class="doccomment">/// `503 service_unavailable`: a crypto permit (`axiam-pki::permit`) or the
-<a href=#1275 id=1275 data-nosnippet>1275</a>    /// password-hash gate (`axiam_auth::crypto_gate::acquire_hash_permit`:
-<a href=#1276 id=1276 data-nosnippet>1276</a>    /// login, password change and reset confirmation, #772). CA import takes
-<a href=#1277 id=1277 data-nosnippet>1277</a>    /// no permit, so it is not here.
-<a href=#1278 id=1278 data-nosnippet>1278</a>    </span><span class="kw">const </span>UNAVAILABLE: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
-<a href=#1279 id=1279 data-nosnippet>1279</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/login"</span>),
-<a href=#1280 id=1280 data-nosnippet>1280</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/password/change"</span>),
-<a href=#1281 id=1281 data-nosnippet>1281</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/reset/confirm"</span>),
-<a href=#1282 id=1282 data-nosnippet>1282</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates"</span>),
-<a href=#1283 id=1283 data-nosnippet>1283</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates/sign-csr"</span>),
-<a href=#1284 id=1284 data-nosnippet>1284</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/organizations/{org_id}/ca-certificates"</span>),
-<a href=#1285 id=1285 data-nosnippet>1285</a>        (
-<a href=#1286 id=1286 data-nosnippet>1286</a>            <span class="string">"post"</span>,
-<a href=#1287 id=1287 data-nosnippet>1287</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas"</span>,
-<a href=#1288 id=1288 data-nosnippet>1288</a>        ),
-<a href=#1289 id=1289 data-nosnippet>1289</a>        (
-<a href=#1290 id=1290 data-nosnippet>1290</a>            <span class="string">"post"</span>,
-<a href=#1291 id=1291 data-nosnippet>1291</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr"</span>,
-<a href=#1292 id=1292 data-nosnippet>1292</a>        ),
-<a href=#1293 id=1293 data-nosnippet>1293</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/pgp-keys"</span>),
-<a href=#1294 id=1294 data-nosnippet>1294</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/pgp-keys/sign-audit-batch"</span>),
-<a href=#1295 id=1295 data-nosnippet>1295</a>    ];
-<a href=#1296 id=1296 data-nosnippet>1296</a>
-<a href=#1297 id=1297 data-nosnippet>1297</a>    <span class="doccomment">/// `409 conflict` / `stale_version`: `NetworkConflict::StaleRole`.
-<a href=#1298 id=1298 data-nosnippet>1298</a>    </span><span class="kw">const </span>STALE: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
-<a href=#1299 id=1299 data-nosnippet>1299</a>        (<span class="string">"put"</span>, <span class="string">"/api/v1/roles/{role_id}"</span>),
-<a href=#1300 id=1300 data-nosnippet>1300</a>        (<span class="string">"delete"</span>, <span class="string">"/api/v1/roles/{role_id}"</span>),
-<a href=#1301 id=1301 data-nosnippet>1301</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/users"</span>),
-<a href=#1302 id=1302 data-nosnippet>1302</a>        (<span class="string">"delete"</span>, <span class="string">"/api/v1/roles/{role_id}/users/{user_id}"</span>),
-<a href=#1303 id=1303 data-nosnippet>1303</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/service-accounts"</span>),
-<a href=#1304 id=1304 data-nosnippet>1304</a>        (
-<a href=#1305 id=1305 data-nosnippet>1305</a>            <span class="string">"delete"</span>,
-<a href=#1306 id=1306 data-nosnippet>1306</a>            <span class="string">"/api/v1/roles/{role_id}/service-accounts/{service_account_id}"</span>,
-<a href=#1307 id=1307 data-nosnippet>1307</a>        ),
-<a href=#1308 id=1308 data-nosnippet>1308</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/groups"</span>),
-<a href=#1309 id=1309 data-nosnippet>1309</a>        (<span class="string">"delete"</span>, <span class="string">"/api/v1/roles/{role_id}/groups/{group_id}"</span>),
-<a href=#1310 id=1310 data-nosnippet>1310</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/permissions"</span>),
-<a href=#1311 id=1311 data-nosnippet>1311</a>        (
-<a href=#1312 id=1312 data-nosnippet>1312</a>            <span class="string">"delete"</span>,
-<a href=#1313 id=1313 data-nosnippet>1313</a>            <span class="string">"/api/v1/roles/{role_id}/permissions/{permission_id}"</span>,
-<a href=#1314 id=1314 data-nosnippet>1314</a>        ),
-<a href=#1315 id=1315 data-nosnippet>1315</a>    ];
-<a href=#1316 id=1316 data-nosnippet>1316</a>
-<a href=#1317 id=1317 data-nosnippet>1317</a>    <span class="kw">fn </span>assert_declares(status: <span class="kw-2">&amp;</span>str, routes: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)]) {
-<a href=#1318 id=1318 data-nosnippet>1318</a>        <span class="kw">let </span>doc = serde_json::to_value(api_doc()).expect(<span class="string">"the spec serialises"</span>);
-<a href=#1319 id=1319 data-nosnippet>1319</a>        <span class="kw">let </span>missing: Vec&lt;String&gt; = routes
-<a href=#1320 id=1320 data-nosnippet>1320</a>            .iter()
-<a href=#1321 id=1321 data-nosnippet>1321</a>            .filter(|(method, path)| {
-<a href=#1322 id=1322 data-nosnippet>1322</a>                doc.pointer(<span class="kw-2">&amp;</span><span class="macro">format!</span>(
-<a href=#1323 id=1323 data-nosnippet>1323</a>                    <span class="string">"/paths/{}/{method}/responses/{status}"</span>,
-<a href=#1324 id=1324 data-nosnippet>1324</a>                    path.replace(<span class="string">'~'</span>, <span class="string">"~0"</span>).replace(<span class="string">'/'</span>, <span class="string">"~1"</span>)
-<a href=#1325 id=1325 data-nosnippet>1325</a>                ))
-<a href=#1326 id=1326 data-nosnippet>1326</a>                .is_none()
-<a href=#1327 id=1327 data-nosnippet>1327</a>            })
-<a href=#1328 id=1328 data-nosnippet>1328</a>            .map(|(method, path)| <span class="macro">format!</span>(<span class="string">"{} {path}"</span>, method.to_uppercase()))
-<a href=#1329 id=1329 data-nosnippet>1329</a>            .collect();
-<a href=#1330 id=1330 data-nosnippet>1330</a>        <span class="macro">assert!</span>(
-<a href=#1331 id=1331 data-nosnippet>1331</a>            missing.is_empty(),
-<a href=#1332 id=1332 data-nosnippet>1332</a>            <span class="string">"these operations return {status} but do not declare it: {missing:#?}"
-<a href=#1333 id=1333 data-nosnippet>1333</a>        </span>);
-<a href=#1334 id=1334 data-nosnippet>1334</a>    }
-<a href=#1335 id=1335 data-nosnippet>1335</a>
-<a href=#1336 id=1336 data-nosnippet>1336</a>    <span class="attr">#[test]
-<a href=#1337 id=1337 data-nosnippet>1337</a>    </span><span class="kw">fn </span>tenants_declare_422_reserved_metadata_key() {
-<a href=#1338 id=1338 data-nosnippet>1338</a>        assert_declares(<span class="string">"422"</span>, TENANT_ROUTES);
-<a href=#1339 id=1339 data-nosnippet>1339</a>    }
-<a href=#1340 id=1340 data-nosnippet>1340</a>
-<a href=#1341 id=1341 data-nosnippet>1341</a>    <span class="attr">#[test]
-<a href=#1342 id=1342 data-nosnippet>1342</a>    </span><span class="kw">fn </span>certificate_and_ca_writes_declare_409_already_exists() {
-<a href=#1343 id=1343 data-nosnippet>1343</a>        assert_declares(<span class="string">"409"</span>, ALREADY_EXISTS);
-<a href=#1344 id=1344 data-nosnippet>1344</a>    }
-<a href=#1345 id=1345 data-nosnippet>1345</a>
-<a href=#1346 id=1346 data-nosnippet>1346</a>    <span class="attr">#[test]
-<a href=#1347 id=1347 data-nosnippet>1347</a>    </span><span class="kw">fn </span>crypto_permit_and_login_gate_declare_503() {
-<a href=#1348 id=1348 data-nosnippet>1348</a>        assert_declares(<span class="string">"503"</span>, UNAVAILABLE);
-<a href=#1349 id=1349 data-nosnippet>1349</a>    }
-<a href=#1350 id=1350 data-nosnippet>1350</a>
-<a href=#1351 id=1351 data-nosnippet>1351</a>    <span class="doccomment">/// R112-10 (#803): the token operation also answers `401`, `429` and `500`.
-<a href=#1352 id=1352 data-nosnippet>1352</a>    </span><span class="attr">#[test]
-<a href=#1353 id=1353 data-nosnippet>1353</a>    </span><span class="kw">fn </span>token_declares_401_429_and_500() {
-<a href=#1354 id=1354 data-nosnippet>1354</a>        <span class="kw">for </span>status <span class="kw">in </span>[<span class="string">"401"</span>, <span class="string">"429"</span>, <span class="string">"500"</span>] {
-<a href=#1355 id=1355 data-nosnippet>1355</a>            assert_declares(status, <span class="kw-2">&amp;</span>[(<span class="string">"post"</span>, <span class="string">"/oauth2/token"</span>)]);
-<a href=#1356 id=1356 data-nosnippet>1356</a>        }
-<a href=#1357 id=1357 data-nosnippet>1357</a>    }
-<a href=#1358 id=1358 data-nosnippet>1358</a>
-<a href=#1359 id=1359 data-nosnippet>1359</a>    <span class="doccomment">/// `429`: the per-resource-server bucket of `/uma2/perm` and the governor
-<a href=#1360 id=1360 data-nosnippet>1360</a>    /// in front of the three hash-gated routes.
-<a href=#1361 id=1361 data-nosnippet>1361</a>    </span><span class="attr">#[test]
-<a href=#1362 id=1362 data-nosnippet>1362</a>    </span><span class="kw">fn </span>uma_perm_and_hash_gated_routes_declare_429() {
-<a href=#1363 id=1363 data-nosnippet>1363</a>        assert_declares(
-<a href=#1364 id=1364 data-nosnippet>1364</a>            <span class="string">"429"</span>,
-<a href=#1365 id=1365 data-nosnippet>1365</a>            <span class="kw-2">&amp;</span>[
-<a href=#1366 id=1366 data-nosnippet>1366</a>                (<span class="string">"post"</span>, <span class="string">"/uma2/perm"</span>),
-<a href=#1367 id=1367 data-nosnippet>1367</a>                (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/login"</span>),
-<a href=#1368 id=1368 data-nosnippet>1368</a>                (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/password/change"</span>),
-<a href=#1369 id=1369 data-nosnippet>1369</a>                (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/reset/confirm"</span>),
-<a href=#1370 id=1370 data-nosnippet>1370</a>            ],
-<a href=#1371 id=1371 data-nosnippet>1371</a>        );
-<a href=#1372 id=1372 data-nosnippet>1372</a>    }
-<a href=#1373 id=1373 data-nosnippet>1373</a>
-<a href=#1374 id=1374 data-nosnippet>1374</a>    <span class="attr">#[test]
-<a href=#1375 id=1375 data-nosnippet>1375</a>    </span><span class="kw">fn </span>role_and_permission_writes_declare_409_stale_version() {
-<a href=#1376 id=1376 data-nosnippet>1376</a>        assert_declares(<span class="string">"409"</span>, STALE);
-<a href=#1377 id=1377 data-nosnippet>1377</a>    }
-<a href=#1378 id=1378 data-nosnippet>1378</a>}
+<a href=#959 id=959 data-nosnippet>959</a>    <span class="kw">let </span>canonical = serde_json::to_vec(<span class="kw-2">&amp;</span>doc).expect(<span class="string">"OpenAPI serialization failed"</span>);
+<a href=#960 id=960 data-nosnippet>960</a>    <span class="kw">let </span>digest = hex::encode(Sha256::digest(<span class="kw-2">&amp;</span>canonical));
+<a href=#961 id=961 data-nosnippet>961</a>
+<a href=#962 id=962 data-nosnippet>962</a>    <span class="comment">// Exactly one extension, deliberately. `Extensions` is a flattened `HashMap`, whose
+<a href=#963 id=963 data-nosnippet>963</a>    // iteration order is not stable across runs, so two or more entries here would make the
+<a href=#964 id=964 data-nosnippet>964</a>    // serialized bytes vary between builds — and the SDK OpenAPI drift gate compares them
+<a href=#965 id=965 data-nosnippet>965</a>    // byte for byte. A second extension needs an ordered map first.
+<a href=#966 id=966 data-nosnippet>966</a>    </span>doc.info.extensions = <span class="prelude-val">Some</span>(
+<a href=#967 id=967 data-nosnippet>967</a>        utoipa::openapi::extensions::ExtensionsBuilder::new()
+<a href=#968 id=968 data-nosnippet>968</a>            .add(SPEC_DIGEST_KEY, <span class="macro">format!</span>(<span class="string">"sha256:{digest}"</span>))
+<a href=#969 id=969 data-nosnippet>969</a>            .build(),
+<a href=#970 id=970 data-nosnippet>970</a>    );
+<a href=#971 id=971 data-nosnippet>971</a>    doc
+<a href=#972 id=972 data-nosnippet>972</a>}
+<a href=#973 id=973 data-nosnippet>973</a>
+<a href=#974 id=974 data-nosnippet>974</a><span class="doccomment">/// Adds the two Bearer JWT security schemes to the OpenAPI spec.
+<a href=#975 id=975 data-nosnippet>975</a>///
+<a href=#976 id=976 data-nosnippet>976</a>/// Both are the same HTTP mechanism; they differ in who may hold the token,
+<a href=#977 id=977 data-nosnippet>977</a>/// which is the `aud` claim. An operation that admits a service account lists
+<a href=#978 id=978 data-nosnippet>978</a>/// both as alternatives, so the document says which routes a machine may call
+<a href=#979 id=979 data-nosnippet>979</a>/// rather than leaving it to the prose (S-9, D-5). `bearer` alone means a
+<a href=#980 id=980 data-nosnippet>980</a>/// person.
+<a href=#981 id=981 data-nosnippet>981</a></span><span class="kw">struct </span>SecurityAddon;
+<a href=#982 id=982 data-nosnippet>982</a>
+<a href=#983 id=983 data-nosnippet>983</a><span class="kw">impl </span>utoipa::Modify <span class="kw">for </span>SecurityAddon {
+<a href=#984 id=984 data-nosnippet>984</a>    <span class="kw">fn </span>modify(<span class="kw-2">&amp;</span><span class="self">self</span>, openapi: <span class="kw-2">&amp;mut </span>utoipa::openapi::OpenApi) {
+<a href=#985 id=985 data-nosnippet>985</a>        <span class="kw">use </span>utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+<a href=#986 id=986 data-nosnippet>986</a>
+<a href=#987 id=987 data-nosnippet>987</a>        <span class="kw">let </span>components = openapi.components.get_or_insert_with(Default::default);
+<a href=#988 id=988 data-nosnippet>988</a>        components.add_security_scheme(
+<a href=#989 id=989 data-nosnippet>989</a>            <span class="string">"bearer"</span>,
+<a href=#990 id=990 data-nosnippet>990</a>            SecurityScheme::Http(
+<a href=#991 id=991 data-nosnippet>991</a>                HttpBuilder::new()
+<a href=#992 id=992 data-nosnippet>992</a>                    .scheme(HttpAuthScheme::Bearer)
+<a href=#993 id=993 data-nosnippet>993</a>                    .bearer_format(<span class="string">"JWT"</span>)
+<a href=#994 id=994 data-nosnippet>994</a>                    .description(<span class="prelude-val">Some</span>(
+<a href=#995 id=995 data-nosnippet>995</a>                        <span class="string">"An AXIAM access token issued to a user (`aud` = `axiam:user`), \
+<a href=#996 id=996 data-nosnippet>996</a>                         from the `axiam_access` cookie or the `Authorization` header."</span>,
+<a href=#997 id=997 data-nosnippet>997</a>                    ))
+<a href=#998 id=998 data-nosnippet>998</a>                    .build(),
+<a href=#999 id=999 data-nosnippet>999</a>            ),
+<a href=#1000 id=1000 data-nosnippet>1000</a>        );
+<a href=#1001 id=1001 data-nosnippet>1001</a>        components.add_security_scheme(
+<a href=#1002 id=1002 data-nosnippet>1002</a>            SERVICE_ACCOUNT_SECURITY_SCHEME,
+<a href=#1003 id=1003 data-nosnippet>1003</a>            SecurityScheme::Http(
+<a href=#1004 id=1004 data-nosnippet>1004</a>                HttpBuilder::new()
+<a href=#1005 id=1005 data-nosnippet>1005</a>                    .scheme(HttpAuthScheme::Bearer)
+<a href=#1006 id=1006 data-nosnippet>1006</a>                    .bearer_format(<span class="string">"JWT"</span>)
+<a href=#1007 id=1007 data-nosnippet>1007</a>                    .description(<span class="prelude-val">Some</span>(
+<a href=#1008 id=1008 data-nosnippet>1008</a>                        <span class="string">"An AXIAM access token issued to a service account \
+<a href=#1009 id=1009 data-nosnippet>1009</a>                         (`aud` = `axiam:m2m`, `sub_kind` = `service_account`), from \
+<a href=#1010 id=1010 data-nosnippet>1010</a>                         client credentials or the mTLS device login. Accepted only \
+<a href=#1011 id=1011 data-nosnippet>1011</a>                         by the operations that list this scheme — the management \
+<a href=#1012 id=1012 data-nosnippet>1012</a>                         families resources, scopes, permissions, roles, groups, \
+<a href=#1013 id=1013 data-nosnippet>1013</a>                         service accounts, certificates and webhooks, and the \
+<a href=#1014 id=1014 data-nosnippet>1014</a>                         authorization checks — and authorized there by the roles \
+<a href=#1015 id=1015 data-nosnippet>1015</a>                         assigned to the account, exactly as a user is. \
+<a href=#1016 id=1016 data-nosnippet>1016</a>                         `X-Axiam-Tenant` is honoured only for an account living in \
+<a href=#1017 id=1017 data-nosnippet>1017</a>                         the organization scope, as for a user; a service account \
+<a href=#1018 id=1018 data-nosnippet>1018</a>                         never issues under the organization CA. A certificate-bound token \
+<a href=#1019 id=1019 data-nosnippet>1019</a>                         (`cnf.x5t#S256`) must be presented over mTLS with that \
+<a href=#1020 id=1020 data-nosnippet>1020</a>                         certificate."</span>,
+<a href=#1021 id=1021 data-nosnippet>1021</a>                    ))
+<a href=#1022 id=1022 data-nosnippet>1022</a>                    .build(),
+<a href=#1023 id=1023 data-nosnippet>1023</a>            ),
+<a href=#1024 id=1024 data-nosnippet>1024</a>        );
+<a href=#1025 id=1025 data-nosnippet>1025</a>        <span class="comment">// T23.4.1 / RFC 7592. Not a JWT and not an AXIAM principal: an opaque
+<a href=#1026 id=1026 data-nosnippet>1026</a>        // 256-bit handle that authorizes management of one dynamically
+<a href=#1027 id=1027 data-nosnippet>1027</a>        // registered client, and nothing else. Its own scheme so that no
+<a href=#1028 id=1028 data-nosnippet>1028</a>        // generator mistakes it for `bearer` and offers a user's token.
+<a href=#1029 id=1029 data-nosnippet>1029</a>        </span>components.add_security_scheme(
+<a href=#1030 id=1030 data-nosnippet>1030</a>            REGISTRATION_ACCESS_TOKEN_SECURITY_SCHEME,
+<a href=#1031 id=1031 data-nosnippet>1031</a>            SecurityScheme::Http(
+<a href=#1032 id=1032 data-nosnippet>1032</a>                HttpBuilder::new()
+<a href=#1033 id=1033 data-nosnippet>1033</a>                    .scheme(HttpAuthScheme::Bearer)
+<a href=#1034 id=1034 data-nosnippet>1034</a>                    .description(<span class="prelude-val">Some</span>(
+<a href=#1035 id=1035 data-nosnippet>1035</a>                        <span class="string">"The RFC 7592 registration access token `POST /oauth2/register` \
+<a href=#1036 id=1036 data-nosnippet>1036</a>                         returned (and each `PUT` rotates). Opaque, shown once, \
+<a href=#1037 id=1037 data-nosnippet>1037</a>                         **sensitive**: it authorizes reading, replacing and deleting \
+<a href=#1038 id=1038 data-nosnippet>1038</a>                         that one client's registration and nothing else. Accepted only \
+<a href=#1039 id=1039 data-nosnippet>1039</a>                         in the `Authorization` header; a user or service-account access \
+<a href=#1040 id=1040 data-nosnippet>1040</a>                         token is refused."</span>,
+<a href=#1041 id=1041 data-nosnippet>1041</a>                    ))
+<a href=#1042 id=1042 data-nosnippet>1042</a>                    .build(),
+<a href=#1043 id=1043 data-nosnippet>1043</a>            ),
+<a href=#1044 id=1044 data-nosnippet>1044</a>        );
+<a href=#1045 id=1045 data-nosnippet>1045</a>    }
+<a href=#1046 id=1046 data-nosnippet>1046</a>}
+<a href=#1047 id=1047 data-nosnippet>1047</a>
+<a href=#1048 id=1048 data-nosnippet>1048</a><span class="doccomment">/// The name of the security scheme the RFC 7592 client configuration
+<a href=#1049 id=1049 data-nosnippet>1049</a>/// operations list (T23.4.1).
+<a href=#1050 id=1050 data-nosnippet>1050</a></span><span class="kw">pub const </span>REGISTRATION_ACCESS_TOKEN_SECURITY_SCHEME: <span class="kw-2">&amp;</span>str = <span class="string">"registration_access_token"</span>;
+<a href=#1051 id=1051 data-nosnippet>1051</a>
+<a href=#1052 id=1052 data-nosnippet>1052</a><span class="doccomment">/// The name of the security scheme an operation lists when it admits a
+<a href=#1053 id=1053 data-nosnippet>1053</a>/// service-account token.
+<a href=#1054 id=1054 data-nosnippet>1054</a></span><span class="kw">pub const </span>SERVICE_ACCOUNT_SECURITY_SCHEME: <span class="kw-2">&amp;</span>str = <span class="string">"service_account"</span>;
+<a href=#1055 id=1055 data-nosnippet>1055</a>
+<a href=#1056 id=1056 data-nosnippet>1056</a><span class="attr">#[cfg(test)]
+<a href=#1057 id=1057 data-nosnippet>1057</a></span><span class="kw">mod </span>spec_digest_tests {
+<a href=#1058 id=1058 data-nosnippet>1058</a>    <span class="kw">use super</span>::{SPEC_DIGEST_KEY, api_doc};
+<a href=#1059 id=1059 data-nosnippet>1059</a>
+<a href=#1060 id=1060 data-nosnippet>1060</a>    <span class="doccomment">/// The digest is present, and says which algorithm produced it.
+<a href=#1061 id=1061 data-nosnippet>1061</a>    </span><span class="attr">#[test]
+<a href=#1062 id=1062 data-nosnippet>1062</a>    </span><span class="kw">fn </span>the_document_carries_a_digest() {
+<a href=#1063 id=1063 data-nosnippet>1063</a>        <span class="kw">let </span>doc = api_doc();
+<a href=#1064 id=1064 data-nosnippet>1064</a>        <span class="kw">let </span>extensions = doc
+<a href=#1065 id=1065 data-nosnippet>1065</a>            .info
+<a href=#1066 id=1066 data-nosnippet>1066</a>            .extensions
+<a href=#1067 id=1067 data-nosnippet>1067</a>            .as_ref()
+<a href=#1068 id=1068 data-nosnippet>1068</a>            .expect(<span class="string">"info carries no extensions"</span>);
+<a href=#1069 id=1069 data-nosnippet>1069</a>        <span class="kw">let </span>value = extensions
+<a href=#1070 id=1070 data-nosnippet>1070</a>            .get(SPEC_DIGEST_KEY)
+<a href=#1071 id=1071 data-nosnippet>1071</a>            .and_then(|v| v.as_str())
+<a href=#1072 id=1072 data-nosnippet>1072</a>            .expect(<span class="string">"info carries no spec digest"</span>);
+<a href=#1073 id=1073 data-nosnippet>1073</a>
+<a href=#1074 id=1074 data-nosnippet>1074</a>        <span class="comment">// `sha256:` + 64 hex characters. Naming the algorithm inline is what lets this
+<a href=#1075 id=1075 data-nosnippet>1075</a>        // change one day without every consumer having to guess from the length.
+<a href=#1076 id=1076 data-nosnippet>1076</a>        </span><span class="macro">assert!</span>(
+<a href=#1077 id=1077 data-nosnippet>1077</a>            value.starts_with(<span class="string">"sha256:"</span>),
+<a href=#1078 id=1078 data-nosnippet>1078</a>            <span class="string">"unexpected digest form: {value}"
+<a href=#1079 id=1079 data-nosnippet>1079</a>        </span>);
+<a href=#1080 id=1080 data-nosnippet>1080</a>        <span class="macro">assert_eq!</span>(value.len(), <span class="string">"sha256:"</span>.len() + <span class="number">64</span>);
+<a href=#1081 id=1081 data-nosnippet>1081</a>        <span class="macro">assert!</span>(
+<a href=#1082 id=1082 data-nosnippet>1082</a>            value[<span class="string">"sha256:"</span>.len()..]
+<a href=#1083 id=1083 data-nosnippet>1083</a>                .chars()
+<a href=#1084 id=1084 data-nosnippet>1084</a>                .all(|c| c.is_ascii_hexdigit())
+<a href=#1085 id=1085 data-nosnippet>1085</a>        );
+<a href=#1086 id=1086 data-nosnippet>1086</a>    }
+<a href=#1087 id=1087 data-nosnippet>1087</a>
+<a href=#1088 id=1088 data-nosnippet>1088</a>    <span class="doccomment">/// Two exports of the same build agree.
+<a href=#1089 id=1089 data-nosnippet>1089</a>    ///
+<a href=#1090 id=1090 data-nosnippet>1090</a>    /// Not a tautology: the digest is computed over a serialization of the whole document,
+<a href=#1091 id=1091 data-nosnippet>1091</a>    /// and if any part of that serialization were order-unstable — a `HashMap` somewhere in
+<a href=#1092 id=1092 data-nosnippet>1092</a>    /// the tree — this would flake. It is the same property the SDK OpenAPI drift gate
+<a href=#1093 id=1093 data-nosnippet>1093</a>    /// depends on, asserted here where the failure names its cause.
+<a href=#1094 id=1094 data-nosnippet>1094</a>    </span><span class="attr">#[test]
+<a href=#1095 id=1095 data-nosnippet>1095</a>    </span><span class="kw">fn </span>the_digest_is_stable_across_exports() {
+<a href=#1096 id=1096 data-nosnippet>1096</a>        <span class="kw">let </span>first = api_doc();
+<a href=#1097 id=1097 data-nosnippet>1097</a>        <span class="kw">let </span>second = api_doc();
+<a href=#1098 id=1098 data-nosnippet>1098</a>        <span class="macro">assert_eq!</span>(
+<a href=#1099 id=1099 data-nosnippet>1099</a>            first.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
+<a href=#1100 id=1100 data-nosnippet>1100</a>            second
+<a href=#1101 id=1101 data-nosnippet>1101</a>                .info
+<a href=#1102 id=1102 data-nosnippet>1102</a>                .extensions
+<a href=#1103 id=1103 data-nosnippet>1103</a>                .as_ref()
+<a href=#1104 id=1104 data-nosnippet>1104</a>                .unwrap()
+<a href=#1105 id=1105 data-nosnippet>1105</a>                .get(SPEC_DIGEST_KEY),
+<a href=#1106 id=1106 data-nosnippet>1106</a>        );
+<a href=#1107 id=1107 data-nosnippet>1107</a>        <span class="macro">assert_eq!</span>(
+<a href=#1108 id=1108 data-nosnippet>1108</a>            serde_json::to_string(<span class="kw-2">&amp;</span>first).unwrap(),
+<a href=#1109 id=1109 data-nosnippet>1109</a>            serde_json::to_string(<span class="kw-2">&amp;</span>second).unwrap(),
+<a href=#1110 id=1110 data-nosnippet>1110</a>        );
+<a href=#1111 id=1111 data-nosnippet>1111</a>    }
+<a href=#1112 id=1112 data-nosnippet>1112</a>
+<a href=#1113 id=1113 data-nosnippet>1113</a>    <span class="doccomment">/// A document that differs by one path gets a different digest.
+<a href=#1114 id=1114 data-nosnippet>1114</a>    ///
+<a href=#1115 id=1115 data-nosnippet>1115</a>    /// This is the whole point of the field, and the reason `info.version` could not serve:
+<a href=#1116 id=1116 data-nosnippet>1116</a>    /// the version is the release version and moves when a release is cut, so two builds
+<a href=#1117 id=1117 data-nosnippet>1117</a>    /// describing genuinely different APIs can and do report the same string. `main` and a
+<a href=#1118 id=1118 data-nosnippet>1118</a>    /// release branch both said `1.0.0-alpha44` while differing by two paths.
+<a href=#1119 id=1119 data-nosnippet>1119</a>    </span><span class="attr">#[test]
+<a href=#1120 id=1120 data-nosnippet>1120</a>    </span><span class="kw">fn </span>removing_a_path_changes_the_digest() {
+<a href=#1121 id=1121 data-nosnippet>1121</a>        <span class="kw">let </span>full = api_doc();
+<a href=#1122 id=1122 data-nosnippet>1122</a>        <span class="kw">let </span>before = full
+<a href=#1123 id=1123 data-nosnippet>1123</a>            .info
+<a href=#1124 id=1124 data-nosnippet>1124</a>            .extensions
+<a href=#1125 id=1125 data-nosnippet>1125</a>            .as_ref()
+<a href=#1126 id=1126 data-nosnippet>1126</a>            .unwrap()
+<a href=#1127 id=1127 data-nosnippet>1127</a>            .get(SPEC_DIGEST_KEY)
+<a href=#1128 id=1128 data-nosnippet>1128</a>            .cloned()
+<a href=#1129 id=1129 data-nosnippet>1129</a>            .unwrap();
+<a href=#1130 id=1130 data-nosnippet>1130</a>
+<a href=#1131 id=1131 data-nosnippet>1131</a>        <span class="kw">let </span><span class="kw-2">mut </span>trimmed = api_doc();
+<a href=#1132 id=1132 data-nosnippet>1132</a>        <span class="kw">let </span>victim = trimmed
+<a href=#1133 id=1133 data-nosnippet>1133</a>            .paths
+<a href=#1134 id=1134 data-nosnippet>1134</a>            .paths
+<a href=#1135 id=1135 data-nosnippet>1135</a>            .keys()
+<a href=#1136 id=1136 data-nosnippet>1136</a>            .next()
+<a href=#1137 id=1137 data-nosnippet>1137</a>            .expect(<span class="string">"the spec has no paths"</span>)
+<a href=#1138 id=1138 data-nosnippet>1138</a>            .clone();
+<a href=#1139 id=1139 data-nosnippet>1139</a>        <span class="comment">// `remove`, not `shift_remove`: `preserve_path_order` is off in this build, so
+<a href=#1140 id=1140 data-nosnippet>1140</a>        // `PathsMap` is a `BTreeMap`. That is also why the digest is stable — a BTreeMap
+<a href=#1141 id=1141 data-nosnippet>1141</a>        // serializes in key order rather than in insertion order.
+<a href=#1142 id=1142 data-nosnippet>1142</a>        </span>trimmed.paths.paths.remove(<span class="kw-2">&amp;</span>victim);
+<a href=#1143 id=1143 data-nosnippet>1143</a>        <span class="kw">let </span>after = <span class="kw">super</span>::stamp_spec_digest(trimmed)
+<a href=#1144 id=1144 data-nosnippet>1144</a>            .info
+<a href=#1145 id=1145 data-nosnippet>1145</a>            .extensions
+<a href=#1146 id=1146 data-nosnippet>1146</a>            .as_ref()
+<a href=#1147 id=1147 data-nosnippet>1147</a>            .unwrap()
+<a href=#1148 id=1148 data-nosnippet>1148</a>            .get(SPEC_DIGEST_KEY)
+<a href=#1149 id=1149 data-nosnippet>1149</a>            .cloned()
+<a href=#1150 id=1150 data-nosnippet>1150</a>            .unwrap();
+<a href=#1151 id=1151 data-nosnippet>1151</a>
+<a href=#1152 id=1152 data-nosnippet>1152</a>        <span class="macro">assert_ne!</span>(
+<a href=#1153 id=1153 data-nosnippet>1153</a>            before, after,
+<a href=#1154 id=1154 data-nosnippet>1154</a>            <span class="string">"dropping {victim} left the digest unchanged, so it does not distinguish content"
+<a href=#1155 id=1155 data-nosnippet>1155</a>        </span>);
+<a href=#1156 id=1156 data-nosnippet>1156</a>    }
+<a href=#1157 id=1157 data-nosnippet>1157</a>
+<a href=#1158 id=1158 data-nosnippet>1158</a>    <span class="doccomment">/// Re-stamping an already-stamped document is a no-op.
+<a href=#1159 id=1159 data-nosnippet>1159</a>    ///
+<a href=#1160 id=1160 data-nosnippet>1160</a>    /// The digest is computed with the field cleared, so it is a function of the content
+<a href=#1161 id=1161 data-nosnippet>1161</a>    /// rather than of itself. Were it not, stamping twice would produce a different value
+<a href=#1162 id=1162 data-nosnippet>1162</a>    /// the second time and the field would be unusable for comparison.
+<a href=#1163 id=1163 data-nosnippet>1163</a>    </span><span class="attr">#[test]
+<a href=#1164 id=1164 data-nosnippet>1164</a>    </span><span class="kw">fn </span>stamping_is_idempotent() {
+<a href=#1165 id=1165 data-nosnippet>1165</a>        <span class="kw">let </span>once = api_doc();
+<a href=#1166 id=1166 data-nosnippet>1166</a>        <span class="kw">let </span>expected = once
+<a href=#1167 id=1167 data-nosnippet>1167</a>            .info
+<a href=#1168 id=1168 data-nosnippet>1168</a>            .extensions
+<a href=#1169 id=1169 data-nosnippet>1169</a>            .as_ref()
+<a href=#1170 id=1170 data-nosnippet>1170</a>            .unwrap()
+<a href=#1171 id=1171 data-nosnippet>1171</a>            .get(SPEC_DIGEST_KEY)
+<a href=#1172 id=1172 data-nosnippet>1172</a>            .cloned()
+<a href=#1173 id=1173 data-nosnippet>1173</a>            .unwrap();
+<a href=#1174 id=1174 data-nosnippet>1174</a>
+<a href=#1175 id=1175 data-nosnippet>1175</a>        <span class="kw">let </span>twice = <span class="kw">super</span>::stamp_spec_digest(once);
+<a href=#1176 id=1176 data-nosnippet>1176</a>        <span class="macro">assert_eq!</span>(
+<a href=#1177 id=1177 data-nosnippet>1177</a>            twice.info.extensions.as_ref().unwrap().get(SPEC_DIGEST_KEY),
+<a href=#1178 id=1178 data-nosnippet>1178</a>            <span class="prelude-val">Some</span>(<span class="kw-2">&amp;</span>expected)
+<a href=#1179 id=1179 data-nosnippet>1179</a>        );
+<a href=#1180 id=1180 data-nosnippet>1180</a>    }
+<a href=#1181 id=1181 data-nosnippet>1181</a>}
+<a href=#1182 id=1182 data-nosnippet>1182</a>
+<a href=#1183 id=1183 data-nosnippet>1183</a><span class="attr">#[cfg(test)]
+<a href=#1184 id=1184 data-nosnippet>1184</a></span><span class="kw">mod </span>discovery_alias_tests {
+<a href=#1185 id=1185 data-nosnippet>1185</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
+<a href=#1186 id=1186 data-nosnippet>1186</a>
+<a href=#1187 id=1187 data-nosnippet>1187</a>    <span class="doccomment">/// I9 — the RFC 8414 alias route (T21.1) is documented alongside the OIDC
+<a href=#1188 id=1188 data-nosnippet>1188</a>    /// discovery path it mirrors, not merely routed.
+<a href=#1189 id=1189 data-nosnippet>1189</a>    </span><span class="attr">#[test]
+<a href=#1190 id=1190 data-nosnippet>1190</a>    </span><span class="kw">fn </span>rfc8414_alias_is_documented() {
+<a href=#1191 id=1191 data-nosnippet>1191</a>        <span class="kw">let </span>doc = api_doc();
+<a href=#1192 id=1192 data-nosnippet>1192</a>        <span class="macro">assert!</span>(
+<a href=#1193 id=1193 data-nosnippet>1193</a>            doc.paths
+<a href=#1194 id=1194 data-nosnippet>1194</a>                .paths
+<a href=#1195 id=1195 data-nosnippet>1195</a>                .contains_key(<span class="string">"/.well-known/oauth-authorization-server"</span>),
+<a href=#1196 id=1196 data-nosnippet>1196</a>            <span class="string">"the RFC 8414 alias must be a documented OpenAPI path"
+<a href=#1197 id=1197 data-nosnippet>1197</a>        </span>);
+<a href=#1198 id=1198 data-nosnippet>1198</a>    }
+<a href=#1199 id=1199 data-nosnippet>1199</a>
+<a href=#1200 id=1200 data-nosnippet>1200</a>    <span class="doccomment">/// The alias's documented operation is exactly the OIDC discovery one —
+<a href=#1201 id=1201 data-nosnippet>1201</a>    /// cloned, not independently authored, so the two can never drift (I1).
+<a href=#1202 id=1202 data-nosnippet>1202</a>    ///
+<a href=#1203 id=1203 data-nosnippet>1203</a>    /// Compared via their JSON serialization rather than `assert_eq!` on the
+<a href=#1204 id=1204 data-nosnippet>1204</a>    /// `PathItem`s directly: `utoipa::openapi::PathItem` implements
+<a href=#1205 id=1205 data-nosnippet>1205</a>    /// `PartialEq` but not `Debug` in this build (`Debug` is behind utoipa's
+<a href=#1206 id=1206 data-nosnippet>1206</a>    /// own `debug` feature, which this workspace does not enable), so a
+<a href=#1207 id=1207 data-nosnippet>1207</a>    /// direct `assert_eq!` fails to compile.
+<a href=#1208 id=1208 data-nosnippet>1208</a>    </span><span class="attr">#[test]
+<a href=#1209 id=1209 data-nosnippet>1209</a>    </span><span class="kw">fn </span>rfc8414_alias_matches_oidc_discovery_operation() {
+<a href=#1210 id=1210 data-nosnippet>1210</a>        <span class="kw">let </span>doc = api_doc();
+<a href=#1211 id=1211 data-nosnippet>1211</a>        <span class="kw">let </span>oidc = doc
+<a href=#1212 id=1212 data-nosnippet>1212</a>            .paths
+<a href=#1213 id=1213 data-nosnippet>1213</a>            .paths
+<a href=#1214 id=1214 data-nosnippet>1214</a>            .get(<span class="string">"/.well-known/openid-configuration"</span>)
+<a href=#1215 id=1215 data-nosnippet>1215</a>            .expect(<span class="string">"OIDC discovery must be documented"</span>);
+<a href=#1216 id=1216 data-nosnippet>1216</a>        <span class="kw">let </span>alias = doc
+<a href=#1217 id=1217 data-nosnippet>1217</a>            .paths
+<a href=#1218 id=1218 data-nosnippet>1218</a>            .paths
+<a href=#1219 id=1219 data-nosnippet>1219</a>            .get(<span class="string">"/.well-known/oauth-authorization-server"</span>)
+<a href=#1220 id=1220 data-nosnippet>1220</a>            .expect(<span class="string">"the RFC 8414 alias must be documented"</span>);
+<a href=#1221 id=1221 data-nosnippet>1221</a>        <span class="macro">assert_eq!</span>(
+<a href=#1222 id=1222 data-nosnippet>1222</a>            serde_json::to_value(oidc).unwrap(),
+<a href=#1223 id=1223 data-nosnippet>1223</a>            serde_json::to_value(alias).unwrap()
+<a href=#1224 id=1224 data-nosnippet>1224</a>        );
+<a href=#1225 id=1225 data-nosnippet>1225</a>    }
+<a href=#1226 id=1226 data-nosnippet>1226</a>}
+<a href=#1227 id=1227 data-nosnippet>1227</a>
+<a href=#1228 id=1228 data-nosnippet>1228</a><span class="attr">#[cfg(test)]
+<a href=#1229 id=1229 data-nosnippet>1229</a></span><span class="kw">mod </span>saml_schema_tests {
+<a href=#1230 id=1230 data-nosnippet>1230</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
+<a href=#1231 id=1231 data-nosnippet>1231</a>
+<a href=#1232 id=1232 data-nosnippet>1232</a>    <span class="doccomment">/// F4 W4 P23W4-05: `AcsEndpoint.index` is a `u16` in the model and in
+<a href=#1233 id=1233 data-nosnippet>1233</a>    /// contract §29.2, so the published schema bounds it to `0..=65535`. Without
+<a href=#1234 id=1234 data-nosnippet>1234</a>    /// the maximum a generated SDK types it as an unbounded 32-bit integer and
+<a href=#1235 id=1235 data-nosnippet>1235</a>    /// learns of the bound from a `400`.
+<a href=#1236 id=1236 data-nosnippet>1236</a>    </span><span class="attr">#[test]
+<a href=#1237 id=1237 data-nosnippet>1237</a>    </span><span class="kw">fn </span>the_acs_endpoint_index_is_bounded_to_sixteen_bits() {
+<a href=#1238 id=1238 data-nosnippet>1238</a>        <span class="kw">let </span>doc = serde_json::to_value(api_doc()).unwrap();
+<a href=#1239 id=1239 data-nosnippet>1239</a>        <span class="kw">let </span>index = <span class="kw-2">&amp;</span>doc[<span class="string">"components"</span>][<span class="string">"schemas"</span>][<span class="string">"AcsEndpoint"</span>][<span class="string">"properties"</span>][<span class="string">"index"</span>];
+<a href=#1240 id=1240 data-nosnippet>1240</a>        <span class="macro">assert_eq!</span>(index[<span class="string">"minimum"</span>], <span class="number">0</span>, <span class="string">"{index}"</span>);
+<a href=#1241 id=1241 data-nosnippet>1241</a>        <span class="macro">assert_eq!</span>(index[<span class="string">"maximum"</span>], <span class="number">65_535</span>, <span class="string">"{index}"</span>);
+<a href=#1242 id=1242 data-nosnippet>1242</a>    }
+<a href=#1243 id=1243 data-nosnippet>1243</a>}
+<a href=#1244 id=1244 data-nosnippet>1244</a>
+<a href=#1245 id=1245 data-nosnippet>1245</a><span class="doccomment">/// R111-06 (#756): four refusals the handlers return must be declared in the
+<a href=#1246 id=1246 data-nosnippet>1246</a>/// spec. There is no variant checker (D-8); this list is the checker, so a
+<a href=#1247 id=1247 data-nosnippet>1247</a>/// handler that starts returning one of these must be added here, and one that
+<a href=#1248 id=1248 data-nosnippet>1248</a>/// is added here without declaring it fails.
+<a href=#1249 id=1249 data-nosnippet>1249</a></span><span class="attr">#[cfg(test)]
+<a href=#1250 id=1250 data-nosnippet>1250</a></span><span class="kw">mod </span>declared_refusal_tests {
+<a href=#1251 id=1251 data-nosnippet>1251</a>    <span class="kw">use </span><span class="kw">super</span>::api_doc;
+<a href=#1252 id=1252 data-nosnippet>1252</a>
+<a href=#1253 id=1253 data-nosnippet>1253</a>    <span class="kw">const </span>TENANT_ROUTES: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
+<a href=#1254 id=1254 data-nosnippet>1254</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/organizations/{org_id}/tenants"</span>),
+<a href=#1255 id=1255 data-nosnippet>1255</a>        (<span class="string">"put"</span>, <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}"</span>),
+<a href=#1256 id=1256 data-nosnippet>1256</a>    ];
+<a href=#1257 id=1257 data-nosnippet>1257</a>
+<a href=#1258 id=1258 data-nosnippet>1258</a>    <span class="doccomment">/// `409 already_exists`: the unique issuer + serial indexes.
+<a href=#1259 id=1259 data-nosnippet>1259</a>    </span><span class="kw">const </span>ALREADY_EXISTS: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
+<a href=#1260 id=1260 data-nosnippet>1260</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates"</span>),
+<a href=#1261 id=1261 data-nosnippet>1261</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates/sign-csr"</span>),
+<a href=#1262 id=1262 data-nosnippet>1262</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/organizations/{org_id}/ca-certificates"</span>),
+<a href=#1263 id=1263 data-nosnippet>1263</a>        (
+<a href=#1264 id=1264 data-nosnippet>1264</a>            <span class="string">"post"</span>,
+<a href=#1265 id=1265 data-nosnippet>1265</a>            <span class="string">"/api/v1/organizations/{org_id}/ca-certificates/import"</span>,
+<a href=#1266 id=1266 data-nosnippet>1266</a>        ),
+<a href=#1267 id=1267 data-nosnippet>1267</a>        (
+<a href=#1268 id=1268 data-nosnippet>1268</a>            <span class="string">"post"</span>,
+<a href=#1269 id=1269 data-nosnippet>1269</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas"</span>,
+<a href=#1270 id=1270 data-nosnippet>1270</a>        ),
+<a href=#1271 id=1271 data-nosnippet>1271</a>        (
+<a href=#1272 id=1272 data-nosnippet>1272</a>            <span class="string">"post"</span>,
+<a href=#1273 id=1273 data-nosnippet>1273</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr"</span>,
+<a href=#1274 id=1274 data-nosnippet>1274</a>        ),
+<a href=#1275 id=1275 data-nosnippet>1275</a>    ];
+<a href=#1276 id=1276 data-nosnippet>1276</a>
+<a href=#1277 id=1277 data-nosnippet>1277</a>    <span class="doccomment">/// `503 service_unavailable`: a crypto permit (`axiam-pki::permit`) or the
+<a href=#1278 id=1278 data-nosnippet>1278</a>    /// password-hash gate (`axiam_auth::crypto_gate::acquire_hash_permit`:
+<a href=#1279 id=1279 data-nosnippet>1279</a>    /// login, password change and reset confirmation, #772). CA import takes
+<a href=#1280 id=1280 data-nosnippet>1280</a>    /// no permit, so it is not here.
+<a href=#1281 id=1281 data-nosnippet>1281</a>    </span><span class="kw">const </span>UNAVAILABLE: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
+<a href=#1282 id=1282 data-nosnippet>1282</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/login"</span>),
+<a href=#1283 id=1283 data-nosnippet>1283</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/password/change"</span>),
+<a href=#1284 id=1284 data-nosnippet>1284</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/reset/confirm"</span>),
+<a href=#1285 id=1285 data-nosnippet>1285</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates"</span>),
+<a href=#1286 id=1286 data-nosnippet>1286</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/certificates/sign-csr"</span>),
+<a href=#1287 id=1287 data-nosnippet>1287</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/organizations/{org_id}/ca-certificates"</span>),
+<a href=#1288 id=1288 data-nosnippet>1288</a>        (
+<a href=#1289 id=1289 data-nosnippet>1289</a>            <span class="string">"post"</span>,
+<a href=#1290 id=1290 data-nosnippet>1290</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas"</span>,
+<a href=#1291 id=1291 data-nosnippet>1291</a>        ),
+<a href=#1292 id=1292 data-nosnippet>1292</a>        (
+<a href=#1293 id=1293 data-nosnippet>1293</a>            <span class="string">"post"</span>,
+<a href=#1294 id=1294 data-nosnippet>1294</a>            <span class="string">"/api/v1/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr"</span>,
+<a href=#1295 id=1295 data-nosnippet>1295</a>        ),
+<a href=#1296 id=1296 data-nosnippet>1296</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/pgp-keys"</span>),
+<a href=#1297 id=1297 data-nosnippet>1297</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/pgp-keys/sign-audit-batch"</span>),
+<a href=#1298 id=1298 data-nosnippet>1298</a>    ];
+<a href=#1299 id=1299 data-nosnippet>1299</a>
+<a href=#1300 id=1300 data-nosnippet>1300</a>    <span class="doccomment">/// `409 conflict` / `stale_version`: `NetworkConflict::StaleRole`.
+<a href=#1301 id=1301 data-nosnippet>1301</a>    </span><span class="kw">const </span>STALE: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)] = <span class="kw-2">&amp;</span>[
+<a href=#1302 id=1302 data-nosnippet>1302</a>        (<span class="string">"put"</span>, <span class="string">"/api/v1/roles/{role_id}"</span>),
+<a href=#1303 id=1303 data-nosnippet>1303</a>        (<span class="string">"delete"</span>, <span class="string">"/api/v1/roles/{role_id}"</span>),
+<a href=#1304 id=1304 data-nosnippet>1304</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/users"</span>),
+<a href=#1305 id=1305 data-nosnippet>1305</a>        (<span class="string">"delete"</span>, <span class="string">"/api/v1/roles/{role_id}/users/{user_id}"</span>),
+<a href=#1306 id=1306 data-nosnippet>1306</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/service-accounts"</span>),
+<a href=#1307 id=1307 data-nosnippet>1307</a>        (
+<a href=#1308 id=1308 data-nosnippet>1308</a>            <span class="string">"delete"</span>,
+<a href=#1309 id=1309 data-nosnippet>1309</a>            <span class="string">"/api/v1/roles/{role_id}/service-accounts/{service_account_id}"</span>,
+<a href=#1310 id=1310 data-nosnippet>1310</a>        ),
+<a href=#1311 id=1311 data-nosnippet>1311</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/groups"</span>),
+<a href=#1312 id=1312 data-nosnippet>1312</a>        (<span class="string">"delete"</span>, <span class="string">"/api/v1/roles/{role_id}/groups/{group_id}"</span>),
+<a href=#1313 id=1313 data-nosnippet>1313</a>        (<span class="string">"post"</span>, <span class="string">"/api/v1/roles/{role_id}/permissions"</span>),
+<a href=#1314 id=1314 data-nosnippet>1314</a>        (
+<a href=#1315 id=1315 data-nosnippet>1315</a>            <span class="string">"delete"</span>,
+<a href=#1316 id=1316 data-nosnippet>1316</a>            <span class="string">"/api/v1/roles/{role_id}/permissions/{permission_id}"</span>,
+<a href=#1317 id=1317 data-nosnippet>1317</a>        ),
+<a href=#1318 id=1318 data-nosnippet>1318</a>    ];
+<a href=#1319 id=1319 data-nosnippet>1319</a>
+<a href=#1320 id=1320 data-nosnippet>1320</a>    <span class="kw">fn </span>assert_declares(status: <span class="kw-2">&amp;</span>str, routes: <span class="kw-2">&amp;</span>[(<span class="kw-2">&amp;</span>str, <span class="kw-2">&amp;</span>str)]) {
+<a href=#1321 id=1321 data-nosnippet>1321</a>        <span class="kw">let </span>doc = serde_json::to_value(api_doc()).expect(<span class="string">"the spec serialises"</span>);
+<a href=#1322 id=1322 data-nosnippet>1322</a>        <span class="kw">let </span>missing: Vec&lt;String&gt; = routes
+<a href=#1323 id=1323 data-nosnippet>1323</a>            .iter()
+<a href=#1324 id=1324 data-nosnippet>1324</a>            .filter(|(method, path)| {
+<a href=#1325 id=1325 data-nosnippet>1325</a>                doc.pointer(<span class="kw-2">&amp;</span><span class="macro">format!</span>(
+<a href=#1326 id=1326 data-nosnippet>1326</a>                    <span class="string">"/paths/{}/{method}/responses/{status}"</span>,
+<a href=#1327 id=1327 data-nosnippet>1327</a>                    path.replace(<span class="string">'~'</span>, <span class="string">"~0"</span>).replace(<span class="string">'/'</span>, <span class="string">"~1"</span>)
+<a href=#1328 id=1328 data-nosnippet>1328</a>                ))
+<a href=#1329 id=1329 data-nosnippet>1329</a>                .is_none()
+<a href=#1330 id=1330 data-nosnippet>1330</a>            })
+<a href=#1331 id=1331 data-nosnippet>1331</a>            .map(|(method, path)| <span class="macro">format!</span>(<span class="string">"{} {path}"</span>, method.to_uppercase()))
+<a href=#1332 id=1332 data-nosnippet>1332</a>            .collect();
+<a href=#1333 id=1333 data-nosnippet>1333</a>        <span class="macro">assert!</span>(
+<a href=#1334 id=1334 data-nosnippet>1334</a>            missing.is_empty(),
+<a href=#1335 id=1335 data-nosnippet>1335</a>            <span class="string">"these operations return {status} but do not declare it: {missing:#?}"
+<a href=#1336 id=1336 data-nosnippet>1336</a>        </span>);
+<a href=#1337 id=1337 data-nosnippet>1337</a>    }
+<a href=#1338 id=1338 data-nosnippet>1338</a>
+<a href=#1339 id=1339 data-nosnippet>1339</a>    <span class="attr">#[test]
+<a href=#1340 id=1340 data-nosnippet>1340</a>    </span><span class="kw">fn </span>tenants_declare_422_reserved_metadata_key() {
+<a href=#1341 id=1341 data-nosnippet>1341</a>        assert_declares(<span class="string">"422"</span>, TENANT_ROUTES);
+<a href=#1342 id=1342 data-nosnippet>1342</a>    }
+<a href=#1343 id=1343 data-nosnippet>1343</a>
+<a href=#1344 id=1344 data-nosnippet>1344</a>    <span class="attr">#[test]
+<a href=#1345 id=1345 data-nosnippet>1345</a>    </span><span class="kw">fn </span>certificate_and_ca_writes_declare_409_already_exists() {
+<a href=#1346 id=1346 data-nosnippet>1346</a>        assert_declares(<span class="string">"409"</span>, ALREADY_EXISTS);
+<a href=#1347 id=1347 data-nosnippet>1347</a>    }
+<a href=#1348 id=1348 data-nosnippet>1348</a>
+<a href=#1349 id=1349 data-nosnippet>1349</a>    <span class="attr">#[test]
+<a href=#1350 id=1350 data-nosnippet>1350</a>    </span><span class="kw">fn </span>crypto_permit_and_login_gate_declare_503() {
+<a href=#1351 id=1351 data-nosnippet>1351</a>        assert_declares(<span class="string">"503"</span>, UNAVAILABLE);
+<a href=#1352 id=1352 data-nosnippet>1352</a>    }
+<a href=#1353 id=1353 data-nosnippet>1353</a>
+<a href=#1354 id=1354 data-nosnippet>1354</a>    <span class="doccomment">/// R112-10 (#803): the token operation also answers `401`, `429` and `500`.
+<a href=#1355 id=1355 data-nosnippet>1355</a>    </span><span class="attr">#[test]
+<a href=#1356 id=1356 data-nosnippet>1356</a>    </span><span class="kw">fn </span>token_declares_401_429_and_500() {
+<a href=#1357 id=1357 data-nosnippet>1357</a>        <span class="kw">for </span>status <span class="kw">in </span>[<span class="string">"401"</span>, <span class="string">"429"</span>, <span class="string">"500"</span>] {
+<a href=#1358 id=1358 data-nosnippet>1358</a>            assert_declares(status, <span class="kw-2">&amp;</span>[(<span class="string">"post"</span>, <span class="string">"/oauth2/token"</span>)]);
+<a href=#1359 id=1359 data-nosnippet>1359</a>        }
+<a href=#1360 id=1360 data-nosnippet>1360</a>    }
+<a href=#1361 id=1361 data-nosnippet>1361</a>
+<a href=#1362 id=1362 data-nosnippet>1362</a>    <span class="doccomment">/// `429`: the per-resource-server bucket of `/uma2/perm` and the governor
+<a href=#1363 id=1363 data-nosnippet>1363</a>    /// in front of the three hash-gated routes.
+<a href=#1364 id=1364 data-nosnippet>1364</a>    </span><span class="attr">#[test]
+<a href=#1365 id=1365 data-nosnippet>1365</a>    </span><span class="kw">fn </span>uma_perm_and_hash_gated_routes_declare_429() {
+<a href=#1366 id=1366 data-nosnippet>1366</a>        assert_declares(
+<a href=#1367 id=1367 data-nosnippet>1367</a>            <span class="string">"429"</span>,
+<a href=#1368 id=1368 data-nosnippet>1368</a>            <span class="kw-2">&amp;</span>[
+<a href=#1369 id=1369 data-nosnippet>1369</a>                (<span class="string">"post"</span>, <span class="string">"/uma2/perm"</span>),
+<a href=#1370 id=1370 data-nosnippet>1370</a>                (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/login"</span>),
+<a href=#1371 id=1371 data-nosnippet>1371</a>                (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/password/change"</span>),
+<a href=#1372 id=1372 data-nosnippet>1372</a>                (<span class="string">"post"</span>, <span class="string">"/api/v1/auth/reset/confirm"</span>),
+<a href=#1373 id=1373 data-nosnippet>1373</a>            ],
+<a href=#1374 id=1374 data-nosnippet>1374</a>        );
+<a href=#1375 id=1375 data-nosnippet>1375</a>    }
+<a href=#1376 id=1376 data-nosnippet>1376</a>
+<a href=#1377 id=1377 data-nosnippet>1377</a>    <span class="attr">#[test]
+<a href=#1378 id=1378 data-nosnippet>1378</a>    </span><span class="kw">fn </span>role_and_permission_writes_declare_409_stale_version() {
+<a href=#1379 id=1379 data-nosnippet>1379</a>        assert_declares(<span class="string">"409"</span>, STALE);
+<a href=#1380 id=1380 data-nosnippet>1380</a>    }
+<a href=#1381 id=1381 data-nosnippet>1381</a>}
 </code></pre></div></section></main></body></html>

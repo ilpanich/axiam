@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_policy","fixed","resolve"],"struct":["FixedRefreshReusePolicy"],"trait":["RefreshReusePolicy"],"type":["SharedRefreshReusePolicy"]};

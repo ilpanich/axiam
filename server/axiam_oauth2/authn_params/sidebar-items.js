@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["MAX_HINT_LEN"],"enum":["Prompt"],"struct":["AcrRequest","AuthnRequestParams","RawAuthnParams"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_HINT_LEN"],"enum":["Prompt"],"fn":["bound_idp_hint"],"struct":["AcrRequest","AuthnRequestParams","RawAuthnParams"]};

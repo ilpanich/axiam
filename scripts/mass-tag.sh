@@ -589,6 +589,22 @@ set_cpp_kversion() {
     "kVersion -> \"$triple\""
 }
 
+# Set the C SDK's AXIAM_VERSION_MAJOR / _MINOR / _PATCH macros in header $1 to
+# the MAJOR.MINOR.PATCH of version $2. sub_literal rewrites the AXIAM_VERSION
+# string beside them, but the numeric macros are three separate tokens no
+# literal substitution reaches: 1.2.2 shipped with the string at 1.2.2 and the
+# macros at 1.1.3, and test_sensitive's prefix check failed every leg of
+# sdk-ci-c and coverage on the tag. No-op on a missing file.
+set_c_version_macros() {
+  local file="$1" triple="${2%%[-+]*}" major minor patch
+  [[ -f "$file" ]] || return 0
+  IFS=. read -r major minor patch <<<"$triple"
+  # shellcheck disable=SC2016  # $ENV{...} and $1 are perl's, expanded by perl
+  MA="$major" MI="$minor" PA="$patch" rewrite_file "$file" \
+    's/^(#define[ \t]+AXIAM_VERSION_MAJOR[ \t]+)\d+/${1}$ENV{MA}/m; s/^(#define[ \t]+AXIAM_VERSION_MINOR[ \t]+)\d+/${1}$ENV{MI}/m; s/^(#define[ \t]+AXIAM_VERSION_PATCH[ \t]+)\d+/${1}$ENV{PA}/m' \
+    "AXIAM_VERSION_{MAJOR,MINOR,PATCH} -> $triple"
+}
+
 # Set a Doxyfile's PROJECT_NUMBER in file $1 to version $2, full spelling
 # (it is free text, so a pre-release suffix is fine). No-op on a missing file.
 set_doxygen_number() {
@@ -1116,6 +1132,11 @@ bump_versions() {
       # kVersion therefore takes the triple too; the Doxyfile the full spelling.
       set_cpp_kversion   include/axiam/axiam.hpp "$version"
       set_doxygen_number Doxyfile                "$version"
+      # The C SDK's numeric version macros and the one test that pins the
+      # released version by literal (both no-ops in the C++ SDK). See
+      # set_c_version_macros for what leaving them out cost in 1.2.2.
+      set_c_version_macros include/axiam/axiam.h "$version"
+      sub_literal tests/test_sensitive.c         "$old" "$version"
       ;;
   esac
 }

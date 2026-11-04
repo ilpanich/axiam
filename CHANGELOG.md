@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-04
+
+### Fixed
+
+- Stop naming libxmlsec1-openssl, renamed on Ubuntu 26.04 runners
+
 ## [1.2.1] - 2026-11-04
 
 #### Upgrading — read before you upgrade

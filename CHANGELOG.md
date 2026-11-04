@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### Upgrading — read before you upgrade
+
+- **A federated sign-in must be completed in the browser that started it**
+  (#837). An SSO sign-in in flight at the moment of the upgrade is refused at
+  its callback and must be started again. A non-browser client that drives the
+  public federation endpoints must send the start and the completion through
+  the **same cookie jar** (`sdks/CONTRACT.md` §12.1 rule 12b); every AXIAM SDK
+  already does when one client instance is used for both.
+
+### Security
+
+- **Federated sign-in is bound to the browser that started it (login CSRF,
+  #837).** The four public start operations set `__Host-axiam_fed_bind`
+  (`HttpOnly; Secure; SameSite=Strict; Path=/`, 256 random bits, reused while
+  the browser holds a well-formed one) and record its digest on the login
+  state. The OIDC, OAuth2 and SAML JSON callbacks and `POST
+  /auth/federation/handoff` refuse a request that does not carry it with the
+  uniform `401`, before any code is redeemed or assertion used; the SAML and
+  Apple cross-site returns carry the binding on the handoff code to the
+  redemption. With `cookie_secure` off (local HTTP) the cookie is
+  `axiam_fed_bind`. Threat model T-495.
+- **Re-authentication is forwarded to the upstream provider (#838).** A start
+  request may say `reauthenticate: true` (the sign-in page does on `fresh=1`,
+  `reauth=1` and step-up hops): AXIAM then sends `prompt=login`/`max_age=0`
+  (OIDC; `max_age=0` only for Google and Apple), `ForceAuthn="true"` (SAML) or
+  `auth_type=reauthenticate` (Facebook), and refuses an `auth_time` or
+  `AuthnInstant` from before the start. A provider that asserts no instant is
+  accepted on the request alone, as documented. T-493 amended.
+
+### Changed
+
+- Schema **v114** (additive, no backfill): `browser_binding_hash` on
+  `federation_login_state` and `sso_handoff_code`, and
+  `federation_login_state.reauthenticate_after`.
+- OpenAPI: `reauthenticate` (optional boolean, default `false`) on
+  `OidcStartRequest`, `OAuth2StartRequest` and `SamlLoginRequest`. Contract
+  1.66.
+
 ## [1.2.0] - 2026-11-01
 
 1.2.0 follows 1.1.3 and closes the social-login gap the 2026-10-30 analysis

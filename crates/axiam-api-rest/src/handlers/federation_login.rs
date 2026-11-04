@@ -493,6 +493,209 @@ pub(crate) fn hash_handoff_code(code: &str) -> String {
     hex::encode(Sha256::digest(code.as_bytes()))
 }
 
+// ---------------------------------------------------------------------------
+// Browser binding (#837 — login CSRF)
+// ---------------------------------------------------------------------------
+
+/// The browser-binding cookie's name when cookies are `Secure` (production).
+///
+/// The `__Host-` prefix is the point: a browser accepts a cookie of this name
+/// only if it is `Secure`, has `Path=/` and names no `Domain`, so a sibling
+/// subdomain cannot plant one for this origin ("cookie tossing") and a
+/// plaintext response cannot overwrite it. Without that, an attacker who can
+/// set a cookie for the victim's browser could set *their own* binding value
+/// and the check below would compare two values the attacker chose.
+pub(crate) const BROWSER_BINDING_COOKIE: &str = "__Host-axiam_fed_bind";
+
+/// The cookie's name when `AuthConfig::cookie_secure` is off (local HTTP
+/// development, D-18).
+///
+/// The `__Host-` prefix requires `Secure`, so it cannot be kept there; the
+/// other session cookies drop `Secure` in that mode for the same reason, and
+/// this one follows them rather than refusing to exist on `http://`. The
+/// protection against a planted cookie is correspondingly weaker in that mode
+/// only, which is the mode's documented purpose.
+pub(crate) const BROWSER_BINDING_COOKIE_INSECURE: &str = "axiam_fed_bind";
+
+/// How long the binding cookie lives: the login state's ten minutes, plus the
+/// handoff code's sixty seconds, plus slack for a browser that sat on the
+/// provider's page until the last moment.
+const BROWSER_BINDING_MAX_AGE_SECS: i64 = 15 * 60;
+
+/// The cookie name in force for this deployment.
+pub(crate) fn browser_binding_cookie_name(cookie_secure: bool) -> &'static str {
+    if cookie_secure {
+        BROWSER_BINDING_COOKIE
+    } else {
+        BROWSER_BINDING_COOKIE_INSECURE
+    }
+}
+
+/// Whether a presented cookie value has the shape [`random_base64url`]
+/// produces: 43 characters of the URL-safe alphabet (256 bits, unpadded).
+///
+/// Checked before a value is reused or hashed, so a cookie that was not
+/// minted here — or was truncated, or is somebody's experiment — is replaced
+/// rather than adopted as this browser's identity.
+fn is_well_formed_binding(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The binding a start endpoint records on the login state row, and the
+/// cookie that carries it to the browser.
+pub(crate) struct BrowserBinding {
+    /// What goes in `federation_login_state.browser_binding_hash`.
+    pub hash: String,
+    /// The `Set-Cookie` for the start response.
+    pub cookie: actix_web::cookie::Cookie<'static>,
+}
+
+/// Bind a sign-in that is starting to the browser starting it (#837).
+///
+/// # One value per browser, not per sign-in
+///
+/// The cookie a browser already holds is **reused** when it is well formed;
+/// a fresh 256-bit value is minted only when there is none. A per-sign-in
+/// value would be overwritten by the next start, so a person who opened two
+/// sign-ins in two tabs — or clicked one provider, came back, and clicked
+/// another — would have every sign-in but the last refused at its callback.
+/// Reuse costs nothing in strength: what the check establishes is *this is the
+/// browser that started the sign-in*, and that is a property of the browser,
+/// not of the attempt. An attacker learns nothing from their own browser's
+/// value and cannot read or write the victim's (`HttpOnly`, `__Host-`).
+///
+/// # Attributes
+///
+/// `HttpOnly` (script never needs it), `SameSite=Strict` and `Path=/`. Every
+/// check happens on a **same-origin** request from the SPA — the JSON
+/// callbacks and the handoff redemption — so `Strict` costs nothing, and it is
+/// never sent on the identity provider's cross-site POST, which is exactly the
+/// request that cannot be trusted to have come from this browser. `Path=/` is
+/// required by the `__Host-` prefix. The `Max-Age` is renewed on every start.
+pub(crate) fn browser_binding_for_start(
+    req: &actix_web::HttpRequest,
+    cookie_secure: bool,
+) -> BrowserBinding {
+    let name = browser_binding_cookie_name(cookie_secure);
+    let value = req
+        .cookie(name)
+        .map(|c| c.value().to_owned())
+        .filter(|v| is_well_formed_binding(v))
+        .unwrap_or_else(random_base64url);
+    let cookie = actix_web::cookie::Cookie::build(name, value.clone())
+        .http_only(true)
+        .secure(cookie_secure)
+        .same_site(actix_web::cookie::SameSite::Strict)
+        .path("/")
+        .max_age(actix_web::cookie::time::Duration::seconds(
+            BROWSER_BINDING_MAX_AGE_SECS,
+        ))
+        .finish();
+    BrowserBinding {
+        hash: hash_handoff_code(&value),
+        cookie,
+    }
+}
+
+/// Refuse a completion whose request does not come from the browser that
+/// started the sign-in (#837).
+///
+/// Called by every **same-origin** completion — the OIDC, OAuth2 and SAML
+/// JSON callbacks and the handoff redemption — immediately after the login
+/// state (or handoff) row is consumed and **before** anything is done with
+/// it: no code is redeemed at the provider, no assertion is verified and no
+/// session or handoff code is issued for a sign-in this browser did not start.
+/// Consuming first is deliberate: a mismatch burns the row, so an attacker's
+/// state planted in a victim's browser is spent rather than left for a retry.
+///
+/// A row that records no binding is refused too. Rows written before schema
+/// v114 are minutes old at any upgrade; and the authenticated account-linking
+/// path (`/api/v1/federation/oidc/authorize`) writes rows without one, under a
+/// `state` its caller chose — if those were accepted here, an attacker could
+/// mint an unbound row with their own account and complete it in the victim's
+/// browser, which is the attack this exists to stop.
+///
+/// The refusal is the uniform federation `401`. It says what happened in
+/// words a person can act on (start the sign-in again, in this browser) and
+/// names nothing about the row.
+pub(crate) fn require_browser_binding(
+    req: &actix_web::HttpRequest,
+    cookie_secure: bool,
+    stored_hash: Option<&str>,
+) -> Result<(), AxiamApiError> {
+    use subtle::ConstantTimeEq;
+
+    let presented = req
+        .cookie(browser_binding_cookie_name(cookie_secure))
+        .map(|c| c.value().to_owned())
+        .filter(|v| is_well_formed_binding(v));
+    let matches = match (presented, stored_hash) {
+        (Some(value), Some(stored)) => bool::from(
+            hash_handoff_code(&value)
+                .as_bytes()
+                .ct_eq(stored.as_bytes()),
+        ),
+        _ => false,
+    };
+    if matches {
+        return Ok(());
+    }
+    warn!(
+        cookie_present = req
+            .cookie(browser_binding_cookie_name(cookie_secure))
+            .is_some(),
+        row_bound = stored_hash.is_some(),
+        "refused a federated sign-in completion from a browser that did not start it (#837)"
+    );
+    Err(AxiamApiError(AxiamError::AuthenticationFailed {
+        reason: "this sign-in was not started in this browser; start it again".into(),
+    }))
+}
+
+/// Refuse a re-authentication sign-in the upstream provider answered from an
+/// SSO session it already held (#838).
+///
+/// `reauthenticate_after` is the login state row's; `upstream_auth_time` is
+/// the provider's instant as the callback bounded it
+/// ([`super::federation::verified_upstream_auth_time`]). The rule, and why an
+/// absent instant passes, is [`axiam_federation::reauth::check_fresh`].
+pub(crate) fn require_fresh_upstream(
+    config: &FederationConfig,
+    reauthenticate_after: Option<chrono::DateTime<chrono::Utc>>,
+    upstream_auth_time: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), AxiamApiError> {
+    if reauthenticate_after.is_some() && upstream_auth_time.is_none() {
+        // The documented residual: nothing to compare. Logged so an operator
+        // can see which providers re-authenticate on request alone.
+        info!(
+            federation_config_id = %config.id,
+            provider_kind = %config.provider_kind.as_str(),
+            "re-authentication sign-in: the provider asserted no authentication instant; \
+             accepted on the strength of the upstream request (#838)"
+        );
+    }
+    axiam_federation::reauth::check_fresh(reauthenticate_after, upstream_auth_time).map_err(
+        |stale| {
+            warn!(
+                federation_config_id = %config.id,
+                idp = %config.provider,
+                upstream_auth_time = %stale.upstream_auth_time,
+                not_before = %stale.not_before,
+                "refused a re-authentication sign-in: the identity provider answered from \
+                 an earlier session (#838)"
+            );
+            AxiamApiError(AxiamError::AuthenticationFailed {
+                reason: "the identity provider did not authenticate the user again; \
+                         sign in at the provider and retry"
+                    .into(),
+            })
+        },
+    )
+}
+
 /// Mint a handoff code and `303` the browser back into the SPA with it.
 ///
 /// Used by the two **cross-site** returns — a SAML IdP's form POST, and Apple's
@@ -517,6 +720,7 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
     spa_redirect_uri: &str,
     start_state: &str,
     upstream_auth_time: Option<chrono::DateTime<chrono::Utc>>,
+    browser_binding_hash: Option<String>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // Checked again here, not only at login start: this is the single point
     // every handoff passes through, and a state row written before the check
@@ -541,6 +745,8 @@ pub(crate) async fn mint_handoff_and_redirect<C: Connection + Clone>(
         // assertion; without this the provider's authentication instant would
         // be replaced by AXIAM's clock a minute later.
         authenticated_at: upstream_auth_time,
+        // #837 — carried to the redemption, where it is checked.
+        browser_binding_hash,
     };
     state.federation.sso_handoff_code_repo.insert(&row).await?;
 
@@ -598,6 +804,7 @@ pub struct SsoHandoffRequest {
     )
 )]
 pub async fn sso_handoff_public<C: Connection + Clone>(
+    http_req: actix_web::HttpRequest,
     state: web::Data<AppState<C>>,
     body: web::Json<SsoHandoffRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -619,6 +826,15 @@ pub async fn sso_handoff_public<C: Connection + Clone>(
                 reason: "handoff code not found or expired".into(),
             })
         })?;
+
+    // #837 — the cross-site return that minted this code could not check the
+    // browser (the IdP's POST carries no `Strict` cookie); this same-origin
+    // redemption can, and it is the moment the code becomes a session.
+    require_browser_binding(
+        &http_req,
+        state.auth_config.cookie_secure,
+        row.browser_binding_hash.as_deref(),
+    )?;
 
     let user = state
         .user_repo
@@ -665,6 +881,19 @@ pub struct OAuth2StartRequest {
     /// The SPA callback route. Sent to the provider verbatim, so it must match
     /// what is registered there byte for byte.
     pub redirect_uri: String,
+    /// #838 — `true` when the sign-in page is answering a re-authentication
+    /// hop (`fresh=1` or `reauth=1` on `/login`): a relying party asked for
+    /// `prompt=login`, a `max_age` the current session cannot meet, a step-up,
+    /// or a different user.
+    ///
+    /// The upstream request then asks the provider to authenticate the user
+    /// again — `prompt=login` and/or `max_age=0` for OpenID Connect,
+    /// `ForceAuthn="true"` for SAML, the provider's own parameter for a
+    /// plain-OAuth2 provider that has one — and the callback refuses an
+    /// assertion whose authentication instant predates this start. Omitted or
+    /// `false`: an ordinary sign-in, exactly as before.
+    #[serde(default)]
+    pub reauthenticate: bool,
 }
 
 /// Response body for `POST /api/v1/auth/federation/oauth2/start`.
@@ -712,6 +941,7 @@ pub struct OAuth2CallbackRequest {
 )]
 pub async fn oauth2_start_public<C: Connection + Clone>(
     app_state: web::Data<AppState<C>>,
+    http_req: actix_web::HttpRequest,
     body: web::Json<OAuth2StartRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
@@ -750,9 +980,18 @@ pub async fn oauth2_start_public<C: Connection + Clone>(
     let pkce = axiam_federation::pkce::generate();
 
     let auth_url = service
-        .build_oauth2_authorization_url(&resolved.config, &b.redirect_uri, &state, &pkce.challenge)
+        .build_oauth2_authorization_url(
+            &resolved.config,
+            &b.redirect_uri,
+            &state,
+            &pkce.challenge,
+            b.reauthenticate,
+        )
         .await
         .map_err(AxiamError::from)?;
+
+    // #837 — bind the sign-in to this browser.
+    let binding = browser_binding_for_start(&http_req, app_state.auth_config.cookie_secure);
 
     app_state
         .federation
@@ -769,14 +1008,20 @@ pub async fn oauth2_start_public<C: Connection + Clone>(
             code_verifier: Some(pkce.verifier),
             // The SPA's redirect_uri went to the provider verbatim.
             idp_redirect_uri: None,
+            browser_binding_hash: Some(binding.hash),
+            // #838 — recorded for symmetry; a plain-OAuth2 provider asserts no
+            // instant, so `check_fresh` has nothing to compare on this path.
+            reauthenticate_after: b.reauthenticate.then(chrono::Utc::now),
         })
         .await?;
 
-    Ok(HttpResponse::Ok().json(OAuth2StartResponse {
-        authorize_url: auth_url.url,
-        state,
-        expires_in_secs: LOGIN_STATE_TTL_MINUTES * 60,
-    }))
+    Ok(HttpResponse::Ok()
+        .cookie(binding.cookie)
+        .json(OAuth2StartResponse {
+            authorize_url: auth_url.url,
+            state,
+            expires_in_secs: LOGIN_STATE_TTL_MINUTES * 60,
+        }))
 }
 
 /// `POST /api/v1/auth/federation/oauth2/callback`
@@ -809,6 +1054,12 @@ pub async fn oauth2_callback_public<C: Connection + Clone>(
     }
 
     let login_state = consume_login_state(&state, &b.state).await?;
+    // #837 — before the code is redeemed at the provider.
+    require_browser_binding(
+        &http_req,
+        state.auth_config.cookie_secure,
+        login_state.browser_binding_hash.as_deref(),
+    )?;
     let workspace = workspace_for_tenant(&state, login_state.tenant_id).await?;
     let resolved =
         resolve_config_for_login(&state, workspace, login_state.federation_config_id).await?;
@@ -824,6 +1075,11 @@ pub async fn oauth2_callback_public<C: Connection + Clone>(
         )
         .await
         .map_err(AxiamError::from)?;
+    require_fresh_upstream(
+        &resolved.config,
+        login_state.reauthenticate_after,
+        result.upstream_auth_time,
+    )?;
 
     sso_login_post_auth(&state, &http_req, login_state.tenant_id, &result.user).await?;
     super::federation::issue_sso_session(
@@ -931,6 +1187,15 @@ pub async fn oidc_form_callback_public<C: Connection + Clone>(
         .await
         .map_err(AxiamError::from)?;
 
+    let upstream_auth_time =
+        super::federation::verified_upstream_auth_time(&resolved.config, result.upstream_auth_time);
+    // #838 — refused before a handoff code exists.
+    require_fresh_upstream(
+        &resolved.config,
+        login_state.reauthenticate_after,
+        upstream_auth_time,
+    )?;
+
     mint_handoff_and_redirect(
         &state,
         &http_req,
@@ -943,7 +1208,10 @@ pub async fn oidc_form_callback_public<C: Connection + Clone>(
         // provider. Bounded by the verification moment (T23.1.2, D-10) here,
         // before the hop, so the row never holds an instant later than the
         // assertion was checked.
-        super::federation::verified_upstream_auth_time(&resolved.config, result.upstream_auth_time),
+        upstream_auth_time,
+        // #837 — no cookie arrives on this cross-site POST; the binding is
+        // carried to the same-origin redemption and checked there.
+        login_state.browser_binding_hash.clone(),
     )
     .await
 }
@@ -1066,6 +1334,18 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
         .await
         .map_err(AxiamError::from)?;
 
+    // X7.2 — the assertion's `AuthnInstant`, carried for the same reason.
+    let upstream_auth_time = super::federation::verified_upstream_auth_time(
+        &resolved.config,
+        callback_result.upstream_auth_time,
+    );
+    // #838 — `ForceAuthn` was asked for; refused before a handoff code exists.
+    require_fresh_upstream(
+        &resolved.config,
+        login_state.reauthenticate_after,
+        upstream_auth_time,
+    )?;
+
     mint_handoff_and_redirect(
         &state,
         &http_req,
@@ -1073,11 +1353,9 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
         &callback_result.user,
         &login_state.redirect_uri,
         relay_state,
-        // X7.2 — the assertion's `AuthnInstant`, carried for the same reason.
-        super::federation::verified_upstream_auth_time(
-            &resolved.config,
-            callback_result.upstream_auth_time,
-        ),
+        upstream_auth_time,
+        // #837 — checked at the same-origin redemption.
+        login_state.browser_binding_hash.clone(),
     )
     .await
 }

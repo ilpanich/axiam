@@ -48,6 +48,24 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// #837 — the browser-binding cookie a start response set, to be carried to
+/// the completion as a browser (or an SDK's cookie jar) would.
+fn binding_of<B>(resp: &actix_web::dev::ServiceResponse<B>) -> actix_web::cookie::Cookie<'static> {
+    resp.response()
+        .cookies()
+        .find(|c| c.name() == "axiam_fed_bind" || c.name() == "__Host-axiam_fed_bind")
+        .map(|c| c.into_owned())
+        .expect("a start response must set the browser-binding cookie")
+}
+
+/// #837 — a binding value and the digest a row stores for it.
+fn fixed_binding() -> (&'static str, String) {
+    use sha2::{Digest, Sha256};
+    let value = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE";
+    assert_eq!(value.len(), 43);
+    (value, hex::encode(Sha256::digest(value.as_bytes())))
+}
+
 type TestDb = surrealdb::engine::local::Db;
 
 const TEST_PEER: &str = "127.0.0.1:12345";
@@ -991,6 +1009,7 @@ async fn an_oauth2_login_round_trips_through_userinfo_and_provisions_a_user() {
         .to_request();
     let start_resp = test::call_service(&app, start_req).await;
     assert_eq!(start_resp.status().as_u16(), 200);
+    let binding = binding_of(&start_resp);
     let start: Value = test::read_body_json(start_resp).await;
 
     let authorize_url = start["authorize_url"].as_str().unwrap();
@@ -1012,6 +1031,7 @@ async fn an_oauth2_login_round_trips_through_userinfo_and_provisions_a_user() {
     let cb_req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/federation/oauth2/callback")
+        .cookie(binding.clone())
         .set_json(json!({ "state": start["state"], "code": "provider-code" }))
         .to_request();
     let cb_resp = test::call_service(&app, cb_req).await;
@@ -1046,6 +1066,7 @@ async fn an_oauth2_login_round_trips_through_userinfo_and_provisions_a_user() {
     let replay = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/federation/oauth2/callback")
+        .cookie(binding)
         .set_json(json!({ "state": start["state"], "code": "provider-code" }))
         .to_request();
     assert_eq!(
@@ -1116,11 +1137,14 @@ async fn an_oauth2_login_with_no_verified_email_is_refused() {
             "redirect_uri": "https://spa.example.test/auth/sso/callback",
         }))
         .to_request();
-    let start: Value = test::read_body_json(test::call_service(&app, start_req).await).await;
+    let start_resp = test::call_service(&app, start_req).await;
+    let binding = binding_of(&start_resp);
+    let start: Value = test::read_body_json(start_resp).await;
 
     let cb = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/federation/oauth2/callback")
+        .cookie(binding)
         .set_json(json!({ "state": start["state"], "code": "c" }))
         .to_request();
     let resp = test::call_service(&app, cb).await;
@@ -1167,6 +1191,7 @@ async fn a_handoff_code_buys_exactly_one_session() {
 
     let user_id = admin_in(&f.db, f.tenant_id, "federated-user").await;
     let code = "a-256-bit-code-stands-in-for-the-real-thing";
+    let (binding_value, binding_hash) = fixed_binding();
     let repo = SurrealSsoHandoffCodeRepository::new(f.db.clone());
     repo.insert(&SsoHandoffCode {
         code_hash: hex::encode(Sha256::digest(code.as_bytes())),
@@ -1175,6 +1200,7 @@ async fn a_handoff_code_buys_exactly_one_session() {
         redirect_uri: "https://spa.example.test/dashboard".into(),
         expires_at: chrono::Utc::now() + chrono::Duration::seconds(SSO_HANDOFF_TTL_SECS),
         authenticated_at: None,
+        browser_binding_hash: Some(binding_hash),
     })
     .await
     .unwrap();
@@ -1183,6 +1209,14 @@ async fn a_handoff_code_buys_exactly_one_session() {
         test::TestRequest::post()
             .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .uri("/api/v1/auth/federation/handoff")
+            .cookie(actix_web::cookie::Cookie::new(
+                "axiam_fed_bind",
+                binding_value,
+            ))
+            .cookie(actix_web::cookie::Cookie::new(
+                "__Host-axiam_fed_bind",
+                binding_value,
+            ))
             .set_json(json!({ "code": code }))
             .to_request()
     };
@@ -1401,11 +1435,13 @@ async fn oauth2_login_against(
         .to_request();
     let start_resp = test::call_service(&app, start_req).await;
     assert_eq!(start_resp.status().as_u16(), 200, "start must succeed");
+    let binding = binding_of(&start_resp);
     let start: Value = test::read_body_json(start_resp).await;
 
     let cb = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/federation/oauth2/callback")
+        .cookie(binding)
         .set_json(json!({ "state": start["state"], "code": "provider-code" }))
         .to_request();
     let resp = test::call_service(&app, cb).await;

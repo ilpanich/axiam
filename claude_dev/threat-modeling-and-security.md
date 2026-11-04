@@ -661,6 +661,15 @@
 > AXIAM's code; open in AXIAM's own request path are the three Low residuals of
 > the network write gate.
 >
+> **Post-1.2.0 follow-ups (model 2.46.0, 2026-11-04; #837, #838, #844).** The model is
+> **495 threats, 464 mitigated / 21 open / 10 not applicable** (Low 41, 2 open and 1
+> not applicable; the other severities unchanged), derived from `Axiam.json` and stated in the five
+> copies. One entry enters Mitigated: **T-495**, a federated sign-in completed in a browser that did
+> not start it (login CSRF), closed by the `__Host-axiam_fed_bind` browser binding (#837). Two are
+> amended: **T-493** (re-authentication is forwarded upstream and a stale upstream instant refused,
+> #838) and **T-249** (logout and RP-initiated logout reach a session's grants across console
+> refreshes through its lineage key, #844).
+>
 > **The 1.2.0 release, reconciliation (model 2.45.0, 2026-11-01).** The model is
 > **494 threats, 463 mitigated / 21 open / 10 not applicable** (Critical 43 with
 > 2 open; High 202, 9 open, 6 not applicable; Medium 209, 8 and 3; Low 40, 2 and
@@ -2052,8 +2061,8 @@ open and says why.
 | Methodology | STRIDE, per-element |
 | Tool | OWASP Threat Dragon (model schema v2) |
 | Diagrams | 10 |
-| Threats identified | 494 |
-| Mitigated / Open | 463 / 21 |
+| Threats identified | 495 |
+| Mitigated / Open | 464 / 21 |
 | Not applicable (specified, not built) | 10 |
 
 Every threat is examined against the STRIDE categories that apply to its element

@@ -464,6 +464,32 @@ raw SAMLResponse passes through JavaScript, which is strictly worse. The handoff
 code confines the compromise to a 60-second single-use token whose only power is
 to create the session the user just legitimately earned.
 
+### 5.2.1 Binding the sign-in to the browser (#837, 2026-11-04)
+
+`state` proves that *a* sign-in was started, not *where*. Without more, an
+attacker could start a sign-in in their own browser, authenticate upstream as
+themselves and have a victim's browser complete it — login CSRF, the victim then
+working inside the attacker's account. Every start therefore sets (or reuses)
+`__Host-axiam_fed_bind`, 256 bits, `HttpOnly; Secure; SameSite=Strict; Path=/`,
+and stores its SHA-256 on the login state row (schema v114). Every same-origin
+completion compares it, in constant time, right after consuming the row and before
+anything else; the cross-site returns copy it to the handoff row and the
+redemption checks it there. Unbound rows (pre-v114, or the account-linking path's
+caller-chosen `state`) are refused. One value per browser rather than per sign-in,
+so concurrent sign-ins in two tabs both work. Threat model T-495; tests in
+`crates/axiam-api-rest/tests/federation_browser_binding_test.rs`.
+
+### 5.2.2 Re-authentication forwarded upstream (#838, 2026-11-04)
+
+A start with `reauthenticate: true` (the SPA sends it on `fresh=1`, `reauth=1`
+and step-up hops) adds the provider's re-authentication request —
+`axiam_federation::reauth::{oidc_params, oauth2_params}`, `ForceAuthn="true"` for
+SAML — and stores `reauthenticate_after` (the start instant). The callback refuses
+an upstream `auth_time`/`AuthnInstant` older than that by more than the 60 s
+skew allowance (`reauth::check_fresh`). A provider that states no instant is
+accepted on the request alone; that residual is why the SPA still never starts
+such a provider unattended. T-493 amended.
+
 ### 5.3 GitHub's email problem
 
 `GET https://api.github.com/user` frequently returns `email: null` (the user has

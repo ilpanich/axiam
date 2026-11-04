@@ -113,6 +113,8 @@ async fn cleanup_sweeps_expired_federation_login_state_rows() {
         request_id: String::new(),
         code_verifier: None,
         idp_redirect_uri: None,
+        browser_binding_hash: None,
+        reauthenticate_after: None,
     };
     let fresh_row = axiam_core::repository::FederationLoginState {
         state: "state-fresh".into(),
@@ -124,6 +126,8 @@ async fn cleanup_sweeps_expired_federation_login_state_rows() {
         request_id: String::new(),
         code_verifier: None,
         idp_redirect_uri: None,
+        browser_binding_hash: None,
+        reauthenticate_after: None,
     };
 
     repo.insert(&expired_row).await.expect("insert expired");

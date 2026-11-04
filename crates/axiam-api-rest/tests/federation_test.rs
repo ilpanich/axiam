@@ -205,6 +205,28 @@ async fn create_test_config(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// #837 — a well-formed browser-binding value and the digest a state row
+/// stores for it, so a test that seeds a row directly can complete it from
+/// "the same browser".
+fn fixed_binding() -> (&'static str, String) {
+    use sha2::{Digest, Sha256};
+    let value = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE";
+    (value, hex::encode(Sha256::digest(value.as_bytes())))
+}
+
+/// Both spellings of the cookie, so the helper holds whatever `cookie_secure`
+/// the test configuration chose.
+fn with_binding(req: test::TestRequest, value: &str) -> test::TestRequest {
+    req.cookie(actix_web::cookie::Cookie::new(
+        "axiam_fed_bind",
+        value.to_owned(),
+    ))
+    .cookie(actix_web::cookie::Cookie::new(
+        "__Host-axiam_fed_bind",
+        value.to_owned(),
+    ))
+}
+
 #[actix_rt::test]
 async fn create_federation_config_returns_201() {
     let (db, org_id, tenant_id) = setup_db().await;
@@ -2346,11 +2368,13 @@ async fn oidc_callback_public_fails_when_service_not_configured_but_state_exists
             request_id: String::new(),
             code_verifier: None,
             idp_redirect_uri: None,
+            browser_binding_hash: Some(fixed_binding().1),
+            reauthenticate_after: None,
         })
         .await
         .unwrap();
 
-    let req = test::TestRequest::post()
+    let req = with_binding(test::TestRequest::post(), fixed_binding().0)
         .uri("/api/v1/auth/federation/oidc/callback")
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .set_json(serde_json::json!({
@@ -3366,10 +3390,12 @@ async fn r101_02_the_saml_acs_gives_up_on_a_held_crypto_gate_and_reads_like_an_i
                     request_id: "_axiam-req-1".into(),
                     code_verifier: None,
                     idp_redirect_uri: None,
+                    browser_binding_hash: Some(fixed_binding().1),
+                    reauthenticate_after: None,
                 })
                 .await
                 .expect("seed federation_login_state");
-            let req = test::TestRequest::post()
+            let req = with_binding(test::TestRequest::post(), fixed_binding().0)
                 .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
                 .uri("/api/v1/auth/federation/saml/acs")
                 .set_json(serde_json::json!({

@@ -358,6 +358,14 @@ async fn first_time_oidc_sso_sets_cookies_and_me_succeeds() {
         .to_request();
     let start_resp = test::call_service(&app, start_req).await;
     assert_eq!(start_resp.status().as_u16(), 200, "oidc/start must succeed");
+    // #837 — the start binds the sign-in to this browser; the callback must
+    // carry the cookie back, as a browser (or an SDK's cookie jar) does.
+    let binding = start_resp
+        .response()
+        .cookies()
+        .find(|c| c.name() == "axiam_fed_bind" || c.name() == "__Host-axiam_fed_bind")
+        .map(|c| c.into_owned())
+        .expect("oidc/start must set the browser-binding cookie");
     let start_body: serde_json::Value = test::read_body_json(start_resp).await;
     let state = start_body["state"].as_str().unwrap().to_string();
     let authorize_url = start_body["authorize_url"].as_str().unwrap();
@@ -401,6 +409,7 @@ async fn first_time_oidc_sso_sets_cookies_and_me_succeeds() {
     let callback_req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/federation/oidc/callback")
+        .cookie(binding)
         .set_json(json!({
             "state": state,
             "code": "mock-authorization-code",

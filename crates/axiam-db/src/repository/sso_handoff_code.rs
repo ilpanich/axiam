@@ -34,6 +34,10 @@ struct SsoHandoffCodeRow {
     /// schema v55 does not backfill; a pre-v55 row falls back at redemption.
     #[surreal(default)]
     authenticated_at: Option<DateTime<Utc>>,
+    /// #837 — see [`SsoHandoffCode::browser_binding_hash`]. `None` on a
+    /// pre-v114 row, which redemption refuses.
+    #[surreal(default)]
+    browser_binding_hash: Option<String>,
 }
 
 /// SurrealDB implementation of the SSO handoff-code repository.
@@ -64,7 +68,8 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
                  user_id = $user_id, \
                  redirect_uri = $redirect_uri, \
                  expires_at = $expires_at, \
-                 authenticated_at = $authenticated_at",
+                 authenticated_at = $authenticated_at, \
+                 browser_binding_hash = $browser_binding_hash",
             )
             .bind(("id", row_id))
             .bind(("code_hash", row.code_hash.clone()))
@@ -73,6 +78,7 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
             .bind(("redirect_uri", row.redirect_uri.clone()))
             .bind(("expires_at", row.expires_at))
             .bind(("authenticated_at", row.authenticated_at))
+            .bind(("browser_binding_hash", row.browser_binding_hash.clone()))
             .await
             .map_err(DbError::from)?;
 
@@ -99,7 +105,7 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
             .query(
                 "BEGIN TRANSACTION; \
                  LET $row = (SELECT code_hash, tenant_id, user_id, redirect_uri, expires_at, \
-                             authenticated_at \
+                             authenticated_at, browser_binding_hash \
                              FROM sso_handoff_code \
                              WHERE code_hash = $code_hash LIMIT 1); \
                  DELETE sso_handoff_code WHERE code_hash = $code_hash; \
@@ -138,6 +144,7 @@ impl<C: Connection> SsoHandoffCodeRepository for SurrealSsoHandoffCodeRepository
             redirect_uri: row.redirect_uri,
             expires_at: row.expires_at,
             authenticated_at: row.authenticated_at,
+            browser_binding_hash: row.browser_binding_hash,
         }))
     }
 

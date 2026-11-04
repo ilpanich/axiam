@@ -401,14 +401,29 @@ provider **by itself**, for OIDC, OAuth2, SAML and Apple providers alike:
   like a start (below), so reloading the page does not restart the countdown.
 - **Not on a re-authentication** (D-N26, D-N28). The page does not start the
   provider when the **server** marked the hop as one; it highlights that
-  provider's button and the person has to click it. AXIAM does not yet forward
-  `prompt=login`/`max_age` to an OIDC provider or `ForceAuthn` to a SAML
-  identity provider, so a provider that still holds a session would answer at
-  once, and an unattended start would record a fresh authentication nobody
-  performed. Forwarding them upstream is a later item; a provider that ignores
-  them (several social providers do) cannot give a real re-authentication even
-  then. The marks, all set by the authorization endpoint (or, for CIBA, by the
-  approval page) and never read by the page out of `return_to`:
+  provider's button and the person has to click it. That click's start request
+  carries `reauthenticate: true` (#838), and AXIAM asks the provider to
+  authenticate the person again:
+
+  | Provider | Sent upstream |
+  |---|---|
+  | Generic OIDC, Microsoft | `prompt=login` and `max_age=0` |
+  | Google, Apple | `max_age=0` only — Google rejects `prompt=login`, Apple documents no `prompt` |
+  | SAML | `ForceAuthn="true"` on the `AuthnRequest` |
+  | Facebook | `auth_type=reauthenticate` |
+  | GitHub, generic OAuth2 | nothing — no re-authentication parameter exists |
+
+  Where the provider states when it authenticated the person (OIDC `auth_time`,
+  SAML `AuthnInstant`), the callback **refuses** an instant earlier than the
+  start of the sign-in by more than the 60-second clock-skew allowance: the
+  provider answered from a session it already held. Where it states nothing
+  (every plain-OAuth2 provider, an OIDC provider that omits `auth_time`) the
+  sign-in is accepted on the strength of the request alone and logged at
+  `info`; the `honour` lane then judges the session that results, exactly as
+  before. Because of that residual the page still never starts the provider
+  unattended on these hops. The marks, all set by the authorization endpoint
+  (or, for CIBA, by the approval page) and never read by the page out of
+  `return_to`:
 
   | Mark | Set when |
   |---|---|

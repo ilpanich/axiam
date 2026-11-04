@@ -31,6 +31,7 @@ fn fresh_row() -> SsoHandoffCode {
         redirect_uri: "https://app.example.com/auth/sso/callback".into(),
         expires_at: Utc::now() + Duration::seconds(60),
         authenticated_at: None,
+        browser_binding_hash: None,
     }
 }
 

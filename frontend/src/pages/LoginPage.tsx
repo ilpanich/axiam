@@ -229,11 +229,16 @@ export function LoginPage() {
   // server-side, never through a URL parameter.
   const [idpHint] = useState(() => parseIdpHint(searchParams.get("idp")));
   // #833 (F4-W3-03, D-N26) — a re-authentication is never started for the
-  // person. `prompt=login` and `max_age` are not forwarded to the upstream
-  // provider (a later item), so a provider that still holds a session would
-  // answer at once and AXIAM would record a fresh authentication nobody
-  // performed. On such a hop the matching provider is only *suggested* —
+  // person. On such a hop the matching provider is only *suggested* —
   // highlighted among the buttons — and the person has to click it.
+  //
+  // #838 — and when they do, the start request says `reauthenticate: true`:
+  // the server then asks the provider to authenticate them again
+  // (`prompt=login`/`max_age=0`, `ForceAuthn`, or the provider's own
+  // parameter) and refuses an answer dated before the start where the
+  // provider states one. The suggestion stays a suggestion: a plain-OAuth2
+  // provider states no authentication instant, so for it the request is the
+  // whole of the measure, and a click is still the person's own.
   //
   // #835 (D-N28) — which hops those are is the **server's** call, never this
   // page's reading of `return_to`: `reauth=1` (the browser's session is not to
@@ -562,6 +567,8 @@ export function LoginPage() {
         : {}),
       federation_config_id: provider.id,
       redirect_uri: ssoCallbackUrl(),
+      // #838 — only sent when true, so an ordinary sign-in's body is unchanged.
+      ...(freshAuthRequired ? { reauthenticate: true } : {}),
     };
     const hopReturnTo = sanitizeReturnTo(returnTo);
     // Written once the start has answered and before the browser leaves, so

@@ -1589,6 +1589,12 @@ pub async fn oidc_authorize<C: Connection + Clone>(
             request_id: String::new(), // OIDC — no request ID
             code_verifier: None,
             idp_redirect_uri: None,
+            // #837 — deliberately unbound: this path is authenticated by a
+            // bearer token and completes at the authenticated callback, which
+            // reads no browser cookie. The public completions refuse an
+            // unbound row, so a `state` chosen here cannot be completed there.
+            browser_binding_hash: None,
+            reauthenticate_after: None,
         })
         .await?;
 
@@ -1999,6 +2005,19 @@ pub struct OidcStartRequest {
     /// SPA post-login destination (stored server-side; returned in callback
     /// response body so the SPA can route after receiving cookies).
     pub redirect_uri: String,
+    /// #838 — `true` when the sign-in page is answering a re-authentication
+    /// hop (`fresh=1` or `reauth=1` on `/login`): a relying party asked for
+    /// `prompt=login`, a `max_age` the current session cannot meet, a step-up,
+    /// or a different user.
+    ///
+    /// The upstream request then asks the provider to authenticate the user
+    /// again — `prompt=login` and/or `max_age=0` for OpenID Connect,
+    /// `ForceAuthn="true"` for SAML, the provider's own parameter for a
+    /// plain-OAuth2 provider that has one — and the callback refuses an
+    /// assertion whose authentication instant predates this start. Omitted or
+    /// `false`: an ordinary sign-in, exactly as before.
+    #[serde(default)]
+    pub reauthenticate: bool,
 }
 
 /// Response body for `POST /api/v1/auth/federation/oidc/start`.
@@ -2031,6 +2050,19 @@ pub struct SamlLoginRequest {
     pub federation_config_id: Uuid,
     /// SPA post-login destination (stored server-side).
     pub redirect_uri: String,
+    /// #838 — `true` when the sign-in page is answering a re-authentication
+    /// hop (`fresh=1` or `reauth=1` on `/login`): a relying party asked for
+    /// `prompt=login`, a `max_age` the current session cannot meet, a step-up,
+    /// or a different user.
+    ///
+    /// The upstream request then asks the provider to authenticate the user
+    /// again — `prompt=login` and/or `max_age=0` for OpenID Connect,
+    /// `ForceAuthn="true"` for SAML, the provider's own parameter for a
+    /// plain-OAuth2 provider that has one — and the callback refuses an
+    /// assertion whose authentication instant predates this start. Omitted or
+    /// `false`: an ordinary sign-in, exactly as before.
+    #[serde(default)]
+    pub reauthenticate: bool,
 }
 
 /// Response body for `POST /api/v1/auth/federation/saml/login`.
@@ -2377,11 +2409,12 @@ pub async fn oidc_start_public<C: Connection + Clone>(
     // Named `app_state` (not `state`) — this handler already has a local
     // `state` variable (the OAuth2 CSRF state value).
     app_state: web::Data<AppState<C>>,
+    http_req: HttpRequest,
     body: web::Json<OidcStartRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use super::federation_login::{
-        idp_redirect_uri_for, oidc_service, require_deployment_spa_origin,
-        resolve_config_for_login, resolve_workspace,
+        browser_binding_for_start, idp_redirect_uri_for, oidc_service,
+        require_deployment_spa_origin, resolve_config_for_login, resolve_workspace,
     };
 
     let b = body.into_inner();
@@ -2457,9 +2490,13 @@ pub async fn oidc_start_public<C: Connection + Clone>(
             &state,
             &nonce,
             pkce.as_ref().map(|p| p.challenge.as_str()),
+            b.reauthenticate,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
+
+    // #837 — bind the sign-in to this browser; see `browser_binding_for_start`.
+    let binding = browser_binding_for_start(&http_req, app_state.auth_config.cookie_secure);
 
     // Persist the state row (single-use, 10-min TTL).
     app_state
@@ -2475,14 +2512,20 @@ pub async fn oidc_start_public<C: Connection + Clone>(
             request_id: String::new(), // OIDC — no request ID
             code_verifier: pkce.map(|p| p.verifier),
             idp_redirect_uri: stored_idp_redirect_uri,
+            browser_binding_hash: Some(binding.hash),
+            // #838 — the start moment, so an `auth_time` from before it is
+            // recognisably an upstream session that was reused.
+            reauthenticate_after: b.reauthenticate.then(chrono::Utc::now),
         })
         .await?;
 
-    Ok(HttpResponse::Ok().json(OidcStartResponse {
-        authorize_url: auth_url.url,
-        state,
-        expires_in_secs: 600,
-    }))
+    Ok(HttpResponse::Ok()
+        .cookie(binding.cookie)
+        .json(OidcStartResponse {
+            authorize_url: auth_url.url,
+            state,
+            expires_in_secs: 600,
+        }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2512,7 +2555,8 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
     body: web::Json<OidcPublicCallbackRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use super::federation_login::{
-        consume_login_state, oidc_service, resolve_config_for_login, workspace_for_tenant,
+        consume_login_state, oidc_service, require_browser_binding, require_fresh_upstream,
+        resolve_config_for_login, workspace_for_tenant,
     };
 
     let b = body.into_inner();
@@ -2526,6 +2570,13 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
 
     // Atomically consume the state row (single-use; expired → None → 401).
     let login_state = consume_login_state(&state, &b.state).await?;
+    // #837 — before the code is redeemed: this browser must be the one that
+    // started the sign-in.
+    require_browser_binding(
+        &http_req,
+        state.auth_config.cookie_secure,
+        login_state.browser_binding_hash.as_deref(),
+    )?;
 
     let tenant_id = login_state.tenant_id;
     // Nonce comes from the state row — NOT from the HTTP body (T-04-30).
@@ -2559,6 +2610,13 @@ pub async fn oidc_callback_public<C: Connection + Clone>(
 
     let callback_upstream_auth_time =
         verified_upstream_auth_time(&resolved.config, callback_result.upstream_auth_time);
+    // #838 — a re-authentication hop must not be answered by an upstream
+    // session older than the sign-in itself.
+    require_fresh_upstream(
+        &resolved.config,
+        login_state.reauthenticate_after,
+        callback_upstream_auth_time,
+    )?;
     let user = callback_result.user;
 
     // SEC-095: `login.post_auth` fires here too, not only on the password
@@ -2609,7 +2667,8 @@ pub async fn saml_login_public<C: Connection + Clone>(
     body: web::Json<SamlLoginRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use super::federation_login::{
-        require_deployment_spa_origin, resolve_config_for_login, resolve_workspace, saml_acs_url,
+        browser_binding_for_start, require_deployment_spa_origin, resolve_config_for_login,
+        resolve_workspace, saml_acs_url,
     };
 
     let b = body.into_inner();
@@ -2660,11 +2719,13 @@ pub async fn saml_login_public<C: Connection + Clone>(
     let result = app_state
         .federation
         .saml_federation_service
-        .build_authn_request(
+        .build_authn_request_with(
             resolved.config.tenant_id,
             b.federation_config_id,
             &acs_url,
             Some(state.clone()),
+            // #838 — `ForceAuthn="true"` on a re-authentication hop.
+            b.reauthenticate,
         )
         .await
         .map_err(axiam_core::error::AxiamError::from)?;
@@ -2678,6 +2739,9 @@ pub async fn saml_login_public<C: Connection + Clone>(
         )
         .await;
     }
+
+    // #837 — bind the sign-in to this browser; see `browser_binding_for_start`.
+    let binding = browser_binding_for_start(&http_req, app_state.auth_config.cookie_secure);
 
     // Persist state row (nonce = "" for SAML — unused but required by schema).
     // Store the AuthnRequest ID for InResponseTo verification (SEC-005/REQ-14 AC-5).
@@ -2694,15 +2758,19 @@ pub async fn saml_login_public<C: Connection + Clone>(
             request_id: result.request_id.clone(),
             code_verifier: None,
             idp_redirect_uri: Some(acs_url),
+            browser_binding_hash: Some(binding.hash),
+            reauthenticate_after: b.reauthenticate.then(chrono::Utc::now),
         })
         .await?;
 
-    Ok(HttpResponse::Ok().json(SamlLoginResponse {
-        binding: result.binding,
-        sso_url: result.url,
-        saml_request_b64: result.saml_request,
-        relay_state: state,
-    }))
+    Ok(HttpResponse::Ok()
+        .cookie(binding.cookie)
+        .json(SamlLoginResponse {
+            binding: result.binding,
+            sso_url: result.url,
+            saml_request_b64: result.saml_request,
+            relay_state: state,
+        }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2733,7 +2801,8 @@ pub async fn saml_acs_public<C: Connection + Clone>(
     body: web::Json<SamlAcsPublicRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     use super::federation_login::{
-        consume_login_state, resolve_config_for_login, workspace_for_tenant,
+        consume_login_state, require_browser_binding, require_fresh_upstream,
+        resolve_config_for_login, workspace_for_tenant,
     };
 
     let b = body.into_inner();
@@ -2747,6 +2816,12 @@ pub async fn saml_acs_public<C: Connection + Clone>(
 
     // Atomically consume the state row (single-use; expired → 401).
     let login_state = consume_login_state(&state, &b.relay_state).await?;
+    // #837 — as `oidc_callback_public`: before the assertion is used.
+    require_browser_binding(
+        &http_req,
+        state.auth_config.cookie_secure,
+        login_state.browser_binding_hash.as_deref(),
+    )?;
 
     let tenant_id = login_state.tenant_id;
     let spa_redirect_uri = login_state.redirect_uri.clone();
@@ -2792,6 +2867,12 @@ pub async fn saml_acs_public<C: Connection + Clone>(
 
     let callback_upstream_auth_time =
         verified_upstream_auth_time(&resolved.config, callback_result.upstream_auth_time);
+    // #838 — `ForceAuthn` was asked for; `AuthnInstant` must show it happened.
+    require_fresh_upstream(
+        &resolved.config,
+        login_state.reauthenticate_after,
+        callback_upstream_auth_time,
+    )?;
     let user = callback_result.user;
 
     // SEC-095 — see the identical call in `oidc_callback_public`.

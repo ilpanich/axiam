@@ -432,6 +432,13 @@ async fn run_oidc_sso_for(
         200,
         "fixture precondition: oidc/start must succeed"
     );
+    // #837 — carried to the callback, as a browser would.
+    let binding = start_resp
+        .response()
+        .cookies()
+        .find(|c| c.name() == "axiam_fed_bind" || c.name() == "__Host-axiam_fed_bind")
+        .map(|c| c.into_owned())
+        .expect("oidc/start sets the browser-binding cookie");
     let start_body: serde_json::Value = test::read_body_json(start_resp).await;
     let oidc_state = start_body["state"].as_str().unwrap().to_string();
     let authorize_url = start_body["authorize_url"].as_str().unwrap();
@@ -470,6 +477,7 @@ async fn run_oidc_sso_for(
     let callback_req = test::TestRequest::post()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri("/api/v1/auth/federation/oidc/callback")
+        .cookie(binding)
         .set_json(json!({ "state": oidc_state, "code": "mock-authorization-code" }))
         .to_request();
     let resp = test::call_service(&app, callback_req).await;
@@ -608,6 +616,8 @@ mod saml {
     const FIXTURE_REQUEST_ID: &str = "_axiam-req-1";
     /// The `<Audience>` baked into the same fixture.
     const FIXTURE_SP_ENTITY_ID: &str = "https://sp.example.com";
+    /// #837 — a well-formed browser-binding value (43 base64url characters).
+    const BINDING: &str = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE";
 
     fn fixture(name: &str) -> String {
         let p = std::path::Path::new(FIXTURES_DIR).join(name);
@@ -668,6 +678,11 @@ mod saml {
                 request_id: FIXTURE_REQUEST_ID.into(),
                 code_verifier: None,
                 idp_redirect_uri: None,
+                // #837 — the row a start in this browser would have written.
+                browser_binding_hash: Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+                    BINDING.as_bytes(),
+                ))),
+                reauthenticate_after: None,
             })
             .await
             .expect("seed federation_login_state");
@@ -675,6 +690,11 @@ mod saml {
         let app = app_for!(auth, state);
         let req = test::TestRequest::post()
             .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .cookie(actix_web::cookie::Cookie::new("axiam_fed_bind", BINDING))
+            .cookie(actix_web::cookie::Cookie::new(
+                "__Host-axiam_fed_bind",
+                BINDING,
+            ))
             .uri("/api/v1/auth/federation/saml/acs")
             .set_json(json!({
                 "relay_state": relay_state,

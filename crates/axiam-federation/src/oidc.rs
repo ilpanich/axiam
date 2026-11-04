@@ -337,7 +337,7 @@ where
         nonce: &str,
     ) -> Result<AuthorizationUrl, FederationError> {
         let config = self.load_config(tenant_id, config_id).await?;
-        self.build_authorization_url_for(&config, redirect_uri, state, nonce, None)
+        self.build_authorization_url_for(&config, redirect_uri, state, nonce, None, false)
             .await
     }
 
@@ -372,6 +372,10 @@ where
     /// it is an addition to the server-side `nonce`, not a replacement for it —
     /// see [`crate::pkce`] for why it is opt-in here and mandatory on the
     /// OAuth2 path.
+    ///
+    /// `reauthenticate` adds [`crate::reauth::oidc_params`] — the request
+    /// that the provider authenticate the user again rather than answer from
+    /// an SSO session it already holds (#838).
     pub async fn build_authorization_url_for(
         &self,
         config: &FederationConfig,
@@ -379,6 +383,7 @@ where
         state: &str,
         nonce: &str,
         pkce_challenge: Option<&str>,
+        reauthenticate: bool,
     ) -> Result<AuthorizationUrl, FederationError> {
         if !config.enabled {
             return Err(FederationError::ConfigDisabled);
@@ -432,6 +437,13 @@ where
             auth_url
                 .query_pairs_mut()
                 .append_pair("response_mode", "form_post");
+        }
+
+        if reauthenticate {
+            let mut pairs = auth_url.query_pairs_mut();
+            for (k, v) in crate::reauth::oidc_params(config.provider_kind) {
+                pairs.append_pair(k, v);
+            }
         }
 
         let url = auth_url.to_string();

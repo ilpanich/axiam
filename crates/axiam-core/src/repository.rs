@@ -2776,6 +2776,37 @@ pub struct FederationLoginState {
     /// reconstructed. `None` means the SPA `redirect_uri` was sent, which is
     /// every row written before v52.
     pub idp_redirect_uri: Option<String>,
+    /// #837 — lowercase hex SHA-256 of the browser-binding cookie the start
+    /// endpoint set (or found) on the browser that began this sign-in
+    /// (schema v114).
+    ///
+    /// The `state` value proves that *a* sign-in was started; it does not say
+    /// *where*. An attacker who starts a sign-in in their own browser can hand
+    /// its callback to a victim's, and without this column the victim would be
+    /// signed in as the attacker (login CSRF). Every same-origin completion —
+    /// the OIDC, OAuth2 and SAML JSON callbacks, and the handoff redemption a
+    /// cross-site return ends in — compares the cookie its request carries
+    /// with this digest and refuses on a mismatch.
+    ///
+    /// `None` on a row written before v114 and on a row written by the
+    /// authenticated account-linking path (`/api/v1/federation/oidc/authorize`),
+    /// which has no browser to bind. The public completions refuse a `None`:
+    /// a row that names no browser cannot be shown to belong to this one.
+    pub browser_binding_hash: Option<String>,
+    /// #838 — when the sign-in was started for a re-authentication hop, the
+    /// earliest upstream authentication instant the callback may accept
+    /// (schema v114).
+    ///
+    /// Set to the start moment when the sign-in page asked for a fresh
+    /// authentication (`reauthenticate: true`). The upstream request then
+    /// carries `prompt=login`/`max_age=0` (OIDC), the provider's own
+    /// re-authentication parameter (OAuth2, where one exists) or
+    /// `ForceAuthn="true"` (SAML), and the callback refuses an assertion whose
+    /// `auth_time`/`AuthnInstant` predates this instant by more than the clock
+    /// skew allowance: an upstream that answered from an SSO session it
+    /// already held did not re-authenticate anyone. `None` — an ordinary
+    /// sign-in, and every row written before v114 — checks nothing.
+    pub reauthenticate_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl FederationLoginState {
@@ -2841,6 +2872,16 @@ pub struct SsoHandoffCode {
     /// any deploy) and whenever the assertion carried no authentication
     /// instant; redemption then falls back to its own clock.
     pub authenticated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// #837 — the [`FederationLoginState::browser_binding_hash`] of the
+    /// sign-in this code completes, carried across the hop (schema v114).
+    ///
+    /// The cross-site return that mints a code is a POST from the identity
+    /// provider, on which the browser sends no `SameSite=Strict` cookie, so
+    /// the binding cannot be checked there. It is checked here instead, at
+    /// redemption — a same-origin request from the SPA — which is the moment
+    /// the code becomes a session. `None` on a row written before v114, which
+    /// redemption refuses.
+    pub browser_binding_hash: Option<String>,
 }
 
 /// How long a handoff code is valid.

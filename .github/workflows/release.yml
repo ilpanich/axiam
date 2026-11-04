@@ -434,6 +434,10 @@ jobs:
         #      canonical one (no-op on amd64, which uses archive.ubuntu.com).
         #   3. Retry apt update+install with backoff so a transient mirror hiccup
         #      does not fail the tag build.
+        # The xmlsec OpenSSL backend is NOT named here: `libxmlsec1-dev` depends
+        # on it, and its package name differs by release (`libxmlsec1t64-openssl`
+        # on 24.04, `libxmlsec1-openssl1` on 26.04, which `ubuntu-latest` now
+        # is). Naming the old `libxmlsec1-openssl` failed the v1.2.1 x86_64 leg.
         run: |
           set -euo pipefail
           echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
@@ -441,7 +445,7 @@ jobs:
             /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
           for attempt in 1 2 3 4 5; do
             if sudo apt-get update && sudo apt-get install -y \
-              protobuf-compiler libxml2-dev libxmlsec1-dev libxmlsec1-openssl; then
+              protobuf-compiler libxml2-dev libxmlsec1-dev; then
               echo "apt install succeeded on attempt ${attempt}"
               exit 0
             fi

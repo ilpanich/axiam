@@ -188,7 +188,9 @@ async fn create_admin_user(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
             tenant_id,
             username: "admin".into(),
             email: "admin@example.com".into(),
-            password: "password12345".into(),
+            // Generated per run: nothing in this suite signs in with it, and a
+            // literal would read as a hard-coded credential (CodeQL).
+            password: format!("pw-{}", Uuid::new_v4().simple()),
             metadata: None,
         })
         .await

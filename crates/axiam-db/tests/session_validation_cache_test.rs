@@ -50,6 +50,7 @@ async fn make_session(repo: &SurrealSessionRepository<Db>, tenant_id: Uuid, user
         authenticated_at: Utc::now(),
         amr: vec![],
         browser_token_hash: None,
+        lineage_id: None,
     })
     .await
     .unwrap()
@@ -245,6 +246,7 @@ async fn an_expired_session_is_not_cached() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap()

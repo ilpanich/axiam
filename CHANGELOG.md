@@ -36,11 +36,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AuthnInstant` from before the start. A provider that asserts no instant is
   accepted on the request alone, as documented. T-493 amended.
 
+### Fixed
+
+- **Logout reaches the grants issued before a console refresh (#844, D-N43).**
+  A console refresh (`POST /api/v1/auth/refresh`) replaces the session row
+  under a new id, and a code grant names the id current at `/oauth2/authorize`,
+  so since D-N39 a `POST /auth/logout` after the first refresh did not revoke
+  the grants authorized before it, and an RP-initiated logout with such a
+  grant's `id_token_hint` left the console (SSO) session alive (F4-R12-08).
+  Every session now carries a **lineage** key, minted at sign-in and copied by
+  every refresh, and refresh tokens and session participants record it. Every
+  single-session logout (`/auth/logout`, the cookie-hop logout,
+  `/oauth2/end_session`, SAML single logout) ends the lineage: all grants of
+  the sign-in are revoked, an `id_token_hint` from before a refresh ends the
+  live console session, and back-channel logout reaches every client that
+  joined, each with the `sid` it was issued. The `sid` claim is unchanged and
+  nothing outside the sign-in is reached. Schema v115 is additive (three
+  optional `lineage_id` columns and their indexes, no backfill); a console
+  session that refreshed before the upgrade keeps the 1.2.0 limit for its older
+  grants. See `docs/api/logout.md`.
+
 ### Changed
 
 - Schema **v114** (additive, no backfill): `browser_binding_hash` on
   `federation_login_state` and `sso_handoff_code`, and
   `federation_login_state.reauthenticate_after`.
+- Schema **v115** (additive, no backfill): `lineage_id` on `session`,
+  `oauth2_refresh_token` and `session_client` (#844).
 - OpenAPI: `reauthenticate` (optional boolean, default `false`) on
   `OidcStartRequest`, `OAuth2StartRequest` and `SamlLoginRequest`. Contract
   1.66.

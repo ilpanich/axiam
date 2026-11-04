@@ -97,6 +97,7 @@ async fn insert_token(
         auth_time: None,
         acr: None,
         amr: Vec::new(),
+        lineage_id: None,
     })
     .await
     .unwrap();

@@ -471,6 +471,7 @@ impl Harness {
                 authenticated_at: Utc::now(),
                 amr: vec![],
                 browser_token_hash: None,
+                lineage_id: None,
             })
             .await
             .unwrap()
@@ -495,6 +496,7 @@ impl Harness {
                 amr: Vec::new(),
                 dpop_jkt: None,
                 expires_at: Utc::now() + Age::days(30),
+                lineage_id: None,
             })
             .await
             .unwrap();

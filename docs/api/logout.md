@@ -59,26 +59,42 @@ repeating the logout with the credential that started it completes it — the
 same bearer token, the same `id_token_hint`, or (on the cookie hop) the
 OP-session cookie, which that `500` page does not clear for this reason.
 
-**Limit: a session that has refreshed (F4-R12-08).** A refresh token names the
-session id that was current when its grant was authorized. A console (browser)
-session that refreshes at `POST /api/v1/auth/refresh` is replaced by a row
-under a new id, and with 15-minute access tokens nearly every session that
-outlives one access token has done so. From then on:
+**A session that has refreshed: the lineage (#844, D-N43).** A refresh token
+names the session id that was current when its grant was authorized, and a
+console (browser) session that refreshes at `POST /api/v1/auth/refresh` is
+replaced by a row under a new id — with 15-minute access tokens, nearly every
+session that outlives one access token. Until #844 that was a limit of the rule
+above (F4-R12-08): the logout of the new row did not reach the grants authorized
+before the refresh, and an RP-initiated logout with such a grant's
+`id_token_hint` revoked that grant but left the console (SSO) session alive.
 
-- `POST /auth/logout` and the cookie-hop logout end the console session, but do
-  **not** reach the code grants authorized before that refresh: their refresh
-  tokens stay live until they expire, are revoked at `/oauth2/revoke`, or are
-  ended by a user-wide revocation (a password reset or change, an account
-  deletion, …).
-- RP-initiated logout with **that grant's own `id_token_hint`** does reach it —
-  the hint's `sid` is the original id — and revokes its refresh tokens. But the
-  session it invalidates is the old id, which no longer exists, so the console
-  (SSO) session **survives** the RP logout of one grant, and the next
-  `/oauth2/authorize` from that browser signs the user straight back in.
+Since schema v115 every session carries a **lineage**: a key minted when the
+sign-in creates its first session (its id) and copied by every console refresh.
+Refresh-token rows and the session's participant records (the clients a
+back-channel logout notifies) record it when they are written. A single-session
+logout ends the **lineage**, not only the row it was handed:
 
-A native sign-in is unaffected: its session id never rotates. Closing this
-needs a lineage key on the session, which 1.2.0 does not have; it is tracked as
-[#844](https://github.com/ilpanich/axiam/issues/844).
+- `POST /auth/logout` and the cookie-hop logout revoke the refresh tokens of
+  every grant of the sign-in, including those authorized before the console's
+  last refresh.
+- RP-initiated logout with an `id_token_hint` minted before a refresh — whose
+  `sid` names a session id that no longer exists — resolves that id to its
+  lineage (from the grant or participant record that captured it) and ends the
+  console session that is live now, so the next `/oauth2/authorize` asks the
+  user to sign in.
+- Back-channel logout notifies every client that joined the sign-in, each with
+  the `sid` its own ID token carried.
+
+Nothing outside the sign-in is reached: a lineage is learnt only from rows the
+server wrote for that user, and the user's other sign-ins (other browsers,
+other devices) are other lineages. The `sid` claim is unchanged — it still names
+the session the grant was issued under.
+
+What the lineage cannot recover is history from before it existed: a console
+session that refreshed **before** the upgrade to v115 has already lost the id its
+older grants name, and those grants end as they did in 1.2.0 (expiry,
+`/oauth2/revoke`, or a user-wide revocation). A native sign-in was never
+affected: its session id does not rotate.
 
 ## RP-initiated logout
 

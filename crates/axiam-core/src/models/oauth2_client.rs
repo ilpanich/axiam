@@ -1212,6 +1212,17 @@ pub struct RefreshToken {
     /// binds to whichever key presents it first.
     #[serde(default)]
     pub dpop_jkt: Option<String>,
+    /// #844 (D-N43) — the lineage of [`Self::session_id`]'s sign-in.
+    ///
+    /// The session id is the `sid` the grant was issued under and is kept for
+    /// that; it stops naming a live session at the first console refresh,
+    /// which replaces the row. The lineage does not, and it is what a logout
+    /// revokes by. Copied forward at rotation, like `session_id`. `None` for a
+    /// grant with no session behind it, and for a row written before schema
+    /// v115 — whose lineage is its `session_id`, and which the lineage
+    /// revocation matches that way.
+    #[serde(default)]
+    pub lineage_id: Option<Uuid>,
 }
 
 /// Input for creating a new refresh token.
@@ -1238,6 +1249,15 @@ pub struct CreateRefreshToken {
     pub amr: Vec<Amr>,
     /// #681 — see [`RefreshToken::dpop_jkt`].
     pub dpop_jkt: Option<String>,
+    /// #844 — see [`RefreshToken::lineage_id`].
+    ///
+    /// `Some` at rotation (the predecessor's, copied). `None` on every issue
+    /// path, where the datastore resolves it from `session_id` in the same
+    /// statement: the live session's lineage, else the one the session's
+    /// participant record captured when the code was issued — which is what
+    /// covers a code redeemed after the browser's session rotated — else
+    /// `session_id` itself.
+    pub lineage_id: Option<Uuid>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -1488,6 +1508,13 @@ pub struct SessionClient {
     pub client_id: String,
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
+    /// #844 — the lineage of [`Self::session_id`] when the client joined,
+    /// which is what a logout of a later, rotated row of the same sign-in
+    /// finds this record by. Resolved by the datastore from the live session
+    /// at write time; a record written before schema v115 reads as
+    /// `session_id`, the key of the lineage it belonged to.
+    #[serde(default)]
+    pub lineage_id: Uuid,
 }
 
 /// Input for recording participation.

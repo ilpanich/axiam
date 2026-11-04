@@ -148,6 +148,7 @@ async fn seed_session(
             authenticated_at: Utc::now() - Duration::minutes(30),
             amr: vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap()

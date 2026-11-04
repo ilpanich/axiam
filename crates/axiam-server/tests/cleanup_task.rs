@@ -1206,6 +1206,7 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
             amr: Vec::new(),
             dpop_jkt: None,
             expires_at: Utc::now() + chrono::Duration::days(90),
+            lineage_id: None,
         })
         .await
         .expect("refresh token");
@@ -4780,6 +4781,7 @@ async fn issue_refresh_token(
         acr: None,
         amr: Vec::new(),
         dpop_jkt: Some("thumbprint-of-the-device-key".into()),
+        lineage_id: None,
     })
     .await
     .unwrap();

@@ -1353,6 +1353,7 @@ async fn session_backed_token(
             authenticated_at: Utc::now(),
             amr: Vec::new(),
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -1521,6 +1522,7 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) -> (String, Stri
                 amr: Vec::new(),
                 dpop_jkt: None,
                 expires_at: Utc::now() + Duration::days(30),
+                lineage_id: None,
             })
             .await
             .unwrap();

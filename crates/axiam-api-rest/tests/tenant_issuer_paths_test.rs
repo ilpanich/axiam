@@ -975,6 +975,7 @@ async fn the_logout_token_iss_is_the_tenant_issuer() {
             authenticated_at: chrono::Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap()

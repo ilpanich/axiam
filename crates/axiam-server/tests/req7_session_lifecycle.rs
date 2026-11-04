@@ -313,6 +313,7 @@ async fn password_change_revokes_oauth2_refresh_tokens() {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         })
         .await
         .expect("create refresh token");
@@ -428,6 +429,7 @@ async fn password_reset_confirm_revokes_oauth2_refresh_tokens() {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         })
         .await
         .expect("create oauth2 refresh token");

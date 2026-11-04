@@ -29,6 +29,34 @@ fn parse_opt_session(raw: Option<&str>) -> Result<Option<Uuid>, DbError> {
 }
 use crate::helpers::{retry_on_write_conflict, take_first_or_not_found};
 
+/// The pre-v115 decode path for a refresh token's lineage (#844).
+///
+/// A stored lineage is taken as it is. An absent one is the row's
+/// `session_id`: before v115 a grant belonged to exactly the session it was
+/// issued under, and a new lineage is keyed by the id of the session that
+/// starts it — so that is the lineage the row is in, the value rotation copies
+/// forward, and the value [`RefreshTokenRepository::revoke_all_for_lineage`]
+/// matches the row by.
+fn decode_lineage(stored: Option<&str>, session_id: Option<Uuid>) -> Result<Option<Uuid>, DbError> {
+    Ok(parse_opt_session(stored)?.or(session_id))
+}
+
+/// The statement a new token's `$lineage` is resolved by, in the query that
+/// creates it, when the caller did not supply one (#844).
+///
+/// In order: the live session's lineage (a row written before v115 is its
+/// own); else the lineage the session's participant record captured when the
+/// authorization code was issued — the case of a code redeemed after the
+/// browser's session rotated, which is a minute's window by default; else the
+/// session id itself, which is the pre-#844 scope and never wider.
+const RESOLVE_LINEAGE: &str = "LET $lineage = \
+     array::first((SELECT VALUE lineage_id ?? meta::id(id) \
+         FROM type::record('session', $session_id) WHERE tenant_id = $tenant_id)) \
+     ?? array::first((SELECT VALUE lineage_id FROM session_client \
+         WHERE tenant_id = $tenant_id AND session_id = $session_id \
+           AND lineage_id != NONE LIMIT 1)) \
+     ?? $session_id;";
+
 /// One row `delete_expired` removed; only its number is read.
 #[derive(Debug, SurrealValue)]
 struct RemovedRow {
@@ -81,6 +109,10 @@ struct RefreshTokenRow {
     /// before schema v109: such a token is bound to no key.
     #[surreal(default)]
     dpop_jkt: Option<String>,
+    /// #844 — see [`RefreshToken::lineage_id`]. Absent on every row written
+    /// before schema v115; [`decode_lineage`] reads that as `session_id`.
+    #[surreal(default)]
+    lineage_id: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -124,6 +156,10 @@ struct RefreshTokenRowWithId {
     /// before schema v109: such a token is bound to no key.
     #[surreal(default)]
     dpop_jkt: Option<String>,
+    /// #844 — see [`RefreshToken::lineage_id`]. Absent on every row written
+    /// before schema v115; [`decode_lineage`] reads that as `session_id`.
+    #[surreal(default)]
+    lineage_id: Option<String>,
 }
 
 impl RefreshTokenRowWithId {
@@ -132,6 +168,7 @@ impl RefreshTokenRowWithId {
             .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
         let tenant_id = Uuid::parse_str(&self.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let session_id = parse_opt_session(self.session_id.as_deref())?;
         let user_id = self
             .user_id
             .map(|uid| {
@@ -147,7 +184,8 @@ impl RefreshTokenRowWithId {
             client_id: self.client_id,
             user_id,
             scopes: self.scopes,
-            session_id: parse_opt_session(self.session_id.as_deref())?,
+            session_id,
+            lineage_id: decode_lineage(self.lineage_id.as_deref(), session_id)?,
             expires_at: self.expires_at,
             revoked: self.revoked,
             created_at: self.created_at,
@@ -221,11 +259,22 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
 
         let user_id_str = input.user_id.map(|u| u.to_string());
 
+        // #844: the lineage is the caller's when it has one (rotation copies
+        // the predecessor's), NONE for a grant with no session behind it, and
+        // otherwise resolved from the session in this same query — so an
+        // issue path costs no extra round trip and none of them has to know.
+        let lineage = match (input.lineage_id, input.session_id) {
+            (Some(_), _) => "LET $lineage = $lineage_in;",
+            (None, None) => "LET $lineage = NONE;",
+            (None, Some(_)) => RESOLVE_LINEAGE,
+        };
+
         let result = self
             .db
             .current()
-            .query(
-                "CREATE type::record('oauth2_refresh_token', $id) SET \
+            .query(format!(
+                "{lineage} \
+                 CREATE type::record('oauth2_refresh_token', $id) SET \
                  tenant_id = $tenant_id, \
                  token_hash = $token_hash, \
                  client_id = $client_id, \
@@ -238,10 +287,12 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
                  acr = $acr, \
                  amr = $amr, \
                  dpop_jkt = $dpop_jkt, \
+                 lineage_id = $lineage, \
                  expires_at = $expires_at, \
-                 revoked = false",
-            )
+                 revoked = false"
+            ))
             .bind(("id", id_str.clone()))
+            .bind(("lineage_in", input.lineage_id.map(|l| l.to_string())))
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("token_hash", input.token_hash.clone()))
             .bind(("client_id", input.client_id.clone()))
@@ -262,11 +313,13 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        let rows: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        // Statement index 1: the CREATE (index 0 is the `LET`).
+        let rows: Vec<RefreshTokenRow> = result.take(1).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "oauth2_refresh_token", &id_str)?;
 
         let tenant_id = Uuid::parse_str(&row.tenant_id)
             .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
+        let session_id = parse_opt_session(row.session_id.as_deref())?;
         let user_id = row
             .user_id
             .map(|uid| {
@@ -282,7 +335,8 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
             client_id: row.client_id,
             user_id,
             scopes: row.scopes,
-            session_id: parse_opt_session(row.session_id.as_deref())?,
+            session_id,
+            lineage_id: decode_lineage(row.lineage_id.as_deref(), session_id)?,
             expires_at: row.expires_at,
             revoked: row.revoked,
             created_at: row.created_at,
@@ -556,6 +610,57 @@ impl<C: Connection> RefreshTokenRepository for SurrealRefreshTokenRepository<C> 
         Ok(rows.len() as u64)
     }
 
+    async fn revoke_all_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        session_id: Uuid,
+    ) -> AxiamResult<u64> {
+        // #844 (D-N43): two statements, one round trip, each on an index —
+        // `(tenant_id, lineage_id)` and `(tenant_id, session_id)` — rather than
+        // one `OR` the planner may answer with a scan.
+        //
+        // The second covers what the first cannot see: rows written before
+        // v115 (and by an older binary during a rolling upgrade) carry no
+        // lineage, and theirs is their `session_id` — so a row issued under
+        // the lineage's first session matches `session_id = $lineage_id`, and
+        // one issued under the session being logged out matches
+        // `session_id = $session_id`. Every row either clause reaches is in
+        // this lineage, so neither widens the scope beyond it.
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE oauth2_refresh_token SET revoked = true \
+                 WHERE tenant_id = $tenant_id \
+                   AND lineage_id = $lineage_id \
+                   AND revoked = false \
+                 RETURN AFTER; \
+                 UPDATE oauth2_refresh_token SET revoked = true \
+                 WHERE tenant_id = $tenant_id \
+                   AND session_id IN $session_ids \
+                   AND revoked = false \
+                 RETURN AFTER",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("lineage_id", lineage_id.to_string()))
+            .bind((
+                "session_ids",
+                vec![lineage_id.to_string(), session_id.to_string()],
+            ))
+            .await
+            .map_err(DbError::from)?;
+
+        // A statement-level failure must surface: a logout told "revoked"
+        // when nothing was is the half-ended state D-N43 refuses.
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let by_lineage: Vec<RefreshTokenRow> = result.take(0).map_err(DbError::from)?;
+        let by_session: Vec<RefreshTokenRow> = result.take(1).map_err(DbError::from)?;
+        Ok((by_lineage.len() + by_session.len()) as u64)
+    }
+
     async fn revoke_all_for_client(&self, tenant_id: Uuid, client_id: &str) -> AxiamResult<u64> {
         let mut result = self
             .db
@@ -671,6 +776,7 @@ mod tests {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         })
         .await
         .unwrap()
@@ -704,6 +810,7 @@ mod tests {
                 auth_time: None,
                 acr: None,
                 amr: Vec::new(),
+                lineage_id: None,
             })
             .await
             .unwrap();
@@ -751,6 +858,7 @@ mod tests {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -805,6 +913,7 @@ mod tests {
                 auth_time: Some(authenticated_at),
                 acr: Some("urn:axiam:acr:mfa".into()),
                 amr: amr.clone(),
+                lineage_id: None,
             })
             .await
             .unwrap();
@@ -854,6 +963,7 @@ mod tests {
             auth_time: Some(Utc::now()),
             acr: Some("urn:axiam:acr:1fa".into()),
             amr: vec![Amr::Pwd],
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -902,6 +1012,7 @@ mod tests {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         };
         let created = repo.create(input.clone()).await.unwrap();
         assert_eq!(created.dpop_jkt.as_deref(), Some("jkt-of-the-device-key"));
@@ -1165,6 +1276,7 @@ mod tests {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -1272,6 +1384,148 @@ mod tests {
                 .unwrap(),
             0,
             "idempotent: nothing left to revoke"
+        );
+    }
+
+    /// #844 — a code issued under a session that has already rotated once
+    /// (`second`, lineage `first`) and is redeemed after it rotated again: the
+    /// row the code names is gone, so the lineage comes from the participant
+    /// record written at `/oauth2/authorize`. Without that fallback the grant
+    /// would land in a lineage of its own, `second`, that no logout of the
+    /// live row ever names. A lineage logout then revokes it; the pre-v115
+    /// shape (no lineage on the row) is matched by its `session_id`.
+    #[tokio::test]
+    async fn a_code_redeemed_after_a_rotation_joins_the_lineage_it_was_issued_in() {
+        use crate::repository::session::SurrealSessionRepository;
+        use crate::repository::session_client::SurrealSessionClientRepository;
+        use axiam_core::models::oauth2_client::CreateSessionClient;
+        use axiam_core::models::session::CreateSession;
+        use axiam_core::repository::{SessionClientRepository, SessionRepository};
+
+        let db = setup_db().await;
+        let repo = SurrealRefreshTokenRepository::new(db.clone());
+        let sessions = SurrealSessionRepository::new(db.clone());
+        let participants = SurrealSessionClientRepository::new(db.clone());
+        let (tenant_id, user_id) = (Uuid::new_v4(), Uuid::new_v4());
+        let session = |lineage_id| CreateSession {
+            tenant_id,
+            user_id,
+            token_hash: Uuid::new_v4().to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: Vec::new(),
+            browser_token_hash: None,
+            lineage_id,
+        };
+
+        let first = sessions.create(session(None)).await.unwrap();
+        assert_eq!(
+            first.lineage_id, first.id,
+            "a new lineage is keyed by its first row"
+        );
+        assert!(sessions.consume(tenant_id, first.id).await.unwrap());
+        let second = sessions.create(session(Some(first.id))).await.unwrap();
+        assert_eq!(second.lineage_id, first.id, "rotation keeps the lineage");
+
+        // The client joins under `second`, then the console refreshes again.
+        let joined = participants
+            .record(CreateSessionClient {
+                tenant_id,
+                session_id: second.id,
+                client_id: "oa_rp".into(),
+                user_id,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            joined.lineage_id, first.id,
+            "the participant captured the lineage"
+        );
+        assert!(sessions.consume(tenant_id, second.id).await.unwrap());
+        let live = sessions.create(session(Some(first.id))).await.unwrap();
+
+        issue_in_session(&repo, tenant_id, "late-code", user_id, "oa_rp", second.id).await;
+        let grant = repo
+            .get_by_token_hash(tenant_id, "late-code")
+            .await
+            .unwrap();
+        assert_eq!(
+            grant.session_id,
+            Some(second.id),
+            "the sid is the one the code named"
+        );
+        assert_eq!(
+            grant.lineage_id,
+            Some(first.id),
+            "and the lineage is the sign-in's"
+        );
+        assert_eq!(
+            sessions
+                .lineage_of(tenant_id, second.id)
+                .await
+                .unwrap()
+                .map(|l| (l.lineage_id, l.user_id)),
+            Some((first.id, user_id)),
+            "a rotated-away id resolves to its lineage and its user"
+        );
+
+        // A row of the lineage's first session written before v115.
+        issue_in_session(&repo, tenant_id, "legacy", user_id, "oa_old", first.id).await;
+        db.query("UPDATE oauth2_refresh_token SET lineage_id = NONE WHERE token_hash = 'legacy'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        // And a grant of another sign-in of the same user, untouched below.
+        let other = sessions.create(session(None)).await.unwrap();
+        issue_in_session(&repo, tenant_id, "other", user_id, "oa_rp", other.id).await;
+
+        let revoked = repo
+            .revoke_all_for_lineage(tenant_id, first.id, live.id)
+            .await
+            .unwrap();
+        assert_eq!(revoked, 2, "the late code's grant and the pre-v115 row");
+        assert!(repo.get_by_token_hash(tenant_id, "other").await.is_ok());
+        assert_eq!(
+            repo.revoke_all_for_lineage(tenant_id, first.id, live.id)
+                .await
+                .unwrap(),
+            0,
+            "idempotent"
+        );
+
+        let ended = sessions
+            .invalidate_lineage(tenant_id, first.id, user_id, None)
+            .await
+            .unwrap();
+        assert_eq!(ended, 1, "the lineage's one live row");
+        assert!(sessions.get_by_id(tenant_id, live.id).await.is_err());
+        assert!(sessions.get_by_id(tenant_id, other.id).await.is_ok());
+        assert_eq!(
+            sessions
+                .invalidate_lineage(tenant_id, other.id, Uuid::new_v4(), None)
+                .await
+                .unwrap(),
+            0,
+            "never another user's session"
+        );
+        assert!(sessions.get_by_id(tenant_id, other.id).await.is_ok());
+
+        assert_eq!(
+            participants
+                .delete_for_lineage(tenant_id, first.id)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            participants
+                .list_for_lineage(tenant_id, first.id)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 }

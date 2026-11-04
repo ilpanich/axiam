@@ -286,6 +286,7 @@ where
                     dpop_jkt: refresh_jkt.clone(),
                     expires_at: Utc::now()
                         + chrono::Duration::seconds(self.refresh_token_lifetime_secs),
+                    lineage_id: None,
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;

@@ -352,6 +352,7 @@ async fn export_includes_real_session_metadata() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();

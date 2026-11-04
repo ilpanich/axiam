@@ -196,6 +196,7 @@ async fn give_live_credentials(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: U
             authenticated_at: chrono::Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .expect("create session");
@@ -216,6 +217,7 @@ async fn give_live_credentials(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: U
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         })
         .await
         .expect("create oauth2 refresh token");

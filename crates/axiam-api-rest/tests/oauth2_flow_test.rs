@@ -1498,6 +1498,7 @@ async fn signed_in_session(
             authenticated_at: chrono::Utc::now(),
             amr: vec![Amr::Pwd],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .expect("session");
@@ -3188,6 +3189,7 @@ async fn t2_6_an_ignore_lane_client_gets_the_same_id_token_though_the_session_no
             authenticated_at,
             amr: vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .expect("session");

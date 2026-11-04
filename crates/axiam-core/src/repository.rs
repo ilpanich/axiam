@@ -64,7 +64,7 @@ use crate::models::{
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
-    session::{CreateSession, Session},
+    session::{CreateSession, Session, SessionLineage},
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     uma::{CreatePermissionTicket, PermissionTicket},
@@ -1241,6 +1241,54 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate a single session.
     fn invalidate(&self, tenant_id: Uuid, id: Uuid)
     -> impl Future<Output = AxiamResult<()>> + Send;
+    /// #844 — which lineage `session_id` belongs to, whether or not the
+    /// session is still live.
+    ///
+    /// Answered by the live row when there is one, and otherwise by what a
+    /// row that recorded the id says: a session participant, or a refresh
+    /// token issued under it. `None` when nothing in the tenant ever recorded
+    /// the id — a session that never issued a grant and has since rotated, or
+    /// an id that was never a session here.
+    ///
+    /// The default answers from the live row alone, which is the pre-#844
+    /// reach; the datastore implementation overrides it.
+    fn lineage_of(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<SessionLineage>>> + Send {
+        async move {
+            match self.get_by_id(tenant_id, session_id).await {
+                Ok(s) => Ok(Some(SessionLineage {
+                    lineage_id: s.lineage_id,
+                    user_id: s.user_id,
+                })),
+                Err(AxiamError::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+    /// #844 — invalidate every live session of `lineage_id` that belongs to
+    /// `user_id`, except `except`. Returns the number invalidated.
+    ///
+    /// Each is ended exactly as [`Self::invalidate`] ends one — validity
+    /// cache, revocation feed and SSF sink included. In practice a lineage
+    /// has one live row (rotation consumes the old row before it creates the
+    /// new one), and this is how a logout handed a rotated-away id reaches
+    /// it. The `user_id` filter is defence in depth: a lineage is only ever
+    /// learnt from a row of that user.
+    ///
+    /// The default invalidates nothing, which is the pre-#844 reach.
+    fn invalidate_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        user_id: Uuid,
+        except: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send {
+        let _ = (tenant_id, lineage_id, user_id, except);
+        async { Ok(0) }
+    }
     /// Atomically consume (delete) a single session, returning `true` iff this
     /// call removed the row. Unlike [`Self::invalidate`] (idempotent, always
     /// `Ok(())`), this is the single-use gate for refresh-token rotation
@@ -2221,6 +2269,27 @@ pub trait SessionClientRepository: Send + Sync {
         tenant_id: Uuid,
         session_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// #844 — every participation record of a session **lineage**, in
+    /// insertion order: those that recorded `lineage_id`, and those written
+    /// before schema v115 under the session that keys it.
+    ///
+    /// Each record keeps the `session_id` it was written under, which is the
+    /// `sid` that client's ID token carried — and therefore the one its
+    /// back-channel logout token must carry for the relying party to match it.
+    fn list_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<SessionClient>>> + Send;
+
+    /// #844 — drop a lineage's participation records (the set
+    /// [`Self::list_for_lineage`] returns). Returns the number deleted.
+    fn delete_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Storage for UMA 2.0 permission tickets (X2).
@@ -2586,6 +2655,34 @@ pub trait RefreshTokenRepository: Send + Sync {
         tenant_id: Uuid,
         session_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// #844 (D-N43) — revoke every refresh token of a session **lineage**: the
+    /// tokens that recorded `lineage_id`, those of a row written before schema
+    /// v115 under the session that keys the lineage, and those issued under
+    /// `session_id` itself. Idempotent, and like
+    /// [`Self::revoke_all_for_session`] it does not stamp `rotated_at`.
+    ///
+    /// This is the scope a logout ends. [`Self::revoke_all_for_session`]
+    /// stopped reaching a relying party's grant at the first console refresh,
+    /// because the refresh replaced the session row the grant named; the
+    /// lineage is what the replacement keeps.
+    ///
+    /// The default is the pre-#844 scope, `session_id` alone (and the lineage
+    /// key, which names the lineage's first session).
+    fn revoke_all_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send {
+        async move {
+            let mut total = self.revoke_all_for_session(tenant_id, session_id).await?;
+            if lineage_id != session_id {
+                total += self.revoke_all_for_session(tenant_id, lineage_id).await?;
+            }
+            Ok(total)
+        }
+    }
 
     /// Delete every refresh token of a user within a tenant, revoked or not
     /// (Art. 17 erasure). Idempotent — a user with no rows deletes none — so a

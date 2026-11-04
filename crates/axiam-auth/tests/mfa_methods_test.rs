@@ -937,6 +937,7 @@ async fn reset_mfa_revokes_the_users_oauth2_refresh_tokens() {
                 amr: Vec::new(),
                 dpop_jkt: None,
                 expires_at: chrono::Utc::now() + chrono::Duration::days(30),
+                lineage_id: None,
             })
             .await
             .unwrap();

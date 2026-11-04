@@ -89,6 +89,7 @@ async fn populate(db: &Surreal<Db>, tenant_id: Uuid) -> Uuid {
             authenticated_at: Utc::now(),
             amr: Vec::new(),
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();

@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#837). An SSO sign-in in flight at the moment of the upgrade is refused at
   its callback and must be started again. A non-browser client that drives the
   public federation endpoints must send the start and the completion through
-  the **same cookie jar** (`sdks/CONTRACT.md` §12.1 rule 12b); every AXIAM SDK
-  already does when one client instance is used for both.
+  the **same cookie jar** (`sdks/CONTRACT.md` §12.1 rule 12b). Use the SDK
+  releases at contract 1.66: the C and Swift SDKs before 1.66 did not carry the
+  start's cookie to the completion and would be refused; the other nine already
+  did when one client instance is used for both.
 
 ### Security
 

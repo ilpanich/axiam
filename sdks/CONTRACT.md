@@ -2326,8 +2326,11 @@ verifier, at the `jwks_uri` the discovery document advertises.
     client (login CSRF). The server reuses a binding the client already presents, so one client may
     run several sign-ins at once. Consequences for an SDK:
 
-    - The [§4](#§4-cookie-jar-requirement) jar already stores and presents the cookie; **no SDK code
-      change is expected**. An application MUST send the start and the completion of one sign-in
+    - The [§4](#§4-cookie-jar-requirement) jar stores and presents the cookie, so no SDK code change
+      is expected **where the federation calls use the jar**. The 1.66 ports found two that did not:
+      the C SDK sent the federated starts and completions on the jar-withholding `/oauth2/*`
+      transport, and the Swift SDK sent `sso_start`/`sso_start_oauth2` on a path that kept no
+      cookies; both are fixed in their 1.66 releases. An application MUST send the start and the completion of one sign-in
       through the **same client instance** (one jar). A backend relying party that builds a fresh
       client per HTTP request, or that starts on one replica's client and completes on another's,
       is refused at the completion and must keep the client — or at least its jar — for the
@@ -14331,8 +14334,8 @@ conformance at 1.65 and §37. The release number is the maintainer's, who tags (
 Contract 1.66 records three server changes made after the 1.2.0 release (issues #837, #838,
 #844). **It adds no management operation and no SDK operation**; the registry is unchanged.
 
-- **(a) Federated sign-in bound to the client that started it (normative rule, no SDK code change
-  expected; #837).** [§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 12b: start and
+- **(a) Federated sign-in bound to the client that started it (normative rule; code changes in the
+  C and Swift SDKs only; #837).** [§12.1](#§121-canonical-operation-set-and-endpoint-map) rule 12b: start and
   completion through one cookie jar; one confirming test per SDK.
 - **(b) `reauthenticate` on the three federated start requests (informative; #838).** §12.1 rule
   12c: an optional input an SDK MAY expose; no port required.

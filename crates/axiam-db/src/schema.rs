@@ -598,6 +598,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "oauth2_client_default_idp",
         sql: SCHEMA_V113,
     },
+    Migration {
+        version: 114,
+        name: "federation_browser_binding",
+        sql: SCHEMA_V114,
+    },
+    Migration {
+        version: 115,
+        name: "session_lineage",
+        sql: SCHEMA_V115,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5773,9 +5783,134 @@ const SCHEMA_V113: &str = "\
 DEFINE FIELD IF NOT EXISTS default_idp ON TABLE oauth2_client TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v114 — federated sign-in bound to the browser that started it (#837),
+// and re-authentication forwarded upstream (#838)
+// -----------------------------------------------------------------------
+//
+// - `federation_login_state.browser_binding_hash` and
+//   `sso_handoff_code.browser_binding_hash`: the SHA-256 of the
+//   `__Host-axiam_fed_bind` cookie the start endpoint set on the browser that
+//   began the sign-in, copied onto the handoff row when a cross-site return
+//   mints one. The same-origin completions compare the cookie their request
+//   carries with it (login CSRF, #837).
+// - `federation_login_state.reauthenticate_after`: on a re-authentication hop,
+//   the earliest upstream authentication instant the callback accepts (#838).
+//
+// Three optional columns, **no `DEFAULT` and no backfill**. Both tables hold
+// rows for minutes (ten and one), so there is nothing worth migrating: a row
+// written by the previous binary reads `NONE`, and the public completions
+// refuse a row that names no browser — an in-flight sign-in at the moment of
+// the upgrade is retried, which is the whole cost. No index: both columns are
+// read from a row already fetched by its unique key.
+const SCHEMA_V114: &str = "\
+DEFINE FIELD IF NOT EXISTS browser_binding_hash ON TABLE federation_login_state TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS reauthenticate_after ON TABLE federation_login_state TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS browser_binding_hash ON TABLE sso_handoff_code TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v115 — the session lineage key (#844, D-N43)
+// -----------------------------------------------------------------------
+//
+// A console refresh replaces the `session` row, so the id an OAuth2 grant or a
+// session participant recorded stops naming a live session fifteen minutes
+// after the sign-in, and a logout of the current row no longer reached them.
+// `lineage_id` is the key that survives the rotation: written on the session
+// (and copied by rotation), on each refresh-token row and on each participant.
+//
+// Additive, and deliberately **no backfill** (the #729 rule: every migration
+// since 1.1.0 is `DEFINE … IF NOT EXISTS` only). Absence has one meaning on
+// every table and every reader applies it: a row without a lineage belongs to
+// the lineage keyed by its own session — the session row's id, or a
+// refresh-token / participant row's `session_id`. That is exactly the value a
+// backfill would have written, since a new lineage is keyed by the id of the
+// session that starts it, and it is also what a row written by an older binary
+// during a rolling upgrade needs. The queries that end a lineage therefore
+// match `lineage_id = $l` and, for those rows, `session_id = $l`.
+//
+// What no migration can recover: a session that rotated *before* the upgrade
+// has already lost the id its older grants name. Those grants end as they did
+// before — by expiry, or by a user-wide revocation.
+const SCHEMA_V115: &str = "\
+DEFINE FIELD IF NOT EXISTS lineage_id ON TABLE session TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_session_lineage ON TABLE session FIELDS tenant_id, lineage_id;
+DEFINE FIELD IF NOT EXISTS lineage_id ON TABLE oauth2_refresh_token TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_refresh_token_lineage ON TABLE oauth2_refresh_token FIELDS tenant_id, lineage_id;
+DEFINE FIELD IF NOT EXISTS lineage_id ON TABLE session_client TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_session_client_lineage ON TABLE session_client FIELDS tenant_id, lineage_id;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #837/#838 — v114 is three optional columns on the two short-lived
+    /// federation tables, and nothing else: no `DEFAULT`, no backfill, no index.
+    #[test]
+    fn v114_adds_only_the_browser_binding_and_reauthentication_columns() {
+        let statements: Vec<&str> = SCHEMA_V114
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS browser_binding_hash ON TABLE federation_login_state \
+                 TYPE option<string>",
+                "DEFINE FIELD IF NOT EXISTS reauthenticate_after ON TABLE federation_login_state \
+                 TYPE option<datetime>",
+                "DEFINE FIELD IF NOT EXISTS browser_binding_hash ON TABLE sso_handoff_code \
+                 TYPE option<string>",
+            ],
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT ",
+            "INDEX",
+        ] {
+            assert!(
+                !SCHEMA_V114.contains(forbidden),
+                "v114 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V114));
+    }
+
+    /// #844 — v115 is the three optional `lineage_id` columns and their
+    /// tenant-scoped indexes, and nothing else: no `DEFAULT`, no backfill.
+    #[test]
+    fn v115_adds_only_the_lineage_columns_and_indexes() {
+        let statements: Vec<&str> = SCHEMA_V115
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(statements.len(), 6, "{statements:?}");
+        for table in ["session", "oauth2_refresh_token", "session_client"] {
+            assert!(
+                SCHEMA_V115.contains(&format!(
+                    "DEFINE FIELD IF NOT EXISTS lineage_id ON TABLE {table} TYPE option<string>"
+                )),
+                "{table} gains an optional lineage_id"
+            );
+            assert!(
+                SCHEMA_V115.contains(&format!("ON TABLE {table} FIELDS tenant_id, lineage_id")),
+                "{table} indexes it under the tenant"
+            );
+        }
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT "] {
+            assert!(
+                !SCHEMA_V115.contains(forbidden),
+                "v115 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V115));
+    }
 
     /// G-B (#817) — v113 is the one optional `default_idp` column on
     /// `oauth2_client`, and nothing else: no `DEFAULT`, no backfill, no index.
@@ -7869,9 +8004,12 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&113),
-            "v113 is the newest migration (G-B, #817 — `oauth2_client.default_idp`, a \
-             client's default sign-in provider, optional, absent reading as none); v112 was \
+            Some(&115),
+            "v115 is the newest migration (#844, D-N43 — `lineage_id` on `session`, \
+             `oauth2_refresh_token` and `session_client`, the session lineage key a logout \
+             ends, optional, absent reading as the row's own session id); v114 is #837/#838; \
+             v113 was G-B, #817 — `oauth2_client.default_idp`, a \
+             client's default sign-in provider, optional, absent reading as none; v112 was \
              G-A, #816, D-N10 — the `federation_id_token_replay` \
              table, the native sign-in replay store, additive; v111 was G-A, #816 — \
              `federation_config.native_login_enabled`, \

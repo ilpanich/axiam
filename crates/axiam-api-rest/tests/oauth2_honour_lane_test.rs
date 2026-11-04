@@ -273,6 +273,7 @@ async fn session_token(
             authenticated_at: chrono::Utc::now() - age,
             amr,
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .expect("session");

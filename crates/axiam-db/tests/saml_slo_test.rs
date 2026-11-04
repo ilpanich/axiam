@@ -445,6 +445,7 @@ async fn a_live_session(db: &Surreal<Db>, tenant_id: Uuid, user_id: Uuid) -> Uui
             authenticated_at: Utc::now(),
             amr: Vec::new(),
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap()

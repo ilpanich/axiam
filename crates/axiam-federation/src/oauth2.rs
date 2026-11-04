@@ -141,12 +141,17 @@ where
     /// `pkce_challenge` is not optional in the caller's sense: the REST layer
     /// always generates a pair for this protocol, because `state` alone is all
     /// that would otherwise bind the code to the browser that started the flow.
+    ///
+    /// `reauthenticate` adds [`crate::reauth::oauth2_params`] for the kinds
+    /// that have a re-authentication parameter, and nothing for the rest
+    /// (#838).
     pub async fn build_oauth2_authorization_url(
         &self,
         config: &FederationConfig,
         redirect_uri: &str,
         state: &str,
         pkce_challenge: &str,
+        reauthenticate: bool,
     ) -> Result<AuthorizationUrl, FederationError> {
         if !config.enabled {
             return Err(FederationError::ConfigDisabled);
@@ -187,6 +192,13 @@ where
             .append_pair("state", state)
             .append_pair("code_challenge", pkce_challenge)
             .append_pair("code_challenge_method", crate::pkce::CHALLENGE_METHOD);
+
+        if reauthenticate {
+            let mut pairs = url.query_pairs_mut();
+            for (k, v) in crate::reauth::oauth2_params(config.provider_kind) {
+                pairs.append_pair(k, v);
+            }
+        }
 
         info!(
             tenant_id = %config.tenant_id,

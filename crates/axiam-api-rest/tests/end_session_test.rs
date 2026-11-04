@@ -210,6 +210,7 @@ async fn new_session(f: &Fixture) -> Uuid {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap()
@@ -755,6 +756,105 @@ async fn ending_a_session_clears_its_participation_rows() {
         .await
         .unwrap();
     assert!(rows.is_empty(), "participation rows must be cleared");
+}
+
+/// #844 (D-N43), the mirror case: an RP logs out with an `id_token_hint`
+/// minted before the console session refreshed. The hint's `sid` names a row
+/// the refresh replaced; the logout resolves it to its lineage and ends the
+/// console session that is live now, revokes the grant, and clears the
+/// lineage's participation rows. The user's other sign-in survives.
+#[actix_web::test]
+async fn a_hint_from_before_a_console_refresh_ends_the_live_sso_session() {
+    use axiam_core::models::oauth2_client::{CreateRefreshToken, CreateSessionClient};
+    use axiam_core::repository::RefreshTokenRepository;
+    use axiam_db::SurrealRefreshTokenRepository;
+
+    let f = setup().await;
+    let app = test_app!(f);
+    let sessions = SurrealSessionRepository::new(f.db.clone());
+    let first = new_session(&f).await;
+    let other_sign_in = new_session(&f).await;
+
+    // The RP joins at `/oauth2/authorize` and redeems its code under `first`.
+    SurrealSessionClientRepository::new(f.db.clone())
+        .record(CreateSessionClient {
+            tenant_id: f.tenant_id,
+            session_id: first,
+            client_id: f.client_id.clone(),
+            user_id: f.user_id,
+        })
+        .await
+        .unwrap();
+    let refresh_tokens = SurrealRefreshTokenRepository::new(f.db.clone());
+    let grant_hash = Uuid::new_v4().to_string();
+    refresh_tokens
+        .create(CreateRefreshToken {
+            tenant_id: f.tenant_id,
+            token_hash: grant_hash.clone(),
+            client_id: f.client_id.clone(),
+            user_id: Some(f.user_id),
+            scopes: vec!["openid".into()],
+            session_id: Some(first),
+            requested_userinfo_claims: vec![],
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: vec![],
+            dpop_jkt: None,
+            lineage_id: None,
+            expires_at: Utc::now() + Duration::days(1),
+        })
+        .await
+        .unwrap();
+
+    // The console refresh, as `AuthService::refresh` performs it: the row is
+    // consumed and replaced under a new id, inheriting the lineage.
+    let row = sessions.get_by_id(f.tenant_id, first).await.unwrap();
+    assert!(sessions.consume(f.tenant_id, first).await.unwrap());
+    let current = sessions
+        .create(CreateSession {
+            tenant_id: f.tenant_id,
+            user_id: f.user_id,
+            token_hash: Uuid::new_v4().to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + Duration::hours(1),
+            authenticated_at: row.authenticated_at,
+            amr: vec![],
+            browser_token_hash: None,
+            lineage_id: Some(row.lineage_id),
+        })
+        .await
+        .unwrap()
+        .id;
+
+    let hint = id_token_for(&f, &f.client_id, Some(first));
+    let (status, _) = end_session!(app, &f, format!("&id_token_hint={hint}"));
+    assert_eq!(status, 200);
+
+    assert!(
+        !session_is_live(&f, current).await,
+        "the live console session of the lineage must end"
+    );
+    assert!(
+        session_is_live(&f, other_sign_in).await,
+        "the user's other sign-in is another lineage and must survive"
+    );
+    let grant = refresh_tokens
+        .get_by_token_hash(f.tenant_id, &grant_hash)
+        .await;
+    assert!(
+        grant.map(|g| g.revoked).unwrap_or(true),
+        "the grant's refresh token must be revoked"
+    );
+    let rows = SurrealSessionClientRepository::new(f.db.clone())
+        .list_for_lineage(f.tenant_id, first)
+        .await
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "the lineage's participation rows are cleared"
+    );
 }
 
 // ---------------------------------------------------------------------------

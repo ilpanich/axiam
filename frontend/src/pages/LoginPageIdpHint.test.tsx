@@ -305,6 +305,8 @@ describe("LoginPage — idp on a re-authentication hop", () => {
     await user.click(suggested);
     expect(startCalls()).toHaveLength(1);
     expect(startCalls()[0][1]).toEqual(expect.objectContaining({ federation_config_id: IDP }));
+    // #838 — and the start asks the provider to authenticate the person again.
+    expect(startCalls()[0][1]).toEqual(expect.objectContaining({ reauthenticate: true }));
   });
 
   /**
@@ -330,6 +332,8 @@ describe("LoginPage — idp on a re-authentication hop", () => {
     await screen.findByTestId("idp-auto-redirect");
     await advance(1600);
     expect(startCalls()).toHaveLength(1);
+    // #838 — an ordinary sign-in's start body is unchanged.
+    expect(startCalls()[0][1]).not.toHaveProperty("reauthenticate");
   });
 
   it.each([

@@ -907,6 +907,7 @@ async fn give_bob_everything(h: &Harness) -> Held {
             amr: vec![Amr::Pwd],
             dpop_jkt: None,
             expires_at: Utc::now() + ChronoDuration::hours(1),
+            lineage_id: None,
         })
         .await
         .unwrap();

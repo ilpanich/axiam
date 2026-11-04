@@ -6924,10 +6924,25 @@ pub(crate) async fn dispatch_backchannel_logout<C: Connection + Clone>(
     // would be dropped by every conforming RP.
     request_issuer: Option<&str>,
 ) {
+    // #844 (D-N43) — the participants of the session's **lineage**, not of the
+    // one row: a relying party that joined before a console refresh recorded
+    // the id the refresh replaced, and was told nothing when the replacement
+    // was logged out. An id nothing ever recorded keeps the pre-#844 scope.
+    let lineage_id = match state.session_repo.lineage_of(tenant_id, session_id).await {
+        Ok(lineage) => lineage.map_or(session_id, |l| l.lineage_id),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not resolve the session lineage for logout; notifying the \
+                 participants of the named session only"
+            );
+            session_id
+        }
+    };
     let participants = match state
         .oauth2
         .session_client_repo
-        .list_for_session(tenant_id, session_id)
+        .list_for_lineage(tenant_id, lineage_id)
         .await
     {
         Ok(rows) => rows,
@@ -6968,16 +6983,31 @@ pub(crate) async fn dispatch_backchannel_logout<C: Connection + Clone>(
         .unwrap_or_else(|| state.auth_config.effective_issuer())
         .to_string();
     let auth_config = state.auth_config.clone();
-    let participant_ids: Vec<String> = participants.into_iter().map(|p| p.client_id).collect();
+    let participant_count = participants.len();
 
-    let deliveries = crate::backchannel_logout::select_targets(
-        &participant_ids,
+    // #844 — one fan-out per `sid` the lineage's clients were issued under,
+    // because the logout token must carry the `sid` the relying party holds
+    // (Back-Channel Logout 1.0 §2.4): for a client that joined before a
+    // console refresh, that is the id the refresh replaced. Within one `sid`
+    // each client is told once, as before. A client that joined under two
+    // ids of the lineage holds two sessions in its own terms and is told
+    // about both.
+    let mut by_sid: std::collections::BTreeMap<Uuid, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for p in participants {
+        by_sid.entry(p.session_id).or_default().push(p.client_id);
+    }
+
+    let mut deliveries = Vec::new();
+    for (sid, participant_ids) in &by_sid {
+        deliveries.extend(crate::backchannel_logout::select_targets(
+        participant_ids,
         &clients,
         |client_id| {
             match axiam_oauth2::logout::issue_logout_token(
                 &issuer,
                 client_id,
-                session_id,
+                *sid,
                 subject_id,
                 &auth_config,
             ) {
@@ -6999,7 +7029,8 @@ pub(crate) async fn dispatch_backchannel_logout<C: Connection + Clone>(
                 }
             }
         },
-    );
+    ));
+    }
 
     // One line naming every stage of the funnel, so a delivery that never
     // happens can be localised without a code read: how many clients joined
@@ -7008,7 +7039,7 @@ pub(crate) async fn dispatch_backchannel_logout<C: Connection + Clone>(
     // between those numbers has its own line above (or is the deliberate
     // "client registered no backchannel_logout_uri" skip in `select_targets`).
     tracing::debug!(
-        participants = participant_ids.len(),
+        participants = participant_count,
         clients = clients.len(),
         deliveries = deliveries.len(),
         "back-channel logout fan-out computed"
@@ -7019,7 +7050,7 @@ pub(crate) async fn dispatch_backchannel_logout<C: Connection + Clone>(
     let _ = state
         .oauth2
         .session_client_repo
-        .delete_for_session(tenant_id, session_id)
+        .delete_for_lineage(tenant_id, lineage_id)
         .await;
 
     if !deliveries.is_empty() {

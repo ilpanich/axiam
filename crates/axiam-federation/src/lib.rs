@@ -25,6 +25,7 @@ pub mod oidc;
 pub mod pkce;
 /// Which providers a tenant may sign in with, inheritance included.
 pub mod provider_resolution;
+pub mod reauth;
 #[cfg(feature = "saml")]
 pub mod saml;
 /// The bounded wait SAML signature verification gives the deployment's crypto

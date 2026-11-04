@@ -1279,6 +1279,13 @@ impl<
                 // authorization endpoint alone — invisibly, at a moment nothing
                 // in the interface corresponds to.
                 browser_token_hash: session.browser_token_hash,
+                // #844 (D-N43): **copied**, and for the reason this whole
+                // field exists. The new row has a new id; every OAuth2 grant
+                // and session participant recorded under the old one still
+                // names that id, and the lineage is how a logout of this row
+                // reaches them. A rotation that started a new lineage would be
+                // exactly the bug it fixes.
+                lineage_id: Some(session.lineage_id),
             })
             .await?;
         let session_create_us = t_create.elapsed().as_micros() as u64;
@@ -1363,23 +1370,74 @@ impl<
     /// live, a state the caller's own credential no longer reaches (its retry
     /// was a `401`, or a "signed out" page over a live refresh token).
     ///
+    /// # The lineage, not the row (#844, D-N43)
+    ///
+    /// A console refresh replaces the session row, so a relying party's grant
+    /// names an id that stopped being live at the first refresh after it was
+    /// issued — fifteen minutes in, with the default access-token lifetime.
+    /// Revoking by that id alone (D-N39 as first written) therefore missed
+    /// the common case. The scope is now the session's **lineage**
+    /// ([`Session::lineage_id`]): resolved from `session_id` first, whether
+    /// or not that row is still live
+    /// ([`SessionRepository::lineage_of`]), then
+    ///
+    /// - every refresh token of the lineage is revoked
+    ///   ([`RefreshTokenRepository::revoke_all_for_lineage`]) — the grants
+    ///   issued before the refresh as much as those issued after it;
+    /// - `session_id` is deleted, and so is the lineage's live row when
+    ///   `session_id` is an id it has rotated away from
+    ///   ([`SessionRepository::invalidate_lineage`]) — which is what ends the
+    ///   SSO session when a relying party logs out with an `id_token_hint`
+    ///   minted before the refresh.
+    ///
+    /// The lineage's live rows are ended only when they belong to the user
+    /// the lineage was learnt from, and a lineage is only ever learnt from a
+    /// row the datastore wrote. An id nothing ever recorded resolves to no
+    /// lineage and the logout keeps its pre-#844 scope, that id alone.
+    ///
+    /// The lineage read belongs to the revocation step: if it fails, nothing
+    /// is revoked or deleted and the logout is reported failed
+    /// (`refresh_tokens_revoke`), retryable as below.
+    ///
     /// The window between the two writes is one statement long. A refresh
     /// token of this session presented in it is already revoked; a console
-    /// refresh that consumes the session row in it moves the session to a new
-    /// id that this logout no longer reaches — the same outcome as that refresh
-    /// landing just before the logout, which no ordering prevents.
+    /// refresh that consumes the session row in it creates a row of the same
+    /// lineage, which the second write then ends too.
+    ///
+    /// [`Session::lineage_id`]: axiam_core::models::session::Session::lineage_id
     pub async fn logout(&self, tenant_id: Uuid, session_id: Uuid) -> AxiamResult<()> {
+        let lineage = match self.session_repo.lineage_of(tenant_id, session_id).await {
+            Ok(lineage) => lineage,
+            // Nothing attempted: the session stays, so the caller can retry.
+            Err(e) => return logout_outcome(tenant_id, session_id, Err(e), None),
+        };
+        let lineage_id = lineage.map_or(session_id, |l| l.lineage_id);
         let revoked = self
             .refresh_token_repo
-            .revoke_all_for_session(tenant_id, session_id)
+            .revoke_all_for_lineage(tenant_id, lineage_id, session_id)
             .await;
         let invalidated = match &revoked {
             Ok(count) => {
                 tracing::debug!(
-                    %tenant_id, %session_id, refresh_tokens_revoked = count,
-                    "logout: the session's OAuth2 refresh tokens are revoked"
+                    %tenant_id, %session_id, %lineage_id, refresh_tokens_revoked = count,
+                    "logout: the session lineage's OAuth2 refresh tokens are revoked"
                 );
-                Some(self.session_repo.invalidate(tenant_id, session_id).await)
+                let own = self.session_repo.invalidate(tenant_id, session_id).await;
+                Some(match (own, lineage) {
+                    (Ok(()), Some(l)) => self
+                        .session_repo
+                        .invalidate_lineage(tenant_id, l.lineage_id, l.user_id, Some(session_id))
+                        .await
+                        .map(|ended| {
+                            if ended > 0 {
+                                tracing::debug!(
+                                    %tenant_id, %session_id, %lineage_id, sessions_ended = ended,
+                                    "logout: the lineage's live session was ended too"
+                                );
+                            }
+                        }),
+                    (own, _) => own,
+                })
             }
             // Not attempted: the session stays, so the caller can retry.
             Err(_) => None,
@@ -1804,6 +1862,7 @@ impl<
                 authenticated_at: evidence.authenticated_at,
                 amr: evidence.amr,
                 browser_token_hash: Some(browser_token_hash),
+                lineage_id: None,
             })
             .await?;
 

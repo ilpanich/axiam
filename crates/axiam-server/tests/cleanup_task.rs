@@ -113,6 +113,8 @@ async fn cleanup_sweeps_expired_federation_login_state_rows() {
         request_id: String::new(),
         code_verifier: None,
         idp_redirect_uri: None,
+        browser_binding_hash: None,
+        reauthenticate_after: None,
     };
     let fresh_row = axiam_core::repository::FederationLoginState {
         state: "state-fresh".into(),
@@ -124,6 +126,8 @@ async fn cleanup_sweeps_expired_federation_login_state_rows() {
         request_id: String::new(),
         code_verifier: None,
         idp_redirect_uri: None,
+        browser_binding_hash: None,
+        reauthenticate_after: None,
     };
 
     repo.insert(&expired_row).await.expect("insert expired");
@@ -1202,6 +1206,7 @@ async fn a_swept_cimd_clients_grants_do_not_come_back_when_it_rematerialises() {
             amr: Vec::new(),
             dpop_jkt: None,
             expires_at: Utc::now() + chrono::Duration::days(90),
+            lineage_id: None,
         })
         .await
         .expect("refresh token");
@@ -4776,6 +4781,7 @@ async fn issue_refresh_token(
         acr: None,
         amr: Vec::new(),
         dpop_jkt: Some("thumbprint-of-the-device-key".into()),
+        lineage_id: None,
     })
     .await
     .unwrap();

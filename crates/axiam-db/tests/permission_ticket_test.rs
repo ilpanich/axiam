@@ -847,6 +847,7 @@ mod single_use_serialisation {
             auth_time: None,
             acr: None,
             amr: Vec::new(),
+            lineage_id: None,
         })
         .await
         .unwrap();

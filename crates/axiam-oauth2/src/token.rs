@@ -2705,6 +2705,7 @@ where
                     // public DPoP-bound client; `None` for every other client.
                     dpop_jkt: refresh_jkt,
                     expires_at: refresh_expires,
+                    lineage_id: None,
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
@@ -3399,6 +3400,10 @@ where
                 // request has just proved; `None` for every other client.
                 dpop_jkt: refresh_jkt,
                 expires_at: refresh_expires,
+                // #844: and the lineage, copied rather than re-resolved — the
+                // session `stored.session_id` names may be long gone, and the
+                // lineage it belonged to is what a logout ends.
+                lineage_id: stored.lineage_id,
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;

@@ -252,6 +252,25 @@ where
         acs_url: &str,
         relay_state: Option<String>,
     ) -> Result<SamlAuthnRequestResult, FederationError> {
+        self.build_authn_request_with(tenant_id, config_id, acs_url, relay_state, false)
+            .await
+    }
+
+    /// [`Self::build_authn_request`], optionally with `ForceAuthn="true"`.
+    ///
+    /// SAML 2.0 Core §3.4.1: an IdP receiving `ForceAuthn="true"` MUST
+    /// authenticate the presenter directly rather than rely on a previous
+    /// security context. It is how a re-authentication hop asks a SAML IdP for
+    /// what `prompt=login` asks of an OpenID provider (#838); the assertion's
+    /// `AuthnInstant` is then checked by the caller.
+    pub async fn build_authn_request_with(
+        &self,
+        tenant_id: Uuid,
+        config_id: Uuid,
+        acs_url: &str,
+        relay_state: Option<String>,
+        force_authn: bool,
+    ) -> Result<SamlAuthnRequestResult, FederationError> {
         let config = self
             .federation_config_repo
             .get_by_id(tenant_id, config_id)
@@ -310,6 +329,10 @@ where
                 format: Some(NAMEID_FORMAT_PERSISTENT.into()),
                 ..Default::default()
             }),
+            // Absent rather than `false` on an ordinary sign-in, so the
+            // request an IdP receives is byte-identical to the one it always
+            // received unless a re-authentication was asked for.
+            force_authn: force_authn.then_some(true),
             ..Default::default()
         };
 

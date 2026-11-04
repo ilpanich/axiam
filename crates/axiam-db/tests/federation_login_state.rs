@@ -30,6 +30,8 @@ fn fresh_row() -> FederationLoginState {
         request_id: String::new(),
         code_verifier: None,
         idp_redirect_uri: None,
+        browser_binding_hash: None,
+        reauthenticate_after: None,
     }
 }
 

@@ -1473,6 +1473,7 @@ async fn a_public_dpop_clients_unbound_refresh_token_is_refused() {
             amr: Vec::new(),
             dpop_jkt: None,
             expires_at: Utc::now() + Duration::days(1),
+            lineage_id: None,
         })
         .await
         .unwrap();

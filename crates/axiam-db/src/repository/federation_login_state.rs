@@ -38,6 +38,14 @@ struct FederationLoginStateRow {
     /// The `redirect_uri` actually sent to the IdP, when it differs from the
     /// SPA destination (schema v52; `response_mode=form_post` providers).
     idp_redirect_uri: Option<String>,
+    /// #837 — digest of the browser-binding cookie (schema v114). `None` on
+    /// every pre-v114 row and on the account-linking path's rows.
+    #[surreal(default)]
+    browser_binding_hash: Option<String>,
+    /// #838 — earliest acceptable upstream authentication instant (schema
+    /// v114). `None` for an ordinary sign-in.
+    #[surreal(default)]
+    reauthenticate_after: Option<DateTime<Utc>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +82,9 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
                  expires_at = $expires_at, \
                  request_id = $request_id, \
                  code_verifier = $code_verifier, \
-                 idp_redirect_uri = $idp_redirect_uri",
+                 idp_redirect_uri = $idp_redirect_uri, \
+                 browser_binding_hash = $browser_binding_hash, \
+                 reauthenticate_after = $reauthenticate_after",
             )
             .bind(("id", row_id))
             .bind(("state", row.state.clone()))
@@ -86,6 +96,8 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
             .bind(("request_id", row.request_id.clone()))
             .bind(("code_verifier", row.code_verifier.clone()))
             .bind(("idp_redirect_uri", row.idp_redirect_uri.clone()))
+            .bind(("browser_binding_hash", row.browser_binding_hash.clone()))
+            .bind(("reauthenticate_after", row.reauthenticate_after))
             .await
             .map_err(DbError::from)?;
 
@@ -110,7 +122,8 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
                 "BEGIN TRANSACTION; \
                  LET $row = (SELECT state, nonce, tenant_id, federation_config_id, \
                                redirect_uri, expires_at, request_id, \
-                               code_verifier, idp_redirect_uri \
+                               code_verifier, idp_redirect_uri, \
+                               browser_binding_hash, reauthenticate_after \
                              FROM federation_login_state \
                              WHERE state = $state LIMIT 1); \
                  DELETE federation_login_state WHERE state = $state; \
@@ -144,6 +157,8 @@ impl<C: Connection> FederationLoginStateRepository for SurrealFederationLoginSta
                     request_id: row.request_id.unwrap_or_default(),
                     code_verifier: row.code_verifier,
                     idp_redirect_uri: row.idp_redirect_uri,
+                    browser_binding_hash: row.browser_binding_hash,
+                    reauthenticate_after: row.reauthenticate_after,
                 };
 
                 // Check expiry in Rust — row was deleted; returning None here

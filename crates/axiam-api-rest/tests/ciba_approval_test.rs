@@ -284,6 +284,7 @@ async fn session_token(w: &World, user: Uuid, amr: Vec<Amr>) -> String {
             authenticated_at: Utc::now() - Duration::seconds(20),
             amr,
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();

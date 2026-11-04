@@ -10,6 +10,16 @@
 //! to authorize last, and the logout fan-out would silently skip every other
 //! RP the user was signed into: the exact failure back-channel logout exists
 //! to prevent.
+//!
+//! # The lineage (#844)
+//!
+//! A record keeps the `session_id` it was written under, because that is the
+//! `sid` the client's ID token carried and the one its logout token must
+//! carry. It also records the session's **lineage**, resolved from the live
+//! session row in the same statement, because a console refresh replaces that
+//! row: a logout of the replacement finds the record by lineage, and a record
+//! written before schema v115 is found by its `session_id`, which is the key of
+//! the lineage it belonged to.
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
@@ -24,8 +34,8 @@ use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::CountRow;
 
-const SELECT_FIELDS: &str =
-    "meta::id(id) AS record_id, tenant_id, session_id, client_id, user_id, created_at";
+const SELECT_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, session_id, client_id, \
+     user_id, created_at, lineage_id";
 
 #[derive(Debug, SurrealValue)]
 struct SessionClientRow {
@@ -35,6 +45,10 @@ struct SessionClientRow {
     client_id: String,
     user_id: String,
     created_at: DateTime<Utc>,
+    /// #844 — absent on every record written before schema v115; read as
+    /// `session_id` (see the module docs).
+    #[surreal(default)]
+    lineage_id: Option<String>,
 }
 
 impl SessionClientRow {
@@ -42,10 +56,16 @@ impl SessionClientRow {
         let parse = |raw: &str, what: &str| {
             Uuid::parse_str(raw).map_err(|e| DbError::Migration(format!("invalid {what}: {e}")))
         };
+        let session_id = parse(&self.session_id, "session UUID")?;
+        let lineage_id = match self.lineage_id.as_deref() {
+            None | Some("") => session_id,
+            Some(raw) => parse(raw, "session lineage UUID")?,
+        };
         Ok(SessionClient {
             id: parse(&self.record_id, "session_client UUID")?,
             tenant_id: parse(&self.tenant_id, "tenant UUID")?,
-            session_id: parse(&self.session_id, "session UUID")?,
+            session_id,
+            lineage_id,
             client_id: self.client_id,
             user_id: parse(&self.user_id, "user UUID")?,
             created_at: self.created_at,
@@ -72,11 +92,18 @@ impl<C: Connection> SessionClientRepository for SurrealSessionClientRepository<C
             .db
             .current()
             .query(format!(
-                "LET $created = (CREATE type::record('session_client', $id) SET \
+                // #844: the live session's lineage (its own id for a row
+                // written before v115), or the session id when the row is
+                // already gone — the pre-#844 scope, never a wider one.
+                "LET $lineage = array::first((SELECT VALUE lineage_id ?? meta::id(id) \
+                     FROM type::record('session', $session_id) \
+                     WHERE tenant_id = $tenant_id)) ?? $session_id; \
+                 LET $created = (CREATE type::record('session_client', $id) SET \
                      tenant_id = $tenant_id, \
                      session_id = $session_id, \
                      client_id = $client_id, \
-                     user_id = $user_id); \
+                     user_id = $user_id, \
+                     lineage_id = $lineage); \
                  SELECT {SELECT_FIELDS} FROM $created"
             ))
             .bind(("id", id.to_string()))
@@ -87,7 +114,8 @@ impl<C: Connection> SessionClientRepository for SurrealSessionClientRepository<C
             .await
             .map_err(DbError::from)?;
 
-        let rows: Vec<SessionClientRow> = result.take(1).map_err(DbError::from)?;
+        // Statement index 2: the projected SELECT (0 and 1 are the `LET`s).
+        let rows: Vec<SessionClientRow> = result.take(2).map_err(DbError::from)?;
         rows.into_iter()
             .next()
             .ok_or_else(|| DbError::Migration("session_client insert returned no row".into()))?
@@ -136,5 +164,67 @@ impl<C: Connection> SessionClientRepository for SurrealSessionClientRepository<C
 
         let rows: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
         Ok(rows.first().map(|r| r.total).unwrap_or(0))
+    }
+
+    async fn list_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+    ) -> AxiamResult<Vec<SessionClient>> {
+        // Two indexed reads, one round trip: the records that captured the
+        // lineage, and those written before v115 under the session that keys
+        // it. A record can satisfy both (the lineage's first session, written
+        // after v115); it is returned once.
+        let mut result = self
+            .db
+            .current()
+            .query(format!(
+                "SELECT {SELECT_FIELDS} FROM session_client \
+                 WHERE tenant_id = $tenant_id AND lineage_id = $lineage_id; \
+                 SELECT {SELECT_FIELDS} FROM session_client \
+                 WHERE tenant_id = $tenant_id AND session_id = $lineage_id \
+                   AND lineage_id = NONE"
+            ))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("lineage_id", lineage_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let mut rows: Vec<SessionClientRow> = result.take(0).map_err(DbError::from)?;
+        let legacy: Vec<SessionClientRow> = result.take(1).map_err(DbError::from)?;
+        rows.extend(legacy);
+        let mut out = rows
+            .into_iter()
+            .map(SessionClientRow::try_into_model)
+            .collect::<Result<Vec<_>, _>>()?;
+        out.sort_by_key(|r| r.created_at);
+        Ok(out)
+    }
+
+    async fn delete_for_lineage(&self, tenant_id: Uuid, lineage_id: Uuid) -> AxiamResult<u64> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT count() AS total FROM (DELETE session_client \
+                 WHERE tenant_id = $tenant_id AND lineage_id = $lineage_id \
+                 RETURN BEFORE) GROUP ALL; \
+                 SELECT count() AS total FROM (DELETE session_client \
+                 WHERE tenant_id = $tenant_id AND session_id = $lineage_id \
+                 RETURN BEFORE) GROUP ALL",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("lineage_id", lineage_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let by_lineage: Vec<CountRow> = result.take(0).map_err(DbError::from)?;
+        let by_session: Vec<CountRow> = result.take(1).map_err(DbError::from)?;
+        Ok(by_lineage.first().map(|r| r.total).unwrap_or(0)
+            + by_session.first().map(|r| r.total).unwrap_or(0))
     }
 }

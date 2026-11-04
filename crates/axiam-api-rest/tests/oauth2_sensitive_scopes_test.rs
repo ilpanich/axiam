@@ -275,6 +275,7 @@ async fn session_token(fx: &Fixture, auth: &AuthConfig) -> String {
             authenticated_at: chrono::Utc::now(),
             amr: vec![Amr::Pwd],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();

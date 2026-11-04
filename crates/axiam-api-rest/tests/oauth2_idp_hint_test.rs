@@ -1317,6 +1317,7 @@ async fn session_token(f: &Fixture, auth: &AuthConfig, age: chrono::Duration) ->
             authenticated_at: chrono::Utc::now() - age,
             amr: vec![Amr::Pwd],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .expect("session");

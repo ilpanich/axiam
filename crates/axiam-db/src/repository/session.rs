@@ -2,7 +2,7 @@
 
 use axiam_core::error::AxiamResult;
 use axiam_core::id::new_id;
-use axiam_core::models::session::{Amr, CreateSession, Session};
+use axiam_core::models::session::{Amr, CreateSession, Session, SessionLineage};
 use axiam_core::models::ssf::SessionRevocationSink;
 use axiam_core::repository::SessionRepository;
 use chrono::{DateTime, Utc};
@@ -44,6 +44,10 @@ struct SessionRow {
     refresh_replay_grace_accepted: Option<i64>,
     #[surreal(default)]
     refresh_replay_refused: Option<i64>,
+    /// #844 — `#[surreal(default)]`: schema v115 is additive and backfills
+    /// nothing. [`decode_lineage`] says what absence means.
+    #[surreal(default)]
+    lineage_id: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -70,6 +74,10 @@ struct SessionRowWithId {
     refresh_replay_grace_accepted: Option<i64>,
     #[surreal(default)]
     refresh_replay_refused: Option<i64>,
+    /// #844 — `#[surreal(default)]`: schema v115 is additive and backfills
+    /// nothing. [`decode_lineage`] says what absence means.
+    #[surreal(default)]
+    lineage_id: Option<String>,
 }
 
 /// The pre-v55 decode path, specified once (plan §4.3).
@@ -106,6 +114,22 @@ fn decode_replay(stored: Option<i64>) -> u32 {
     u32::try_from(stored.unwrap_or(0)).unwrap_or(0)
 }
 
+/// The pre-v115 decode path for the lineage key (#844).
+///
+/// An absent lineage is the session's own id: a new lineage is keyed by the id
+/// of the session that starts it, so this is the value the row would carry had
+/// it been written after v115 — and the value every query that ends a lineage
+/// matches such a row by. A stored value that does not parse is refused rather
+/// than replaced: it is not something this codebase writes, and guessing would
+/// put the row in a lineage nobody can end.
+fn decode_lineage(stored: Option<&str>, id: Uuid) -> Result<Uuid, DbError> {
+    match stored {
+        None => Ok(id),
+        Some(raw) => Uuid::parse_str(raw)
+            .map_err(|e| DbError::Migration(format!("invalid session lineage UUID: {e}"))),
+    }
+}
+
 fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
     let tenant_id = Uuid::parse_str(&row.tenant_id)
         .map_err(|e| DbError::Migration(format!("invalid tenant UUID: {e}")))?;
@@ -127,6 +151,7 @@ fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
         refresh_replay_at: row.refresh_replay_at,
         refresh_replay_grace_accepted: decode_replay(row.refresh_replay_grace_accepted),
         refresh_replay_refused: decode_replay(row.refresh_replay_refused),
+        lineage_id: decode_lineage(row.lineage_id.as_deref(), id)?,
     })
 }
 
@@ -155,6 +180,7 @@ impl SessionRowWithId {
             refresh_replay_at: self.refresh_replay_at,
             refresh_replay_grace_accepted: decode_replay(self.refresh_replay_grace_accepted),
             refresh_replay_refused: decode_replay(self.refresh_replay_refused),
+            lineage_id: decode_lineage(self.lineage_id.as_deref(), id)?,
         })
     }
 }
@@ -533,7 +559,8 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
                  expires_at = $expires_at, \
                  authenticated_at = $authenticated_at, \
                  amr = $amr, \
-                 browser_token_hash = $browser_token_hash",
+                 browser_token_hash = $browser_token_hash, \
+                 lineage_id = $lineage_id",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -552,6 +579,14 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             // Rotation binds the value it inherited, never a fresh one — the
             // cookie in the browser did not change.
             .bind(("browser_token_hash", input.browser_token_hash))
+            // #844: the inherited lineage on rotation; a new one — keyed by
+            // this row's own id — on every sign-in. Written explicitly rather
+            // than left absent, so that "absent" keeps meaning "written before
+            // v115" and nothing else.
+            .bind((
+                "lineage_id",
+                input.lineage_id.unwrap_or(id).to_string(),
+            ))
             .await
             .map_err(DbError::from)?;
 
@@ -729,6 +764,119 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
         }
 
         Ok(())
+    }
+
+    async fn lineage_of(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> AxiamResult<Option<SessionLineage>> {
+        // #844 — three reads in one round trip, in order of authority: the
+        // live row; else a participant record written under the id (the
+        // lineage it captured from the live row when a code was issued);
+        // else a refresh token issued under it. All three are tenant-scoped
+        // and on an index (the record id, `idx_session_client_session`,
+        // `idx_refresh_token_session`).
+        //
+        // Absence of a stored lineage is the row's own session id on all
+        // three, as everywhere else. A record that names no user (a
+        // client-credentials token has no session at all, so cannot match)
+        // is skipped rather than guessed at.
+        #[derive(Debug, SurrealValue)]
+        struct LineageRow {
+            #[surreal(default)]
+            lineage_id: Option<String>,
+            #[surreal(default)]
+            user_id: Option<String>,
+        }
+        let sid = session_id.to_string();
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT lineage_id, user_id FROM type::record('session', $sid) \
+                     WHERE tenant_id = $tenant_id; \
+                 SELECT lineage_id, user_id FROM session_client \
+                     WHERE tenant_id = $tenant_id AND session_id = $sid LIMIT 8; \
+                 SELECT lineage_id, user_id FROM oauth2_refresh_token \
+                     WHERE tenant_id = $tenant_id AND session_id = $sid LIMIT 8",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("sid", sid.clone()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        for index in 0..3 {
+            let rows: Vec<LineageRow> = result.take(index).map_err(DbError::from)?;
+            // A row that recorded a lineage outranks one written before v115
+            // under the same id: the latter's lineage is only the id itself.
+            let best = rows
+                .iter()
+                .find(|r| r.lineage_id.is_some() && r.user_id.is_some())
+                .or_else(|| rows.iter().find(|r| r.user_id.is_some()));
+            if let Some(row) = best {
+                let user_id = Uuid::parse_str(row.user_id.as_deref().unwrap_or_default())
+                    .map_err(|e| DbError::Migration(format!("invalid user UUID: {e}")))?;
+                let lineage_id = decode_lineage(row.lineage_id.as_deref(), session_id)?;
+                return Ok(Some(SessionLineage {
+                    lineage_id,
+                    user_id,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn invalidate_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        user_id: Uuid,
+        except: Option<Uuid>,
+    ) -> AxiamResult<u64> {
+        // #844 — the live rows of the lineage: those that recorded it, and the
+        // lineage's first row, whose id *is* the key (and which carries no
+        // stored lineage if it was written before v115). Each is then ended by
+        // `invalidate`, so the validity cache, the revocation feed and the SSF
+        // sink see a lineage logout exactly as they see any other. A logout is
+        // one or two rows; the extra statements are not on any hot path.
+        #[derive(Debug, SurrealValue)]
+        struct IdRow {
+            record_id: String,
+        }
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM session \
+                     WHERE tenant_id = $tenant_id AND lineage_id = $lineage_id \
+                       AND user_id = $user_id; \
+                 SELECT meta::id(id) AS record_id FROM type::record('session', $lineage_id) \
+                     WHERE tenant_id = $tenant_id AND user_id = $user_id",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("lineage_id", lineage_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let mut ids: Vec<IdRow> = result.take(0).map_err(DbError::from)?;
+        let first: Vec<IdRow> = result.take(1).map_err(DbError::from)?;
+        ids.extend(first);
+        let mut ended = std::collections::BTreeSet::new();
+        for row in ids {
+            let id = Uuid::parse_str(&row.record_id)
+                .map_err(|e| DbError::Migration(format!("invalid UUID: {e}")))?;
+            if Some(id) == except || !ended.insert(id) {
+                continue;
+            }
+            self.invalidate(tenant_id, id).await?;
+        }
+        Ok(ended.len() as u64)
     }
 
     async fn consume(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<bool> {
@@ -1085,6 +1233,7 @@ mod tests {
                 authenticated_at: Utc::now(),
                 amr: vec![Amr::Pwd],
                 browser_token_hash: Some("digest-live".into()),
+                lineage_id: None,
             })
             .await
             .unwrap();
@@ -1135,6 +1284,7 @@ mod tests {
             authenticated_at: Utc::now() - Duration::hours(9),
             amr: vec![Amr::Pwd],
             browser_token_hash: Some("digest-expired".into()),
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -1168,6 +1318,7 @@ mod tests {
                     authenticated_at: Utc::now(),
                     amr: vec![],
                     browser_token_hash: None,
+                    lineage_id: None,
                 })
                 .await
                 .expect("a UNIQUE index over this column would have failed here");
@@ -1195,6 +1346,7 @@ mod tests {
                 authenticated_at,
                 amr: vec![Amr::Pwd, Amr::Otp, Amr::Mfa],
                 browser_token_hash: None,
+                lineage_id: None,
             })
             .await
             .unwrap();
@@ -1256,6 +1408,7 @@ mod tests {
                 authenticated_at: Utc::now(),
                 amr: vec![Amr::Pwd],
                 browser_token_hash: None,
+                lineage_id: None,
             })
             .await
             .unwrap();
@@ -1446,6 +1599,7 @@ mod tests {
                 authenticated_at: Utc::now(),
                 amr: vec![],
                 browser_token_hash: None,
+                lineage_id: None,
             })
             .await
             .unwrap();
@@ -1462,6 +1616,7 @@ mod tests {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -1478,6 +1633,7 @@ mod tests {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -1537,6 +1693,7 @@ mod tests {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap()
@@ -1609,6 +1766,7 @@ mod tests {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -1672,6 +1830,7 @@ mod tests {
                     authenticated_at: Utc::now(),
                     amr: vec![],
                     browser_token_hash: None,
+                    lineage_id: None,
                 })
                 .await
                 .unwrap();
@@ -1854,6 +2013,7 @@ mod tests {
                 authenticated_at: Utc::now(),
                 amr: vec![],
                 browser_token_hash: None,
+                lineage_id: None,
             })
             .await
             .unwrap();

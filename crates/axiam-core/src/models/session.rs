@@ -272,6 +272,31 @@ pub struct Session {
     /// non-zero value here is worth an operator's attention.
     #[serde(default)]
     pub refresh_replay_refused: u32,
+    /// #844 (D-N43) — the stable key of the sign-in this row descends from.
+    ///
+    /// A console refresh **replaces** the session row: the new row has a new
+    /// [`Self::id`], and every OAuth2 grant issued under the old one still
+    /// names the old id. Logout used to revoke by that id, so after the first
+    /// refresh — fifteen minutes in, with the default access-token lifetime —
+    /// `POST /auth/logout` no longer reached the grants a relying party had
+    /// been issued earlier. The lineage is what survives the rotation:
+    /// minted once, when the sign-in creates its first session, and **copied**
+    /// by `AuthService::refresh` exactly as [`Self::authenticated_at`] is.
+    /// Refresh-token rows and session participants record it, and every
+    /// single-session logout ends the whole lineage.
+    ///
+    /// A new lineage is the id of the session that starts it, so the first
+    /// row of every lineage has `lineage_id == id` — the same value schema
+    /// v115's backfill writes into every row that predates it, and the value
+    /// the decoder substitutes for a row still missing one (a row written by
+    /// an older binary during a rolling upgrade). It is never a second
+    /// identifier a caller can present: nothing outside the datastore reads
+    /// it, and the `sid` claim keeps naming [`Self::id`].
+    ///
+    /// `Uuid::nil()` only on a `Session` deserialized from a payload that
+    /// predates the field; no repository produces one.
+    #[serde(default)]
+    pub lineage_id: Uuid,
 }
 
 /// What an operator should read into a session's refresh-replay counters
@@ -337,6 +362,21 @@ fn epoch() -> DateTime<Utc> {
     DateTime::UNIX_EPOCH
 }
 
+/// Which lineage a session id belongs to, and whose it is (#844).
+///
+/// The answer to "this id was a session once — which sign-in was it?", which
+/// a logout needs whenever the id it was handed has since been rotated away:
+/// an `id_token_hint`'s `sid`, a SAML session index, an id a relying party
+/// stored at sign-in. See [`Session::lineage_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionLineage {
+    /// The lineage the id belongs to.
+    pub lineage_id: Uuid,
+    /// The user the row that answered names. A logout ends only sessions of
+    /// this user, so a lineage can never be used to reach somebody else's.
+    pub user_id: Uuid,
+}
+
 /// Input for creating a session.
 #[derive(Debug, Clone)]
 pub struct CreateSession {
@@ -362,6 +402,12 @@ pub struct CreateSession {
     /// in the browser did not change, so neither may the digest it is matched
     /// against.
     pub browser_token_hash: Option<String>,
+    /// #844 — see [`Session::lineage_id`].
+    ///
+    /// `None` starts a new lineage, keyed by the id of the session being
+    /// created; every sign-in passes `None`. Refresh rotation passes the
+    /// consumed session's lineage, which is what makes it stable.
+    pub lineage_id: Option<Uuid>,
 }
 
 #[cfg(test)]

@@ -501,6 +501,27 @@ impl SessionRepository for FlakySessionRepo {
         }
         self.inner.invalidate(tenant_id, id).await
     }
+    async fn lineage_of(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> AxiamResult<Option<axiam_core::models::session::SessionLineage>> {
+        self.inner.lineage_of(tenant_id, session_id).await
+    }
+    async fn invalidate_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        user_id: Uuid,
+        except: Option<Uuid>,
+    ) -> AxiamResult<u64> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AxiamError::Database("injected: session delete".into()));
+        }
+        self.inner
+            .invalidate_lineage(tenant_id, lineage_id, user_id, except)
+            .await
+    }
     async fn consume(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<bool> {
         self.inner.consume(tenant_id, id).await
     }
@@ -602,6 +623,19 @@ impl RefreshTokenRepository for FlakyRefreshTokenRepo {
             .revoke_all_for_session(tenant_id, session_id)
             .await
     }
+    async fn revoke_all_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        session_id: Uuid,
+    ) -> AxiamResult<u64> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AxiamError::Database("injected: refresh revocation".into()));
+        }
+        self.inner
+            .revoke_all_for_lineage(tenant_id, lineage_id, session_id)
+            .await
+    }
     async fn delete_all_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<u64> {
         self.inner.delete_all_for_user(tenant_id, user_id).await
     }
@@ -659,6 +693,7 @@ async fn sign_in_with_a_grant(
             amr: vec![],
             dpop_jkt: None,
             expires_at: Utc::now() + Duration::days(30),
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -705,10 +740,11 @@ type FlakySetup = (
     Uuid,
     Uuid,
     Uuid,
+    Surreal<MemDb>,
 );
 
 async fn flaky_setup() -> FlakySetup {
-    let (user_repo, session_repo, fed_repo, refresh_repo, org_id, tenant_id, user_id, _db) =
+    let (user_repo, session_repo, fed_repo, refresh_repo, org_id, tenant_id, user_id, db) =
         setup().await;
     let (fail_session, fail_refresh) = (Arc::new(AtomicBool::new(false)), Arc::default());
     let svc = AuthService::new(
@@ -734,6 +770,7 @@ async fn flaky_setup() -> FlakySetup {
         org_id,
         tenant_id,
         user_id,
+        db,
     )
 }
 
@@ -743,7 +780,7 @@ async fn flaky_setup() -> FlakySetup {
 /// token is refused.
 #[tokio::test]
 async fn a_failed_revocation_leaves_the_session_for_a_retry_with_the_same_credential() {
-    let (svc, sessions, refresh_tokens, _, fail_refresh, org_id, tenant_id, user_id) =
+    let (svc, sessions, refresh_tokens, _, fail_refresh, org_id, tenant_id, user_id, _db) =
         flaky_setup().await;
     let (bearer, refresh_hash) =
         sign_in_with_a_grant(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
@@ -781,7 +818,7 @@ async fn a_failed_revocation_leaves_the_session_for_a_retry_with_the_same_creden
 /// the delete then runs.
 #[tokio::test]
 async fn a_failed_session_delete_after_the_revocation_is_retryable() {
-    let (svc, sessions, refresh_tokens, fail_session, _, org_id, tenant_id, user_id) =
+    let (svc, sessions, refresh_tokens, fail_session, _, org_id, tenant_id, user_id, _db) =
         flaky_setup().await;
     let (bearer, refresh_hash) =
         sign_in_with_a_grant(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
@@ -803,6 +840,217 @@ async fn a_failed_session_delete_after_the_revocation_is_retryable() {
         .expect("the retry completes the logout");
     assert!(matches!(
         sessions.get_by_id(tenant_id, session_of(&bearer)).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+}
+
+// -----------------------------------------------------------------------
+// #844 (D-N43) — logout reaches grants issued before a console refresh
+// -----------------------------------------------------------------------
+
+/// A console sign-in, an OAuth2 grant issued under it, then a console
+/// refresh: the access token the caller now holds names the *new* session,
+/// while the grant still names the old one. Returns (old session, new
+/// session, the grant's hash).
+async fn grant_then_console_refresh(
+    svc: &AuthService<
+        SurrealUserRepository<MemDb>,
+        FlakySessionRepo,
+        SurrealFederationLinkRepository<MemDb>,
+        FlakyRefreshTokenRepo,
+    >,
+    refresh_repo: &SurrealRefreshTokenRepository<MemDb>,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    user_id: Uuid,
+) -> (Uuid, Uuid, String) {
+    let out = match svc
+        .login(LoginInput {
+            tenant_id,
+            org_id,
+            username_or_email: "alice".into(),
+            password: test_password(),
+            ip_address: None,
+            user_agent: None,
+            mfa_policy: None,
+            lockout_policy: None,
+        })
+        .await
+        .unwrap()
+    {
+        LoginResult::Success(out) => out,
+        _ => panic!("expected Success, got an MFA variant"),
+    };
+    let grant_hash = token::hash_refresh_token(&token::generate_refresh_token());
+    refresh_repo
+        .create(CreateRefreshToken {
+            tenant_id,
+            token_hash: grant_hash.clone(),
+            client_id: "rp".into(),
+            user_id: Some(user_id),
+            scopes: vec!["openid".into()],
+            session_id: Some(out.session_id),
+            requested_userinfo_claims: vec![],
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: vec![],
+            dpop_jkt: None,
+            expires_at: Utc::now() + Duration::days(30),
+            lineage_id: None,
+        })
+        .await
+        .unwrap();
+    let refreshed = svc
+        .refresh(RefreshInput {
+            tenant_id,
+            org_id,
+            raw_refresh_token: out.refresh_token,
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .unwrap();
+    assert_ne!(
+        refreshed.session_id, out.session_id,
+        "rotation replaced the row"
+    );
+    (out.session_id, refreshed.session_id, grant_hash)
+}
+
+/// #844 (d) — the console refresh copies the lineage, and the lineage of a
+/// sign-in is the id of its first session.
+#[tokio::test]
+async fn a_console_refresh_keeps_the_session_lineage() {
+    let (svc, sessions, refresh_tokens, _, _, org_id, tenant_id, user_id, _db) =
+        flaky_setup().await;
+    let (first, current, grant_hash) =
+        grant_then_console_refresh(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+
+    let row = sessions.get_by_id(tenant_id, current).await.unwrap();
+    assert_eq!(
+        row.lineage_id, first,
+        "the lineage is keyed by the first session"
+    );
+    let grant = refresh_tokens
+        .get_by_token_hash(tenant_id, &grant_hash)
+        .await
+        .unwrap();
+    assert_eq!(grant.session_id, Some(first), "the grant keeps its sid");
+    assert_eq!(grant.lineage_id, Some(first), "and records the lineage");
+    assert_eq!(
+        sessions
+            .lineage_of(tenant_id, first)
+            .await
+            .unwrap()
+            .map(|l| l.lineage_id),
+        Some(first),
+        "the rotated-away id still resolves, through the grant that recorded it"
+    );
+}
+
+/// #844 (a) — `POST /auth/logout` with the post-refresh credential revokes the
+/// grant issued before the refresh. Before the lineage it was missed: the
+/// grant named a session id the refresh had already replaced.
+#[tokio::test]
+async fn logout_after_a_console_refresh_revokes_a_grant_issued_before_it() {
+    let (svc, sessions, refresh_tokens, _, _, org_id, tenant_id, user_id, _db) =
+        flaky_setup().await;
+    let (_, current, grant_hash) =
+        grant_then_console_refresh(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+
+    svc.logout(tenant_id, current).await.unwrap();
+    assert!(
+        !refresh_is_live(&refresh_tokens, tenant_id, &grant_hash).await,
+        "the grant of the lineage is revoked"
+    );
+    assert!(matches!(
+        sessions.get_by_id(tenant_id, current).await,
+        Err(AxiamError::NotFound { .. })
+    ));
+}
+
+/// #844, the mirror case — a logout handed the rotated-away id (an
+/// `id_token_hint`'s `sid` from before the refresh) ends the live session of
+/// the lineage, so the SSO session does not survive the relying party's
+/// logout.
+#[tokio::test]
+async fn logout_by_a_rotated_away_id_ends_the_live_session_of_its_lineage() {
+    let (svc, sessions, refresh_tokens, _, _, org_id, tenant_id, user_id, _db) =
+        flaky_setup().await;
+    let (first, current, grant_hash) =
+        grant_then_console_refresh(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+
+    svc.logout(tenant_id, first).await.unwrap();
+    assert!(
+        matches!(
+            sessions.get_by_id(tenant_id, current).await,
+            Err(AxiamError::NotFound { .. })
+        ),
+        "the live row of the lineage is ended"
+    );
+    assert!(!refresh_is_live(&refresh_tokens, tenant_id, &grant_hash).await);
+}
+
+/// #844 — the lineage never reaches another sign-in: a second login of the
+/// same user is a second lineage, and logging the first out leaves it and its
+/// grant alone.
+#[tokio::test]
+async fn a_lineage_logout_leaves_the_users_other_sign_ins_alone() {
+    let (svc, sessions, refresh_tokens, _, _, org_id, tenant_id, user_id, _db) =
+        flaky_setup().await;
+    let (_, current, _) =
+        grant_then_console_refresh(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+    let (_, other, other_grant) =
+        grant_then_console_refresh(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+
+    svc.logout(tenant_id, current).await.unwrap();
+    sessions
+        .get_by_id(tenant_id, other)
+        .await
+        .expect("the other sign-in is untouched");
+    assert!(refresh_is_live(&refresh_tokens, tenant_id, &other_grant).await);
+}
+
+/// #844 (c) — rows written before schema v115 carry no lineage. A session
+/// without one is its own lineage, a grant without one is its session's, and
+/// a logout of that session still revokes the grant, as it did before.
+#[tokio::test]
+async fn rows_without_a_lineage_keep_the_pre_v115_logout() {
+    let (svc, sessions, refresh_tokens, _, _, org_id, tenant_id, user_id, db) = flaky_setup().await;
+    let (bearer, grant_hash) =
+        sign_in_with_a_grant(&svc, &refresh_tokens, tenant_id, org_id, user_id).await;
+    let sid = session_of(&bearer);
+    // Strip what v115 writes, exactly as an older binary would have left it.
+    db.query(
+        "UPDATE type::record('session', $sid) SET lineage_id = NONE; \
+         UPDATE oauth2_refresh_token SET lineage_id = NONE WHERE session_id = $sid",
+    )
+    .bind(("sid", sid.to_string()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let row = sessions.get_by_id(tenant_id, sid).await.unwrap();
+    assert_eq!(
+        row.lineage_id, sid,
+        "an absent lineage reads as the session's own id"
+    );
+    let grant = refresh_tokens
+        .get_by_token_hash(tenant_id, &grant_hash)
+        .await
+        .unwrap();
+    assert_eq!(
+        grant.lineage_id,
+        Some(sid),
+        "and a grant's as its session's"
+    );
+
+    svc.logout(tenant_id, sid).await.unwrap();
+    assert!(!refresh_is_live(&refresh_tokens, tenant_id, &grant_hash).await);
+    assert!(matches!(
+        sessions.get_by_id(tenant_id, sid).await,
         Err(AxiamError::NotFound { .. })
     ));
 }

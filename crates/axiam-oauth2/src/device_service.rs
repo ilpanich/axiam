@@ -498,6 +498,7 @@ where
                 // other client.
                 dpop_jkt: crate::dpop::refresh_token_binding(&client.client, client.cnf.as_ref()),
                 expires_at: Utc::now() + Duration::seconds(self.refresh_token_lifetime_secs),
+                lineage_id: None,
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;

@@ -2887,24 +2887,24 @@ writes ran independently, and the common failure — session deleted, revocation
 failed — left live refresh tokens the caller's own credential could no longer
 reach; F4-R12-07.)
 
-**Limit: a session that has refreshed (F4-R12-08).** A refresh token names the
-session id that was current when its grant was authorized at
+**A session that has refreshed: the lineage (#844, D-N43).** A refresh token
+names the session id that was current when its grant was authorized at
 `/oauth2/authorize`, and a console refresh (`POST /api/v1/auth/refresh`)
-replaces the session row with one under a new id. With 15-minute access tokens
-that is the common case for any browser session that outlives one access token,
-not an edge. After it, `POST /auth/logout` and the cookie-hop logout end the
-console session but **not** the code grants issued before the refresh, whose
-refresh tokens stay live until they expire, are revoked at `/oauth2/revoke`, or
-are ended by a user-wide revocation. RP-initiated logout with **that grant's
-own `id_token_hint`** does revoke them, because the hint's `sid` is the
-original id; but the session it then invalidates no longer exists, so the
-console (SSO) session survives the RP logout of one grant and the next
-`/oauth2/authorize` signs the user straight back in. A native sign-in is
-unaffected (its session id never rotates). This is the same root cause as
-[What "the session" covers](#refresh-token-replay-revokes-the-session-g-c-818)
-above; a session lineage key, which closes all three, is
-[#844](https://github.com/ilpanich/axiam/issues/844). Until then, an operator
-who must end every grant of a user uses a user-wide revocation.
+replaces the session row with one under a new id — the common case for any
+browser session that outlives one 15-minute access token. Up to 1.2.0 that was
+a limit of logout (F4-R12-08). Since schema v115 every session carries a
+**lineage** key, minted at sign-in and copied by every console refresh, and
+recorded on refresh tokens and session participants. `POST /auth/logout`, the
+cookie-hop logout, RP-initiated logout and SAML single logout end the whole
+lineage: every grant of the sign-in is revoked, an `id_token_hint` minted
+before a refresh ends the console session that is live now, and back-channel
+logout reaches every client that joined, each with the `sid` it was issued.
+Nothing outside the sign-in is reached. No setting. A console session that
+refreshed *before* the upgrade has already lost the id its older grants name;
+those end as before (expiry, `/oauth2/revoke`, a user-wide revocation). The
+replay revocations ([What "the session" covers](#refresh-token-replay-revokes-the-session-g-c-818)
+above, and an authorization-code replay) keep their per-session scope; see
+`docs/api/logout.md`.
 
 ## Session revocation feed (optional, T-39 / T-143)
 

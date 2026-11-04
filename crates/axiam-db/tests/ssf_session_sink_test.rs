@@ -109,6 +109,7 @@ async fn session(db: &Handle, tenant_id: Uuid, user_id: Uuid, expires_in: Durati
             authenticated_at: Utc::now(),
             amr: Vec::new(),
             browser_token_hash: Some(hash),
+            lineage_id: None,
         })
         .await
         .unwrap()

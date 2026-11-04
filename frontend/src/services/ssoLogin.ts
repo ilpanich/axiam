@@ -282,6 +282,8 @@ export const ssoLoginService = {
     tenant_slug?: string;
     federation_config_id: string;
     redirect_uri: string;
+    /** #838 — answer a re-authentication hop: ask the provider to authenticate again. */
+    reauthenticate?: boolean;
   }): Promise<StartResponse> =>
     api.post<StartResponse>("/api/v1/auth/federation/oidc/start", body).then((r) => r.data),
 
@@ -291,6 +293,8 @@ export const ssoLoginService = {
     tenant_slug?: string;
     federation_config_id: string;
     redirect_uri: string;
+    /** #838 — answer a re-authentication hop: ask the provider to authenticate again. */
+    reauthenticate?: boolean;
   }): Promise<StartResponse> =>
     api.post<StartResponse>("/api/v1/auth/federation/oauth2/start", body).then((r) => r.data),
 
@@ -306,6 +310,8 @@ export const ssoLoginService = {
     tenant_slug?: string;
     federation_config_id: string;
     redirect_uri: string;
+    /** #838 — answer a re-authentication hop: ask the provider to authenticate again. */
+    reauthenticate?: boolean;
   }): Promise<{
     binding: string;
     sso_url: string;

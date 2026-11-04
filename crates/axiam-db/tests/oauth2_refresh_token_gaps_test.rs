@@ -80,6 +80,7 @@ async fn insert_token_expiring(
         acr: None,
         amr: Vec::new(),
         dpop_jkt: None,
+        lineage_id: None,
     })
     .await
     .unwrap();

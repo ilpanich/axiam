@@ -64,7 +64,7 @@ use crate::models::{
     scim_token::{CreateScimToken, ScimToken},
     scope::{CreateScope, Scope, UpdateScope},
     service_account::{CreateServiceAccount, ServiceAccount, UpdateServiceAccount},
-    session::{CreateSession, Session},
+    session::{CreateSession, Session, SessionLineage},
     settings::{SecuritySettings, SetOrgSettings, SetTenantOverride, TenantSettingsOverride},
     tenant::{CreateTenant, Tenant, UpdateTenant},
     uma::{CreatePermissionTicket, PermissionTicket},
@@ -1241,6 +1241,54 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate a single session.
     fn invalidate(&self, tenant_id: Uuid, id: Uuid)
     -> impl Future<Output = AxiamResult<()>> + Send;
+    /// #844 — which lineage `session_id` belongs to, whether or not the
+    /// session is still live.
+    ///
+    /// Answered by the live row when there is one, and otherwise by what a
+    /// row that recorded the id says: a session participant, or a refresh
+    /// token issued under it. `None` when nothing in the tenant ever recorded
+    /// the id — a session that never issued a grant and has since rotated, or
+    /// an id that was never a session here.
+    ///
+    /// The default answers from the live row alone, which is the pre-#844
+    /// reach; the datastore implementation overrides it.
+    fn lineage_of(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<SessionLineage>>> + Send {
+        async move {
+            match self.get_by_id(tenant_id, session_id).await {
+                Ok(s) => Ok(Some(SessionLineage {
+                    lineage_id: s.lineage_id,
+                    user_id: s.user_id,
+                })),
+                Err(AxiamError::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+    /// #844 — invalidate every live session of `lineage_id` that belongs to
+    /// `user_id`, except `except`. Returns the number invalidated.
+    ///
+    /// Each is ended exactly as [`Self::invalidate`] ends one — validity
+    /// cache, revocation feed and SSF sink included. In practice a lineage
+    /// has one live row (rotation consumes the old row before it creates the
+    /// new one), and this is how a logout handed a rotated-away id reaches
+    /// it. The `user_id` filter is defence in depth: a lineage is only ever
+    /// learnt from a row of that user.
+    ///
+    /// The default invalidates nothing, which is the pre-#844 reach.
+    fn invalidate_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        user_id: Uuid,
+        except: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send {
+        let _ = (tenant_id, lineage_id, user_id, except);
+        async { Ok(0) }
+    }
     /// Atomically consume (delete) a single session, returning `true` iff this
     /// call removed the row. Unlike [`Self::invalidate`] (idempotent, always
     /// `Ok(())`), this is the single-use gate for refresh-token rotation
@@ -2221,6 +2269,27 @@ pub trait SessionClientRepository: Send + Sync {
         tenant_id: Uuid,
         session_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
+
+    /// #844 — every participation record of a session **lineage**, in
+    /// insertion order: those that recorded `lineage_id`, and those written
+    /// before schema v115 under the session that keys it.
+    ///
+    /// Each record keeps the `session_id` it was written under, which is the
+    /// `sid` that client's ID token carried — and therefore the one its
+    /// back-channel logout token must carry for the relying party to match it.
+    fn list_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Vec<SessionClient>>> + Send;
+
+    /// #844 — drop a lineage's participation records (the set
+    /// [`Self::list_for_lineage`] returns). Returns the number deleted.
+    fn delete_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send;
 }
 
 /// Storage for UMA 2.0 permission tickets (X2).
@@ -2587,6 +2656,34 @@ pub trait RefreshTokenRepository: Send + Sync {
         session_id: Uuid,
     ) -> impl Future<Output = AxiamResult<u64>> + Send;
 
+    /// #844 (D-N43) — revoke every refresh token of a session **lineage**: the
+    /// tokens that recorded `lineage_id`, those of a row written before schema
+    /// v115 under the session that keys the lineage, and those issued under
+    /// `session_id` itself. Idempotent, and like
+    /// [`Self::revoke_all_for_session`] it does not stamp `rotated_at`.
+    ///
+    /// This is the scope a logout ends. [`Self::revoke_all_for_session`]
+    /// stopped reaching a relying party's grant at the first console refresh,
+    /// because the refresh replaced the session row the grant named; the
+    /// lineage is what the replacement keeps.
+    ///
+    /// The default is the pre-#844 scope, `session_id` alone (and the lineage
+    /// key, which names the lineage's first session).
+    fn revoke_all_for_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        session_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<u64>> + Send {
+        async move {
+            let mut total = self.revoke_all_for_session(tenant_id, session_id).await?;
+            if lineage_id != session_id {
+                total += self.revoke_all_for_session(tenant_id, lineage_id).await?;
+            }
+            Ok(total)
+        }
+    }
+
     /// Delete every refresh token of a user within a tenant, revoked or not
     /// (Art. 17 erasure). Idempotent — a user with no rows deletes none — so a
     /// re-run of the erasure is safe. The caller revokes first; this removes
@@ -2776,6 +2873,37 @@ pub struct FederationLoginState {
     /// reconstructed. `None` means the SPA `redirect_uri` was sent, which is
     /// every row written before v52.
     pub idp_redirect_uri: Option<String>,
+    /// #837 — lowercase hex SHA-256 of the browser-binding cookie the start
+    /// endpoint set (or found) on the browser that began this sign-in
+    /// (schema v114).
+    ///
+    /// The `state` value proves that *a* sign-in was started; it does not say
+    /// *where*. An attacker who starts a sign-in in their own browser can hand
+    /// its callback to a victim's, and without this column the victim would be
+    /// signed in as the attacker (login CSRF). Every same-origin completion —
+    /// the OIDC, OAuth2 and SAML JSON callbacks, and the handoff redemption a
+    /// cross-site return ends in — compares the cookie its request carries
+    /// with this digest and refuses on a mismatch.
+    ///
+    /// `None` on a row written before v114 and on a row written by the
+    /// authenticated account-linking path (`/api/v1/federation/oidc/authorize`),
+    /// which has no browser to bind. The public completions refuse a `None`:
+    /// a row that names no browser cannot be shown to belong to this one.
+    pub browser_binding_hash: Option<String>,
+    /// #838 — when the sign-in was started for a re-authentication hop, the
+    /// earliest upstream authentication instant the callback may accept
+    /// (schema v114).
+    ///
+    /// Set to the start moment when the sign-in page asked for a fresh
+    /// authentication (`reauthenticate: true`). The upstream request then
+    /// carries `prompt=login`/`max_age=0` (OIDC), the provider's own
+    /// re-authentication parameter (OAuth2, where one exists) or
+    /// `ForceAuthn="true"` (SAML), and the callback refuses an assertion whose
+    /// `auth_time`/`AuthnInstant` predates this instant by more than the clock
+    /// skew allowance: an upstream that answered from an SSO session it
+    /// already held did not re-authenticate anyone. `None` — an ordinary
+    /// sign-in, and every row written before v114 — checks nothing.
+    pub reauthenticate_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl FederationLoginState {
@@ -2841,6 +2969,16 @@ pub struct SsoHandoffCode {
     /// any deploy) and whenever the assertion carried no authentication
     /// instant; redemption then falls back to its own clock.
     pub authenticated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// #837 — the [`FederationLoginState::browser_binding_hash`] of the
+    /// sign-in this code completes, carried across the hop (schema v114).
+    ///
+    /// The cross-site return that mints a code is a POST from the identity
+    /// provider, on which the browser sends no `SameSite=Strict` cookie, so
+    /// the binding cannot be checked there. It is checked here instead, at
+    /// redemption — a same-origin request from the SPA — which is the moment
+    /// the code becomes a session. `None` on a row written before v114, which
+    /// redemption refuses.
+    pub browser_binding_hash: Option<String>,
 }
 
 /// How long a handoff code is valid.

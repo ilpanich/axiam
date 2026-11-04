@@ -565,6 +565,7 @@ where
                 amr: evidence.amr.clone(),
                 // No browser, so no `axiam_op_session` cookie to match.
                 browser_token_hash: None,
+                lineage_id: None,
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
@@ -619,6 +620,7 @@ where
                     amr: evidence.amr.clone(),
                     dpop_jkt: refresh_jkt,
                     expires_at: now + chrono::Duration::seconds(self.refresh_token_lifetime_secs),
+                    lineage_id: None,
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;

@@ -540,6 +540,7 @@ async fn session_jwt(w: &World) -> (Uuid, String) {
             authenticated_at: Utc::now() - Duration::seconds(20),
             amr: vec![Amr::Pwd],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();

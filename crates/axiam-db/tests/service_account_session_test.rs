@@ -293,6 +293,7 @@ async fn create_and_get_session() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -323,6 +324,7 @@ async fn get_by_token_hash() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -351,6 +353,7 @@ async fn invalidate_session() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -378,6 +381,7 @@ async fn invalidate_user_sessions() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -416,6 +420,7 @@ async fn cleanup_expired() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();
@@ -432,6 +437,7 @@ async fn cleanup_expired() {
             authenticated_at: Utc::now(),
             amr: vec![],
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap();

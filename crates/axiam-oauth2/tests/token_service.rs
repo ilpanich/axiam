@@ -587,6 +587,7 @@ impl RefreshTokenRepository for MockRefreshRepo {
                 acr: i.acr,
                 amr: i.amr,
                 dpop_jkt: i.dpop_jkt,
+                lineage_id: i.lineage_id,
             })
         } else {
             Err(AxiamError::Database("create failed".into()))
@@ -875,6 +876,7 @@ fn make_refresh(user_id: Option<Uuid>, client_id: &str, scopes: &[&str]) -> Refr
         acr: None,
         amr: Vec::new(),
         dpop_jkt: None,
+        lineage_id: None,
     }
 }
 
@@ -6003,6 +6005,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
         refresh_replay_at: None,
         refresh_replay_grace_accepted: 0,
         refresh_replay_refused: 0,
+        lineage_id: Uuid::nil(),
     };
 
     // The hand-built pre-migration row: the columns are simply absent.

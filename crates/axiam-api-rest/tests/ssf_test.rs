@@ -1414,6 +1414,7 @@ impl StepUpWorld {
                 authenticated_at: chrono::Utc::now(),
                 amr,
                 browser_token_hash: None,
+                lineage_id: None,
             })
             .await
             .unwrap();
@@ -3267,6 +3268,7 @@ async fn session_row(w: &World, user_id: Uuid) -> Session {
             authenticated_at: Utc::now(),
             amr: Vec::new(),
             browser_token_hash: None,
+            lineage_id: None,
         })
         .await
         .unwrap()

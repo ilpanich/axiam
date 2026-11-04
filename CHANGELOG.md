@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-04
+
 #### Upgrading — read before you upgrade
 
 - **A federated sign-in must be completed in the browser that started it**
@@ -17,6 +19,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   releases at contract 1.66: the C and Swift SDKs before 1.66 did not carry the
   start's cookie to the completion and would be refused; the other nine already
   did when one client instance is used for both.
+
+### Added
+
+- Session lineage key so logout reaches grants issued before a console refresh (#844)
+
+- Audit administrator OAuth2 client writes (#834)
+
+- IdP-hint auto-redirect and default provider field (G-B, W3.2)
+
+- Accept the provider kind name as an IdP hint (G-B, D-N24)
+
+- axiam_idp_hint and per-client default_idp (G-B, W3.1)
+
+- Native sign-in trust card and grant option (G-A, W2.4)
+
+- Native sign-in grant with a provider ID token (G-A, W2.3)
+
+- Verify a provider ID token for native sign-in (G-A, W2.2)
+
+- native_login trust block on OIDC providers (G-A, W2.1)
+
+- Exchanged tokens carry the exchanging client's client_id (G-D)
+
+- A refused refresh-token replay revokes its session (G-C)
 
 ### Security
 
@@ -58,6 +84,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session that refreshed before the upgrade keeps the 1.2.0 limit for its older
   grants. See `docs/api/logout.md`.
 
+- Bind federated sign-in to the starting browser; forward re-authentication upstream (#837, #838)
+
+- re-pin surreal-race-probe to SurrealDB 3.3.5; patch RUSTSEC-2026-0433
+
+- Patch RUSTSEC-2026-0433 (pulldown-cmark 0.13.6) and yanked async-executor
+
+- Handle ldap3_proto 0.9 LdapBindCred::Unsupported; patch RUSTSEC-2026-0433
+
+- Redact the MFA challenge and setup tokens in Debug
+
+- Logout revokes before it deletes, so a failed logout is retryable (F4-R12-07)
+
+- A code replay revokes its session's refresh tokens (#842)
+
+- An admin MFA reset revokes the user's OAuth2 refresh tokens (#841)
+
+- Logout revokes the session's refresh tokens (#839)
+
+- Quiet reload of a stripped re-auth hop; no-referrer on the error redirect (#836)
+
+- server-marked re-authentication hop and hop binding (#835)
+
+- Idp hint review findings (#833)
+
+- Resume the login hop after SSO (#832)
+
+- Native sign-in re-check findings (#831)
+
+- Native sign-in hardening from the W2 F4 review (#830)
+
+- hashed-only nonce and azp-first audience for native sign-in (#829)
+
+- Run the post_auth gate on native sign-in (#828)
+
+- Record a cross-client presentation of a live superseded row (#824)
+
+- Close the W1 F4 informational findings (#823)
+
+- Audit a failed replay revocation as revocation_failed, not refused (#822)
+
+- Only the token's own, proven client can revoke a session by replay (#821)
+
 ### Changed
 
 - Schema **v114** (additive, no backfill): `browser_binding_hash` on
@@ -68,6 +136,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - OpenAPI: `reauthenticate` (optional boolean, default `false`) on
   `OidcStartRequest`, `OAuth2StartRequest` and `SamlLoginRequest`. Contract
   1.66.
+
+- Generate the fixture password instead of a literal (CodeQL #843)
+
+- Contract 1.66 names the C and Swift jar defects found by the rule 12b ports (#837)
+
+- Regenerate openapi.json and management-registry.json for contract 1.66 (#838)
+
+- Record surrealkv race-probe results for SurrealDB 3.3.5
+
+- Bump ldap3_proto from 0.8.1 to 0.9.0
+
+- Bump the minor-patch group with 2 updates
+
+- Bump the base-images group in /docker with 2 updates
+
+- Bump the minor-patch group in /frontend with 2 updates
+
+- Stop Debug-formatting the login result in the F4-R12-07 test
+
+- Release 1.2.0 review addendum 2 and W5 results
+
+- Declare the 500 of /auth/logout and reset-mfa in the OpenAPI spec (D-N44)
+
+- State the D-N39 logout limit and update logout.md (F4-R12-08, F4-R12-11)
+
+- Record D-N43 and D-N44
+
+- Release 1.2.0 review addendum 1 — sweeps re-check
+
+- Declare end_session's 500 in the OpenAPI spec (D-N42)
+
+- Record D-N40 to D-N42
+
+- Release 1.2.0 review corrections (#840)
+
+- Record D-N39 (logout revokes the session's refresh tokens)
+
+- Combined F4 security review of release 1.2.0 (W5.3)
+
+- 1.2.0 release notes, upgrade notes and comparison rows (W5.1, W5.2)
+
+- Contract 1.65 review addendum 3 and W4 wave results
+
+- Record D-N38 (targeted pass for the contract 1.65 leftovers)
+
+- Contract 1.65 review addendum 2 — sweep 2 re-check
+
+- Contract 1.65 review addendum 1 — fix-round re-check
+
+- Contract 1.65 amendments from the W4.13 review (C165-09…13, -19; D-N36)
+
+- Record D-N36 and D-N37 from the contract 1.65 review
+
+- Contract 1.65 cross-SDK conformance review (W4.13)
+
+- Record D-N32 to D-N35 from the W4 SDK ports
+
+- Contract 1.65 — native sign-in helper, idp_hint, refresh-reuse note (W4.1)
+
+- Record D-N30 and D-N31 at the start of W4
+
+- W3 wave results
+
+- F4 W3 addendum 2 — sweep 2 re-check
+
+- Record D-N28 and D-N29 from the W3 re-check
+
+- F4 W3 addendum 1 — sweep 1 re-check
+
+- Record D-N25 to D-N27 from the W3 F4 review
+
+- F4 security review of social-gap W3
+
+- IdP hint docs, OpenAPI and threat model (G-B, W3.3)
+
+- Record D-N22 to D-N24 from W3.1
+
+- W2 wave results
+
+- F4 W2 addendum 2 — sweep 2 re-check
+
+- Record D-N20 and D-N21 from the W2 re-check
+
+- F4 W2 addendum 1 — sweep 1 re-check
+
+- D-N18 per-client binding is not part of 1.2.0 (#830)
+
+- Record D-N16 to D-N19 from the W2 F4 review
+
+- F4 security review of social-gap W2
+
+- Native sign-in docs, OpenAPI, discovery and threat model (G-A, W2.5)
+
+- Record D-N12 to D-N15 from W2.3
+
+- Record D-N10 and D-N11 and correct §3.1 steps 6-7
+
+- W1 wave results and the single-PR amendment
+
+- F4 addendum 2 for the social-gap W1 sweep
+
+- Bump the minor-patch group with 4 updates
+
+- Bump react-router in /frontend in the minor-patch group
+
+- Bump the base-images group in /docker with 4 updates
+
+- F4 addendum for the social-gap W1 sweep
+
+- F4 security review of social-gap W1
+
+- re-amend T-37/T-254 for G-C and record the G-D actor rule (2.45.0)
+
+- Record D-N8, D-N9 and the §3.4 correction from W1
+
+- Record the maintainer's answers to D-N1 … D-N7
+
+- Link issues #816-#819 and name the repositories each wave needs
+
+- Assess the 2026-10-30 social-login analysis and plan G-A…G-D
+
+- Keep the digest-pinned Docker base images current
 
 ## [1.2.0] - 2026-11-01
 

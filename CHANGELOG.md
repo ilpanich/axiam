@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Update `actix-http` to 3.20.3 and `actix-web` to 4.18.2, fixing HTTP/1 request
+  smuggling through malformed chunked trailers (RUSTSEC-2026-0446) and memory
+  exhaustion from compressed request bodies (RUSTSEC-2026-0447, RUSTSEC-2026-0448,
+  RUSTSEC-2026-0455).
+
+### Changed
+
+- CI: ignore RUSTSEC-2026-0452 (`surrealkv`) and RUSTSEC-2026-0454
+  (`surrealdb-core`) in `cargo deny` and `cargo audit`. The only fix is surrealdb
+  4.0.0. Both still affect the deployed database, which runs surrealdb v3.3.4 on
+  `surrealkv` storage, so keep its volume and port private. Review date 2026-12-06.
+
 ## [1.2.4] - 2026-11-06
 
 ### Changed

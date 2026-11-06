@@ -164,6 +164,29 @@ ignore = [
     #
     # Review date: 2027-02-06. DROP when wasmtimer or surrealdb moves off pin-utils.
     { id = "RUSTSEC-2026-0441", reason = "pin-utils 0.1.1 via wasmtimer 0.4.3 (newest) <- surrealdb 3.3.5, wasm32 targets only; not in any artifact AXIAM builds; unmaintained notice, no CVE, no patched version. Review: 2027-02-06" },
+    # RUSTSEC-2026-0452: surrealkv <1.2.0 — out-of-bounds read decoding an internal key shorter
+    # than 16 bytes, reachable from a crafted or corrupted SSTable. RUSTSEC-2026-0454:
+    # surrealdb-core <4.0.0 — unsound `Send`/`Sync` on reblessive 0.4.3's stack types (data race,
+    # double free). Solution for both: surrealdb 4.0.0, a major upgrade of the SDK AND the
+    # database. 3.3.5 is the newest 3.x, and it pins these versions, so there is no 3.x fix.
+    #
+    # NOT TEST-ONLY, AND THESE ENTRIES DO NOT CLAIM TO BE. The crates cargo-audit names are
+    # dev-only here: `cargo tree -p axiam-server -e normal,build --target all -i surrealkv`
+    # (or -i surrealdb-core) prints nothing. But:
+    #   * the database itself runs on them. docker-compose.prod.yml, docker-compose.minimal.yml
+    #     and k8s/surrealdb/statefulset.yml all start surrealdb/surrealdb:v3.3.4 on `surrealkv:`
+    #     storage, and that engine cannot be swapped for `memory` (see the statefulset comment).
+    #   * reblessive 0.4.3 IS in the server binary, through surrealdb-syn.
+    #
+    # Why waiting is acceptable: 0452 needs write access to the database volume (CVSS AV:L), and
+    # anyone with that already holds the data. 0454 (CVSS AV:L/AC:H/PR:L) is a soundness defect in
+    # how Rust code may use those types; the advisory names no query or network input that
+    # triggers it. Keep the volume and the database port private to the deployment.
+    #
+    # Review date: 2026-12-06, shorter than usual because these are memory-safety bugs in the
+    # deployed database. DROP both when AXIAM moves to surrealdb >=4.0.0.
+    { id = "RUSTSEC-2026-0452", reason = "surrealkv 0.21.4 via surrealdb-kvs-surrealkv 3.3.5 (dev-only here); fix needs surrealdb 4.0.0. The deployed surrealdb v3.3.4 image uses surrealkv storage, so this is NOT test-only: trigger is a crafted SSTable, needing write access to the database volume. Review: 2026-12-06" },
+    { id = "RUSTSEC-2026-0454", reason = "surrealdb-core 3.3.5 (dev-only here; reblessive 0.4.3 is in the server binary via surrealdb-syn, and the deployed database runs surrealdb-core); fix needs surrealdb 4.0.0. Soundness defect, CVSS AV:L/AC:H/PR:L, no query or network trigger named by the advisory. Review: 2026-12-06" },
 ]
 
 [licenses]

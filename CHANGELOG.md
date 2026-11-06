@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Server image: replace the distroless base's libssl3 3.0.20-1~deb12u2 with the
+  builder's patched 3.0.22-1~deb12u2, clearing CVE-2026-84782 (HIGH), which
+  failed the release Trivy image scan on amd64 and arm64, along with the other
+  OpenSSL CVEs fixed in that version. AXIAM uses no DTLS, so the HIGH was not
+  reachable in the server.
+
+### Changed
+
+- Release workflow: print Trivy's table output to the job log when the image
+  scan fails, so the log names the CVE without the code-scanning UI.
+
 ## [1.2.2] - 2026-11-04
 
 ### Fixed

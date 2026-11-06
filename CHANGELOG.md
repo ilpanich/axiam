@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-11-06
+
+### Fixed
+
+- Patch actix advisories and ignore the surrealdb 4.0-only ones
+
 ### Security
 
 - Update `actix-http` to 3.20.3 and `actix-web` to 4.18.2, fixing HTTP/1 request

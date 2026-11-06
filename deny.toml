@@ -153,6 +153,17 @@ ignore = [
     # Review date: 2026-12-23. DROP when elliptic-curve 0.13 and cx448 leave the graph (pgp and
     # jsonwebtoken moving to the crypto-bigint 0.7 generation).
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via elliptic-curve 0.13 / cx448 0.1.1 (pgp 0.21.0, jsonwebtoken 11, p256/p384/p521/k256, voprf); no release on >=0.7.6. The one secret-key path (Apple client-secret ES256, reachable from the public OIDC callback, oidc.rs:502) now signs with ring (axiam-federation/src/apple.rs:141-157, pinned by a test). Remaining uses are public-key only: AXIAM generates no Ed448/X448/EC PGP key (axiam-pki/src/pgp.rs:256-260) and imports none, ES256/ES384 is verify-only, OPAQUE is Ristretto255. Review: 2026-12-23" },
+    # RUSTSEC-2026-0441: pin-utils is unmaintained (repository archived 2026-10-01). Notice only:
+    # no CVE, and the advisory lists no patched version.
+    #
+    # pin-utils 0.1.1 comes only from wasmtimer 0.4.3 (the newest release), which surrealdb 3.3.5
+    # pulls in for wasm32 targets. cargo-deny checks every target, so it reports the crate, but
+    # nothing AXIAM builds contains it: `cargo tree --workspace --all-features -i pin-utils` is
+    # empty on the host, and axiam-opaque-wasm, our one wasm32 crate, is outside this workspace
+    # and does not depend on surrealdb.
+    #
+    # Review date: 2027-02-06. DROP when wasmtimer or surrealdb moves off pin-utils.
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils 0.1.1 via wasmtimer 0.4.3 (newest) <- surrealdb 3.3.5, wasm32 targets only; not in any artifact AXIAM builds; unmaintained notice, no CVE, no patched version. Review: 2027-02-06" },
 ]
 
 [licenses]

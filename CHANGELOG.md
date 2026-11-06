@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI: ignore RUSTSEC-2026-0441 (`pin-utils` unmaintained) in `cargo deny` and
+  `cargo audit`. It reaches the lockfile only through `wasmtimer` for wasm32
+  targets of `surrealdb`, so no AXIAM artifact contains it, and the advisory has
+  no patched version. Review date 2027-02-06.
+
 ## [1.2.3] - 2026-11-06
 
 ### Fixed

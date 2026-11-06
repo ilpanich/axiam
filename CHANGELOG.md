@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-11-06
+
 ### Fixed
 
 - Server image: replace the distroless base's libssl3 3.0.20-1~deb12u2 with the
@@ -14,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed the release Trivy image scan on amd64 and arm64, along with the other
   OpenSSL CVEs fixed in that version. AXIAM uses no DTLS, so the HIGH was not
   reachable in the server.
+
+- Overlay patched libssl3 on the distroless server image
 
 ### Changed
 

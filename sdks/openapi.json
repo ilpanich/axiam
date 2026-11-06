@@ -9,8 +9,8 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.2.2",
-    "x-axiam-spec-digest": "sha256:4216b66a7f11d532b0a9d2a1e175ba3aa41fdc0d3b1b540b2bf549c81edba97e"
+    "version": "1.2.3",
+    "x-axiam-spec-digest": "sha256:1773d9e4a95f89102a1729b87a6f0e185e3258f5ea740437d2261bec8a45c87a"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {

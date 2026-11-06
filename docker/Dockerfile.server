@@ -166,6 +166,36 @@ RUN set -eux; \
     ls -l "/rootfs${libdir}"
 
 # ---------------------------------------------------------------------------
+# Overlay the builder's patched libssl3 on the distroless one
+# ---------------------------------------------------------------------------
+# distroless/cc-debian12 still carries libssl3 3.0.20-1~deb12u2, and its newest
+# :nonroot digest is the one pinned below, so a digest bump cannot clear
+# CVE-2026-84782 (HIGH, fixed in 3.0.22-1~deb12u2). This builder has the fixed
+# package from bookworm-security, on amd64 and arm64 alike.
+#
+# The record has to travel WITH the files, and both come from this builder's own
+# dpkg database, so what Trivy reads is what was really installed: every file of
+# the package (libssl, libcrypto, the engines and the legacy provider, so no
+# version mix is left behind) plus its status.d stanza and md5sums. Status: is
+# dropped because distroless records have none.
+#
+# REMOVE this step once the pinned distroless digest ships libssl3 >= the
+# builder's: from then on it would be a pointless overlay, and if the builder
+# ever fell behind, a silent downgrade.
+WORKDIR /rootfs
+RUN set -eux; \
+    pkg=libssl3; \
+    record="var/lib/dpkg/status.d/${pkg}"; \
+    for path in $(dpkg-query -L "${pkg}"); do \
+        if [ -f "${path}" ]; then cp -a --parents "${path}" /rootfs/; fi; \
+    done; \
+    mkdir -p var/lib/dpkg/status.d; \
+    dpkg-query -s "${pkg}" > "${record}"; \
+    sed -i '/^Status:/d' "${record}"; \
+    cp "/var/lib/dpkg/info/${pkg}:$(dpkg --print-architecture).md5sums" "${record}.md5sums"; \
+    md5sum -c "${record}.md5sums"
+
+# ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime image — distroless/cc-debian12 (D-08)
 # ---------------------------------------------------------------------------
 # nonroot = UID 65532 (username "nonroot") — no shell, no package manager.
@@ -183,7 +213,8 @@ LABEL org.opencontainers.image.title="axiam-server" \
 # The cc variant provides glibc/libgcc/libssl3; we copy only the delta needed
 # for xmlsec1/libxml2: libxmlsec1(+openssl backend), libxml2, libltdl, libxslt,
 # liblzma, libz and the ICU pair. Soname symlinks (*.so.N) are the runtime
-# entry points.
+# entry points. The same COPY also replaces libssl3 and its dpkg record with the
+# builder's patched package (see the overlay step above).
 #
 # The builder staged them under /rootfs/usr/lib/<multiarch-triplet>/ (see the
 # staging step above), so this single COPY is architecture-agnostic and lands

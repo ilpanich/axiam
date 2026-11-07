@@ -275,3 +275,15 @@ strip = "symbols"     # Drop the symbol table to shrink the shipped binary. No
 # entire process, turning any panic-reachable code path into a whole-server
 # outage (and a potential DoS lever). For an availability- and security-
 # critical IAM service, request isolation outweighs the marginal optimization.
+
+# Optimise dependencies in dev and test builds; workspace crates stay at
+# opt-level 0. The test suite runs every query through an embedded SurrealDB
+# engine (`kv-mem` / `kv-surrealkv`), and SurrealDB 4's query compiler is far
+# costlier per statement than 3.x: unoptimised, `cargo test --workspace`
+# outran the CI Test job's 6-hour limit. Measured on network_gate_test:
+# 219 s -> 32 s, and the binary shrinks from 419 MB to 323 MB. Coverage is
+# unaffected: cargo-llvm-cov reports workspace crates only, and those keep
+# their opt-level and their instrumentation. The price is a slower first
+# build of the dependency tree, which rust-cache keeps in CI.
+[profile.dev.package."*"]
+opt-level = 2

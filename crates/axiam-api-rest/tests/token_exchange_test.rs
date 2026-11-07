@@ -1217,38 +1217,51 @@ async fn the_deprecated_redirect_uri_branch_still_works_and_says_so() {
         .with_writer(BufWriter(captured.clone()))
         .with_ansi(false)
         .finish();
+    // Global, not `set_default`. tracing caches each callsite's interest for
+    // the whole process. Two other tests in this binary reach the same `warn!`,
+    // and when one registered that callsite from a thread with no subscriber,
+    // the cache said "nobody listens" and this test's thread-local subscriber
+    // never saw the event: it failed about two runs in three, on 3.x and 4.0
+    // alike. A global subscriber is visible from every thread, so no ordering
+    // can disable the callsite. Nothing else in this binary installs one.
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("no other test in this binary installs a global subscriber");
 
-    {
-        let _guard = tracing::subscriber::set_default(subscriber);
-        let f = setup().await;
-        let app = test_app!(f);
+    let f = setup().await;
+    let app = test_app!(f);
 
-        // `https://orders.internal` is this client's registered redirect URI
-        // and is NOT in its (empty) `allowed_resources`.
-        let extra = format!(
-            "{}&audience={}",
-            subject_params(&f, &["read"]),
-            enc("https://orders.internal")
-        );
-        let (status, body) = exchange!(app, f, f.client_id, f.client_secret, extra);
-        assert_eq!(
-            status, 200,
-            "the deprecated branch must still work: {body:?}"
-        );
-    }
+    // `https://orders.internal` is this client's registered redirect URI
+    // and is NOT in its (empty) `allowed_resources`.
+    let extra = format!(
+        "{}&audience={}",
+        subject_params(&f, &["read"]),
+        enc("https://orders.internal")
+    );
+    let (status, body) = exchange!(app, f, f.client_id, f.client_secret, extra);
+    assert_eq!(
+        status, 200,
+        "the deprecated branch must still work: {body:?}"
+    );
 
+    // The global subscriber also hears the other tests that take this branch,
+    // so look for the line naming THIS test's client, never just any line.
     let logs = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let line = logs
+        .lines()
+        .find(|l| l.contains("DEPRECATED") && l.contains(&f.client_id))
+        .unwrap_or_else(|| {
+            panic!(
+                "the redirect-URI branch must announce itself for client {}: {logs}",
+                f.client_id
+            )
+        });
     assert!(
-        logs.contains("DEPRECATED"),
-        "the redirect-URI branch must announce itself: {logs}"
+        line.contains("allowed_resources"),
+        "and must name the remedy: {line}"
     );
     assert!(
-        logs.contains("allowed_resources"),
-        "and must name the remedy: {logs}"
-    );
-    assert!(
-        logs.contains("https://orders.internal"),
-        "and the registration to migrate: {logs}"
+        line.contains("https://orders.internal"),
+        "and the registration to migrate: {line}"
     );
 }
 

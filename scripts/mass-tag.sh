@@ -864,6 +864,16 @@ revendor_spec_artifacts() {
       continue
     fi
     if cmp -s "$from" "$to"; then
+      # Matching the platform's copy is not the same as being committed. A
+      # release that stopped after this copy and before its commit (a missing
+      # generator toolchain, say) leaves the file current on disk and dirty in
+      # git; without this, the rerun stages nothing and tags a tree that does
+      # not carry the spec it was released from.
+      if ! git diff --quiet HEAD -- "$to" 2>/dev/null; then
+        printf '      %s: re-vendored by an earlier run, not yet committed; staging it\n' "$f"
+        BUMP_FILES+=("$f")
+        changed=1
+      fi
       continue
     fi
     if $DRY_RUN; then

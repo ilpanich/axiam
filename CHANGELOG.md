@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Device authorization grant: a token poll racing another poll of the same
+  approved grant could be answered "device code has already been used" while
+  the grant was still unredeemed, because the concurrent poll's
+  `last_polled_at` write aborted the redemption and that abort was read as a
+  redemption. The redemption now retries on a write conflict; the status guard
+  still admits exactly one.
+- Release tooling: `scripts/mass-tag.sh` rerun after a partial failure skipped
+  vendored spec files the failed run had already copied, so it could tag an SDK
+  without them. A copy that matches the platform but is not committed is now
+  staged.
+- Tests: `the_deprecated_redirect_uri_branch_still_works_and_says_so` failed
+  about two runs in three when its binary ran in parallel. tracing cached the
+  log callsite as unwatched when another test thread registered it first; the
+  test now uses a global subscriber and matches its own client's line.
+
+### Security
+
+- `axiam-opaque-wasm`: update `ctutils` 0.4.2 to 0.4.8 for RUSTSEC-2026-0385
+  (non-constant-time mask generation, and branching `u128` comparisons on
+  32-bit targets, which wasm32 is). The published `@axiam/opaque-wasm` and the
+  admin UI are built from this lockfile. CI now audits it, which it did not.
+
 ## [1.2.5] - 2026-11-06
 
 ### Fixed

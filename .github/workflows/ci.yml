@@ -334,6 +334,19 @@ jobs:
         with:
           ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0387,RUSTSEC-2026-0441,RUSTSEC-2026-0452,RUSTSEC-2026-0454
 
+      # axiam-opaque-wasm is outside the workspace and carries its own
+      # lockfile, which the step above never reads. That lockfile is what
+      # release-opaque.yml builds the published @axiam/opaque-wasm package and
+      # the admin UI's copy from, and it shipped ctutils 0.4.2
+      # (RUSTSEC-2026-0385) unnoticed. Same ignore as above for crypto-bigint:
+      # OPAQUE is Ristretto255, and the 0.5.5 copy is only reached through it.
+      #
+      # A `run:` step, not a second action call: it reuses the cargo-audit the
+      # action above installed, and scripts/check-audit-ignore-sync.py reads the
+      # action's single `ignore:` input as THE workspace list.
+      - name: cargo audit (axiam-opaque-wasm lockfile)
+        run: cargo audit --file crates/axiam-opaque-wasm/Cargo.lock --ignore RUSTSEC-2026-0387
+
       # --- cargo deny (advisories + licenses + bans + sources) ---
       # `-D advisory-not-detected` promotes cargo-deny's "this ignore matched
       # nothing" warning to a hard failure. Four suppressions had already gone

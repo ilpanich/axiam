@@ -55,7 +55,7 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::is_transaction_conflict;
+use crate::helpers::{is_transaction_conflict, retry_on_write_conflict};
 
 /// Ceiling on the poll interval `slow_down` may raise a grant to.
 ///
@@ -296,38 +296,40 @@ impl<C: Connection> DeviceGrantRepository for SurrealDeviceGrantRepository<C> {
         // after this transaction has committed. It must not be folded into the
         // statements here — under snapshot isolation every racer would see its
         // own write and believe it won (`SCHEMA_V31`).
+        //
+        // A write conflict here can also mean a concurrent `record_poll` wrote
+        // `last_polled_at` on this row: SurrealDB 4 aborts on that, and an
+        // aborted transaction wrote nothing. Answering "already redeemed" would
+        // refuse an approved grant nobody used, so the attempt is retried; the
+        // status guard keeps it single-use when the other writer did redeem.
         let nonce = new_id().to_string();
-        let result = self
-            .db
-            .current()
-            .query(format!(
-                "BEGIN TRANSACTION; \
-                 LET $before = (UPDATE device_grant \
-                     SET status = 'redeemed', redemption_id = $nonce \
-                     WHERE tenant_id = $tenant_id AND device_code_hash = $hash \
-                     AND status = 'approved' AND expires_at > time::now() \
-                     RETURN BEFORE); \
-                 SELECT {SELECT_FIELDS} FROM $before; \
-                 COMMIT TRANSACTION"
-            ))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("hash", device_code_hash.to_string()))
-            .bind(("nonce", nonce.clone()))
-            .await;
-
-        // A loser's abort is this method's "already redeemed" answer, not a
-        // server fault.
-        let mut result = match result {
-            Ok(r) => r,
-            Err(e) if is_transaction_conflict(&e) => return Ok(None),
-            Err(e) => return Err(DbError::from(e).into()),
+        let attempt = || async {
+            let mut result = self
+                .db
+                .current()
+                .query(format!(
+                    "BEGIN TRANSACTION; \
+                     LET $before = (UPDATE device_grant \
+                         SET status = 'redeemed', redemption_id = $nonce \
+                         WHERE tenant_id = $tenant_id AND device_code_hash = $hash \
+                         AND status = 'approved' AND expires_at > time::now() \
+                         RETURN BEFORE); \
+                     SELECT {SELECT_FIELDS} FROM $before; \
+                     COMMIT TRANSACTION"
+                ))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("hash", device_code_hash.to_string()))
+                .bind(("nonce", nonce.clone()))
+                .await
+                .map_err(DbError::from)?;
+            // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+            result.take::<Vec<DeviceGrantRow>>(2).map_err(DbError::from)
         };
-
-        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-        let rows: Vec<DeviceGrantRow> = match result.take::<Vec<DeviceGrantRow>>(2) {
+        let rows = match retry_on_write_conflict(attempt).await {
             Ok(rows) => rows,
+            // Still contended after the retries: refuse, never serve.
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
-            Err(e) => return Err(DbError::from(e).into()),
+            Err(e) => return Err(e.into()),
         };
         if rows.is_empty() {
             // Unknown, not approved, already redeemed, or expired. Nothing was

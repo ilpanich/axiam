@@ -381,3 +381,55 @@ async fn deleting_a_clients_grants_voids_every_status_and_nobody_elses() {
         "idempotent"
     );
 }
+
+/// A poll and a redemption of the same approved grant race. The poll writes
+/// `last_polled_at` on the row the redemption is consuming, and SurrealDB 4
+/// aborts the redemption's transaction when it does. That abort means "someone
+/// else wrote this row", not "someone else redeemed it", so the redemption must
+/// still succeed: refusing it leaves an approved grant that the device was told
+/// is used. The CIBA request had exactly this defect.
+///
+/// Runs on `surrealkv`, the engine that is deployed, with the two calls on
+/// separate worker threads so they really overlap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_poll_racing_the_redemption_never_refuses_an_unredeemed_grant() {
+    use surrealdb::engine::local::SurrealKv;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let db = Surreal::new::<SurrealKv>(dir.path().join("device.db").to_string_lossy().into_owned())
+        .await
+        .unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let repo = SurrealDeviceGrantRepository::new(db);
+    let tenant = Uuid::new_v4();
+
+    for round in 0..60 {
+        let code = format!("RACE{round:04}");
+        let hash = format!("race-hash-{round}");
+        repo.create(grant(tenant, &code, &hash, 600)).await.unwrap();
+        assert!(
+            repo.decide(tenant, &code, true, Uuid::new_v4())
+                .await
+                .unwrap()
+        );
+
+        let (poller, redeemer) = (repo.clone(), repo.clone());
+        let (h1, h2) = (hash.clone(), hash.clone());
+        let poll = tokio::spawn(async move { poller.record_poll(tenant, &h1).await });
+        let redeem = tokio::spawn(async move { redeemer.redeem(tenant, &h2).await });
+        let (poll, redeem) = (poll.await.unwrap(), redeem.await.unwrap());
+        poll.unwrap();
+
+        let after = repo
+            .get_by_device_code_hash(tenant, &hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            redeem.unwrap().is_some(),
+            "round {round}: the redemption was refused while the grant is {:?}",
+            after.status
+        );
+    }
+}

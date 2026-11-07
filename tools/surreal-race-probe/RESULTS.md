@@ -43,13 +43,35 @@ RocksDB engine, which SurrealDB 4 no longer has.
 The property AXIAM depends on holds: zero double winners and zero burned rounds over
 40 000 contended attempts in both shapes.
 
-The `tx` abort rate rose from 36% to 83%. **That comparison is not clean**: the earlier
-rows were taken on a 4-vCPU host and this one on 24 cores, and more cores mean more
-racers truly overlap. Treat it as unconfirmed until CI's runner measures it. It is
-consistent with one thing found during the migration, though: 4.0 aborts a
-transaction that a concurrent write merely touched, which made CIBA's `redeem` report
-a credential as used when nobody had used it. That is fixed by retrying, in
-`axiam-db/src/repository/ciba_request.rs`.
+The `tx` abort rate rose, and a same-host comparison settles that it is the
+engine. Both versions, the same 24-core host, three runs each, 5000 × 8, and the
+4-core rows pinned with `taskset -c 0-3` (3.3.5 there reproduces the historical
+36%, so those rows are comparable to the older sections):
+
+| Host     | Engine | `tx` aborted          | `tx` time | `nonce` time |
+|----------|--------|-----------------------|-----------|--------------|
+| 24 cores | 3.3.5  | 75.2–75.3%            | 5–6 s     | 6 s          |
+| 24 cores | 4.0.0  | 81.8–82.1%            | 14–15 s   | 30–31 s      |
+| 4 cores  | 3.3.5  | 36.9–37.0%            | 5–6 s     | 6–7 s        |
+| 4 cores  | 4.0.0  | 86.9–87.0%            | 10–11 s   | 25–26 s      |
+
+Every run had exactly one winner per round and no unexpected error.
+
+So 4.0 aborts far more often under contention (37% → 87% on 4 cores), and each
+commit is slower: `nonce`, which never aborts, takes 4–5× as long. Disk sync is
+not the cause: 3.3.5 also defaults to `sync=every`, and the in-memory engine and
+`surrealkv` with `sync=never` show the same gap. The cost is CPU, about 350 µs
+per write statement, 47% of it in `surrealdb_core::exec::ir`, the new query
+compiler, which appears to rebuild the plan on every execution. Slower writes
+keep each transaction open longer, so more racers overlap and more of them
+abort. This is reported upstream as a SurrealDB 4.0 regression.
+
+More aborts mean more retries, and more chances for a caller to misread an abort.
+Two did: CIBA's and the device grant's `redeem` both answered "already used" when
+a concurrent poll's `last_polled_at` write aborted them, refusing an approved
+request nobody had used. Both now retry. The device grant's defect was latent on
+3.3.5 too (5 of 6 runs of its new race test failed there), so it was not caused
+by 4.0, only made more frequent by it.
 
 ---
 

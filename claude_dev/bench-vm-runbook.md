@@ -371,16 +371,31 @@ for L in rust typescript python java kotlin csharp php go swift c cplusplus; do 
 `--filter=blob:none` keeps the full history (the provenance check needs `origin/main`) without
 downloading every old file.
 
-### 6.1 Which AXIAM release to measure — your decision
+### 6.1 Which AXIAM release to measure — `v1.3.0`
 
-The run-6 runbook is pinned to **`v1.1.1`**; the workspace is now at **`1.2.5`**. Both
-are measurable with the same procedure; the harness at the checked-out tag is the one that
-runs. **My recommendation is the latest release (`v1.2.5`)**: the VM is a new baseline in any
-case (§0.2), so there is nothing to keep comparable with 1.1.1, and a comparison published
-now should describe the product as it ships now. Whichever you pick:
+The round measures **`v1.3.0`**, the first release on **SurrealDB 4.0**
+([ilpanich/axiam#853](https://github.com/ilpanich/axiam/pull/853)). The run-6 runbook's
+`v1.1.1` pin is superseded for this round; its procedure is unchanged. The harness at the
+checked-out tag is the one that runs, and at `v1.3.0` it already pins the datastore:
+`benchmarks/targets/axiam/docker-compose.yml` defaults to `surrealdb/surrealdb:v4.0.0`, so no
+override is needed (`pull-pinned-images.sh` still resolves and records its digest).
+
+**Do not start before both exist** — `bench-up` falls back to a local source build when the
+image cannot be pulled (run6 §1.0), and a build is not the release:
 
 ```bash
-AXIAM_TAG=v1.2.5
+git ls-remote --tags https://github.com/ilpanich/axiam.git 'refs/tags/v1.3.0'
+```
+
+```bash
+docker manifest inspect ghcr.io/ilpanich/axiam/server:1.3.0 >/dev/null && echo "image published"
+```
+
+Provisioning (§1–§5) does not depend on the tag, so it can be done while the release
+pipeline runs.
+
+```bash
+AXIAM_TAG=v1.3.0
 ```
 
 ```bash
@@ -392,8 +407,22 @@ git merge-base --is-ancestor HEAD origin/main && echo "OK: on main" || echo "STO
 ```
 
 ```bash
-grep -m1 '^version' Cargo.toml && git rev-parse HEAD      # both go in the run notes
+grep -m1 '^version' Cargo.toml && git rev-parse HEAD      # must read 1.3.0; both go in the run notes
 ```
+
+```bash
+grep -n 'BENCH_SURREALDB_IMAGE:-' benchmarks/targets/axiam/docker-compose.yml   # must name surrealdb/surrealdb:v4.0.0
+```
+
+**What SurrealDB 4.0 means for the numbers.** It is a major version of AXIAM's datastore, so
+AXIAM's figures from this round are not comparable with any earlier run for **two**
+independent reasons — the box (§0.2) and the database engine — and the report must name both.
+The competitors are unaffected by the second. The PR also changes one query on the
+rate-limit sweep (now index-served on 4.0) and adds write-conflict retries; none of the
+comparison cells targets those paths directly, but they are part of the product being measured.
+The dry run (§9.3) is the first time the harness meets 4.0 under load: a `FAIL` there is a
+finding for the harness or the release, not a reason to pin SurrealDB back (a 3.x datastore
+refuses the 1.3.0 client).
 
 For the SDKs, check out the release tag of each that you intend to publish against (or leave
 the default branch); either way every SDK record carries the version it built
@@ -581,7 +610,8 @@ awk 'NR==2 {for (i=1;i<=NF;i++) if ($i=="st") c=i; next} c && $1 ~ /^[0-9]+$/ {s
 - Qualification (§7):  sysbench e/s <r1> <r2> <r3>; steal under load <x> %
 - Steal during run:    mean <x> %; any period above 5 %: <when, which cells>
 - Box change:          first run on this VM; NOT comparable with G-box runs (run 5 and earlier)
-- AXIAM tag measured:  <tag> @ <commit>   (run6 runbook pins v1.1.1 — say why if different)
+- AXIAM tag measured:  v1.3.0 @ <commit>; SurrealDB v4.0.0 @ <digest from images.txt>
+- Engine change:       first round on SurrealDB 4.0; AXIAM figures NOT comparable with any 3.x run
 - Scope:               comparison only (dry run CORE, resting x4, core matrix, SDK pass); deferred: NEW cells, rl=prod, minimal profile, investigations
 - Local change:        C# SDK bench retargeted net8.0 -> net10.0 for the SDK pass only (§5.1)
 ```

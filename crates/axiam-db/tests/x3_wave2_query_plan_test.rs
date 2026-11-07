@@ -130,11 +130,12 @@ async fn webauthn_attestation_policy_tenant_lookup_is_index_satisfied() {
 
 /// The selection of `SurrealRateLimitBucketRepository::delete_stale_once`
 /// (#676, R111W3-04 (e)), read from the constant the sweep itself uses
-/// (#773), so the two cannot drift. The planner
-/// folds `time::now() - duration::from_secs($retention)` into a constant and
-/// serves the range from `rate_limit_bucket_updated_at`; a plan that stops
-/// folding it, or a rewritten predicate, would make every pass of the server's
-/// sweep a scan of a table that holds a row per hint, client IP and endpoint.
+/// (#773), so the two cannot drift. The caller binds `$cutoff`, and the
+/// planner serves `updated_at < $cutoff` from `rate_limit_bucket_updated_at`.
+/// SurrealDB 4 stopped doing that for `time::now() - duration::from_secs(..)`,
+/// which is why the bound moved out of the query; a plan that scans would make
+/// every pass of the server's sweep read a table holding a row per hint,
+/// client IP and endpoint.
 #[tokio::test]
 async fn rate_limit_bucket_sweep_selection_is_index_satisfied() {
     let db = fresh_db().await;
@@ -143,7 +144,7 @@ async fn rate_limit_bucket_sweep_selection_is_index_satisfied() {
             "{} EXPLAIN",
             axiam_db::repository::RATE_LIMIT_BUCKET_SWEEP_SELECTION
         ))
-        .bind(("retention", 1_260_i64))
+        .bind(("cutoff", chrono::Utc::now()))
         .bind(("limit", 500_i64))
         .await
         .unwrap();

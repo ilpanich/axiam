@@ -21,6 +21,38 @@ failure: a row consumed but claimable by nobody is a burned credential.
 
 ---
 
+## surrealdb 4.0.0 / surrealdb-core 4.0.0 / surrealkv 1.3.0
+
+**Taken:** 2026-11-07, for the SurrealDB 4 migration (branch `chore/surrealdb-4`). It
+moved `surrealdb` and `surrealdb-core` from 3.3.5 to 4.0.0 and `surrealkv` from 0.21.4
+to 1.3.0, a new on-disk format.
+**Host:** Linux x86_64, **24 cores**, embedded engines, multi-threaded tokio, otherwise
+idle. Each `surrealkv` run used its own fresh `PROBE_DIR`, as CI does.
+**Probe commit:** the one that re-pinned this lockfile to `=4.0.0` and removed the
+RocksDB engine, which SurrealDB 4 no longer has.
+
+| Datastore      | Mechanism | Rounds × racers | Rounds with >1 winner | Rounds with 0 winners | Attempts the engine aborted |
+|----------------|-----------|-----------------|-----------------------|-----------------------|-----------------------------|
+| `kv-surrealkv` | `tx`      | 5000 × 8        | **0**                 | 0                     | 33 094 / 40 000 (83%)       |
+| `kv-surrealkv` | `nonce`   | 5000 × 8        | **0**                 | 0                     | 0 / 40 000                  |
+
+`kv-mem` was not re-measured; it is not part of the CI gate. RocksDB is gone.
+
+### What changed against 3.3.5
+
+The property AXIAM depends on holds: zero double winners and zero burned rounds over
+40 000 contended attempts in both shapes.
+
+The `tx` abort rate rose from 36% to 83%. **That comparison is not clean**: the earlier
+rows were taken on a 4-vCPU host and this one on 24 cores, and more cores mean more
+racers truly overlap. Treat it as unconfirmed until CI's runner measures it. It is
+consistent with one thing found during the migration, though: 4.0 aborts a
+transaction that a concurrent write merely touched, which made CIBA's `redeem` report
+a credential as used when nobody had used it. That is fixed by retrying, in
+`axiam-db/src/repository/ciba_request.rs`.
+
+---
+
 ## surrealdb 3.3.5 / surrealdb-core 3.3.5 / surrealkv 0.21.4
 
 **Taken:** 2026-11-03, for the Dependabot update in PR #848. It moved `surrealdb` and

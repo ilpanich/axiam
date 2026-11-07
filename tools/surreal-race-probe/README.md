@@ -128,13 +128,11 @@ cargo run --release -- mem       tx    1200 8
 cargo run --release -- surrealkv tx    5000 8
 cargo run --release -- surrealkv nonce 5000 8
 
-# rocksdb (adds a ~10 minute C++ build the first time)
-cargo run --release --features rocksdb -- rocksdb tx 1200 8
 ```
 
 Arguments are `<engine> [mechanism] [rounds] [racers]`:
 
-- `engine` — `mem`, `surrealkv`, or `rocksdb`
+- `engine` — `mem` or `surrealkv` (SurrealDB 4 removed RocksDB)
 - `mechanism` — `tx` (one guarded `UPDATE` inside `BEGIN`/`COMMIT`, which asks
   the engine to arbitrate) or `nonce` (a per-attempt nonce written then read
   back outside any transaction, which asks the engine for nothing)

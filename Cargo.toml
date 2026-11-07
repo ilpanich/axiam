@@ -64,7 +64,7 @@ edition = "2024"
 authors = ["AXIAM Contributors"]
 license = "Apache-2.0"
 repository = "https://github.com/emanuele/axiam"
-rust-version = "1.93"
+rust-version = "1.95"
 
 [workspace.dependencies]
 # Serialization
@@ -101,7 +101,7 @@ lapin = "4"
 futures-lite = "2"
 
 # Database
-surrealdb = "3"
+surrealdb = "4"
 # Lock-free atomic swap of the pooled SurrealDB connection: the DB pool slot is
 # read on every query and written only by a reconnect, so readers must never
 # take a lock or queue behind the (essentially never) writer.

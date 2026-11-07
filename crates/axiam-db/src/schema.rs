@@ -15,7 +15,7 @@ use surrealdb_types::SurrealValue;
 use tracing::{info, warn};
 
 use crate::error::DbError;
-use crate::helpers::{is_unique_violation, is_write_conflict};
+use crate::helpers::{is_unique_violation, is_write_conflict, retry_on_write_conflict};
 
 // -----------------------------------------------------------------------
 // Migration tracking
@@ -2987,7 +2987,12 @@ async fn apply_pending_migrations<C: Connection>(db: &Surreal<C>) -> Result<(), 
                 v = migration.version,
                 n = migration.name,
             );
-            let applied = db.query(&txn).await?.check();
+            // A write conflict rolled the transaction back and may mean another
+            // starter is applying this version but has not committed, so the
+            // version is not recorded yet and the check below would call it a
+            // failure. Retry: either this attempt lands, or the other starter's
+            // record refuses it and that check sees the version.
+            let applied = retry_on_write_conflict(|| async { db.query(&txn).await?.check() }).await;
             if let Err(e) = applied {
                 // The transaction rolled back whole. If the version is
                 // recorded now, another starter applied it (the unique

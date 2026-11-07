@@ -133,8 +133,8 @@ hostile server both surface as an envelope that will not open.
 
 ## MSRV
 
-**1.88**, stated explicitly rather than inherited from the workspace (which is
-1.93). This crate is vendored into the Rust SDK, whose MSRV is 1.88 and is
+**1.89**, stated explicitly rather than inherited from the workspace (which is
+1.95). This crate is vendored into the Rust SDK, whose MSRV is 1.89 and is
 CI-enforced; inheriting the workspace floor made that SDK's MSRV job fail on a
 requirement nothing in this crate actually has. Raising it is a breaking change
 for every SDK that depends on it, and should be a deliberate edit here rather

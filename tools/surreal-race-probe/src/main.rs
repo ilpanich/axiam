@@ -27,7 +27,7 @@
 //!
 //! Usage:
 //!   surreal-race-probe <engine> [mechanism] [rounds] [racers]
-//!     engine     mem | surrealkv | rocksdb        (rocksdb needs --features rocksdb)
+//!     engine     mem | surrealkv
 //!     mechanism  tx | nonce                        (default: tx)
 //!     rounds     default 1200
 //!     racers     default 8
@@ -183,11 +183,7 @@ async fn open(engine: &str, dir: &str) -> Surreal<Db> {
         "surrealkv" => Surreal::new::<SurrealKv>(format!("{dir}/skv.db"))
             .await
             .expect("surrealkv"),
-        #[cfg(feature = "rocksdb")]
-        "rocksdb" => Surreal::new::<surrealdb::engine::local::RocksDb>(format!("{dir}/rocks.db"))
-            .await
-            .expect("rocksdb"),
-        other => panic!("unknown or uncompiled engine {other:?} (rocksdb needs --features rocksdb)"),
+        other => panic!("unknown engine {other:?}"),
     };
     db.use_ns("probe").use_db("probe").await.expect("use ns/db");
     db.query("DEFINE TABLE IF NOT EXISTS probe SCHEMALESS; DEFINE INDEX IF NOT EXISTS probe_key ON TABLE probe COLUMNS key")

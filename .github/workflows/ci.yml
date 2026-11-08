@@ -969,7 +969,13 @@ jobs:
     # Backstop: a Playwright spec that hangs on CI (no per-test signal) would
     # otherwise run to GitHub's 6h default. Bound the whole job so a hang
     # self-terminates and leaves a downloadable log instead of blocking the PR.
-    timeout-minutes: 75
+    #
+    # 90, not 75: the Keycloak steps below compile a dev-profile test build,
+    # and with dependencies optimised (Cargo.toml, `profile.dev.package."*"`)
+    # that compile alone took 33 minutes on a cold cache, putting a passing
+    # job at 65 of 75. The bound still stops a hung spec; it no longer
+    # trips on a slow but healthy build.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -1008,7 +1014,7 @@ jobs:
         # tikv-jemallocator, actix-tls, rcgen, x509-parser, samael, tonic-build,
         # etc.), leaving near-zero margin under the old 15-min step timeout —
         # observed a hairline timeout where every service reported Healthy in
-        # the same second the step timed out. The job-level timeout-minutes: 75
+        # the same second the step timed out. The job-level timeout-minutes: 90
         # above has ample headroom, so give this step real margin instead.
         timeout-minutes: 30
 

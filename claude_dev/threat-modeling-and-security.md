@@ -14,8 +14,9 @@
 >
 > ## Handoff — this document and the website section
 >
-> **Status: source current as of 2026-11-01 (the `1.2.0` release branch, model
-> 2.45.0 — the social-login gap plan's four waves and its reconciliation, on top of
+> **Status: source current as of 2026-11-08 (the `1.3.0` tag, model 2.46.0 —
+> the post-1.2.0 follow-ups and the website pass recorded below, on top of the
+> `1.2.0` release branch's model 2.45.0 — the social-login gap plan's four waves and its reconciliation, on top of
 > the `1.1.2` release's model (2.44.0, 2026-10-23: the waves and the reconciliation pass), on top of the
 > `1.1.1` release's model (2.43.0, 2026-10-19: the waves and the reconciliation pass recorded below),
 > on top of the 1.1.0 release's six waves (model 2.42.0, 2026-10-16), among them
@@ -660,6 +661,24 @@
 > High or Critical are still eleven, none of them a defect awaiting a fix in
 > AXIAM's code; open in AXIAM's own request path are the three Low residuals of
 > the network write gate.
+>
+> **Website pass at `1.3.0` (2026-11-08; model 2.46.0, unchanged since 1.2.1).** The
+> section bodies below and the website's Security section were brought up to the
+> `1.3.0` tag. What the pass covered: every change of `1.2.0` to `1.3.0` that
+> touches a claim in those sections — the native sign-in grant (T-489 … T-492), the
+> provider hint and `default_idp` (T-493, T-494), a refused refresh-token replay
+> revoking its session (T-37, T-254), logout revoking the session's refresh tokens
+> and reaching the grants of earlier console refreshes through the lineage key
+> (T-249), the code-replay and MFA-reset revocations, `client_id` and the exchange
+> marker on exchanged tokens (T-471), the browser binding against login CSRF
+> (T-495), re-authentication forwarded upstream (T-493), and the release gate that
+> held back `1.1.3` to `1.2.2` on the image scan — each added and checked against
+> the code and the CHANGELOG; and the rest of the sections, read for statements
+> those releases made stale (two were: the refresh-replay sentence in *Tokens*, and
+> the model version in *Coverage by area*). Claims those releases did not touch
+> were not re-derived. SurrealDB 4.0 (`1.3.0`) changes no claim in the sections
+> and no threat; the counts are regenerated from `Axiam.json` and unchanged
+> (**495 threats, 464 mitigated / 21 open / 10 not applicable**).
 >
 > **Post-1.2.0 follow-ups (model 2.46.0, 2026-11-04; #837, #838, #844).** The model is
 > **495 threats, 464 mitigated / 21 open / 10 not applicable** (Low 41, 2 open and 1
@@ -2100,7 +2119,7 @@ The concentration of open items in *Deployment* and *Client SDKs* is deliberate
 and expected: those are the two areas where security is a shared responsibility
 between AXIAM and the people who run and integrate it. The five diagrams of
 AXIAM's own request path — authentication, OAuth2 and tokens, federation,
-authorization, PKI — carry **four** open items at model 2.45.0, all
+authorization, PKI — carry **four** open items at model 2.46.0, all
 residuals that land at least partly outside AXIAM: a key extracted from a
 device (T-94), a partner's IdP populating the user table under opt-in
 just-in-time provisioning (T-161), a leaked SAML signing key that service
@@ -2389,19 +2408,24 @@ have to be re-established — nothing is assumed across a boundary.
   required field on the settings write, so a client cannot relax it by omission.
 - **Tokens**: access tokens are **EdDSA (Ed25519) JWTs**, 15 minutes long. The
   verifier pins the algorithm and never reads it from the token header, so
-  `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh tokens
-  are opaque, server-stored and **single-use with rotation**: the rotated token
-  is revoked and a second presentation is refused. A client registered on the
-  FAPI 2.0 profile is the exception — there the rotated token is retired on a
-  60-second grace clock rather than destroyed, which is §5.3.2.1-9's recovery
-  for a client whose rotation response was lost, and is affordable there
-  because that profile binds every token to a key the client must also hold.
-  Two genuinely concurrent rotations still cannot both find a live row. And a
+  `alg:none` and HMAC-key-confusion attacks are rejected outright. Refresh
+  tokens are opaque, server-stored and **single-use with rotation**: the rotated
+  token is revoked and a second presentation is refused. A client registered on
+  the FAPI 2.0 profile is the exception — there the rotated token is retired on
+  a 60-second grace clock rather than destroyed, which is §5.3.2.1-9's recovery
+  for a client whose rotation response was lost, and is affordable there because
+  that profile binds every token to a key the client must also hold. Two
+  genuinely concurrent rotations still cannot both find a live row. And a
   refresh token presented **after** it was rotated is never silent, inside the
   window or outside it: it is counted on the session it belongs to and written
-  to the audit log as `oauth2.refresh_token_replayed`, saying whether it was
-  served under the grace or refused, and never carrying the token itself. In the
-  browser, tokens live only in `Secure` / `HttpOnly` /
+  to the audit log as `oauth2.refresh_token_replayed`, saying how it was
+  answered, and never carrying the token itself. Since `1.2.0` a replay outside
+  the grace also **revokes the session it belongs to** and every refresh token
+  issued under it, the successor included. Only the token's own client, passing
+  the token's sender constraint, triggers that, so a thief presenting a stolen
+  token cannot use it to sign its owner out; an organization that needs the
+  older refuse-and-audit answer sets `oauth2.refresh_reuse_response` to `refuse`
+  (T-37, T-254). In the browser, tokens live only in `Secure` / `HttpOnly` /
   `SameSite=Strict` cookies — never in `localStorage`, never in a URL — and
   logout's removal cookies are built from the same setters they clear, so the
   protective attributes are mirrored by construction rather than restated.
@@ -2419,6 +2443,18 @@ have to be re-established — nothing is assumed across a boundary.
   It narrows the window and is deliberately not a control: a guard that cannot
   fetch the feed behaves exactly as it does without it, the feed can only ever
   turn an accept into a reject, and local verification still decides.
+- **Logging out ends the sign-in, not only the cookie.** Since `1.2.0` a
+  single-session logout — `/auth/logout`, RP-initiated logout and SAML single
+  logout — revokes every OAuth2 refresh token issued under the session, for
+  every client and grant bound to it. It revokes them before it deletes the
+  session, so a logout whose writes fail is reported as failed, never as signed
+  out, and repeating it with the same credential completes it. Since `1.2.1`
+  every session carries a **lineage** key, minted at sign-in and copied by every
+  console refresh, so the logout also reaches the grants authorized before a
+  refresh, an `id_token_hint` from before a refresh ends the live console
+  session, and back-channel logout reaches every client that joined (T-249). An
+  administrator's MFA reset revokes the user's refresh tokens as a password
+  reset does.
 - **Password reset** uses CSPRNG-generated, single-use, short-lived tokens
   (never time-ordered UUIDs), delivered over an authenticated POST, and consuming a
   reset invalidates every existing session. An optional **Have I Been Pwned**
@@ -2607,8 +2643,10 @@ are published rather than counted as passes.
   rotation** that can only narrow scope, never widen it, and that revokes the
   predecessor — except on the FAPI 2.0 profile, where §5.3.2.1-9's 60-second
   grace applies and every token is sender-constrained. A rotated refresh token
-  presented again is audited either way; `state` and `nonce` required and
-  verified.
+  presented again is audited either way, and outside the grace revokes its
+  session (see *Authentication & sessions*); since `1.2.0` a replayed code
+  revokes the refresh tokens issued under its session as well as the session
+  itself. `state` and `nonce` required and verified.
 - **Introspection and revocation require client authentication** and are scoped
   to the caller's own tenant; unknown tokens return the uniform inactive response.
 - **userinfo is scope-filtered**; JWKS publishes the active key plus a bounded
@@ -2883,6 +2921,36 @@ are published rather than counted as passes.
   client authentication and sender-constrained tokens, as the FAPI-CIBA
   profile requires. A self-registered client can obtain the grant only with
   an administrator's initial access token.
+- **A native app's provider ID token is accepted once, for the app it was issued
+  to, and only where an operator said so.** Since `1.2.0` a mobile app that
+  signed its user in with the provider's own SDK can exchange that ID token at
+  the token endpoint (`urn:axiam:params:oauth:grant-type:provider-id-token`).
+  The grant is off per OIDC provider until an operator enables `native_login`
+  and lists the app's client IDs, and a client must list it among its grant
+  types. The token's audience must be a listed client ID (its `azp` where it has
+  one); its `nonce` claim must be the SHA-256 of the raw nonce the app presents,
+  and a claim equal to the raw value is refused; and each token is accepted once
+  in the whole deployment, keyed on the bytes its signature covers, so a second
+  encoding of an ECDSA signature is the same token. Every refusal is one
+  `invalid_grant`, every interactive-sign-in gate applies, and the grant is rate
+  limited at the login ceiling. It is not token exchange, which still refuses ID
+  tokens. Trust is per tenant rather than per client — a residual recorded, not
+  closed (T-489 … T-492).
+- **A provider hint steers the sign-in page and cannot probe it.**
+  `axiam_idp_hint` on `/oauth2/authorize` and `/oauth2/par`, and a client's
+  registered `default_idp`, are resolved on the server against the tenant's own
+  enabled providers, and the sign-in page receives only the matched provider's
+  id. A hint that names nothing — unknown, disabled or another tenant's — is
+  ignored and the response is byte-identical to one without it, so the parameter
+  tells a caller nothing about which providers a tenant has; a `default_idp` the
+  tenant cannot see is refused at write time. It changes nothing that is issued,
+  the page's automatic start never loops, and on a re-authentication hop it only
+  highlights the provider (T-493, T-494).
+- **An exchanged token names who exchanged it.** Since `1.2.0` a token issued by
+  token exchange carries the RFC 9068 `client_id` of the client that ran the
+  exchange and an `axiam_exchanged` marker no other token carries, and an
+  exchanged token is never accepted as an `actor_token` — so a foreign token
+  cannot be laundered through one exchange into the actor of the next (T-471).
 
 ### Federation (SAML & OIDC)
 
@@ -2903,11 +2971,16 @@ against the classic federation attacks:
   the signature), and verification runs off the request workers under the crypto
   gate (T-477).
 - **OIDC federation** requires `state` and `nonce` from server-side flow state
-  (never from the request body), binds the federation-config id into `state` to stop
-  IdP mix-up, and validates the issuer. The authentication instant a federated
-  login reports is the provider's own `auth_time` or `AuthnInstant`, never
-  AXIAM's clock, so a provider replaying a session it established hours ago is
-  not recorded as a fresh login.
+  (never from the request body), binds the federation-config id into `state` to
+  stop IdP mix-up, and validates the issuer. The authentication instant a
+  federated login reports is the provider's own `auth_time` or `AuthnInstant`,
+  never AXIAM's clock, so a provider replaying a session it established hours
+  ago is not recorded as a fresh login. Since `1.2.1` a request for a fresh
+  sign-in is forwarded upstream — `prompt=login` to an OIDC provider (with
+  `max_age=0` for Google and Apple), `ForceAuthn="true"` to a SAML IdP,
+  `auth_type=reauthenticate` to Facebook — and an upstream `auth_time` or
+  `AuthnInstant` from before the start is refused; a provider that asserts no
+  instant is accepted on the request alone (T-493).
 - **Every outbound IdP fetch** — discovery, token exchange, JWKS, SAML metadata —
   goes through one **SSRF guard** that resolves DNS fresh, rejects private,
   loopback, link-local and ULA addresses, **pins the validated IP for the actual
@@ -2980,6 +3053,16 @@ against the classic federation attacks:
   provider's registration hygiene, and it is not a control this deployment owns,
   so it sits behind AXIAM's own rule as a second layer rather than in place of
   it.
+- **A federated sign-in completes only in the browser that started it.** Login
+  CSRF — an attacker starting a sign-in with their own provider account and
+  getting the victim's browser to finish it — is closed since `1.2.1`. Every
+  public start operation sets a `__Host-axiam_fed_bind` cookie (`HttpOnly`,
+  `Secure`, `SameSite=Strict`, 256 random bits) and records only its digest on
+  the login state, and the OIDC, OAuth2 and SAML callbacks and the handoff
+  redemption refuse a request that does not carry it, with the uniform `401` and
+  before any code is redeemed or assertion used. On the SAML and Apple
+  cross-site returns the binding rides on the handoff code to its same-origin
+  redemption (T-495).
 - **The plain-OAuth2 variant states its downgrade instead of hiding it.**
   Providers that issue no ID token (GitHub, Facebook) authenticate by a userinfo
   call with no signature, `nonce` or `aud`. AXIAM refuses that protocol for every
@@ -3911,9 +3994,13 @@ by who does it.
   with no corresponding threat, or when a deferred item ships. The Threat Dragon
   JSON is the source of truth and this section is generated from it.
 - **Gates, not vibes.** Every commit runs formatting, lints (`-D warnings`), the
-  test suite against real SurrealDB and RabbitMQ, dependency and container scans, and
-  cross-language SDK contract-drift checks. Security-relevant fixes land with a
-  regression or negative test.
+  test suite against real SurrealDB and RabbitMQ, dependency and container
+  scans, and cross-language SDK contract-drift checks. Security-relevant fixes
+  land with a regression or negative test. A release does not publish a server
+  image in which its image scan finds a fixable High or Critical vulnerability —
+  from `1.1.3` to `1.2.2` that held back three tags, until `1.2.3` replaced the
+  base image's `libssl3` — and every ignored dependency advisory carries its
+  reason and a review date in `deny.toml`, and says so when it is reachable.
 - **External suites are run, and their receipts kept.** The OpenID Foundation's
   conformance suite is run against a live server and every report is committed
   alongside the earlier ones, green and red alike; its first runs found a hole
@@ -3923,7 +4010,7 @@ by who does it.
 Everything in this document was last re-derived from source at the
 **`1.0.1`** release branch (model 2.41.0) on 2026-10-14, and reconciled with the
 **`1.1.0`** release branch's model (2.42.0) on 2026-10-16, and with the
-**`1.1.1`** release branch's model (2.43.0) on 2026-10-19, and with the **`1.1.2`** release branch's model (2.44.0) on 2026-10-23 (no status changed), and with the **`1.2.0`** release branch's model (2.45.0) on 2026-11-01 (no status changed; six entries enter, three are amended); the handoff block at
+**`1.1.1`** release branch's model (2.43.0) on 2026-10-19, and with the **`1.1.2`** release branch's model (2.44.0) on 2026-10-23 (no status changed), and with the **`1.2.0`** release branch's model (2.45.0) on 2026-11-01 (no status changed; six entries enter, three are amended), and with the **`1.2.1`** release's model (2.46.0) on 2026-11-04 (T-495 enters, two entries are amended); the sections were brought up to the **`1.3.0`** tag on 2026-11-08 (no model change); the handoff block at
 the top of this file says what each pass covered and what it changed. The website carries its own stamp,
 from a single constant in `website/src/version.ts`, recording the release *its*
 Security section was last re-derived against; it moves when that section does.

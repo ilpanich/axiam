@@ -59,7 +59,7 @@
 <a href=#59 id=59 data-nosnippet>59</a>
 <a href=#60 id=60 data-nosnippet>60</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
 <a href=#61 id=61 data-nosnippet>61</a><span class="kw">use </span><span class="kw">crate</span>::handle::DbHandle;
-<a href=#62 id=62 data-nosnippet>62</a><span class="kw">use </span><span class="kw">crate</span>::helpers::is_transaction_conflict;
+<a href=#62 id=62 data-nosnippet>62</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{is_transaction_conflict, retry_on_write_conflict};
 <a href=#63 id=63 data-nosnippet>63</a>
 <a href=#64 id=64 data-nosnippet>64</a><span class="doccomment">/// Every column a read projects. The sealed ping columns are not among them.
 <a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">const </span>SELECT_FIELDS: <span class="kw-2">&amp;</span>str = <span class="string">"meta::id(id) AS record_id, tenant_id, client_id, \
@@ -539,172 +539,179 @@
 <a href=#539 id=539 data-nosnippet>539</a>        client_id: <span class="kw-2">&amp;</span>str,
 <a href=#540 id=540 data-nosnippet>540</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;CibaRequest&gt;&gt; {
 <a href=#541 id=541 data-nosnippet>541</a>        <span class="comment">// Layer 1: the guarded UPDATE inside an explicit transaction.
-<a href=#542 id=542 data-nosnippet>542</a>        </span><span class="kw">let </span>nonce = new_id().to_string();
-<a href=#543 id=543 data-nosnippet>543</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#544 id=544 data-nosnippet>544</a>            </span>.db
-<a href=#545 id=545 data-nosnippet>545</a>            .current()
-<a href=#546 id=546 data-nosnippet>546</a>            .query(<span class="macro">format!</span>(
-<a href=#547 id=547 data-nosnippet>547</a>                <span class="string">"BEGIN TRANSACTION; \
-<a href=#548 id=548 data-nosnippet>548</a>                 LET $before = (UPDATE ciba_request \
-<a href=#549 id=549 data-nosnippet>549</a>                     SET status = 'redeemed', version = version + 1, redemption_id = $nonce \
-<a href=#550 id=550 data-nosnippet>550</a>                     WHERE tenant_id = $tenant_id AND auth_req_id_hash = $hash \
-<a href=#551 id=551 data-nosnippet>551</a>                     AND client_id = $client_id \
-<a href=#552 id=552 data-nosnippet>552</a>                     AND status = 'approved' AND expires_at &gt; time::now() \
-<a href=#553 id=553 data-nosnippet>553</a>                     RETURN BEFORE); \
-<a href=#554 id=554 data-nosnippet>554</a>                 SELECT {SELECT_FIELDS} FROM $before; \
-<a href=#555 id=555 data-nosnippet>555</a>                 COMMIT TRANSACTION"
-<a href=#556 id=556 data-nosnippet>556</a>            </span>))
-<a href=#557 id=557 data-nosnippet>557</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#558 id=558 data-nosnippet>558</a>            .bind((<span class="string">"hash"</span>, auth_req_id_hash.to_owned()))
-<a href=#559 id=559 data-nosnippet>559</a>            .bind((<span class="string">"client_id"</span>, client_id.to_owned()))
-<a href=#560 id=560 data-nosnippet>560</a>            .bind((<span class="string">"nonce"</span>, nonce.clone()))
-<a href=#561 id=561 data-nosnippet>561</a>            .<span class="kw">await</span>;
-<a href=#562 id=562 data-nosnippet>562</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="kw">match </span>result {
-<a href=#563 id=563 data-nosnippet>563</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#564 id=564 data-nosnippet>564</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#565 id=565 data-nosnippet>565</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#566 id=566 data-nosnippet>566</a>        };
-<a href=#567 id=567 data-nosnippet>567</a>        <span class="comment">// BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-<a href=#568 id=568 data-nosnippet>568</a>        </span><span class="kw">let </span>rows: Vec&lt;CibaRequestRow&gt; = <span class="kw">match </span>result.take::&lt;Vec&lt;CibaRequestRow&gt;&gt;(<span class="number">2</span>) {
-<a href=#569 id=569 data-nosnippet>569</a>            <span class="prelude-val">Ok</span>(rows) =&gt; rows,
-<a href=#570 id=570 data-nosnippet>570</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#571 id=571 data-nosnippet>571</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#572 id=572 data-nosnippet>572</a>        };
-<a href=#573 id=573 data-nosnippet>573</a>        <span class="kw">if </span>rows.is_empty() {
-<a href=#574 id=574 data-nosnippet>574</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#575 id=575 data-nosnippet>575</a>        }
-<a href=#576 id=576 data-nosnippet>576</a>
-<a href=#577 id=577 data-nosnippet>577</a>        <span class="comment">// Layer 2: outside, and after, the transaction above.
-<a href=#578 id=578 data-nosnippet>578</a>        </span><span class="kw">let </span>stored = <span class="self">self
-<a href=#579 id=579 data-nosnippet>579</a>            </span>.db
-<a href=#580 id=580 data-nosnippet>580</a>            .current()
-<a href=#581 id=581 data-nosnippet>581</a>            .query(
-<a href=#582 id=582 data-nosnippet>582</a>                <span class="string">"SELECT VALUE redemption_id FROM ciba_request \
-<a href=#583 id=583 data-nosnippet>583</a>                 WHERE tenant_id = $tenant_id AND auth_req_id_hash = $hash LIMIT 1"</span>,
-<a href=#584 id=584 data-nosnippet>584</a>            )
-<a href=#585 id=585 data-nosnippet>585</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#586 id=586 data-nosnippet>586</a>            .bind((<span class="string">"hash"</span>, auth_req_id_hash.to_owned()))
-<a href=#587 id=587 data-nosnippet>587</a>            .<span class="kw">await</span>;
-<a href=#588 id=588 data-nosnippet>588</a>        <span class="kw">let </span><span class="kw-2">mut </span>stored = <span class="kw">match </span>stored {
-<a href=#589 id=589 data-nosnippet>589</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#590 id=590 data-nosnippet>590</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#591 id=591 data-nosnippet>591</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#592 id=592 data-nosnippet>592</a>        };
-<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">let </span>stored: Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt; = <span class="kw">match </span>stored.take::&lt;Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt;&gt;(<span class="number">0</span>) {
-<a href=#594 id=594 data-nosnippet>594</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
-<a href=#595 id=595 data-nosnippet>595</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#596 id=596 data-nosnippet>596</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#597 id=597 data-nosnippet>597</a>        };
-<a href=#598 id=598 data-nosnippet>598</a>        <span class="kw">if </span>stored.into_iter().flatten().next().as_deref() != <span class="prelude-val">Some</span>(nonce.as_str()) {
-<a href=#599 id=599 data-nosnippet>599</a>            <span class="comment">// Another redemption's write landed after ours: it holds the
-<a href=#600 id=600 data-nosnippet>600</a>            // request, and this one must not also mint a token set.
-<a href=#601 id=601 data-nosnippet>601</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#602 id=602 data-nosnippet>602</a>        }
-<a href=#603 id=603 data-nosnippet>603</a>
-<a href=#604 id=604 data-nosnippet>604</a>        rows.into_iter()
-<a href=#605 id=605 data-nosnippet>605</a>            .next()
-<a href=#606 id=606 data-nosnippet>606</a>            .map(CibaRequestRow::try_into_request)
-<a href=#607 id=607 data-nosnippet>607</a>            .transpose()
-<a href=#608 id=608 data-nosnippet>608</a>            .map_err(Into::into)
-<a href=#609 id=609 data-nosnippet>609</a>    }
+<a href=#542 id=542 data-nosnippet>542</a>        //
+<a href=#543 id=543 data-nosnippet>543</a>        // A write conflict here means another writer touched the row, not that
+<a href=#544 id=544 data-nosnippet>544</a>        // it was redeemed: a concurrent poll's `last_polled_at` write is enough
+<a href=#545 id=545 data-nosnippet>545</a>        // to abort this transaction, and an aborted transaction wrote nothing.
+<a href=#546 id=546 data-nosnippet>546</a>        // Treating that as "already redeemed" refused a credential nobody had
+<a href=#547 id=547 data-nosnippet>547</a>        // used, so it is retried. The retry is safe because the status guard is
+<a href=#548 id=548 data-nosnippet>548</a>        // re-evaluated: a real redemption leaves no `approved` row to match.
+<a href=#549 id=549 data-nosnippet>549</a>        </span><span class="kw">let </span>nonce = new_id().to_string();
+<a href=#550 id=550 data-nosnippet>550</a>        <span class="kw">let </span>attempt = || <span class="kw">async </span>{
+<a href=#551 id=551 data-nosnippet>551</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#552 id=552 data-nosnippet>552</a>                </span>.db
+<a href=#553 id=553 data-nosnippet>553</a>                .current()
+<a href=#554 id=554 data-nosnippet>554</a>                .query(<span class="macro">format!</span>(
+<a href=#555 id=555 data-nosnippet>555</a>                    <span class="string">"BEGIN TRANSACTION; \
+<a href=#556 id=556 data-nosnippet>556</a>                     LET $before = (UPDATE ciba_request \
+<a href=#557 id=557 data-nosnippet>557</a>                         SET status = 'redeemed', version = version + 1, redemption_id = $nonce \
+<a href=#558 id=558 data-nosnippet>558</a>                         WHERE tenant_id = $tenant_id AND auth_req_id_hash = $hash \
+<a href=#559 id=559 data-nosnippet>559</a>                         AND client_id = $client_id \
+<a href=#560 id=560 data-nosnippet>560</a>                         AND status = 'approved' AND expires_at &gt; time::now() \
+<a href=#561 id=561 data-nosnippet>561</a>                         RETURN BEFORE); \
+<a href=#562 id=562 data-nosnippet>562</a>                     SELECT {SELECT_FIELDS} FROM $before; \
+<a href=#563 id=563 data-nosnippet>563</a>                     COMMIT TRANSACTION"
+<a href=#564 id=564 data-nosnippet>564</a>                </span>))
+<a href=#565 id=565 data-nosnippet>565</a>                .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#566 id=566 data-nosnippet>566</a>                .bind((<span class="string">"hash"</span>, auth_req_id_hash.to_owned()))
+<a href=#567 id=567 data-nosnippet>567</a>                .bind((<span class="string">"client_id"</span>, client_id.to_owned()))
+<a href=#568 id=568 data-nosnippet>568</a>                .bind((<span class="string">"nonce"</span>, nonce.clone()))
+<a href=#569 id=569 data-nosnippet>569</a>                .<span class="kw">await
+<a href=#570 id=570 data-nosnippet>570</a>                </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#571 id=571 data-nosnippet>571</a>            <span class="comment">// BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+<a href=#572 id=572 data-nosnippet>572</a>            </span>result.take::&lt;Vec&lt;CibaRequestRow&gt;&gt;(<span class="number">2</span>).map_err(DbError::from)
+<a href=#573 id=573 data-nosnippet>573</a>        };
+<a href=#574 id=574 data-nosnippet>574</a>        <span class="kw">let </span>rows = <span class="kw">match </span>retry_on_write_conflict(attempt).<span class="kw">await </span>{
+<a href=#575 id=575 data-nosnippet>575</a>            <span class="prelude-val">Ok</span>(rows) =&gt; rows,
+<a href=#576 id=576 data-nosnippet>576</a>            <span class="comment">// Still contended after the retries: refuse, never serve.
+<a href=#577 id=577 data-nosnippet>577</a>            </span><span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#578 id=578 data-nosnippet>578</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e.into()),
+<a href=#579 id=579 data-nosnippet>579</a>        };
+<a href=#580 id=580 data-nosnippet>580</a>        <span class="kw">if </span>rows.is_empty() {
+<a href=#581 id=581 data-nosnippet>581</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#582 id=582 data-nosnippet>582</a>        }
+<a href=#583 id=583 data-nosnippet>583</a>
+<a href=#584 id=584 data-nosnippet>584</a>        <span class="comment">// Layer 2: outside, and after, the transaction above.
+<a href=#585 id=585 data-nosnippet>585</a>        </span><span class="kw">let </span>stored = <span class="self">self
+<a href=#586 id=586 data-nosnippet>586</a>            </span>.db
+<a href=#587 id=587 data-nosnippet>587</a>            .current()
+<a href=#588 id=588 data-nosnippet>588</a>            .query(
+<a href=#589 id=589 data-nosnippet>589</a>                <span class="string">"SELECT VALUE redemption_id FROM ciba_request \
+<a href=#590 id=590 data-nosnippet>590</a>                 WHERE tenant_id = $tenant_id AND auth_req_id_hash = $hash LIMIT 1"</span>,
+<a href=#591 id=591 data-nosnippet>591</a>            )
+<a href=#592 id=592 data-nosnippet>592</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#593 id=593 data-nosnippet>593</a>            .bind((<span class="string">"hash"</span>, auth_req_id_hash.to_owned()))
+<a href=#594 id=594 data-nosnippet>594</a>            .<span class="kw">await</span>;
+<a href=#595 id=595 data-nosnippet>595</a>        <span class="kw">let </span><span class="kw-2">mut </span>stored = <span class="kw">match </span>stored {
+<a href=#596 id=596 data-nosnippet>596</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
+<a href=#597 id=597 data-nosnippet>597</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#598 id=598 data-nosnippet>598</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#599 id=599 data-nosnippet>599</a>        };
+<a href=#600 id=600 data-nosnippet>600</a>        <span class="kw">let </span>stored: Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt; = <span class="kw">match </span>stored.take::&lt;Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt;&gt;(<span class="number">0</span>) {
+<a href=#601 id=601 data-nosnippet>601</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
+<a href=#602 id=602 data-nosnippet>602</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#603 id=603 data-nosnippet>603</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#604 id=604 data-nosnippet>604</a>        };
+<a href=#605 id=605 data-nosnippet>605</a>        <span class="kw">if </span>stored.into_iter().flatten().next().as_deref() != <span class="prelude-val">Some</span>(nonce.as_str()) {
+<a href=#606 id=606 data-nosnippet>606</a>            <span class="comment">// Another redemption's write landed after ours: it holds the
+<a href=#607 id=607 data-nosnippet>607</a>            // request, and this one must not also mint a token set.
+<a href=#608 id=608 data-nosnippet>608</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#609 id=609 data-nosnippet>609</a>        }
 <a href=#610 id=610 data-nosnippet>610</a>
-<a href=#611 id=611 data-nosnippet>611</a>    <span class="kw">async fn </span>ping_credentials(
-<a href=#612 id=612 data-nosnippet>612</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#613 id=613 data-nosnippet>613</a>        tenant_id: Uuid,
-<a href=#614 id=614 data-nosnippet>614</a>        id: Uuid,
-<a href=#615 id=615 data-nosnippet>615</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;CibaPingCredentials&gt;&gt; {
-<a href=#616 id=616 data-nosnippet>616</a>        <span class="attr">#[derive(SurrealValue)]
-<a href=#617 id=617 data-nosnippet>617</a>        </span><span class="kw">struct </span>SealedRow {
-<a href=#618 id=618 data-nosnippet>618</a>            ping_ciphertext: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#619 id=619 data-nosnippet>619</a>            ping_nonce: <span class="prelude-ty">Option</span>&lt;String&gt;,
-<a href=#620 id=620 data-nosnippet>620</a>        }
-<a href=#621 id=621 data-nosnippet>621</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#622 id=622 data-nosnippet>622</a>            </span>.db
-<a href=#623 id=623 data-nosnippet>623</a>            .current()
-<a href=#624 id=624 data-nosnippet>624</a>            .query(
-<a href=#625 id=625 data-nosnippet>625</a>                <span class="string">"SELECT ping_ciphertext, ping_nonce FROM ciba_request \
-<a href=#626 id=626 data-nosnippet>626</a>                 WHERE meta::id(id) = $id AND tenant_id = $tenant_id"</span>,
-<a href=#627 id=627 data-nosnippet>627</a>            )
-<a href=#628 id=628 data-nosnippet>628</a>            .bind((<span class="string">"id"</span>, id.to_string()))
-<a href=#629 id=629 data-nosnippet>629</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#630 id=630 data-nosnippet>630</a>            .<span class="kw">await
-<a href=#631 id=631 data-nosnippet>631</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#632 id=632 data-nosnippet>632</a>        <span class="kw">let </span>rows: Vec&lt;SealedRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#633 id=633 data-nosnippet>633</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(row) = rows.into_iter().next() <span class="kw">else </span>{
-<a href=#634 id=634 data-nosnippet>634</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#635 id=635 data-nosnippet>635</a>        };
-<a href=#636 id=636 data-nosnippet>636</a>        <span class="kw">let </span>(<span class="prelude-val">Some</span>(ciphertext), <span class="prelude-val">Some</span>(nonce)) = (row.ping_ciphertext, row.ping_nonce) <span class="kw">else </span>{
-<a href=#637 id=637 data-nosnippet>637</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#638 id=638 data-nosnippet>638</a>        };
-<a href=#639 id=639 data-nosnippet>639</a>        <span class="kw">let </span>key = <span class="self">self</span>.key.as_ref().ok_or_else(<span class="self">Self</span>::missing_key)<span class="question-mark">?</span>;
-<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">let </span>plaintext =
-<a href=#641 id=641 data-nosnippet>641</a>            Zeroizing::new(decrypt_separate(key, <span class="kw-2">&amp;</span>nonce, <span class="kw-2">&amp;</span>ciphertext).map_err(|<span class="kw">_</span>| {
-<a href=#642 id=642 data-nosnippet>642</a>                AxiamError::Crypto(
-<a href=#643 id=643 data-nosnippet>643</a>                    <span class="string">"the CIBA ping credentials could not be decrypted: the stored value does \
-<a href=#644 id=644 data-nosnippet>644</a>                     not match the configured pki_encryption_key"
-<a href=#645 id=645 data-nosnippet>645</a>                        </span>.into(),
-<a href=#646 id=646 data-nosnippet>646</a>                )
-<a href=#647 id=647 data-nosnippet>647</a>            })<span class="question-mark">?</span>);
-<a href=#648 id=648 data-nosnippet>648</a>        <span class="kw">let </span>decoded: PingPlaintext = serde_json::from_slice(<span class="kw-2">&amp;</span>plaintext)
-<a href=#649 id=649 data-nosnippet>649</a>            .map_err(|<span class="kw">_</span>| AxiamError::Crypto(<span class="string">"the CIBA ping credentials are malformed"</span>.into()))<span class="question-mark">?</span>;
-<a href=#650 id=650 data-nosnippet>650</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(CibaPingCredentials {
-<a href=#651 id=651 data-nosnippet>651</a>            auth_req_id: decoded.auth_req_id,
-<a href=#652 id=652 data-nosnippet>652</a>            client_notification_token: decoded.client_notification_token,
-<a href=#653 id=653 data-nosnippet>653</a>        }))
-<a href=#654 id=654 data-nosnippet>654</a>    }
-<a href=#655 id=655 data-nosnippet>655</a>
-<a href=#656 id=656 data-nosnippet>656</a>    <span class="kw">async fn </span>sweep_expired(
-<a href=#657 id=657 data-nosnippet>657</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#658 id=658 data-nosnippet>658</a>        now: DateTime&lt;Utc&gt;,
-<a href=#659 id=659 data-nosnippet>659</a>        retention: chrono::Duration,
-<a href=#660 id=660 data-nosnippet>660</a>    ) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#661 id=661 data-nosnippet>661</a>        <span class="comment">// First mark, then delete: a request that expired a moment ago stays
-<a href=#662 id=662 data-nosnippet>662</a>        // long enough (`retention`) for a client still polling to be told
-<a href=#663 id=663 data-nosnippet>663</a>        // `expired_token` rather than `invalid_grant`.
-<a href=#664 id=664 data-nosnippet>664</a>        </span><span class="kw">let </span>cutoff = now - retention;
-<a href=#665 id=665 data-nosnippet>665</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#666 id=666 data-nosnippet>666</a>            </span>.db
-<a href=#667 id=667 data-nosnippet>667</a>            .current()
-<a href=#668 id=668 data-nosnippet>668</a>            .query(
-<a href=#669 id=669 data-nosnippet>669</a>                <span class="string">"UPDATE ciba_request SET status = 'expired', version = version + 1 \
-<a href=#670 id=670 data-nosnippet>670</a>                     WHERE status IN ['pending', 'approved'] AND expires_at &lt;= $now \
-<a href=#671 id=671 data-nosnippet>671</a>                     RETURN NONE; \
-<a href=#672 id=672 data-nosnippet>672</a>                 LET $removed = (DELETE ciba_request WHERE expires_at &lt;= $cutoff RETURN BEFORE); \
-<a href=#673 id=673 data-nosnippet>673</a>                 SELECT meta::id(id) AS record_id FROM $removed"</span>,
-<a href=#674 id=674 data-nosnippet>674</a>            )
-<a href=#675 id=675 data-nosnippet>675</a>            .bind((<span class="string">"now"</span>, now))
-<a href=#676 id=676 data-nosnippet>676</a>            .bind((<span class="string">"cutoff"</span>, cutoff))
-<a href=#677 id=677 data-nosnippet>677</a>            .<span class="kw">await
-<a href=#678 id=678 data-nosnippet>678</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#679 id=679 data-nosnippet>679</a>        <span class="comment">// UPDATE=0, LET=1, SELECT=2.
-<a href=#680 id=680 data-nosnippet>680</a>        </span><span class="kw">let </span>removed: Vec&lt;IdRow&gt; = result.take(<span class="number">2</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#681 id=681 data-nosnippet>681</a>        <span class="prelude-val">Ok</span>(removed.len() <span class="kw">as </span>u64)
-<a href=#682 id=682 data-nosnippet>682</a>    }
-<a href=#683 id=683 data-nosnippet>683</a>
-<a href=#684 id=684 data-nosnippet>684</a>    <span class="kw">async fn </span>delete_all_for_client(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, client_id: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#685 id=685 data-nosnippet>685</a>        <span class="comment">// Every status, expired or not: an approved request is the one that
-<a href=#686 id=686 data-nosnippet>686</a>        // must not outlive its client, a pending one is listed
-<a href=#687 id=687 data-nosnippet>687</a>        // on the approval surface for a client that no longer exists. Tenant
-<a href=#688 id=688 data-nosnippet>688</a>        // AND client id, as `client_id` is unique only within its tenant.
-<a href=#689 id=689 data-nosnippet>689</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#690 id=690 data-nosnippet>690</a>            </span>.db
-<a href=#691 id=691 data-nosnippet>691</a>            .current()
-<a href=#692 id=692 data-nosnippet>692</a>            .query(
-<a href=#693 id=693 data-nosnippet>693</a>                <span class="string">"SELECT count() AS c FROM (DELETE ciba_request \
-<a href=#694 id=694 data-nosnippet>694</a>                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
-<a href=#695 id=695 data-nosnippet>695</a>                 RETURN BEFORE) GROUP ALL"</span>,
-<a href=#696 id=696 data-nosnippet>696</a>            )
-<a href=#697 id=697 data-nosnippet>697</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#698 id=698 data-nosnippet>698</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
-<a href=#699 id=699 data-nosnippet>699</a>            .<span class="kw">await
-<a href=#700 id=700 data-nosnippet>700</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#701 id=701 data-nosnippet>701</a>
-<a href=#702 id=702 data-nosnippet>702</a>        <span class="attr">#[derive(Debug, SurrealValue)]
-<a href=#703 id=703 data-nosnippet>703</a>        </span><span class="kw">struct </span>CountRow {
-<a href=#704 id=704 data-nosnippet>704</a>            c: i64,
-<a href=#705 id=705 data-nosnippet>705</a>        }
-<a href=#706 id=706 data-nosnippet>706</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#707 id=707 data-nosnippet>707</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
-<a href=#708 id=708 data-nosnippet>708</a>    }
-<a href=#709 id=709 data-nosnippet>709</a>}
+<a href=#611 id=611 data-nosnippet>611</a>        rows.into_iter()
+<a href=#612 id=612 data-nosnippet>612</a>            .next()
+<a href=#613 id=613 data-nosnippet>613</a>            .map(CibaRequestRow::try_into_request)
+<a href=#614 id=614 data-nosnippet>614</a>            .transpose()
+<a href=#615 id=615 data-nosnippet>615</a>            .map_err(Into::into)
+<a href=#616 id=616 data-nosnippet>616</a>    }
+<a href=#617 id=617 data-nosnippet>617</a>
+<a href=#618 id=618 data-nosnippet>618</a>    <span class="kw">async fn </span>ping_credentials(
+<a href=#619 id=619 data-nosnippet>619</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#620 id=620 data-nosnippet>620</a>        tenant_id: Uuid,
+<a href=#621 id=621 data-nosnippet>621</a>        id: Uuid,
+<a href=#622 id=622 data-nosnippet>622</a>    ) -&gt; AxiamResult&lt;<span class="prelude-ty">Option</span>&lt;CibaPingCredentials&gt;&gt; {
+<a href=#623 id=623 data-nosnippet>623</a>        <span class="attr">#[derive(SurrealValue)]
+<a href=#624 id=624 data-nosnippet>624</a>        </span><span class="kw">struct </span>SealedRow {
+<a href=#625 id=625 data-nosnippet>625</a>            ping_ciphertext: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#626 id=626 data-nosnippet>626</a>            ping_nonce: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#627 id=627 data-nosnippet>627</a>        }
+<a href=#628 id=628 data-nosnippet>628</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#629 id=629 data-nosnippet>629</a>            </span>.db
+<a href=#630 id=630 data-nosnippet>630</a>            .current()
+<a href=#631 id=631 data-nosnippet>631</a>            .query(
+<a href=#632 id=632 data-nosnippet>632</a>                <span class="string">"SELECT ping_ciphertext, ping_nonce FROM ciba_request \
+<a href=#633 id=633 data-nosnippet>633</a>                 WHERE meta::id(id) = $id AND tenant_id = $tenant_id"</span>,
+<a href=#634 id=634 data-nosnippet>634</a>            )
+<a href=#635 id=635 data-nosnippet>635</a>            .bind((<span class="string">"id"</span>, id.to_string()))
+<a href=#636 id=636 data-nosnippet>636</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#637 id=637 data-nosnippet>637</a>            .<span class="kw">await
+<a href=#638 id=638 data-nosnippet>638</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#639 id=639 data-nosnippet>639</a>        <span class="kw">let </span>rows: Vec&lt;SealedRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#640 id=640 data-nosnippet>640</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(row) = rows.into_iter().next() <span class="kw">else </span>{
+<a href=#641 id=641 data-nosnippet>641</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#642 id=642 data-nosnippet>642</a>        };
+<a href=#643 id=643 data-nosnippet>643</a>        <span class="kw">let </span>(<span class="prelude-val">Some</span>(ciphertext), <span class="prelude-val">Some</span>(nonce)) = (row.ping_ciphertext, row.ping_nonce) <span class="kw">else </span>{
+<a href=#644 id=644 data-nosnippet>644</a>            <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#645 id=645 data-nosnippet>645</a>        };
+<a href=#646 id=646 data-nosnippet>646</a>        <span class="kw">let </span>key = <span class="self">self</span>.key.as_ref().ok_or_else(<span class="self">Self</span>::missing_key)<span class="question-mark">?</span>;
+<a href=#647 id=647 data-nosnippet>647</a>        <span class="kw">let </span>plaintext =
+<a href=#648 id=648 data-nosnippet>648</a>            Zeroizing::new(decrypt_separate(key, <span class="kw-2">&amp;</span>nonce, <span class="kw-2">&amp;</span>ciphertext).map_err(|<span class="kw">_</span>| {
+<a href=#649 id=649 data-nosnippet>649</a>                AxiamError::Crypto(
+<a href=#650 id=650 data-nosnippet>650</a>                    <span class="string">"the CIBA ping credentials could not be decrypted: the stored value does \
+<a href=#651 id=651 data-nosnippet>651</a>                     not match the configured pki_encryption_key"
+<a href=#652 id=652 data-nosnippet>652</a>                        </span>.into(),
+<a href=#653 id=653 data-nosnippet>653</a>                )
+<a href=#654 id=654 data-nosnippet>654</a>            })<span class="question-mark">?</span>);
+<a href=#655 id=655 data-nosnippet>655</a>        <span class="kw">let </span>decoded: PingPlaintext = serde_json::from_slice(<span class="kw-2">&amp;</span>plaintext)
+<a href=#656 id=656 data-nosnippet>656</a>            .map_err(|<span class="kw">_</span>| AxiamError::Crypto(<span class="string">"the CIBA ping credentials are malformed"</span>.into()))<span class="question-mark">?</span>;
+<a href=#657 id=657 data-nosnippet>657</a>        <span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(CibaPingCredentials {
+<a href=#658 id=658 data-nosnippet>658</a>            auth_req_id: decoded.auth_req_id,
+<a href=#659 id=659 data-nosnippet>659</a>            client_notification_token: decoded.client_notification_token,
+<a href=#660 id=660 data-nosnippet>660</a>        }))
+<a href=#661 id=661 data-nosnippet>661</a>    }
+<a href=#662 id=662 data-nosnippet>662</a>
+<a href=#663 id=663 data-nosnippet>663</a>    <span class="kw">async fn </span>sweep_expired(
+<a href=#664 id=664 data-nosnippet>664</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#665 id=665 data-nosnippet>665</a>        now: DateTime&lt;Utc&gt;,
+<a href=#666 id=666 data-nosnippet>666</a>        retention: chrono::Duration,
+<a href=#667 id=667 data-nosnippet>667</a>    ) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="comment">// First mark, then delete: a request that expired a moment ago stays
+<a href=#669 id=669 data-nosnippet>669</a>        // long enough (`retention`) for a client still polling to be told
+<a href=#670 id=670 data-nosnippet>670</a>        // `expired_token` rather than `invalid_grant`.
+<a href=#671 id=671 data-nosnippet>671</a>        </span><span class="kw">let </span>cutoff = now - retention;
+<a href=#672 id=672 data-nosnippet>672</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#673 id=673 data-nosnippet>673</a>            </span>.db
+<a href=#674 id=674 data-nosnippet>674</a>            .current()
+<a href=#675 id=675 data-nosnippet>675</a>            .query(
+<a href=#676 id=676 data-nosnippet>676</a>                <span class="string">"UPDATE ciba_request SET status = 'expired', version = version + 1 \
+<a href=#677 id=677 data-nosnippet>677</a>                     WHERE status IN ['pending', 'approved'] AND expires_at &lt;= $now \
+<a href=#678 id=678 data-nosnippet>678</a>                     RETURN NONE; \
+<a href=#679 id=679 data-nosnippet>679</a>                 LET $removed = (DELETE ciba_request WHERE expires_at &lt;= $cutoff RETURN BEFORE); \
+<a href=#680 id=680 data-nosnippet>680</a>                 SELECT meta::id(id) AS record_id FROM $removed"</span>,
+<a href=#681 id=681 data-nosnippet>681</a>            )
+<a href=#682 id=682 data-nosnippet>682</a>            .bind((<span class="string">"now"</span>, now))
+<a href=#683 id=683 data-nosnippet>683</a>            .bind((<span class="string">"cutoff"</span>, cutoff))
+<a href=#684 id=684 data-nosnippet>684</a>            .<span class="kw">await
+<a href=#685 id=685 data-nosnippet>685</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#686 id=686 data-nosnippet>686</a>        <span class="comment">// UPDATE=0, LET=1, SELECT=2.
+<a href=#687 id=687 data-nosnippet>687</a>        </span><span class="kw">let </span>removed: Vec&lt;IdRow&gt; = result.take(<span class="number">2</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#688 id=688 data-nosnippet>688</a>        <span class="prelude-val">Ok</span>(removed.len() <span class="kw">as </span>u64)
+<a href=#689 id=689 data-nosnippet>689</a>    }
+<a href=#690 id=690 data-nosnippet>690</a>
+<a href=#691 id=691 data-nosnippet>691</a>    <span class="kw">async fn </span>delete_all_for_client(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, client_id: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#692 id=692 data-nosnippet>692</a>        <span class="comment">// Every status, expired or not: an approved request is the one that
+<a href=#693 id=693 data-nosnippet>693</a>        // must not outlive its client, a pending one is listed
+<a href=#694 id=694 data-nosnippet>694</a>        // on the approval surface for a client that no longer exists. Tenant
+<a href=#695 id=695 data-nosnippet>695</a>        // AND client id, as `client_id` is unique only within its tenant.
+<a href=#696 id=696 data-nosnippet>696</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#697 id=697 data-nosnippet>697</a>            </span>.db
+<a href=#698 id=698 data-nosnippet>698</a>            .current()
+<a href=#699 id=699 data-nosnippet>699</a>            .query(
+<a href=#700 id=700 data-nosnippet>700</a>                <span class="string">"SELECT count() AS c FROM (DELETE ciba_request \
+<a href=#701 id=701 data-nosnippet>701</a>                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+<a href=#702 id=702 data-nosnippet>702</a>                 RETURN BEFORE) GROUP ALL"</span>,
+<a href=#703 id=703 data-nosnippet>703</a>            )
+<a href=#704 id=704 data-nosnippet>704</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#705 id=705 data-nosnippet>705</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
+<a href=#706 id=706 data-nosnippet>706</a>            .<span class="kw">await
+<a href=#707 id=707 data-nosnippet>707</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#708 id=708 data-nosnippet>708</a>
+<a href=#709 id=709 data-nosnippet>709</a>        <span class="attr">#[derive(Debug, SurrealValue)]
+<a href=#710 id=710 data-nosnippet>710</a>        </span><span class="kw">struct </span>CountRow {
+<a href=#711 id=711 data-nosnippet>711</a>            c: i64,
+<a href=#712 id=712 data-nosnippet>712</a>        }
+<a href=#713 id=713 data-nosnippet>713</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#714 id=714 data-nosnippet>714</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
+<a href=#715 id=715 data-nosnippet>715</a>    }
+<a href=#716 id=716 data-nosnippet>716</a>}
 </code></pre></div></section></main></body></html>

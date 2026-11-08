@@ -55,7 +55,7 @@
 <a href=#55 id=55 data-nosnippet>55</a>
 <a href=#56 id=56 data-nosnippet>56</a><span class="kw">use </span><span class="kw">crate</span>::error::DbError;
 <a href=#57 id=57 data-nosnippet>57</a><span class="kw">use </span><span class="kw">crate</span>::handle::DbHandle;
-<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span><span class="kw">crate</span>::helpers::is_transaction_conflict;
+<a href=#58 id=58 data-nosnippet>58</a><span class="kw">use </span><span class="kw">crate</span>::helpers::{is_transaction_conflict, retry_on_write_conflict};
 <a href=#59 id=59 data-nosnippet>59</a>
 <a href=#60 id=60 data-nosnippet>60</a><span class="doccomment">/// Ceiling on the poll interval `slow_down` may raise a grant to.
 <a href=#61 id=61 data-nosnippet>61</a>///
@@ -296,179 +296,181 @@
 <a href=#296 id=296 data-nosnippet>296</a>        // after this transaction has committed. It must not be folded into the
 <a href=#297 id=297 data-nosnippet>297</a>        // statements here — under snapshot isolation every racer would see its
 <a href=#298 id=298 data-nosnippet>298</a>        // own write and believe it won (`SCHEMA_V31`).
-<a href=#299 id=299 data-nosnippet>299</a>        </span><span class="kw">let </span>nonce = new_id().to_string();
-<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">let </span>result = <span class="self">self
-<a href=#301 id=301 data-nosnippet>301</a>            </span>.db
-<a href=#302 id=302 data-nosnippet>302</a>            .current()
-<a href=#303 id=303 data-nosnippet>303</a>            .query(<span class="macro">format!</span>(
-<a href=#304 id=304 data-nosnippet>304</a>                <span class="string">"BEGIN TRANSACTION; \
-<a href=#305 id=305 data-nosnippet>305</a>                 LET $before = (UPDATE device_grant \
-<a href=#306 id=306 data-nosnippet>306</a>                     SET status = 'redeemed', redemption_id = $nonce \
-<a href=#307 id=307 data-nosnippet>307</a>                     WHERE tenant_id = $tenant_id AND device_code_hash = $hash \
-<a href=#308 id=308 data-nosnippet>308</a>                     AND status = 'approved' AND expires_at &gt; time::now() \
-<a href=#309 id=309 data-nosnippet>309</a>                     RETURN BEFORE); \
-<a href=#310 id=310 data-nosnippet>310</a>                 SELECT {SELECT_FIELDS} FROM $before; \
-<a href=#311 id=311 data-nosnippet>311</a>                 COMMIT TRANSACTION"
-<a href=#312 id=312 data-nosnippet>312</a>            </span>))
-<a href=#313 id=313 data-nosnippet>313</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#314 id=314 data-nosnippet>314</a>            .bind((<span class="string">"hash"</span>, device_code_hash.to_string()))
-<a href=#315 id=315 data-nosnippet>315</a>            .bind((<span class="string">"nonce"</span>, nonce.clone()))
-<a href=#316 id=316 data-nosnippet>316</a>            .<span class="kw">await</span>;
-<a href=#317 id=317 data-nosnippet>317</a>
-<a href=#318 id=318 data-nosnippet>318</a>        <span class="comment">// A loser's abort is this method's "already redeemed" answer, not a
-<a href=#319 id=319 data-nosnippet>319</a>        // server fault.
-<a href=#320 id=320 data-nosnippet>320</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="kw">match </span>result {
-<a href=#321 id=321 data-nosnippet>321</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#322 id=322 data-nosnippet>322</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#323 id=323 data-nosnippet>323</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#324 id=324 data-nosnippet>324</a>        };
-<a href=#325 id=325 data-nosnippet>325</a>
-<a href=#326 id=326 data-nosnippet>326</a>        <span class="comment">// BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-<a href=#327 id=327 data-nosnippet>327</a>        </span><span class="kw">let </span>rows: Vec&lt;DeviceGrantRow&gt; = <span class="kw">match </span>result.take::&lt;Vec&lt;DeviceGrantRow&gt;&gt;(<span class="number">2</span>) {
-<a href=#328 id=328 data-nosnippet>328</a>            <span class="prelude-val">Ok</span>(rows) =&gt; rows,
-<a href=#329 id=329 data-nosnippet>329</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#330 id=330 data-nosnippet>330</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#331 id=331 data-nosnippet>331</a>        };
-<a href=#332 id=332 data-nosnippet>332</a>        <span class="kw">if </span>rows.is_empty() {
-<a href=#333 id=333 data-nosnippet>333</a>            <span class="comment">// Unknown, not approved, already redeemed, or expired. Nothing was
-<a href=#334 id=334 data-nosnippet>334</a>            // written, so nothing was burned.
-<a href=#335 id=335 data-nosnippet>335</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#336 id=336 data-nosnippet>336</a>        }
-<a href=#337 id=337 data-nosnippet>337</a>
-<a href=#338 id=338 data-nosnippet>338</a>        <span class="comment">// Layer 2: outside, and after, the transaction above.
-<a href=#339 id=339 data-nosnippet>339</a>        </span><span class="kw">let </span>stored = <span class="self">self
-<a href=#340 id=340 data-nosnippet>340</a>            </span>.db
-<a href=#341 id=341 data-nosnippet>341</a>            .current()
-<a href=#342 id=342 data-nosnippet>342</a>            .query(
-<a href=#343 id=343 data-nosnippet>343</a>                <span class="string">"SELECT VALUE redemption_id FROM device_grant \
-<a href=#344 id=344 data-nosnippet>344</a>                 WHERE tenant_id = $tenant_id AND device_code_hash = $hash LIMIT 1"</span>,
-<a href=#345 id=345 data-nosnippet>345</a>            )
-<a href=#346 id=346 data-nosnippet>346</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#347 id=347 data-nosnippet>347</a>            .bind((<span class="string">"hash"</span>, device_code_hash.to_string()))
-<a href=#348 id=348 data-nosnippet>348</a>            .<span class="kw">await</span>;
-<a href=#349 id=349 data-nosnippet>349</a>        <span class="kw">let </span><span class="kw-2">mut </span>stored = <span class="kw">match </span>stored {
-<a href=#350 id=350 data-nosnippet>350</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
-<a href=#351 id=351 data-nosnippet>351</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#352 id=352 data-nosnippet>352</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#353 id=353 data-nosnippet>353</a>        };
-<a href=#354 id=354 data-nosnippet>354</a>        <span class="kw">let </span>stored: Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt; = <span class="kw">match </span>stored.take::&lt;Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt;&gt;(<span class="number">0</span>) {
-<a href=#355 id=355 data-nosnippet>355</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
-<a href=#356 id=356 data-nosnippet>356</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
-<a href=#357 id=357 data-nosnippet>357</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
-<a href=#358 id=358 data-nosnippet>358</a>        };
-<a href=#359 id=359 data-nosnippet>359</a>        <span class="kw">if </span>stored.into_iter().flatten().next().as_deref() != <span class="prelude-val">Some</span>(nonce.as_str()) {
-<a href=#360 id=360 data-nosnippet>360</a>            <span class="comment">// Our write landed but another poll's landed after it. That poll
-<a href=#361 id=361 data-nosnippet>361</a>            // holds the redemption; this one must not also mint a token set.
-<a href=#362 id=362 data-nosnippet>362</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
-<a href=#363 id=363 data-nosnippet>363</a>        }
-<a href=#364 id=364 data-nosnippet>364</a>
-<a href=#365 id=365 data-nosnippet>365</a>        rows.into_iter()
-<a href=#366 id=366 data-nosnippet>366</a>            .next()
-<a href=#367 id=367 data-nosnippet>367</a>            .map(DeviceGrantRow::try_into_grant)
-<a href=#368 id=368 data-nosnippet>368</a>            .transpose()
-<a href=#369 id=369 data-nosnippet>369</a>            .map_err(Into::into)
-<a href=#370 id=370 data-nosnippet>370</a>    }
-<a href=#371 id=371 data-nosnippet>371</a>
-<a href=#372 id=372 data-nosnippet>372</a>    <span class="kw">async fn </span>record_poll(
-<a href=#373 id=373 data-nosnippet>373</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
-<a href=#374 id=374 data-nosnippet>374</a>        tenant_id: Uuid,
-<a href=#375 id=375 data-nosnippet>375</a>        device_code_hash: <span class="kw-2">&amp;</span>str,
-<a href=#376 id=376 data-nosnippet>376</a>    ) -&gt; AxiamResult&lt;(u64, bool)&gt; {
-<a href=#377 id=377 data-nosnippet>377</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(grant) = <span class="self">self
-<a href=#378 id=378 data-nosnippet>378</a>            </span>.get_by_device_code_hash(tenant_id, device_code_hash)
-<a href=#379 id=379 data-nosnippet>379</a>            .<span class="kw">await</span><span class="question-mark">?
-<a href=#380 id=380 data-nosnippet>380</a>        </span><span class="kw">else </span>{
-<a href=#381 id=381 data-nosnippet>381</a>            <span class="comment">// Nothing to slow down; the caller will reject the unknown code.
-<a href=#382 id=382 data-nosnippet>382</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>((<span class="number">0</span>, <span class="bool-val">false</span>));
-<a href=#383 id=383 data-nosnippet>383</a>        };
-<a href=#384 id=384 data-nosnippet>384</a>
-<a href=#385 id=385 data-nosnippet>385</a>        <span class="kw">let </span>now = Utc::now();
-<a href=#386 id=386 data-nosnippet>386</a>        <span class="kw">let </span>too_fast = grant.last_polled_at.is_some_and(|last| {
-<a href=#387 id=387 data-nosnippet>387</a>            (now - last).num_milliseconds() &lt; (grant.interval_secs <span class="kw">as </span>i64) * <span class="number">1000
-<a href=#388 id=388 data-nosnippet>388</a>        </span>});
-<a href=#389 id=389 data-nosnippet>389</a>
-<a href=#390 id=390 data-nosnippet>390</a>        <span class="comment">// Capped: an uncapped `slow_down` would eventually push the interval
-<a href=#391 id=391 data-nosnippet>391</a>        // past the grant's own lifetime, turning "slow down" into "never
-<a href=#392 id=392 data-nosnippet>392</a>        // succeed" without ever saying so.
-<a href=#393 id=393 data-nosnippet>393</a>        </span><span class="kw">let </span>next_interval = <span class="kw">if </span>too_fast {
-<a href=#394 id=394 data-nosnippet>394</a>            (grant.interval_secs + <span class="number">5</span>).min(MAX_INTERVAL_SECS)
-<a href=#395 id=395 data-nosnippet>395</a>        } <span class="kw">else </span>{
-<a href=#396 id=396 data-nosnippet>396</a>            grant.interval_secs
-<a href=#397 id=397 data-nosnippet>397</a>        };
-<a href=#398 id=398 data-nosnippet>398</a>
-<a href=#399 id=399 data-nosnippet>399</a>        <span class="self">self</span>.db
-<a href=#400 id=400 data-nosnippet>400</a>            .current()
-<a href=#401 id=401 data-nosnippet>401</a>            .query(
-<a href=#402 id=402 data-nosnippet>402</a>                <span class="string">"UPDATE device_grant SET last_polled_at = $now, interval_secs = $interval \
-<a href=#403 id=403 data-nosnippet>403</a>                 WHERE tenant_id = $tenant_id AND device_code_hash = $hash"</span>,
-<a href=#404 id=404 data-nosnippet>404</a>            )
-<a href=#405 id=405 data-nosnippet>405</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#406 id=406 data-nosnippet>406</a>            .bind((<span class="string">"hash"</span>, device_code_hash.to_string()))
-<a href=#407 id=407 data-nosnippet>407</a>            .bind((<span class="string">"now"</span>, now))
-<a href=#408 id=408 data-nosnippet>408</a>            .bind((<span class="string">"interval"</span>, next_interval <span class="kw">as </span>i64))
-<a href=#409 id=409 data-nosnippet>409</a>            .<span class="kw">await
-<a href=#410 id=410 data-nosnippet>410</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#411 id=411 data-nosnippet>411</a>
-<a href=#412 id=412 data-nosnippet>412</a>        <span class="prelude-val">Ok</span>((next_interval, too_fast))
-<a href=#413 id=413 data-nosnippet>413</a>    }
-<a href=#414 id=414 data-nosnippet>414</a>
-<a href=#415 id=415 data-nosnippet>415</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#416 id=416 data-nosnippet>416</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#417 id=417 data-nosnippet>417</a>            </span>.db
-<a href=#418 id=418 data-nosnippet>418</a>            .current()
-<a href=#419 id=419 data-nosnippet>419</a>            .query(
-<a href=#420 id=420 data-nosnippet>420</a>                <span class="string">"LET $removed = (DELETE device_grant WHERE tenant_id = $tenant_id \
-<a href=#421 id=421 data-nosnippet>421</a>                     AND expires_at &lt;= time::now() RETURN BEFORE); \
-<a href=#422 id=422 data-nosnippet>422</a>                 SELECT meta::id(id) AS record_id FROM $removed"</span>,
-<a href=#423 id=423 data-nosnippet>423</a>            )
-<a href=#424 id=424 data-nosnippet>424</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#425 id=425 data-nosnippet>425</a>            .<span class="kw">await
-<a href=#426 id=426 data-nosnippet>426</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#427 id=427 data-nosnippet>427</a>
-<a href=#428 id=428 data-nosnippet>428</a>        <span class="comment">// `RETURN BEFORE` yields the removed rows, so their count IS the
-<a href=#429 id=429 data-nosnippet>429</a>        // number deleted — no second query, and no window in which a
-<a href=#430 id=430 data-nosnippet>430</a>        // concurrent insert could inflate a follow-up `count()`.
-<a href=#431 id=431 data-nosnippet>431</a>        //
-<a href=#432 id=432 data-nosnippet>432</a>        // The before-images carry `id` as a record link rather than the
-<a href=#433 id=433 data-nosnippet>433</a>        // `record_id` string the row struct expects, so they are projected by
-<a href=#434 id=434 data-nosnippet>434</a>        // a second statement in the same query. Deserializing into the full
-<a href=#435 id=435 data-nosnippet>435</a>        // row type instead would fail on that one field and — because the
-<a href=#436 id=436 data-nosnippet>436</a>        // count is the only thing wanted here — fail *silently*, reporting
-<a href=#437 id=437 data-nosnippet>437</a>        // zero deletions for a cleanup that worked.
-<a href=#438 id=438 data-nosnippet>438</a>        </span><span class="attr">#[derive(SurrealValue)]
-<a href=#439 id=439 data-nosnippet>439</a>        </span><span class="kw">struct </span>IdOnly {
-<a href=#440 id=440 data-nosnippet>440</a>            <span class="attr">#[allow(dead_code)]
-<a href=#441 id=441 data-nosnippet>441</a>            </span>record_id: String,
-<a href=#442 id=442 data-nosnippet>442</a>        }
-<a href=#443 id=443 data-nosnippet>443</a>        <span class="kw">let </span>deleted: Vec&lt;IdOnly&gt; = result.take(<span class="number">1</span>).unwrap_or_default();
-<a href=#444 id=444 data-nosnippet>444</a>        <span class="prelude-val">Ok</span>(deleted.len() <span class="kw">as </span>u64)
-<a href=#445 id=445 data-nosnippet>445</a>    }
-<a href=#446 id=446 data-nosnippet>446</a>
-<a href=#447 id=447 data-nosnippet>447</a>    <span class="kw">async fn </span>delete_all_for_client(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, client_id: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;u64&gt; {
-<a href=#448 id=448 data-nosnippet>448</a>        <span class="comment">// Every status, expired or not: an approved grant is the one that
-<a href=#449 id=449 data-nosnippet>449</a>        // matters (it must not outlive its client, R101W3-01), but a
-<a href=#450 id=450 data-nosnippet>450</a>        // pending one could still be approved and a redeemed row is of no
-<a href=#451 id=451 data-nosnippet>451</a>        // further use. Tenant AND client id, as `client_id` is unique only
-<a href=#452 id=452 data-nosnippet>452</a>        // within its tenant.
-<a href=#453 id=453 data-nosnippet>453</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
-<a href=#454 id=454 data-nosnippet>454</a>            </span>.db
-<a href=#455 id=455 data-nosnippet>455</a>            .current()
-<a href=#456 id=456 data-nosnippet>456</a>            .query(
-<a href=#457 id=457 data-nosnippet>457</a>                <span class="string">"SELECT count() AS c FROM (DELETE device_grant \
-<a href=#458 id=458 data-nosnippet>458</a>                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
-<a href=#459 id=459 data-nosnippet>459</a>                 RETURN BEFORE) GROUP ALL"</span>,
-<a href=#460 id=460 data-nosnippet>460</a>            )
-<a href=#461 id=461 data-nosnippet>461</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
-<a href=#462 id=462 data-nosnippet>462</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
-<a href=#463 id=463 data-nosnippet>463</a>            .<span class="kw">await
-<a href=#464 id=464 data-nosnippet>464</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#465 id=465 data-nosnippet>465</a>
-<a href=#466 id=466 data-nosnippet>466</a>        <span class="attr">#[derive(Debug, SurrealValue)]
-<a href=#467 id=467 data-nosnippet>467</a>        </span><span class="kw">struct </span>CountRow {
-<a href=#468 id=468 data-nosnippet>468</a>            c: i64,
-<a href=#469 id=469 data-nosnippet>469</a>        }
-<a href=#470 id=470 data-nosnippet>470</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
-<a href=#471 id=471 data-nosnippet>471</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
-<a href=#472 id=472 data-nosnippet>472</a>    }
-<a href=#473 id=473 data-nosnippet>473</a>}
+<a href=#299 id=299 data-nosnippet>299</a>        //
+<a href=#300 id=300 data-nosnippet>300</a>        // A write conflict here can also mean a concurrent `record_poll` wrote
+<a href=#301 id=301 data-nosnippet>301</a>        // `last_polled_at` on this row: SurrealDB 4 aborts on that, and an
+<a href=#302 id=302 data-nosnippet>302</a>        // aborted transaction wrote nothing. Answering "already redeemed" would
+<a href=#303 id=303 data-nosnippet>303</a>        // refuse an approved grant nobody used, so the attempt is retried; the
+<a href=#304 id=304 data-nosnippet>304</a>        // status guard keeps it single-use when the other writer did redeem.
+<a href=#305 id=305 data-nosnippet>305</a>        </span><span class="kw">let </span>nonce = new_id().to_string();
+<a href=#306 id=306 data-nosnippet>306</a>        <span class="kw">let </span>attempt = || <span class="kw">async </span>{
+<a href=#307 id=307 data-nosnippet>307</a>            <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#308 id=308 data-nosnippet>308</a>                </span>.db
+<a href=#309 id=309 data-nosnippet>309</a>                .current()
+<a href=#310 id=310 data-nosnippet>310</a>                .query(<span class="macro">format!</span>(
+<a href=#311 id=311 data-nosnippet>311</a>                    <span class="string">"BEGIN TRANSACTION; \
+<a href=#312 id=312 data-nosnippet>312</a>                     LET $before = (UPDATE device_grant \
+<a href=#313 id=313 data-nosnippet>313</a>                         SET status = 'redeemed', redemption_id = $nonce \
+<a href=#314 id=314 data-nosnippet>314</a>                         WHERE tenant_id = $tenant_id AND device_code_hash = $hash \
+<a href=#315 id=315 data-nosnippet>315</a>                         AND status = 'approved' AND expires_at &gt; time::now() \
+<a href=#316 id=316 data-nosnippet>316</a>                         RETURN BEFORE); \
+<a href=#317 id=317 data-nosnippet>317</a>                     SELECT {SELECT_FIELDS} FROM $before; \
+<a href=#318 id=318 data-nosnippet>318</a>                     COMMIT TRANSACTION"
+<a href=#319 id=319 data-nosnippet>319</a>                </span>))
+<a href=#320 id=320 data-nosnippet>320</a>                .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#321 id=321 data-nosnippet>321</a>                .bind((<span class="string">"hash"</span>, device_code_hash.to_string()))
+<a href=#322 id=322 data-nosnippet>322</a>                .bind((<span class="string">"nonce"</span>, nonce.clone()))
+<a href=#323 id=323 data-nosnippet>323</a>                .<span class="kw">await
+<a href=#324 id=324 data-nosnippet>324</a>                </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#325 id=325 data-nosnippet>325</a>            <span class="comment">// BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+<a href=#326 id=326 data-nosnippet>326</a>            </span>result.take::&lt;Vec&lt;DeviceGrantRow&gt;&gt;(<span class="number">2</span>).map_err(DbError::from)
+<a href=#327 id=327 data-nosnippet>327</a>        };
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="kw">let </span>rows = <span class="kw">match </span>retry_on_write_conflict(attempt).<span class="kw">await </span>{
+<a href=#329 id=329 data-nosnippet>329</a>            <span class="prelude-val">Ok</span>(rows) =&gt; rows,
+<a href=#330 id=330 data-nosnippet>330</a>            <span class="comment">// Still contended after the retries: refuse, never serve.
+<a href=#331 id=331 data-nosnippet>331</a>            </span><span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#332 id=332 data-nosnippet>332</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(e.into()),
+<a href=#333 id=333 data-nosnippet>333</a>        };
+<a href=#334 id=334 data-nosnippet>334</a>        <span class="kw">if </span>rows.is_empty() {
+<a href=#335 id=335 data-nosnippet>335</a>            <span class="comment">// Unknown, not approved, already redeemed, or expired. Nothing was
+<a href=#336 id=336 data-nosnippet>336</a>            // written, so nothing was burned.
+<a href=#337 id=337 data-nosnippet>337</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#338 id=338 data-nosnippet>338</a>        }
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a>        <span class="comment">// Layer 2: outside, and after, the transaction above.
+<a href=#341 id=341 data-nosnippet>341</a>        </span><span class="kw">let </span>stored = <span class="self">self
+<a href=#342 id=342 data-nosnippet>342</a>            </span>.db
+<a href=#343 id=343 data-nosnippet>343</a>            .current()
+<a href=#344 id=344 data-nosnippet>344</a>            .query(
+<a href=#345 id=345 data-nosnippet>345</a>                <span class="string">"SELECT VALUE redemption_id FROM device_grant \
+<a href=#346 id=346 data-nosnippet>346</a>                 WHERE tenant_id = $tenant_id AND device_code_hash = $hash LIMIT 1"</span>,
+<a href=#347 id=347 data-nosnippet>347</a>            )
+<a href=#348 id=348 data-nosnippet>348</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#349 id=349 data-nosnippet>349</a>            .bind((<span class="string">"hash"</span>, device_code_hash.to_string()))
+<a href=#350 id=350 data-nosnippet>350</a>            .<span class="kw">await</span>;
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">let </span><span class="kw-2">mut </span>stored = <span class="kw">match </span>stored {
+<a href=#352 id=352 data-nosnippet>352</a>            <span class="prelude-val">Ok</span>(r) =&gt; r,
+<a href=#353 id=353 data-nosnippet>353</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#354 id=354 data-nosnippet>354</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#355 id=355 data-nosnippet>355</a>        };
+<a href=#356 id=356 data-nosnippet>356</a>        <span class="kw">let </span>stored: Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt; = <span class="kw">match </span>stored.take::&lt;Vec&lt;<span class="prelude-ty">Option</span>&lt;String&gt;&gt;&gt;(<span class="number">0</span>) {
+<a href=#357 id=357 data-nosnippet>357</a>            <span class="prelude-val">Ok</span>(v) =&gt; v,
+<a href=#358 id=358 data-nosnippet>358</a>            <span class="prelude-val">Err</span>(e) <span class="kw">if </span>is_transaction_conflict(<span class="kw-2">&amp;</span>e) =&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>),
+<a href=#359 id=359 data-nosnippet>359</a>            <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(DbError::from(e).into()),
+<a href=#360 id=360 data-nosnippet>360</a>        };
+<a href=#361 id=361 data-nosnippet>361</a>        <span class="kw">if </span>stored.into_iter().flatten().next().as_deref() != <span class="prelude-val">Some</span>(nonce.as_str()) {
+<a href=#362 id=362 data-nosnippet>362</a>            <span class="comment">// Our write landed but another poll's landed after it. That poll
+<a href=#363 id=363 data-nosnippet>363</a>            // holds the redemption; this one must not also mint a token set.
+<a href=#364 id=364 data-nosnippet>364</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">None</span>);
+<a href=#365 id=365 data-nosnippet>365</a>        }
+<a href=#366 id=366 data-nosnippet>366</a>
+<a href=#367 id=367 data-nosnippet>367</a>        rows.into_iter()
+<a href=#368 id=368 data-nosnippet>368</a>            .next()
+<a href=#369 id=369 data-nosnippet>369</a>            .map(DeviceGrantRow::try_into_grant)
+<a href=#370 id=370 data-nosnippet>370</a>            .transpose()
+<a href=#371 id=371 data-nosnippet>371</a>            .map_err(Into::into)
+<a href=#372 id=372 data-nosnippet>372</a>    }
+<a href=#373 id=373 data-nosnippet>373</a>
+<a href=#374 id=374 data-nosnippet>374</a>    <span class="kw">async fn </span>record_poll(
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="kw-2">&amp;</span><span class="self">self</span>,
+<a href=#376 id=376 data-nosnippet>376</a>        tenant_id: Uuid,
+<a href=#377 id=377 data-nosnippet>377</a>        device_code_hash: <span class="kw-2">&amp;</span>str,
+<a href=#378 id=378 data-nosnippet>378</a>    ) -&gt; AxiamResult&lt;(u64, bool)&gt; {
+<a href=#379 id=379 data-nosnippet>379</a>        <span class="kw">let </span><span class="prelude-val">Some</span>(grant) = <span class="self">self
+<a href=#380 id=380 data-nosnippet>380</a>            </span>.get_by_device_code_hash(tenant_id, device_code_hash)
+<a href=#381 id=381 data-nosnippet>381</a>            .<span class="kw">await</span><span class="question-mark">?
+<a href=#382 id=382 data-nosnippet>382</a>        </span><span class="kw">else </span>{
+<a href=#383 id=383 data-nosnippet>383</a>            <span class="comment">// Nothing to slow down; the caller will reject the unknown code.
+<a href=#384 id=384 data-nosnippet>384</a>            </span><span class="kw">return </span><span class="prelude-val">Ok</span>((<span class="number">0</span>, <span class="bool-val">false</span>));
+<a href=#385 id=385 data-nosnippet>385</a>        };
+<a href=#386 id=386 data-nosnippet>386</a>
+<a href=#387 id=387 data-nosnippet>387</a>        <span class="kw">let </span>now = Utc::now();
+<a href=#388 id=388 data-nosnippet>388</a>        <span class="kw">let </span>too_fast = grant.last_polled_at.is_some_and(|last| {
+<a href=#389 id=389 data-nosnippet>389</a>            (now - last).num_milliseconds() &lt; (grant.interval_secs <span class="kw">as </span>i64) * <span class="number">1000
+<a href=#390 id=390 data-nosnippet>390</a>        </span>});
+<a href=#391 id=391 data-nosnippet>391</a>
+<a href=#392 id=392 data-nosnippet>392</a>        <span class="comment">// Capped: an uncapped `slow_down` would eventually push the interval
+<a href=#393 id=393 data-nosnippet>393</a>        // past the grant's own lifetime, turning "slow down" into "never
+<a href=#394 id=394 data-nosnippet>394</a>        // succeed" without ever saying so.
+<a href=#395 id=395 data-nosnippet>395</a>        </span><span class="kw">let </span>next_interval = <span class="kw">if </span>too_fast {
+<a href=#396 id=396 data-nosnippet>396</a>            (grant.interval_secs + <span class="number">5</span>).min(MAX_INTERVAL_SECS)
+<a href=#397 id=397 data-nosnippet>397</a>        } <span class="kw">else </span>{
+<a href=#398 id=398 data-nosnippet>398</a>            grant.interval_secs
+<a href=#399 id=399 data-nosnippet>399</a>        };
+<a href=#400 id=400 data-nosnippet>400</a>
+<a href=#401 id=401 data-nosnippet>401</a>        <span class="self">self</span>.db
+<a href=#402 id=402 data-nosnippet>402</a>            .current()
+<a href=#403 id=403 data-nosnippet>403</a>            .query(
+<a href=#404 id=404 data-nosnippet>404</a>                <span class="string">"UPDATE device_grant SET last_polled_at = $now, interval_secs = $interval \
+<a href=#405 id=405 data-nosnippet>405</a>                 WHERE tenant_id = $tenant_id AND device_code_hash = $hash"</span>,
+<a href=#406 id=406 data-nosnippet>406</a>            )
+<a href=#407 id=407 data-nosnippet>407</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#408 id=408 data-nosnippet>408</a>            .bind((<span class="string">"hash"</span>, device_code_hash.to_string()))
+<a href=#409 id=409 data-nosnippet>409</a>            .bind((<span class="string">"now"</span>, now))
+<a href=#410 id=410 data-nosnippet>410</a>            .bind((<span class="string">"interval"</span>, next_interval <span class="kw">as </span>i64))
+<a href=#411 id=411 data-nosnippet>411</a>            .<span class="kw">await
+<a href=#412 id=412 data-nosnippet>412</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#413 id=413 data-nosnippet>413</a>
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="prelude-val">Ok</span>((next_interval, too_fast))
+<a href=#415 id=415 data-nosnippet>415</a>    }
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a>    <span class="kw">async fn </span>cleanup_expired(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#418 id=418 data-nosnippet>418</a>        <span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#419 id=419 data-nosnippet>419</a>            </span>.db
+<a href=#420 id=420 data-nosnippet>420</a>            .current()
+<a href=#421 id=421 data-nosnippet>421</a>            .query(
+<a href=#422 id=422 data-nosnippet>422</a>                <span class="string">"LET $removed = (DELETE device_grant WHERE tenant_id = $tenant_id \
+<a href=#423 id=423 data-nosnippet>423</a>                     AND expires_at &lt;= time::now() RETURN BEFORE); \
+<a href=#424 id=424 data-nosnippet>424</a>                 SELECT meta::id(id) AS record_id FROM $removed"</span>,
+<a href=#425 id=425 data-nosnippet>425</a>            )
+<a href=#426 id=426 data-nosnippet>426</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#427 id=427 data-nosnippet>427</a>            .<span class="kw">await
+<a href=#428 id=428 data-nosnippet>428</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#429 id=429 data-nosnippet>429</a>
+<a href=#430 id=430 data-nosnippet>430</a>        <span class="comment">// `RETURN BEFORE` yields the removed rows, so their count IS the
+<a href=#431 id=431 data-nosnippet>431</a>        // number deleted — no second query, and no window in which a
+<a href=#432 id=432 data-nosnippet>432</a>        // concurrent insert could inflate a follow-up `count()`.
+<a href=#433 id=433 data-nosnippet>433</a>        //
+<a href=#434 id=434 data-nosnippet>434</a>        // The before-images carry `id` as a record link rather than the
+<a href=#435 id=435 data-nosnippet>435</a>        // `record_id` string the row struct expects, so they are projected by
+<a href=#436 id=436 data-nosnippet>436</a>        // a second statement in the same query. Deserializing into the full
+<a href=#437 id=437 data-nosnippet>437</a>        // row type instead would fail on that one field and — because the
+<a href=#438 id=438 data-nosnippet>438</a>        // count is the only thing wanted here — fail *silently*, reporting
+<a href=#439 id=439 data-nosnippet>439</a>        // zero deletions for a cleanup that worked.
+<a href=#440 id=440 data-nosnippet>440</a>        </span><span class="attr">#[derive(SurrealValue)]
+<a href=#441 id=441 data-nosnippet>441</a>        </span><span class="kw">struct </span>IdOnly {
+<a href=#442 id=442 data-nosnippet>442</a>            <span class="attr">#[allow(dead_code)]
+<a href=#443 id=443 data-nosnippet>443</a>            </span>record_id: String,
+<a href=#444 id=444 data-nosnippet>444</a>        }
+<a href=#445 id=445 data-nosnippet>445</a>        <span class="kw">let </span>deleted: Vec&lt;IdOnly&gt; = result.take(<span class="number">1</span>).unwrap_or_default();
+<a href=#446 id=446 data-nosnippet>446</a>        <span class="prelude-val">Ok</span>(deleted.len() <span class="kw">as </span>u64)
+<a href=#447 id=447 data-nosnippet>447</a>    }
+<a href=#448 id=448 data-nosnippet>448</a>
+<a href=#449 id=449 data-nosnippet>449</a>    <span class="kw">async fn </span>delete_all_for_client(<span class="kw-2">&amp;</span><span class="self">self</span>, tenant_id: Uuid, client_id: <span class="kw-2">&amp;</span>str) -&gt; AxiamResult&lt;u64&gt; {
+<a href=#450 id=450 data-nosnippet>450</a>        <span class="comment">// Every status, expired or not: an approved grant is the one that
+<a href=#451 id=451 data-nosnippet>451</a>        // matters (it must not outlive its client, R101W3-01), but a
+<a href=#452 id=452 data-nosnippet>452</a>        // pending one could still be approved and a redeemed row is of no
+<a href=#453 id=453 data-nosnippet>453</a>        // further use. Tenant AND client id, as `client_id` is unique only
+<a href=#454 id=454 data-nosnippet>454</a>        // within its tenant.
+<a href=#455 id=455 data-nosnippet>455</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>result = <span class="self">self
+<a href=#456 id=456 data-nosnippet>456</a>            </span>.db
+<a href=#457 id=457 data-nosnippet>457</a>            .current()
+<a href=#458 id=458 data-nosnippet>458</a>            .query(
+<a href=#459 id=459 data-nosnippet>459</a>                <span class="string">"SELECT count() AS c FROM (DELETE device_grant \
+<a href=#460 id=460 data-nosnippet>460</a>                 WHERE tenant_id = $tenant_id AND client_id = $client_id \
+<a href=#461 id=461 data-nosnippet>461</a>                 RETURN BEFORE) GROUP ALL"</span>,
+<a href=#462 id=462 data-nosnippet>462</a>            )
+<a href=#463 id=463 data-nosnippet>463</a>            .bind((<span class="string">"tenant_id"</span>, tenant_id.to_string()))
+<a href=#464 id=464 data-nosnippet>464</a>            .bind((<span class="string">"client_id"</span>, client_id.to_string()))
+<a href=#465 id=465 data-nosnippet>465</a>            .<span class="kw">await
+<a href=#466 id=466 data-nosnippet>466</a>            </span>.map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#467 id=467 data-nosnippet>467</a>
+<a href=#468 id=468 data-nosnippet>468</a>        <span class="attr">#[derive(Debug, SurrealValue)]
+<a href=#469 id=469 data-nosnippet>469</a>        </span><span class="kw">struct </span>CountRow {
+<a href=#470 id=470 data-nosnippet>470</a>            c: i64,
+<a href=#471 id=471 data-nosnippet>471</a>        }
+<a href=#472 id=472 data-nosnippet>472</a>        <span class="kw">let </span>rows: Vec&lt;CountRow&gt; = result.take(<span class="number">0</span>).map_err(DbError::from)<span class="question-mark">?</span>;
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="prelude-val">Ok</span>(rows.first().map(|r| r.c.max(<span class="number">0</span>) <span class="kw">as </span>u64).unwrap_or(<span class="number">0</span>))
+<a href=#474 id=474 data-nosnippet>474</a>    }
+<a href=#475 id=475 data-nosnippet>475</a>}
 </code></pre></div></section></main></body></html>

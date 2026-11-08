@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-08
+
+### Added
+
+- Migrate to SurrealDB 4.0
+
 ### Changed
 
 - **Breaking: SurrealDB 4.0.** AXIAM now requires SurrealDB 4.0.0. The Rust SDK
@@ -19,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependencies need it) and 1.89 for `axiam-opaque`, matching the Rust SDK.
 - Tests run with an 8 MiB thread stack (`.cargo/config.toml`): SurrealDB 4's
   recursive parser overflows libtest's 2 MiB threads in debug builds.
+
+- Lift the PAR limit in the honour-lane test app
+
+- Give the E2E job room for the optimised dependency build
+
+- Wait for the OAuth2 client list request instead of sampling it
+
+- Compile the containerized-reactor test outside its 10-minute bound
+
+- Optimise dependencies in dev and test builds
+
+- Drop dependency debug info in the Test and coverage jobs
+
+- Record the same-host SurrealDB 3.3.5 and 4.0 comparison
 
 ### Fixed
 
@@ -45,6 +65,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rate-limit sweep: the stale-bucket selection used a bound SurrealDB 4 cannot
   serve from its index, so every sweep scanned the table. The cutoff is now bound
   as a parameter.
+
+- Size the write-conflict budget for SurrealDB 4's open-winner conflicts
+
+- Give role holder-epoch writes the hot-row retry budget
+
+- Device grant conflict, mass-tag rerun, wasm ctutils, a test flake
 
 ### Security
 

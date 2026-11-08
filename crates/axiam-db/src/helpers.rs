@@ -111,7 +111,23 @@ pub fn classify_write_error<E: std::fmt::Display>(err: E, entity: &str) -> DbErr
 /// double-apply, even when the statement is not idempotent (`x += 1`). Every
 /// other error returns on the first attempt, so an outage or a malformed
 /// statement fails fast instead of slowly.
-pub async fn retry_on_write_conflict<T, E, F, Fut>(mut op: F) -> Result<T, E>
+pub async fn retry_on_write_conflict<T, E, F, Fut>(op: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    retry_on_write_conflict_within(MAX_WRITE_ATTEMPTS, op).await
+}
+
+/// [`retry_on_write_conflict`] with an explicit attempt budget, for a caller
+/// whose budget is part of its design: one on a shared worker's path that
+/// must give up early rather than serialize every replica behind one record
+/// (the notification window, R1W2-01).
+pub async fn retry_on_write_conflict_within<T, E, F, Fut>(
+    max_attempts: u32,
+    mut op: F,
+) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
@@ -127,7 +143,7 @@ where
             // `Migration` from a call site that has not been routed through the
             // classifier. Every one of them renders the engine's own text, so
             // the message is the reliable discriminator; the variant is not.
-            Err(e) if attempt < MAX_WRITE_ATTEMPTS && is_write_conflict(&e.to_string()) => {
+            Err(e) if attempt < max_attempts && is_write_conflict(&e.to_string()) => {
                 tokio::time::sleep(write_conflict_backoff(attempt)).await;
                 attempt += 1;
             }
@@ -185,7 +201,7 @@ impl From<surrealdb::Error> for TxFail {
 }
 
 /// How many attempts a write to a row that is hot by design gets before its
-/// conflict surfaces. [`MAX_WRITE_ATTEMPTS`]' four are sized for an occasional
+/// conflict surfaces. [`MAX_WRITE_ATTEMPTS`]' eight are sized for an occasional
 /// collision; a SCIM target's delivery state (every delivery of every message
 /// of one target, on every replica, increments it) and a role's holder epoch
 /// (every assignment and unassignment of the role moves it) need more patience. A
@@ -194,7 +210,8 @@ impl From<surrealdb::Error> for TxFail {
 ///
 /// Not for a write on a shared worker's path: waiting out one record there
 /// serializes every replica behind it. The notification window used this until
-/// R1W2-01 and now gives up after [`MAX_WRITE_ATTEMPTS`].
+/// R1W2-01 and now gives up after four attempts
+/// ([`retry_on_write_conflict_within`]).
 pub const HOT_ROW_MAX_WRITE_ATTEMPTS: u32 = 32;
 
 /// [`retry_on_write_conflict`] for a hot row: up to
@@ -320,25 +337,32 @@ pub fn is_write_conflict(msg: &str) -> bool {
 
 /// How many attempts a contended write gets before its conflict surfaces.
 ///
-/// Four is chosen against the shape of the failure rather than as a round
-/// number: a conflict means some other writer *did* commit, so the contended
-/// record is free almost immediately and the overwhelming majority of retries
-/// succeed on the first one. The extra attempts cover a burst of writers
-/// landing on the same record at once; past that, retrying is no longer
-/// masking a race but hiding sustained contention that should surface.
+/// Sized by time, not by count: the attempts' backoff must outlast the
+/// winner's transaction. On SurrealDB 3 a conflict meant some other writer
+/// *had* committed, so the record was free almost at once and four attempts
+/// (at most 14 ms of backoff) were enough. On SurrealDB 4 the loser can learn
+/// of the conflict while the winner's transaction is still open, and one
+/// write transaction measured 6 ms at the median and 25 ms at worst on an idle
+/// machine, longer on a loaded CI runner. Four attempts then surfaced
+/// `WriteContention` from races that should resolve, in three places at once
+/// (a role unassignment, a role grant against a revoke, a deletion cancel
+/// against the purge claim). Eight attempts wait up to 190 ms in all, well past
+/// any transaction measured; past that, retrying is no longer masking a race
+/// but hiding sustained contention that should surface.
 ///
 /// Retrying only ever applies to [`is_write_conflict`]. Every other error — an
 /// outage, a malformed statement, a constraint violation — must return on the
 /// first attempt, so a hard failure is never turned into a slow one.
-pub const MAX_WRITE_ATTEMPTS: u32 = 4;
+pub const MAX_WRITE_ATTEMPTS: u32 = 8;
 
-/// How long to wait before write attempt `attempt + 1` (2 ms, 4 ms, 8 ms).
+/// How long to wait before write attempt `attempt + 1` (2 ms, 4 ms, 8 ms, …,
+/// capped at 64 ms).
 ///
 /// On SurrealDB 3 the winner had already committed by the time the loser
 /// learned it lost, so this only had to spread out a burst of retries. On
 /// SurrealDB 4 the loser can learn it while the winner's transaction is still
-/// open, so a write that contends by design on a long transaction needs
-/// [`retry_hot_row`]'s attempts to outlast the winner, not this schedule alone.
+/// open, so the attempt budget ([`MAX_WRITE_ATTEMPTS`]) is what has to
+/// outlast the winner.
 pub fn write_conflict_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(1u64 << attempt.min(6))
 }
@@ -1012,6 +1036,22 @@ mod tests {
         .await;
         assert!(matches!(out, Err(DbError::Conflict(_))));
         assert_eq!(calls.get(), MAX_WRITE_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn retry_on_write_conflict_within_honours_its_own_budget() {
+        // The notification window gives up after four attempts whatever the
+        // default is (R1W2-01): the explicit budget, not MAX_WRITE_ATTEMPTS,
+        // must bound the loop.
+        use std::cell::Cell;
+        let calls = Cell::new(0u32);
+        let out: Result<(), DbError> = retry_on_write_conflict_within(4, || async {
+            calls.set(calls.get() + 1);
+            Err(DbError::Conflict(LIVE_V3_CONFLICT.to_string()))
+        })
+        .await;
+        assert!(matches!(out, Err(DbError::Conflict(_))));
+        assert_eq!(calls.get(), 4);
     }
 
     #[tokio::test]

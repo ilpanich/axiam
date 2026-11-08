@@ -187,7 +187,8 @@ impl From<surrealdb::Error> for TxFail {
 /// How many attempts a write to a row that is hot by design gets before its
 /// conflict surfaces. [`MAX_WRITE_ATTEMPTS`]' four are sized for an occasional
 /// collision; a SCIM target's delivery state (every delivery of every message
-/// of one target, on every replica, increments it) needs more patience. A
+/// of one target, on every replica, increments it) and a role's holder epoch
+/// (every assignment and unassignment of the role moves it) need more patience. A
 /// conflicted transaction commits nothing, so replaying an increment cannot
 /// double-count.
 ///
@@ -333,9 +334,11 @@ pub const MAX_WRITE_ATTEMPTS: u32 = 4;
 
 /// How long to wait before write attempt `attempt + 1` (2 ms, 4 ms, 8 ms).
 ///
-/// Not there to wait out the winner — it has already committed by the time the
-/// loser learns it lost — but to stop a burst of contending writers from
-/// re-colliding in lockstep on the retry.
+/// On SurrealDB 3 the winner had already committed by the time the loser
+/// learned it lost, so this only had to spread out a burst of retries. On
+/// SurrealDB 4 the loser can learn it while the winner's transaction is still
+/// open, so a write that contends by design on a long transaction needs
+/// [`retry_hot_row`]'s attempts to outlast the winner, not this schedule alone.
 pub fn write_conflict_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(1u64 << attempt.min(6))
 }

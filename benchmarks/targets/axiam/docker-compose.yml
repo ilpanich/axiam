@@ -350,8 +350,8 @@ services:
 
   surrealdb:
     # A9: the default was the floating surrealdb/surrealdb:v3 tag until 1.1.0;
-    # it is now v3.3.4, the version the shipped Compose files, the k8s
-    # StatefulSet and CI pin (1.1.0's race fixes rely on 3.3.4's write-write
+    # it is now v4.0.0, the version the shipped Compose files, the k8s
+    # StatefulSet and CI pin (1.1.0's race fixes rely on the engine's write-write
     # conflict detection — benchmark the datastore that is supported). A tag
     # is still not a digest: a registry can re-push it, which breaks
     # provenance ("what exactly did this run measure against?"). No
@@ -360,12 +360,12 @@ services:
     # fabricated (unpullable) sha256. For a run you will publish, pin it at
     # run time: pull once, resolve the digest, then export
     # BENCH_SURREALDB_IMAGE to override this default, e.g.:
-    #   docker pull surrealdb/surrealdb:v3.3.4
-    #   export BENCH_SURREALDB_IMAGE="surrealdb/surrealdb@$(docker inspect --format '{{index .RepoDigests 0}}' surrealdb/surrealdb:v3.3.4 | cut -d@ -f2)"
+    #   docker pull surrealdb/surrealdb:v4.0.0
+    #   export BENCH_SURREALDB_IMAGE="surrealdb/surrealdb@$(docker inspect --format '{{index .RepoDigests 0}}' surrealdb/surrealdb:v4.0.0 | cut -d@ -f2)"
     # (run-benchmark.sh's meta.json also now records image_id/build_ref as a
     # fallback identifier for whatever tag actually ran — see A9 in
     # claude_dev/benchmark-improvement-plan.md.)
-    image: ${BENCH_SURREALDB_IMAGE:-surrealdb/surrealdb:v3.3.4}
+    image: ${BENCH_SURREALDB_IMAGE:-surrealdb/surrealdb:v4.0.0}
     container_name: bench-axiam-surrealdb
     cpus: ${BENCH_DB_CPUS:-2}
     mem_limit: ${BENCH_DB_MEM:-1024m}

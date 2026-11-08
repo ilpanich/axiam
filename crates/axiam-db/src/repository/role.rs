@@ -15,7 +15,8 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, classify_write_error, parse_uuid, retry_on_write_conflict, search_bind, search_filter,
+    CountRow, classify_write_error, parse_uuid, retry_hot_row, retry_on_write_conflict,
+    search_bind, search_filter,
 };
 
 #[derive(Debug, SurrealValue)]
@@ -923,7 +924,16 @@ impl<C: Connection> SurrealRoleRepository<C> {
         let (claimed, claim_grants, claim_holders) = claim_binds(claim);
         let cross_tenant = format!("cross-tenant {subject_label} role assignment denied");
 
-        let outcome = retry_on_write_conflict(|| async {
+        // `retry_hot_row`, not `retry_on_write_conflict`: the holder-epoch bump
+        // makes the role row hot by design, written by every assignment and
+        // unassignment of the role. On SurrealDB 4 a loser learns of the
+        // conflict while the winner's transaction is still open (measured: an
+        // unassignment of 6 ms median, 25 ms max, on a warm local box), so four
+        // attempts with at most 14 ms of backoff can run out before the winner
+        // commits. Two concurrent erasure role passes then surfaced
+        // `WriteContention` for an unassignment that would have matched nothing
+        // (`two_concurrent_role_passes_over_one_network_role_write_one_row`).
+        let outcome = retry_hot_row(|| async {
             let mut result = self
                 .db
                 .current()
@@ -1017,7 +1027,9 @@ impl<C: Connection> SurrealRoleRepository<C> {
         let (claimed, claim_grants, claim_holders) = claim_binds(claim);
         let cross_tenant = format!("cross-tenant {subject_label} role unassignment denied");
 
-        let outcome = retry_on_write_conflict(|| async {
+        // `retry_hot_row`: see `relate_subject_to_role`, whose holder-epoch bump
+        // this transaction shares.
+        let outcome = retry_hot_row(|| async {
             let mut result = self
                 .db
                 .current()

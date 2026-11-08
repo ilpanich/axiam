@@ -21,6 +21,60 @@ failure: a row consumed but claimable by nobody is a burned credential.
 
 ---
 
+## surrealdb 4.0.0 / surrealdb-core 4.0.0 / surrealkv 1.3.0
+
+**Taken:** 2026-11-07, for the SurrealDB 4 migration (branch `chore/surrealdb-4`). It
+moved `surrealdb` and `surrealdb-core` from 3.3.5 to 4.0.0 and `surrealkv` from 0.21.4
+to 1.3.0, a new on-disk format.
+**Host:** Linux x86_64, **24 cores**, embedded engines, multi-threaded tokio, otherwise
+idle. Each `surrealkv` run used its own fresh `PROBE_DIR`, as CI does.
+**Probe commit:** the one that re-pinned this lockfile to `=4.0.0` and removed the
+RocksDB engine, which SurrealDB 4 no longer has.
+
+| Datastore      | Mechanism | Rounds × racers | Rounds with >1 winner | Rounds with 0 winners | Attempts the engine aborted |
+|----------------|-----------|-----------------|-----------------------|-----------------------|-----------------------------|
+| `kv-surrealkv` | `tx`      | 5000 × 8        | **0**                 | 0                     | 33 094 / 40 000 (83%)       |
+| `kv-surrealkv` | `nonce`   | 5000 × 8        | **0**                 | 0                     | 0 / 40 000                  |
+
+`kv-mem` was not re-measured; it is not part of the CI gate. RocksDB is gone.
+
+### What changed against 3.3.5
+
+The property AXIAM depends on holds: zero double winners and zero burned rounds over
+40 000 contended attempts in both shapes.
+
+The `tx` abort rate rose, and a same-host comparison settles that it is the
+engine. Both versions, the same 24-core host, three runs each, 5000 × 8, and the
+4-core rows pinned with `taskset -c 0-3` (3.3.5 there reproduces the historical
+36%, so those rows are comparable to the older sections):
+
+| Host     | Engine | `tx` aborted          | `tx` time | `nonce` time |
+|----------|--------|-----------------------|-----------|--------------|
+| 24 cores | 3.3.5  | 75.2–75.3%            | 5–6 s     | 6 s          |
+| 24 cores | 4.0.0  | 81.8–82.1%            | 14–15 s   | 30–31 s      |
+| 4 cores  | 3.3.5  | 36.9–37.0%            | 5–6 s     | 6–7 s        |
+| 4 cores  | 4.0.0  | 86.9–87.0%            | 10–11 s   | 25–26 s      |
+
+Every run had exactly one winner per round and no unexpected error.
+
+So 4.0 aborts far more often under contention (37% → 87% on 4 cores), and each
+commit is slower: `nonce`, which never aborts, takes 4–5× as long. Disk sync is
+not the cause: 3.3.5 also defaults to `sync=every`, and the in-memory engine and
+`surrealkv` with `sync=never` show the same gap. The cost is CPU, about 350 µs
+per write statement, 47% of it in `surrealdb_core::exec::ir`, the new query
+compiler, which appears to rebuild the plan on every execution. Slower writes
+keep each transaction open longer, so more racers overlap and more of them
+abort. This is reported upstream as a SurrealDB 4.0 regression.
+
+More aborts mean more retries, and more chances for a caller to misread an abort.
+Two did: CIBA's and the device grant's `redeem` both answered "already used" when
+a concurrent poll's `last_polled_at` write aborted them, refusing an approved
+request nobody had used. Both now retry. The device grant's defect was latent on
+3.3.5 too (5 of 6 runs of its new race test failed there), so it was not caused
+by 4.0, only made more frequent by it.
+
+---
+
 ## surrealdb 3.3.5 / surrealdb-core 3.3.5 / surrealkv 0.21.4
 
 **Taken:** 2026-11-03, for the Dependabot update in PR #848. It moved `surrealdb` and

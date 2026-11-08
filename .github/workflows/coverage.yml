@@ -69,12 +69,27 @@ jobs:
           # emit; llvm-tools ships the llvm-profdata/llvm-cov it shells out to.
           components: llvm-tools-preview
 
+      # Every integration-test target links its own executable carrying the
+      # whole SurrealDB tree, so `cargo test --workspace` writes one ~400 MB
+      # binary per target. SurrealDB 4 grew them past this runner's free disk:
+      # main already filled 109G of `target/debug/deps` on 3.3. About 40% of
+      # each binary is dependency DWARF (measured on seeder_skip_test: 396 MB
+      # -> 243 MB). Drop debug info for dependencies only; workspace crates
+      # keep their line tables, so a failing test's backtrace still points
+      # into AXIAM code. Written to the runner's Cargo home, not the repo, so
+      # local builds keep full dependency debug info for the debugger.
+      - name: Drop dependency debug info (disk)
+        run: |
+          mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
+          printf '[profile.dev.package."*"]\ndebug = false\n' >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          cat "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
 
       - name: Start SurrealDB
         run: |
           docker run -d --name surrealdb -p 8000:8000 \
-            surrealdb/surrealdb:v3.3.4 start \
+            surrealdb/surrealdb:v4.0.0 start \
             --user root --pass root --log info
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2

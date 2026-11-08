@@ -204,12 +204,23 @@ The shipped deployments already satisfy this — `docker-compose.dev.yml`,
 argument over.
 
 **The version is pinned too.** From 1.1.0 the shipped Compose files, the
-Kubernetes StatefulSet and CI run `surrealdb/surrealdb:v3.3.4`, not the floating
-`v3` tag. 1.1.0's race fixes go further than the three redemptions above: every
+Kubernetes StatefulSet and CI run `surrealdb/surrealdb:v4.0.0`, not the floating
+`v4` tag. 1.1.0's race fixes go further than the three redemptions above: every
 write that is decided on an earlier read also writes one row that a conflicting
-write must write too, and relies on SurrealDB 3.3.4's write-write conflict
-detection to let only one of them commit. If you override the image, stay on
-3.3.x, and re-run the race tests before you move to another line.
+write must write too, and relies on SurrealDB's write-write conflict detection
+to let only one of them commit. That property is measured, not documented, so it
+is re-measured for every engine version (`tools/surreal-race-probe/RESULTS.md`;
+4.0.0 is the current row). If you override the image, stay on 4.0.x, and re-run
+the race tests before you move to another line.
+
+**Upgrading a SurrealDB 3 datastore.** AXIAM now needs SurrealDB 4.0, and a 3.x
+client refuses a 4.0 server, so the database and AXIAM move together. A fresh
+datastore needs nothing. For an existing one, SurrealDB's in-place upgrade is
+experimental and one-way: take and verify a `surreal export` first, upgrade the
+3.x server to the latest 3.3 release, then start 4.0.0 once with
+`SURREAL_EXPERIMENTAL_UPGRADE_FROM_3X=true`. After that the data cannot be opened
+by 3.x. SurrealDB recommends waiting for 4.1 for production datastores; see its
+[3.x to 4.0 guide](https://surrealdb.com/docs/build/migrating/from-old-surrealdb-versions/3x-to-4x).
 
 **The server cannot verify this for you.** SurrealDB exposes no datastore
 identity over the wire: neither `/version`, nor `INFO FOR ROOT` (including its
@@ -2492,8 +2503,8 @@ How it was measured, so the number can be reproduced and not over-read:
 * **Versions.** SurrealDB 3.2.5 (`surrealdb/surrealdb:v3`, digest
   `sha256:eb6dddd6…`), RabbitMQ `4-management-alpine` (digest `sha256:3ef7f7e8…`),
   on a 4-vCPU Linux 6.18 host. The measurement predates 1.1.0, whose manifests
-  pin `v3.3.4` (see the storage-engine section above); it has not been repeated
-  on 3.3.4.
+  pin a newer engine (`v4.0.0` today; see the storage-engine section above); it
+  has not been repeated on either.
 * **What the RSS figure includes.** File-backed pages count (the server's own
   binary, ~32 MiB of its 121 MiB; SurrealDB's mapped datastore, ~62 MiB of its
   87 MiB), which a container's cgroup accounting largely does not — which is why

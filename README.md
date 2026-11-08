@@ -203,7 +203,7 @@ In-repository references, which the site links out to for the normative detail:
 ## Quick Start
 
 ```bash
-# Prerequisites: Rust 1.93+, Docker
+# Prerequisites: Rust 1.95+, Docker
 
 # Start dev infrastructure (SurrealDB + RabbitMQ)
 just dev-up

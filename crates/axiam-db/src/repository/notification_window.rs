@@ -9,8 +9,9 @@
 //! it is retried on a write conflict: of two concurrent claimants one commits
 //! and the other re-reads the winner's window.
 //!
-//! Retried a few times, not with a hot row's patience (R1W2-01). A claim that
-//! still conflicts after [`crate::helpers::MAX_WRITE_ATTEMPTS`] is
+//! Retried a few times, not with a hot row's patience (R1W2-01), and not with
+//! the default budget either: a claim that still conflicts after
+//! [`WINDOW_WRITE_ATTEMPTS`] is
 //! [`NotificationWindowClaim::Contended`]: another claimant has just written
 //! the record, so a window is open, and the caller counts the event in memory
 //! and hands the count back through `add_uncounted`. Waiting out every
@@ -28,9 +29,15 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{classify_write_error, is_write_conflict, retry_on_write_conflict};
+use crate::helpers::{classify_write_error, is_write_conflict, retry_on_write_conflict_within};
 
 const ENTITY: &str = "notification_window";
+
+/// The window's own attempt budget, fixed at the four the default had when
+/// R1W2-01 sized it: a contended claim is answered by counting in memory, so
+/// waiting longer on this record only holds a shared worker behind it. Kept
+/// apart from [`crate::helpers::MAX_WRITE_ATTEMPTS`], which grew for SurrealDB 4.
+const WINDOW_WRITE_ATTEMPTS: u32 = 4;
 
 #[derive(SurrealValue)]
 struct WindowRow {
@@ -92,7 +99,7 @@ impl<C: Connection> NotificationWindowRepository for SurrealNotificationWindowRe
         // counts the event and keeps its claimant. The claimant compares the
         // `opened_by` it gets back with its own id.
         let claimant = Uuid::new_v4().to_string();
-        let claimed = retry_on_write_conflict(|| async {
+        let claimed = retry_on_write_conflict_within(WINDOW_WRITE_ATTEMPTS, || async {
             let mut result = self
                 .db
                 .current()
@@ -162,7 +169,7 @@ impl<C: Connection> NotificationWindowRepository for SurrealNotificationWindowRe
         // deleted (and its rows with it) takes no count. Whether the window is
         // still the one the events were counted in or a later one, the count
         // reaches the next mail that opens a window.
-        retry_on_write_conflict(|| async {
+        retry_on_write_conflict_within(WINDOW_WRITE_ATTEMPTS, || async {
             self.db
                 .current()
                 .query(

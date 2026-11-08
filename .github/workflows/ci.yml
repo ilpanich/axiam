@@ -299,14 +299,6 @@ jobs:
       #     upstream severity low. Drop this ID the moment actix-http ships on h2 0.4.
       #     Full reachability analysis and the interim operator mitigation: deny.toml.
       #
-      #   RUSTSEC-2026-0194 / RUSTSEC-2026-0195 — quick-xml DoS pair. Left both lists once
-      #     samael 0.0.22 moved to the patched quick-xml 0.41.0, and came BACK by a different
-      #     road: surrealdb 3.3.0 -> surrealdb-core -> object_store 0.13.2 (aws/azure) ->
-      #     quick-xml 0.39.4. surrealdb 3.3.0 is the newest release and pins object_store
-      #     ^0.13, so there is nothing to take. The parser only reads S3/Azure bucket
-      #     responses; AXIAM talks to SurrealDB over HTTP and defines no buckets. Full note
-      #     in deny.toml. Drop both when surrealdb moves off quick-xml <0.41.
-      #
       #   RUSTSEC-2026-0367 / RUSTSEC-2026-0368 / RUSTSEC-2026-0369 — zip 8.6.0. It is only a
       #     `[build-dependencies]` entry of utoipa-swagger-ui 10.0.1, the newest release, which
       #     requires `zip = "8.6"`, so there is no upgrade path. Its build.rs never calls
@@ -323,16 +315,10 @@ jobs:
       #     client-secret ES256 reachable from the public OIDC callback, now signs with ring
       #     (crates/axiam-federation/src/apple.rs). Every other use is public-key only. Full
       #     reachability note in deny.toml. Drop when elliptic-curve 0.13 leaves the graph.
-      #
-      #   RUSTSEC-2026-0452 / RUSTSEC-2026-0454 — surrealkv out-of-bounds read and surrealdb-core
-      #     unsound Send/Sync (reblessive). Fix is surrealdb 4.0.0 only. NOT test-only: the crates
-      #     are dev-only here, but the deployed database runs them on `surrealkv:` storage, and
-      #     reblessive is in the server binary. Full exposure note in deny.toml. Review 2026-12-06;
-      #     drop both when AXIAM moves to surrealdb >=4.0.0.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0387,RUSTSEC-2026-0441,RUSTSEC-2026-0452,RUSTSEC-2026-0454
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387
 
       # axiam-opaque-wasm is outside the workspace and carries its own
       # lockfile, which the step above never reads. That lockfile is what
@@ -580,11 +566,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # stable (2026-03-27)
         with:
           toolchain: stable
+      # Every integration-test target links its own executable carrying the
+      # whole SurrealDB tree, so `cargo test --workspace` writes one ~400 MB
+      # binary per target. SurrealDB 4 grew them past this runner's free disk:
+      # main already filled 109G of `target/debug/deps` on 3.3. About 40% of
+      # each binary is dependency DWARF (measured on seeder_skip_test: 396 MB
+      # -> 243 MB). Drop debug info for dependencies only; workspace crates
+      # keep their line tables, so a failing test's backtrace still points
+      # into AXIAM code. Written to the runner's Cargo home, not the repo, so
+      # local builds keep full dependency debug info for the debugger.
+      - name: Drop dependency debug info (disk)
+        run: |
+          mkdir -p "${CARGO_HOME:-$HOME/.cargo}"
+          printf '[profile.dev.package."*"]\ndebug = false\n' >> "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          cat "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
       - name: Start SurrealDB
         run: |
           docker run -d --name surrealdb -p 8000:8000 \
-            surrealdb/surrealdb:v3.3.4 start \
+            surrealdb/surrealdb:v4.0.0 start \
             --user root --pass root --log info
           for i in $(seq 1 30); do
             docker exec surrealdb /surreal isready 2>/dev/null && break || sleep 2
@@ -687,6 +688,14 @@ jobs:
       # `connect_timeout_ms` should now make an unbounded dial impossible, so
       # this should never be what stops the step; it is here for the failure
       # that has not been thought of yet.
+      #
+      # The bound is for the test run, so the compile happens in its own step
+      # first. `-p axiam-amqp` resolves a different feature set from the
+      # workspace build above and recompiles part of the SurrealDB tree, which
+      # with optimised dependencies takes longer than 10 minutes on its own:
+      # the step once timed out in `surrealdb-engine-local` before any test ran.
+      - name: Build the containerized-reactor test
+        run: cargo test -p axiam-amqp --test reactor_containerized_test --no-run
       - timeout-minutes: 10
         env:
           RUST_BACKTRACE: "1"
@@ -960,7 +969,13 @@ jobs:
     # Backstop: a Playwright spec that hangs on CI (no per-test signal) would
     # otherwise run to GitHub's 6h default. Bound the whole job so a hang
     # self-terminates and leaves a downloadable log instead of blocking the PR.
-    timeout-minutes: 75
+    #
+    # 90, not 75: the Keycloak steps below compile a dev-profile test build,
+    # and with dependencies optimised (Cargo.toml, `profile.dev.package."*"`)
+    # that compile alone took 33 minutes on a cold cache, putting a passing
+    # job at 65 of 75. The bound still stops a hung spec; it no longer
+    # trips on a slow but healthy build.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -999,7 +1014,7 @@ jobs:
         # tikv-jemallocator, actix-tls, rcgen, x509-parser, samael, tonic-build,
         # etc.), leaving near-zero margin under the old 15-min step timeout —
         # observed a hairline timeout where every service reported Healthy in
-        # the same second the step timed out. The job-level timeout-minutes: 75
+        # the same second the step timed out. The job-level timeout-minutes: 90
         # above has ample headroom, so give this step real margin instead.
         timeout-minutes: 30
 

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Tests: `a_failed_append_is_logged_though_its_awaiter_was_dropped` (`axiam-audit`)
+  could fail when the blocking write task finished before the test's single
+  poll read its `JoinHandle`, so the poll was `Ready` instead of `Pending`. The
+  test now holds the log buffer the task writes its error line to across the
+  poll and the drop, so the task cannot return first.
+- Tests: `allow_no_candidate_and_another_tenant_cost_the_same` (`axiam-api-rest`)
+  failed under the coverage build when one timing median left the 1.5x band by
+  noise (ratio 0.64 against 0.67). The measurement now runs up to three times
+  and fails only if every attempt leaves the band; an early return (about 0.57)
+  still fails every attempt.
+
 ## [1.3.0] - 2026-11-08
 
 ### Added

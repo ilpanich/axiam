@@ -688,6 +688,14 @@ jobs:
       # `connect_timeout_ms` should now make an unbounded dial impossible, so
       # this should never be what stops the step; it is here for the failure
       # that has not been thought of yet.
+      #
+      # The bound is for the test run, so the compile happens in its own step
+      # first. `-p axiam-amqp` resolves a different feature set from the
+      # workspace build above and recompiles part of the SurrealDB tree, which
+      # with optimised dependencies takes longer than 10 minutes on its own:
+      # the step once timed out in `surrealdb-engine-local` before any test ran.
+      - name: Build the containerized-reactor test
+        run: cargo test -p axiam-amqp --test reactor_containerized_test --no-run
       - timeout-minutes: 10
         env:
           RUST_BACKTRACE: "1"

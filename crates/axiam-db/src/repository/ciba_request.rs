@@ -59,7 +59,7 @@ use zeroize::Zeroizing;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::is_transaction_conflict;
+use crate::helpers::{is_transaction_conflict, retry_on_write_conflict};
 
 /// Every column a read projects. The sealed ping columns are not among them.
 const SELECT_FIELDS: &str = "meta::id(id) AS record_id, tenant_id, client_id, \
@@ -539,36 +539,43 @@ impl<C: Connection> CibaRequestRepository for SurrealCibaRequestRepository<C> {
         client_id: &str,
     ) -> AxiamResult<Option<CibaRequest>> {
         // Layer 1: the guarded UPDATE inside an explicit transaction.
+        //
+        // A write conflict here means another writer touched the row, not that
+        // it was redeemed: a concurrent poll's `last_polled_at` write is enough
+        // to abort this transaction, and an aborted transaction wrote nothing.
+        // Treating that as "already redeemed" refused a credential nobody had
+        // used, so it is retried. The retry is safe because the status guard is
+        // re-evaluated: a real redemption leaves no `approved` row to match.
         let nonce = new_id().to_string();
-        let result = self
-            .db
-            .current()
-            .query(format!(
-                "BEGIN TRANSACTION; \
-                 LET $before = (UPDATE ciba_request \
-                     SET status = 'redeemed', version = version + 1, redemption_id = $nonce \
-                     WHERE tenant_id = $tenant_id AND auth_req_id_hash = $hash \
-                     AND client_id = $client_id \
-                     AND status = 'approved' AND expires_at > time::now() \
-                     RETURN BEFORE); \
-                 SELECT {SELECT_FIELDS} FROM $before; \
-                 COMMIT TRANSACTION"
-            ))
-            .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("hash", auth_req_id_hash.to_owned()))
-            .bind(("client_id", client_id.to_owned()))
-            .bind(("nonce", nonce.clone()))
-            .await;
-        let mut result = match result {
-            Ok(r) => r,
-            Err(e) if is_transaction_conflict(&e) => return Ok(None),
-            Err(e) => return Err(DbError::from(e).into()),
+        let attempt = || async {
+            let mut result = self
+                .db
+                .current()
+                .query(format!(
+                    "BEGIN TRANSACTION; \
+                     LET $before = (UPDATE ciba_request \
+                         SET status = 'redeemed', version = version + 1, redemption_id = $nonce \
+                         WHERE tenant_id = $tenant_id AND auth_req_id_hash = $hash \
+                         AND client_id = $client_id \
+                         AND status = 'approved' AND expires_at > time::now() \
+                         RETURN BEFORE); \
+                     SELECT {SELECT_FIELDS} FROM $before; \
+                     COMMIT TRANSACTION"
+                ))
+                .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("hash", auth_req_id_hash.to_owned()))
+                .bind(("client_id", client_id.to_owned()))
+                .bind(("nonce", nonce.clone()))
+                .await
+                .map_err(DbError::from)?;
+            // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
+            result.take::<Vec<CibaRequestRow>>(2).map_err(DbError::from)
         };
-        // BEGIN=0, LET=1, SELECT=2, COMMIT=3.
-        let rows: Vec<CibaRequestRow> = match result.take::<Vec<CibaRequestRow>>(2) {
+        let rows = match retry_on_write_conflict(attempt).await {
             Ok(rows) => rows,
+            // Still contended after the retries: refuse, never serve.
             Err(e) if is_transaction_conflict(&e) => return Ok(None),
-            Err(e) => return Err(DbError::from(e).into()),
+            Err(e) => return Err(e.into()),
         };
         if rows.is_empty() {
             return Ok(None);

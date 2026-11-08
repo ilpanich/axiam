@@ -140,7 +140,7 @@ export default function Security({ go }: SecurityProps) {
           <code style={{ color: "#94a3b8", fontFamily: "ui-monospace,Menlo,monospace" }}>
             {SECURITY_VERIFIED_RELEASE}
           </code>{" "}
-          · last re-derived from source on {SECURITY_VERIFIED_DATE}
+          · last checked against source on {SECURITY_VERIFIED_DATE}
         </p>
       </div>
 

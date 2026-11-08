@@ -19,7 +19,7 @@ axiam-pki = { workspace = true }
 argon2 = { workspace = true }
 surrealdb = { workspace = true, features = ["protocol-http"] }
 arc-swap = { workspace = true }
-surrealdb-types = "3"
+surrealdb-types = "4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

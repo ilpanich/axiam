@@ -20,13 +20,15 @@ use crate::handle::DbHandle;
 use crate::helpers::{classify_write_error, retry_on_write_conflict};
 
 /// The selection of `SurrealRateLimitBucketRepository::delete_stale_once`:
-/// the ids of up to `$limit` buckets last touched more than `$retention`
-/// seconds ago. `x3_wave2_query_plan_test` appends ` EXPLAIN` to this very text
-/// and asserts that the v109 index serves it, so the sweep and its plan pin
-/// cannot drift apart (#773, R112W3-06 (b)).
+/// the ids of up to `$limit` buckets last touched before `$cutoff`.
+/// `x3_wave2_query_plan_test` appends ` EXPLAIN` to this very text and asserts
+/// that the v109 index serves it, so the sweep and its plan pin cannot drift
+/// apart (#773, R112W3-06 (b)). `$cutoff` is computed by the caller because
+/// SurrealDB 4's planner falls back to a table scan on a bound that calls
+/// `duration::from_secs`.
 #[doc(hidden)]
 pub const RATE_LIMIT_BUCKET_SWEEP_SELECTION: &str = "SELECT VALUE id FROM rate_limit_bucket \
-     WHERE updated_at < time::now() - duration::from_secs($retention) \
+     WHERE updated_at < $cutoff \
      LIMIT $limit";
 
 /// Row shape returned by the windowed-CAS `UPSERT ... RETURN AFTER` query —
@@ -259,18 +261,21 @@ impl<C: Connection> SurrealRateLimitBucketRepository<C> {
         limit: u32,
     ) -> Result<u64, DbError> {
         let entity = "rate_limit_bucket";
+        // A retention too long to subtract keeps every bucket.
+        let cutoff = chrono::Duration::from_std(retention)
+            .ok()
+            .and_then(|age| Utc::now().checked_sub_signed(age))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
         let mut result = self
             .db
             .current()
-            .query(
-                format!(
-                    "LET $ids = ({RATE_LIMIT_BUCKET_SWEEP_SELECTION}); \
-                     LET $removed = (DELETE $ids WHERE updated_at < time::now() - duration::from_secs($retention) \
+            .query(format!(
+                "LET $ids = ({RATE_LIMIT_BUCKET_SWEEP_SELECTION}); \
+                     LET $removed = (DELETE $ids WHERE updated_at < $cutoff \
                          RETURN BEFORE); \
                      SELECT meta::id(id) AS record_id FROM $removed"
-                ),
-            )
-            .bind(("retention", i64::try_from(retention.as_secs()).unwrap_or(i64::MAX)))
+            ))
+            .bind(("cutoff", cutoff))
             .bind(("limit", i64::from(limit)))
             .await
             .map_err(|e| classify_write_error(e, entity))?

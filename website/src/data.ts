@@ -491,6 +491,180 @@ void handler(axiam::Client& axiam,
 
 export const POSTS: Post[] = [
   {
+    slug: "axiam-1-3-0",
+    date: "2026-11-08",
+    dateShort: "Nov 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.3.0",
+    excerpt:
+      "AXIAM 1.3.0 moves to SurrealDB 4.0 — a breaking, one-way change for the database — removes the five advisory ignores that only 4.0 could clear, and fixes the write-conflict races 4.0 made visible in the device grant, CIBA and the migration runner. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "SurrealDB 4.0 is now required, and the database upgrade is one-way. Five advisory ignores removed, five remain. No route, no schema version and no contract change. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "What 1.3.0 is" },
+      {
+        type: "p",
+        text: "1.3.0 is a minor release because of one breaking change: AXIAM now requires **SurrealDB 4.0.0**. The server's SurrealDB dependency moves to 4.0.0, and every shipped manifest — Compose, Kubernetes, CI — pins `surrealdb/surrealdb:v4.0.0`. A 3.x client refuses a 4.0 server and the reverse, so the database and AXIAM move together. Nothing else moves: the schema stays at v115, the SDK contract at 1.66, and no route is added or changed. The minimum Rust for the server workspace is now 1.95 (SurrealDB 4's dependencies need it) and 1.89 for `axiam-opaque`.",
+      },
+      { type: "h", text: "Upgrading the database" },
+      {
+        type: "p",
+        text: "A fresh datastore needs nothing. For an existing 3.x datastore, follow the upgrade note in the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md): take and verify a `surreal export` first, move the 3.x server to the latest 3.3 release, then start 4.0.0 once with `SURREAL_EXPERIMENTAL_UPGRADE_FROM_3X=true`. SurrealDB's in-place upgrade is experimental and one-way — afterwards 3.x can no longer open the data — and SurrealDB itself recommends waiting for 4.1 for production datastores. Weigh that before you upgrade a datastore you could not rebuild from its export; 1.2.5 remains available on 3.x, with the exposure stated below.",
+      },
+      { type: "h", text: "Why now: the advisories" },
+      {
+        type: "p",
+        text: "SurrealDB 4.0 is the only fix for RUSTSEC-2026-0452 (`surrealkv`) and RUSTSEC-2026-0454 (`surrealdb-core`), which 1.2.5 had to ignore with a review date, and it clears RUSTSEC-2026-0194 and RUSTSEC-2026-0195 (`quick-xml` 0.39) with them; `wasmtimer` 0.4.5 drops the unmaintained `pin-utils` (RUSTSEC-2026-0441). All five ignores are removed. Five remain, each with its reason and review date in `deny.toml`. Separately, `axiam-opaque-wasm` — the build behind `@axiam/opaque-wasm` and the admin console — updates `ctutils` for RUSTSEC-2026-0385 (non-constant-time mask generation, and branching `u128` comparisons on 32-bit targets, which wasm32 is). CI now audits that lockfile too, which it did not before.",
+      },
+      { type: "h", text: "The races SurrealDB 4 made visible" },
+      {
+        type: "p",
+        text: "On SurrealDB 4 the loser of a write conflict can learn of it while the winner's transaction is still open, and the release fixes what that exposed. A device-grant token poll racing another poll of the same approved grant could be told the code had already been used while the grant was still unredeemed; a CIBA token request losing a conflict to a concurrent poll was told the same; and two servers starting together without the migration lease could fail on a conflict before the other had recorded the version. Each now retries, and the status guards still allow exactly one redemption. The retry budgets for contended rows are sized for 4.0's conflicts, and the rate-limit sweep's stale-bucket query is served from its index again. The race probe that measures SurrealDB's conflict detection is re-run for each engine version, and 4.0.0 is its current row (`tools/surreal-race-probe/RESULTS.md`).",
+      },
+      { type: "h", text: "What is not in 1.3.0" },
+      {
+        type: "p",
+        text: "The OpenID Foundation submissions ([#513](https://github.com/ilpanich/axiam/issues/513)) are the maintainer's and stay open: AXIAM is not certified, and every conformance figure on this site is a self-run. Benchmark run 6 ([#561](https://github.com/ilpanich/axiam/issues/561)) is not done; the Benchmarks page's numbers are run 5, measured on SurrealDB 3.",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.3.0 is a minor release of the first stable line. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
+    slug: "axiam-1-2-3-to-1-2-5",
+    date: "2026-11-06",
+    dateShort: "Nov 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.2.3, 1.2.4 and 1.2.5",
+    excerpt:
+      "Three patch releases in one day, all on the supply chain: a patched OpenSSL in the server image, four actix advisories fixed, and two SurrealDB advisories ignored — with their exposure stated — until 1.3.0. 1.2.3 is the first 1.2 release with published artifacts. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "No feature, no schema version, no contract change: three patches for what the scanners found. 1.2.3 is the first release since 1.1.2 whose artifacts were published.",
+      },
+      { type: "h", text: "Why nothing was published from 1.1.3 to 1.2.2" },
+      {
+        type: "p",
+        text: "The release workflow does not publish a server image in which its Trivy scan finds a fixable High or Critical vulnerability, and from 1.1.3 on it found one: the pinned distroless base carried `libssl3` 3.0.20, with CVE-2026-84782 (HIGH). 1.1.3, 1.2.1 and 1.2.2 were tagged, but none produced a published release (1.2.1 also stopped earlier, on a package renamed on the Ubuntu 26.04 runners, which 1.2.2 fixed). The base image's current digest still carried the old library, so a bump could not clear it. **1.2.3** overlays the builder's patched `libssl3` 3.0.22 on the distroless image, which clears that CVE and the other OpenSSL CVEs fixed in the same version. AXIAM uses no DTLS, so the High was not reachable in the server; the gate stopped the release anyway, which is what it is for. A failed scan now also prints its table to the job log.",
+      },
+      { type: "h", text: "1.2.4 and 1.2.5" },
+      {
+        type: "p",
+        text: "**1.2.4** ignores RUSTSEC-2026-0441 (`pin-utils` unmaintained, no patched version), which reaches the lockfile only through SurrealDB's wasm32 dependencies, so no AXIAM artifact contains it; and the release tooling now bumps the C SDK's version macros. **1.2.5** moves `actix-http` to 3.20.3 and `actix-web` to 4.18.2, fixing HTTP/1 request smuggling through malformed chunked trailers (RUSTSEC-2026-0446) and memory exhaustion from compressed request bodies (RUSTSEC-2026-0447, RUSTSEC-2026-0448, RUSTSEC-2026-0455) — both on AXIAM's own listener.",
+      },
+      { type: "h", text: "An ignore that says what it costs" },
+      {
+        type: "p",
+        text: "1.2.5 also ignores RUSTSEC-2026-0452 (`surrealkv`) and RUSTSEC-2026-0454 (`surrealdb-core`), whose only fix was SurrealDB 4.0.0. The ignore does not pretend they are unreachable: both affect the deployed database, which on 1.2.5 runs SurrealDB 3 on `surrealkv` storage, so keep its volume and port private. 1.3.0 moves to SurrealDB 4.0 and removes both ignores two days later.",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** These are patch releases of the first stable line. AXIAM has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies.",
+      },
+    ],
+  },
+  {
+    slug: "axiam-1-2-1",
+    date: "2026-11-04",
+    dateShort: "Nov 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.2.1",
+    excerpt:
+      "AXIAM 1.2.1 carries the untagged 1.2.0 and closes three follow-ups: a federated sign-in is bound to the browser that started it, re-authentication is forwarded to the upstream provider, and logout reaches grants issued before a console refresh. SDK contract 1.66. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "1.2.0 was prepared and never tagged, so 1.2.1 carries it. Three follow-ups, two schema versions (v114, v115, both additive), the threat model at 2.46.0, contract 1.66. An SSO sign-in in flight during the upgrade must be started again. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "Login CSRF: a federated sign-in finishes where it started" },
+      {
+        type: "p",
+        text: "An attacker could start a federated sign-in with their own account at the identity provider and get the victim's browser to complete it, leaving the victim signed in as the attacker. The four public start operations now set `__Host-axiam_fed_bind` — `HttpOnly`, `Secure`, `SameSite=Strict`, 256 random bits — and record only its digest on the login state. The OIDC, OAuth2 and SAML callbacks and the federation handoff refuse a request that does not carry it with the uniform `401`, before any code is redeemed or assertion used; the SAML and Apple cross-site returns carry the binding on the handoff code to its redemption ([#837](https://github.com/ilpanich/axiam/issues/837), threat T-495). A non-browser client that drives the public federation endpoints must send the start and the completion through the same cookie jar; the C and Swift SDKs before contract 1.66 did not, so use the 1.66 releases.",
+      },
+      { type: "h", text: "Re-authentication reaches the provider" },
+      {
+        type: "p",
+        text: "When a relying party asks for a fresh sign-in, AXIAM now passes that on: `prompt=login` to an OIDC provider (with `max_age=0` for Google and Apple), `ForceAuthn=\"true\"` to a SAML IdP, `auth_type=reauthenticate` to Facebook, and it refuses an `auth_time` or `AuthnInstant` from before the start. A provider that asserts no instant is accepted on the request alone, as documented ([#838](https://github.com/ilpanich/axiam/issues/838), T-493 amended).",
+      },
+      { type: "h", text: "Logout reaches every grant of the sign-in" },
+      {
+        type: "p",
+        text: "1.2.0 made logout revoke a session's refresh tokens, with a limit it stated: a console refresh gives the session a new id, so grants authorized before it were missed. Every session now carries a **lineage** key, minted at sign-in and copied by every refresh, and each single-session logout — `/auth/logout`, `/oauth2/end_session`, SAML single logout — ends the lineage: every grant of the sign-in is revoked, an `id_token_hint` from before a refresh ends the live console session, and back-channel logout reaches every client that joined ([#844](https://github.com/ilpanich/axiam/issues/844), T-249 amended). The `sid` claim is unchanged. A console session that refreshed before the upgrade keeps the 1.2.0 limit for its older grants. See [the logout guide](https://github.com/ilpanich/axiam/blob/main/docs/api/logout.md).",
+      },
+      { type: "h", text: "The threat model and the SDKs" },
+      {
+        type: "p",
+        text: "Model 2.46.0 holds **495 threats: 464 mitigated, 21 open, 10 not applicable**; T-495 enters mitigated. Contract 1.66 adds `reauthenticate` to the three federation start requests and names the C and Swift cookie-jar defects the rule 12b ports found. Check a registry for the published version before you pin it.",
+      },
+      { type: "h", text: "Upgrading" },
+      {
+        type: "p",
+        text: "Read the `[1.2.1]` and `[1.2.0]` sections of the [CHANGELOG](https://github.com/ilpanich/axiam/blob/main/CHANGELOG.md) before you upgrade. The schema moves to v115 additively, with no backfill. (Update, 1.2.3: 1.2.1's release run did not publish its artifacts; 1.2.3 is the first 1.2 release that did — see its post.)",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.2.1 is a patch release of the first stable line. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
+    slug: "axiam-1-2-0",
+    date: "2026-11-01",
+    dateShort: "Nov 2026",
+    tag: "Release",
+    author: "The AXIAM team",
+    title: "AXIAM 1.2.0: native sign-in and the social-login gap",
+    excerpt:
+      "AXIAM 1.2.0 closes the social-login gap: native apps sign in with the ID token their provider's SDK produced, relying parties can hint the provider, a replayed refresh token revokes its session, and logout revokes the session's refresh tokens. SDK contract 1.65. No independent third-party audit has been performed.",
+    body: [
+      {
+        type: "quote",
+        text: "One grant, one authorize parameter, one client field, the schema from v109 to v113 additively, and two behaviour changes an operator should read first. The threat model at 2.45.0, contract 1.65 in all eleven SDKs. No independent third-party audit has been performed; the shared-responsibility checklist applies.",
+      },
+      { type: "h", text: "What 1.2.0 is" },
+      {
+        type: "p",
+        text: "On 2026-10-30 an analysis compared AXIAM's social sign-in with what mobile and multi-provider deployments expect, and named four gaps (G-A to G-D, [#816](https://github.com/ilpanich/axiam/issues/816) … [#819](https://github.com/ilpanich/axiam/issues/819)). 1.2.0 closes them, with the findings filed while they were built. Each wave ended in a security review of its own diff, and every finding of those reviews is fixed in its wave or recorded on its issue. (1.1.3, on 2026-10-29, was dependency maintenance only.) 1.2.0 was prepared but never tagged: it ships in 1.2.1.",
+      },
+      { type: "h", text: "Native sign-in with a provider ID token" },
+      {
+        type: "p",
+        text: "A mobile app that signed the user in with Sign in with Google, Sign in with Apple or another OIDC provider's native SDK can now exchange that ID token at `POST /oauth2/token` (`grant_type=urn:axiam:params:oauth:grant-type:provider-id-token`) for the client's ordinary token set — no browser round trip. It is off until an operator enables `native_login` on a provider and lists the app's client IDs, and a client must list the grant. The app sends its raw nonce and the token must carry its SHA-256; each provider ID token is accepted once in the whole deployment; every refusal is the same `invalid_grant`; every interactive-sign-in gate applies. It is not token exchange: an ID token is still refused there. See [the native sign-in guide](https://github.com/ilpanich/axiam/blob/main/docs/api/native-sign-in.md) and threats T-489 to T-492.",
+      },
+      { type: "h", text: "A provider hint and a default provider" },
+      {
+        type: "p",
+        text: "`/oauth2/authorize` and `/oauth2/par` accept `axiam_idp_hint` — a provider's UUID, slug or branded kind name — and a client may register a `default_idp`. Both are resolved on the server against the tenant's enabled providers; a hint that names nothing is ignored and the response is identical to one without it, so the parameter is no oracle. The sign-in page then starts the matched provider by itself, behind a \"Choose another way to sign in\" control, and never loops. There is deliberately no `kc_idp_hint` alias; [the guide](https://github.com/ilpanich/axiam/blob/main/docs/admin/oidc-authn-parameters.md) has a Keycloak migration note (T-493, T-494).",
+      },
+      { type: "h", text: "Read before you upgrade: replay and logout" },
+      {
+        type: "p",
+        text: "**A replayed refresh token now revokes its session** — on `standard` clients, and on `fapi2` clients once their 60-second grace has passed. The answer is still `invalid_grant`, but the session and every refresh token issued under it are now revoked, and only the token's own client, passing its sender constraint, can trigger it. `oauth2.refresh_reuse_response: refuse` on the organization restores the 1.1.x behaviour. **Logging a session out now revokes its refresh tokens**, for every client and grant bound to it; a relying party that kept refreshing after its user signed out now gets `invalid_grant`. A replayed authorization code and an administrator's MFA reset revoke refresh tokens too. Tokens issued by token exchange now carry the `client_id` of the client that exchanged them and a marker that keeps them from being reused as an `actor_token` (G-D).",
+      },
+      { type: "h", text: "The threat model and the SDKs" },
+      {
+        type: "p",
+        text: "Model 2.45.0 holds **494 threats: 463 mitigated, 21 open, 10 not applicable**. Six entries enter, all mitigated; T-254's \"detectable and invalidates the family\" is true again on the `standard` lane for the first time since 1.0.0-beta13. Two residuals are recorded rather than closed: native-sign-in trust is per tenant, not per client (T-489), and the first-sign-in account-existence signal is shared with browser login (T-491). Contract 1.65 specifies the native sign-in helper and `idp_hint`; the eleven SDKs ship it as minor releases, the C SDK at SOVERSION 3 and the C++ SDK at SOVERSION 5.",
+      },
+      { type: "h", text: "The caution" },
+      {
+        type: "p",
+        text: "**Caution — no independent third-party audit has been performed.** AXIAM 1.2.0 is a minor release of the first stable line. It has not undergone an independent third-party penetration test or security certification. The shared-responsibility checklist applies. The controls described here are real and verified in the codebase, but a self-assessment is a starting point for your own evaluation, not a guarantee — weigh it against what the deployment protects.",
+      },
+    ],
+  },
+  {
     slug: "axiam-1-1-2",
     date: "2026-10-24",
     dateShort: "Oct 2026",

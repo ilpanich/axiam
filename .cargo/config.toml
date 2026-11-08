@@ -1,0 +1,7 @@
+# SurrealDB 4 replaced its heap-allocated parser stack with plain recursion, so
+# a debug build of the embedded engine overflows libtest's default 2 MiB thread
+# stack while it parses AXIAM's schema. 4 MiB was measured as enough; 8 leaves
+# room. `cargo` applies this to `cargo test` and `cargo run`, in CI and locally,
+# and it changes nothing about a released binary.
+[env]
+RUST_MIN_STACK = "8388608"

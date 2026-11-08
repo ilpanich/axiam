@@ -541,6 +541,11 @@ async fn a_callback_from_a_browser_that_did_not_start_it_is_refused_before_the_e
     let (status, body) = callback(&app, &other.state, None).await;
     assert_eq!(status, 401, "{body}");
     assert!(body.contains("not started in this browser"), "{body}");
+
+    // Verify here, not only in `MockServer`'s `Drop`. That `Drop` calls
+    // `block_on`, and with this task's tokio budget spent the lock it awaits
+    // wakes through a runtime the `block_on` is holding: the test hangs forever.
+    idp.server.verify().await;
 }
 
 /// A row with no binding — the authenticated account-linking path writes one

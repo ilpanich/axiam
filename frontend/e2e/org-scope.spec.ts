@@ -187,8 +187,20 @@ test.describe("Organization-level super-admin", () => {
       if (url.pathname.includes("oauth2") && url.pathname.startsWith("/api/"))
         listUrls.push(url.pathname);
     });
+    // WAIT for the list request rather than sampling `listUrls` once the page
+    // shows. The query is fired from an effect, which runs after the commit
+    // that paints "New Client", and axios then goes through its interceptor
+    // chain before the request leaves — so the button can be visible while
+    // nothing has been requested yet, and a check made at that instant fails
+    // for a page that is correct. Registered before navigating, so it cannot
+    // miss a request that goes out early.
+    const listed = page.waitForRequest(
+      (req) => new URL(req.url()).pathname === "/api/v1/oauth2-clients",
+      { timeout: 30_000 },
+    );
 
     await page.goto("/oauth2-clients");
+    await listed;
     await expect(page.getByRole("button", { name: /New Client/i })).toBeVisible({
       timeout: 30_000,
     });

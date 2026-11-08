@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-08
+
+### Added
+
+- Migrate to SurrealDB 4.0
+
+### Changed
+
+- **Breaking: SurrealDB 4.0.** AXIAM now requires SurrealDB 4.0.0. The Rust SDK
+  moves to 4.0.0 and every shipped manifest (Compose, Kubernetes, CI) pins
+  `surrealdb/surrealdb:v4.0.0`. A 3.x client refuses a 4.0 server and the reverse
+  upgrade is one-way, so the database and AXIAM move together. A fresh datastore
+  needs nothing; for an existing 3.x datastore, follow the upgrade note in
+  `docs/deployment/README.md`, which starts with a verified `surreal export`.
+- Minimum supported Rust is 1.95 for the server workspace (SurrealDB 4's
+  dependencies need it) and 1.89 for `axiam-opaque`, matching the Rust SDK.
+- Tests run with an 8 MiB thread stack (`.cargo/config.toml`): SurrealDB 4's
+  recursive parser overflows libtest's 2 MiB threads in debug builds.
+
+- Lift the PAR limit in the honour-lane test app
+
+- Give the E2E job room for the optimised dependency build
+
+- Wait for the OAuth2 client list request instead of sampling it
+
+- Compile the containerized-reactor test outside its 10-minute bound
+
+- Optimise dependencies in dev and test builds
+
+- Drop dependency debug info in the Test and coverage jobs
+
+- Record the same-host SurrealDB 3.3.5 and 4.0 comparison
+
 ### Fixed
 
 - Device authorization grant: a token poll racing another poll of the same
@@ -23,9 +56,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about two runs in three when its binary ran in parallel. tracing cached the
   log callsite as unwatched when another test thread registered it first; the
   test now uses a global subscriber and matches its own client's line.
+- CIBA: a token request that lost a write conflict, for example to a concurrent
+  poll, was answered "auth_req_id has already been used" although the request was
+  still unredeemed. It now retries; the status guard still allows one redemption.
+- Migrations: two servers starting together without the migration lease could
+  fail on a write conflict before the other had recorded the version. A conflict
+  is now retried.
+- Rate-limit sweep: the stale-bucket selection used a bound SurrealDB 4 cannot
+  serve from its index, so every sweep scanned the table. The cutoff is now bound
+  as a parameter.
+
+- Size the write-conflict budget for SurrealDB 4's open-winner conflicts
+
+- Give role holder-epoch writes the hot-row retry budget
+
+- Device grant conflict, mass-tag rerun, wasm ctutils, a test flake
 
 ### Security
 
+- SurrealDB 4.0 clears RUSTSEC-2026-0452 (`surrealkv`) and RUSTSEC-2026-0454
+  (`surrealdb-core`), and with them RUSTSEC-2026-0194 and RUSTSEC-2026-0195
+  (`quick-xml` 0.39). `wasmtimer` 0.4.5 drops `pin-utils` (RUSTSEC-2026-0441).
+  All five ignores are removed; five remain.
 - `axiam-opaque-wasm`: update `ctutils` 0.4.2 to 0.4.8 for RUSTSEC-2026-0385
   (non-constant-time mask generation, and branching `u128` comparisons on
   32-bit targets, which wasm32 is). The published `@axiam/opaque-wasm` and the

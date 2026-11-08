@@ -143,9 +143,18 @@ async fn setup_db() -> (Surreal<TestDb>, Uuid, Uuid, Uuid) {
 /// driving many authorizations from one peer can meet across a run (#532). The
 /// limit is pinned by
 /// `oauth2_tenant_path_sso_test::p23w3_09_authorize_is_rate_limited_on_both_mounts`.
+///
+/// `par_per_min` is lifted for a sharper version of the same reason. PAR is a
+/// machine bucket, so a client first seen partway through a minute is charged
+/// the cold-entry seed (up to 90% of its 120); the D-N28 tests push 16 requests
+/// for one client, so a first push in the last ~2 s of a wall-clock minute left
+/// fewer than 16 and the run failed with `429` about one time in 25, with
+/// nothing about PAR under test. The handler reads its limit from
+/// `AppState::rate_limit_cfg`, which `test_app!` sets from here.
 fn permissive_rate_limits() -> RateLimitConfig {
     RateLimitConfig {
         end_session_per_min: 100_000,
+        par_per_min: 100_000,
         ..RateLimitConfig::default()
     }
 }
@@ -155,10 +164,11 @@ macro_rules! test_app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
-                .app_data(web::Data::new(AppState::for_test(
-                    $db.clone(),
-                    $auth.clone(),
-                )))
+                .app_data(web::Data::new({
+                    let mut state = AppState::for_test($db.clone(), $auth.clone());
+                    state.rate_limit_cfg = permissive_rate_limits();
+                    state
+                }))
                 .app_data(web::Data::new(
                     Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
                 ))

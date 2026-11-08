@@ -1,6 +1,6 @@
 # Benchmark VM runbook — Infomaniak Public Cloud
 
-- **Date written**: 2026-11-07
+- **Date written**: 2026-11-07; §1–§8 scripted on 2026-11-08 ([`infra/bench-vm/`](../infra/bench-vm/README.md))
 - **Purpose**: provision one dedicated cloud VM and run on it the **cross-system comparison**
   (AXIAM vs Keycloak vs Zitadel vs authentik) and the **SDK pass**, in place of the
   maintainer's laptop (the "G-box" every draft so far used).
@@ -12,6 +12,8 @@
   [`run6-runbook.md`](run6-runbook.md) remains the reference for *the run* — what each cell
   measures, the labels, the reporting rules. Where this file says "run6 §12.x", the commands
   are the ones there, unchanged unless this file says otherwise.
+- **Relationship to `infra/bench-vm/`**: the OpenTofu module and the scripts *do* §1–§8;
+  this file says why, in what order, and what to check. The run itself (§9) stays by hand.
 
 ---
 
@@ -90,156 +92,109 @@ at the listed rates (a8-ram32-disk80-perf1 was listed at €0.049/h). Check the 
 
 ---
 
-## 1. Provision the instance
+## 1. Provision the instance — `infra/bench-vm/run.sh`
 
-With the OpenStack CLI (download the project's `openrc` from the Infomaniak manager), from
-your PC:
+§1–§7 are scripted in [`infra/bench-vm/`](../infra/bench-vm/README.md): an OpenTofu module
+for the instance, and five numbered scripts for the host, each idempotent and safe to re-run.
+Their headers say what they do and why; this section says when to run them and what to look at.
+Every version they install is pinned in
+[`infra/bench-vm/scripts/versions.env`](../infra/bench-vm/scripts/versions.env).
+
+On your PC, with OpenTofu ≥ 1.6 (or Terraform ≥ 1.7), `rsync`, `ssh`, and the OpenStack CLI
+if you want the snapshot of §11:
 
 ```bash
-source ~/Downloads/PCP-XXXX-openrc.sh
+source ~/Downloads/<project>-openrc.sh          # the Infomaniak manager's OpenStack RC file
 ```
 
 ```bash
-openstack flavor list --sort-column VCPUs | grep -E '\| a(12|16|24)-'
+cd axiam/infra/bench-vm && cp tofu/example.tfvars tofu/bench-vm.auto.tfvars && $EDITOR tofu/bench-vm.auto.tfvars
+```
+
+Set `flavor_name` (16 vCPU; `openstack flavor list --sort-column VCPUs`), `boot_volume_size`
+(100 for a `-disk0` flavor, 0 for one with a large local disk) and `ssh_allowed_cidrs` (your
+address, `curl -fsS https://ifconfig.me`). The plan refuses fewer than 12 vCPUs, less than
+60 GB of disk, and SSH from anywhere — the sizing of §0.3 as preconditions, so the
+`a8_ram32_disk20_perf1` flavor fails before anything is created.
+
+```bash
+./run.sh plan
 ```
 
 ```bash
-openstack image list | grep -i 'ubuntu 24.04'
+./run.sh apply
 ```
 
 ```bash
-openstack network list        # the public network is usually ext-net1
+./run.sh output host_for_run_notes        # flavor, vCPUs, RAM, disk kind: goes in the run notes
 ```
 
 ```bash
-openstack keypair create --public-key ~/.ssh/id_ed25519.pub axiam-bench
+./run.sh push && ./run.sh ssh
 ```
 
-SSH from your own address only (the stacks bind loopback, but nothing else needs to be open):
-
-```bash
-openstack security group create axiam-bench-ssh
-```
-
-```bash
-openstack security group rule create --protocol tcp --dst-port 22 --remote-ip "$(curl -fsS https://ifconfig.me)/32" axiam-bench-ssh
-```
-
-Variant A — flavor with a local disk:
-
-```bash
-openstack server create --flavor <a16-flavor-with-disk> --image "<Ubuntu 24.04 image>" --network ext-net1 --key-name axiam-bench --security-group axiam-bench-ssh axiam-bench
-```
-
-Variant B — `disk0` flavor booted from a 100 GB volume:
-
-```bash
-openstack server create --flavor a16-ram64-disk0 --image "<Ubuntu 24.04 image>" --boot-from-volume 100 --network ext-net1 --key-name axiam-bench --security-group axiam-bench-ssh axiam-bench
-```
-
-```bash
-openstack server show axiam-bench -c addresses -c status
-```
-
-```bash
-ssh ubuntu@<VM_IP>
-```
-
-The Horizon web console does the same: Compute → Instances → Launch, with the same flavor,
-image, key pair and security group.
+The state is kept outside the repository (`~/axiam-infra/state/bench-vm/`) and holds no
+secret; the OpenStack credentials stay in your shell's environment. `./run.sh test` runs the
+module's offline tests (no cloud needed).
 
 ---
 
-## 2. Base system — update, then remove sources of noise
+## 2. Base system — `00-host-prepare.sh`
 
-Everything from here on runs **on the VM**.
+On the VM:
 
 ```bash
-sudo apt-get update && sudo apt-get -y full-upgrade && sudo reboot
+~/bench-vm/scripts/00-host-prepare.sh
 ```
 
-After the reboot, stop the background jobs that burst CPU or disk at random times. They are
-the VM's equivalent of the laptop's browser and indexers:
+It checks the OS and the box's size, upgrades, disables the background jobs that burst CPU
+or disk at random (unattended upgrades, the apt and man-db timers, snap refreshes), sets UTC
+and installs the base packages. **No kernel or network tuning**: the G-box had none, and a
+sysctl that helps one target changes the comparison. If it ends asking for a reboot:
 
 ```bash
-sudo systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer motd-news.timer man-db.timer fwupd-refresh.timer 2>/dev/null; true
-```
-
-```bash
-command -v snap >/dev/null && sudo snap refresh --hold
-```
-
-```bash
-sudo timedatectl set-timezone UTC
-```
-
-Base packages the harness and the builds need:
-
-```bash
-sudo apt-get install -y git curl ca-certificates gnupg jq openssl python3 python3-venv python3-pip just tmux xz-utils unzip rsync sysstat sysbench build-essential cmake pkg-config libcurl4-openssl-dev libssl-dev
-```
-
-> **No kernel or network tuning** beyond this. The G-box had none, and a sysctl that helps
-> one target changes the comparison. Removing noise is allowed; adding speed is not.
-
----
-
-## 3. Docker Engine (≥ 25) and Compose (≥ 2.24)
-
-From Docker's own repository (Ubuntu's `docker.io` package lags behind):
-
-```bash
-sudo install -m 0755 -d /etc/apt/keyrings && sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-```
-
-```bash
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list
-```
-
-```bash
-sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-```
-
-Bound the container logs so a 20-hour run cannot fill the disk (rotation does not affect
-what is measured):
-
-```bash
-echo '{ "log-driver": "json-file", "log-opts": { "max-size": "50m", "max-file": "3" } }' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
-```
-
-```bash
-sudo usermod -aG docker "$USER" && exit      # log in again so the group applies
-```
-
-```bash
-docker version --format 'docker {{.Server.Version}}' && docker compose version --short
+sudo reboot
 ```
 
 ---
 
-## 4. k6
-
-Pin the version, and record it (run 5 used 2.1.0; the sandbox that wrote run 6 had 2.3.0).
-If you have been running k6 on your PC, use the same version for continuity:
+## 3. Docker, Compose and k6 — `01-docker-k6.sh`
 
 ```bash
-K6_VERSION=2.3.0
+~/bench-vm/scripts/01-docker-k6.sh
 ```
 
-```bash
-curl -fsSL "https://github.com/grafana/k6/releases/download/v${K6_VERSION}/k6-v${K6_VERSION}-linux-amd64.tar.gz" | sudo tar -xz -C /usr/local/bin --strip-components=1 "k6-v${K6_VERSION}-linux-amd64/k6"
-```
-
-```bash
-k6 version
-```
-
-That completes the tooling of the **standard benchmarks** (run6 §1.2: Docker, Compose, k6,
-`just`, `jq`, `openssl`, `python3`, `curl`, `git`).
+Docker Engine and the Compose plugin from Docker's own repository (≥ 25 and ≥ 2.24, checked),
+container log rotation so a 20-hour run cannot fill the disk, and k6 at the pinned version.
+Log out and back in afterwards (the docker group).
 
 ---
 
-## 5. The eleven SDK toolchains
+## 4. Registry logins (by hand — never scripted)
+
+Anonymous Docker Hub pulls are rate-limited per IP (run 6's sandbox got `429` on the third
+pull), and cloud IPs are shared, so log in to both registries (run6 §1.2). These are the only
+credentials the round needs on the VM, and they are typed, not scripted: anything put in
+cloud-init or a Tofu variable is readable through the metadata service and lands in the state.
+
+```bash
+docker login ghcr.io      # GitHub handle + a PAT with read:packages only
+```
+
+```bash
+docker login              # Docker Hub
+```
+
+If the repositories are private, set up read access for §6 the same way (`gh auth login`, or
+a fine-grained PAT with Contents: read on the twelve repositories).
+
+---
+
+## 5. The eleven SDK toolchains — `02-sdk-toolchains.sh`
+
+```bash
+~/bench-vm/scripts/02-sdk-toolchains.sh && exec bash -l
+```
 
 What each bench needs, read off `benchmarks/sdk/<lang>/run.sh` and the SDK manifests:
 
@@ -257,75 +212,10 @@ What each bench needs, read off `benchmarks/sdk/<lang>/run.sh` and the SDK manif
 | c | CMake ≥ 3.16, a C11 compiler, libcurl, OpenSSL | `axiam-c-sdk/CMakeLists.txt` |
 | cpp | CMake ≥ 3.16, a C++17 compiler, libcurl, OpenSSL | `axiam-cplusplus-sdk/CMakeLists.txt` |
 
-C and C++ are already covered by §2's `build-essential cmake libcurl4-openssl-dev libssl-dev`.
-
-**Rust**
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . "$HOME/.cargo/env"
-```
-
-**Node 22**
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs
-```
-
-**Java 21, Maven** (Kotlin uses the same JDK)
-
-```bash
-sudo apt-get install -y openjdk-21-jdk-headless maven
-```
-
-**PHP 8.3, Composer**
-
-```bash
-sudo apt-get install -y php8.3-cli php8.3-curl php8.3-mbstring php8.3-xml composer
-```
-
-```bash
-php -m | grep -iE '^(sodium|sockets|curl|ffi)$'      # sodium and sockets must be listed
-```
-
-**Go** (the latest stable release satisfies `go 1.26`)
-
-```bash
-GO_VER="$(curl -fsS 'https://go.dev/VERSION?m=text' | head -1)" && curl -fsSL "https://go.dev/dl/${GO_VER}.linux-amd64.tar.gz" | sudo tar -xz -C /usr/local
-```
-
-**.NET 10**
-
-```bash
-sudo apt-get install -y libicu74 && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && sudo bash /tmp/dotnet-install.sh --channel 10.0 --install-dir /opt/dotnet
-```
-
-**Swift** (via `swiftly`, the official installer; it installs the latest stable toolchain)
-
-```bash
-sudo apt-get install -y binutils gnupg2 libc6-dev libedit2 libgcc-13-dev libncurses-dev libpython3-dev libsqlite3-0 libstdc++-13-dev libxml2-dev libz3-dev tzdata zlib1g-dev
-```
-
-```bash
-cd /tmp && curl -fsSLO "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz" && tar -xzf "swiftly-$(uname -m).tar.gz" && ./swiftly init --assume-yes --quiet-shell-followup
-```
-
-**PATH for every new shell**
-
-```bash
-cat >> ~/.bashrc <<'EOF'
-export PATH="/usr/local/go/bin:$HOME/go/bin:/opt/dotnet:$HOME/.cargo/bin:$PATH"
-export DOTNET_ROOT=/opt/dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1
-[ -f "$HOME/.local/share/swiftly/env.sh" ] && . "$HOME/.local/share/swiftly/env.sh"
-EOF
-```
-
-```bash
-exec bash -l
-```
-
-```bash
-cargo --version; node --version; python3 --version; java -version 2>&1 | head -1; mvn -v | head -1; php --version | head -1; go version; dotnet --version; swift --version 2>&1 | head -1; cmake --version | head -1
-```
+The script installs each at the version pinned in `versions.env` (Rust via rustup, Node via
+NodeSource, Go from go.dev, .NET via `dotnet-install.sh` into `/opt/dotnet`, Swift via
+`swiftly`; JDK 21, Maven, PHP 8.3, Composer, CMake and the C/C++ libraries from Ubuntu) and
+writes one marked PATH block into `~/.bashrc`.
 
 ### 5.1 Known blocker: the C# bench targets `net8.0`, the SDK `net10.0`
 
@@ -344,75 +234,39 @@ sed -i 's#<TargetFramework>net8.0</TargetFramework>#<TargetFramework>net10.0</Ta
 git -C ~/bench/axiam checkout -- benchmarks/sdk/csharp/axiam-sdk-bench.csproj      # after the SDK pass
 ```
 
-Write it in the run notes (§9.4). This was found by reading the files and has **not** been
+Write it in the run notes (§9.7). `04-verify.sh` flags the mismatch as a `WARN` while it lasts. This was found by reading the files and has **not** been
 compiled here (no .NET on the machine that wrote this runbook).
 
 ---
 
-## 6. The checkouts — AXIAM at a release tag, the SDKs as siblings
-
-Every SDK bench resolves its SDK at `../../../../axiam-<lang>-sdk` from
-`benchmarks/sdk/<lang>/`, i.e. **beside** the `axiam` checkout. If the repositories are
-private, authenticate first with a fine-grained PAT (Contents: read-only, these twelve
-repositories only) or `gh auth login`.
+## 6. The checkouts — `03-checkouts.sh`
 
 ```bash
-mkdir -p ~/bench ~/bench/logs && cd ~/bench
+~/bench-vm/scripts/03-checkouts.sh
 ```
 
-```bash
-git clone --filter=blob:none https://github.com/ilpanich/axiam.git
-```
-
-```bash
-for L in rust typescript python java kotlin csharp php go swift c cplusplus; do git clone --filter=blob:none "https://github.com/ilpanich/axiam-$L-sdk.git"; done
-```
-
-`--filter=blob:none` keeps the full history (the provenance check needs `origin/main`) without
-downloading every old file.
+It clones `axiam` and the eleven SDKs side by side under `~/bench` (every SDK bench resolves
+its SDK at `../../../../axiam-<lang>-sdk`), with `--filter=blob:none` so the full history is
+there for the provenance check without every old file. It **refuses an unpublished tag**,
+checks out the tag, and verifies that it is on `origin/main`, that `Cargo.toml` carries the
+same version, and that the tree is clean; it prints the harness's SurrealDB default and writes
+every checkout's ref to `~/bench/logs/checkouts.txt`.
 
 ### 6.1 Which AXIAM release to measure — `v1.3.0`
 
 The round measures **`v1.3.0`**, the first release on **SurrealDB 4.0**
-([ilpanich/axiam#853](https://github.com/ilpanich/axiam/pull/853)). The run-6 runbook's
-`v1.1.1` pin is superseded for this round; its procedure is unchanged. The harness at the
-checked-out tag is the one that runs, and at `v1.3.0` it already pins the datastore:
-`benchmarks/targets/axiam/docker-compose.yml` defaults to `surrealdb/surrealdb:v4.0.0`, so no
-override is needed (`pull-pinned-images.sh` still resolves and records its digest).
+([ilpanich/axiam#853](https://github.com/ilpanich/axiam/pull/853)); the run-6 runbook's
+`v1.1.1` pin is superseded for this round, its procedure unchanged. On 2026-11-08 both the tag
+and `ghcr.io/ilpanich/axiam/server:1.3.0` were published, and every SDK repository carried a
+`v1.3.0` tag too. The harness at the tag already pins the datastore
+(`surrealdb/surrealdb:v4.0.0` in `benchmarks/targets/axiam/docker-compose.yml`), so no override
+is needed; `pull-pinned-images.sh` still resolves and records its digest. The image matters
+because `bench-up` falls back to a local source build when it cannot pull (run6 §1.0), and a
+build is not the release — `04-verify.sh` fails if the image is not pullable.
 
-**Do not start before both exist** — `bench-up` falls back to a local source build when the
-image cannot be pulled (run6 §1.0), and a build is not the release:
-
-```bash
-git ls-remote --tags https://github.com/ilpanich/axiam.git 'refs/tags/v1.3.0'
-```
-
-```bash
-docker manifest inspect ghcr.io/ilpanich/axiam/server:1.3.0 >/dev/null && echo "image published"
-```
-
-Provisioning (§1–§5) does not depend on the tag, so it can be done while the release
-pipeline runs.
-
-```bash
-AXIAM_TAG=v1.3.0
-```
-
-```bash
-cd ~/bench/axiam && git fetch origin main --tags && git checkout "$AXIAM_TAG"
-```
-
-```bash
-git merge-base --is-ancestor HEAD origin/main && echo "OK: on main" || echo "STOP: not on main"
-```
-
-```bash
-grep -m1 '^version' Cargo.toml && git rev-parse HEAD      # must read 1.3.0; both go in the run notes
-```
-
-```bash
-grep -n 'BENCH_SURREALDB_IMAGE:-' benchmarks/targets/axiam/docker-compose.yml   # must name surrealdb/surrealdb:v4.0.0
-```
+`AXIAM_TAG=<tag>` before the script measures another release; `SDK_REF=v1.3.0` checks every SDK
+out at its matching release instead of its default branch (each SDK record carries the version
+it built either way, `benchmarks/sdk/_sdkversion.sh`).
 
 **What SurrealDB 4.0 means for the numbers.** It is a major version of AXIAM's datastore, so
 AXIAM's figures from this round are not comparable with any earlier run for **two**
@@ -424,57 +278,45 @@ The dry run (§9.3) is the first time the harness meets 4.0 under load: a `FAIL`
 finding for the harness or the release, not a reason to pin SurrealDB back (a 3.x datastore
 refuses the 1.3.0 client).
 
-For the SDKs, check out the release tag of each that you intend to publish against (or leave
-the default branch); either way every SDK record carries the version it built
-(`sdk/_sdkversion.sh`), so the choice is recorded automatically:
-
-```bash
-for L in rust typescript python java kotlin csharp php go swift c cplusplus; do printf '%-11s %s\n' "$L" "$(git -C ~/bench/axiam-$L-sdk describe --tags --always)"; done | tee ~/bench/logs/sdk-checkouts.txt
-```
-
 ---
 
-## 7. Qualify the VM before trusting it (about 15 minutes)
-
-Two cheap checks that the vCPUs deliver steady capacity. The thresholds are **operator
-heuristics** chosen for this runbook, not values from the methodology.
-
-**CPU consistency** — three identical runs on every vCPU:
+## 7. Verify and qualify — `04-verify.sh`, `05-qualify.sh`
 
 ```bash
-for i in 1 2 3; do sysbench cpu --threads="$(nproc)" --time=60 run | grep 'events per second'; done | tee ~/bench/logs/sysbench.txt
+~/bench-vm/scripts/04-verify.sh
 ```
 
-**Steal under load** — start a fourth `sysbench cpu --threads="$(nproc)" --time=60 run` in one
-`tmux` pane and, at the same time, this in another (`st` = % of time the hypervisor gave the
-vCPUs to someone else):
+A read-only table of `PASS` / `WARN` / `FAIL` over the box, the standard-benchmark tooling,
+the eleven toolchains, the checkouts and the registries; its exit status is the number of
+`FAIL`s, so **0 means ready**. It writes the table to `~/bench/logs/verify.txt` and every exact
+version to `~/bench/logs/toolchains.txt` (for the run notes). Expect one `WARN` today: the C#
+bench target (§5.1).
 
 ```bash
-vmstat -t 5 13 | tee ~/bench/logs/steal-qualify.txt
+~/bench-vm/scripts/05-qualify.sh
 ```
 
-| Result | Action |
+About five minutes, no containers: three identical `sysbench` CPU runs on every vCPU (their
+spread) and a fourth with `vmstat` beside it (the mean steal). The thresholds are **operator
+heuristics** chosen for this runbook, not values from the methodology:
+
+| Result | Verdict |
 |---|---|
-| spread of the three runs ≤ 5 % and average `st` ≤ 2 % | proceed |
-| spread 5–10 % or `st` 2–5 % | proceed, and watch the steal log during the run (§9.1) |
-| spread > 10 % or `st` > 5 % | delete the instance and create a new one (it usually lands on another hypervisor), or ask Infomaniak about a dedicated-CPU option |
+| spread ≤ 5 % and steal ≤ 2 % | proceed |
+| spread ≤ 10 % and steal ≤ 5 % | proceed, and watch the steal log during the run (§9.1) |
+| anything worse | exit 3: delete the instance and create a new one (it usually lands on another hypervisor), or ask Infomaniak about a dedicated-CPU option |
 
-Record `nproc`, `lscpu | grep 'Model name'` and the results in the run notes.
+The result is in `~/bench/logs/qualify.txt`; quote it in the run notes.
 
 ---
 
-## 8. Registry logins
+## 8. Later rounds — boot the snapshot
 
-Anonymous Docker Hub pulls are rate-limited per IP (run 6's sandbox got `429` on the third
-pull), and cloud IPs are shared, so log in to both registries (run6 §1.2):
-
-```bash
-docker login ghcr.io      # GitHub handle + a PAT with read:packages only
-```
-
-```bash
-docker login              # Docker Hub
-```
+After the first round, §11 images the provisioned VM. The next round (the improvement
+benchmarks) starts from it: set `image_name = "axiam-bench-provisioned"` in
+`tofu/bench-vm.auto.tfvars`, `./run.sh apply`, then `04-verify.sh` and `05-qualify.sh` — a new
+instance may land on a different hypervisor, so qualify it again. Re-run `03-checkouts.sh`
+with the new `AXIAM_TAG` if the release changed.
 
 ---
 
@@ -605,9 +447,10 @@ awk 'NR==2 {for (i=1;i<=NF;i++) if ($i=="st") c=i; next} c && $1 ~ /^[0-9]+$/ {s
 **Run notes** — write `results/RUN-NOTES.md` from run6 §10's template, **adding**:
 
 ```text
-- Host:                Infomaniak Public Cloud, flavor <name>, <n> vCPU <model>, <RAM>, disk <local|volume, size>
+- Host:                Infomaniak Public Cloud; ./run.sh output host_for_run_notes; CPU model from ~/bench/logs/verify.txt
 - Region / created:    <region>, instance created <date>
-- Qualification (§7):  sysbench e/s <r1> <r2> <r3>; steal under load <x> %
+- Qualification (§7):  ~/bench/logs/qualify.txt (sysbench spread, steal under load, verdict)
+- Toolchains:          ~/bench/logs/toolchains.txt; checkouts: ~/bench/logs/checkouts.txt
 - Steal during run:    mean <x> %; any period above 5 %: <when, which cells>
 - Box change:          first run on this VM; NOT comparable with G-box runs (run 5 and earlier)
 - AXIAM tag measured:  v1.3.0 @ <commit>; SurrealDB v4.0.0 @ <digest from images.txt>
@@ -622,8 +465,8 @@ awk 'NR==2 {for (i=1;i<=NF;i++) if ($i=="st") c=i; next} c && $1 ~ /^[0-9]+$/ {s
 
 | Step | Wall clock (estimate) |
 |---|---|
-| §1–§6 provisioning and toolchains | 1–1.5 h (mostly downloads) |
-| §7 qualification | 15 min |
+| §1–§6 `run.sh apply` and scripts 00–03 | 1–1.5 h (mostly downloads; Swift is the largest) |
+| §7 `04-verify.sh`, `05-qualify.sh` | 10 min |
 | §9.2 preflight, pulls | 30 min |
 | §9.3 dry run (CORE) + SDK rehearsal | 1.5 h |
 | §9.4 resting footprint, four stacks | 50 min |
@@ -636,32 +479,34 @@ awk 'NR==2 {for (i=1;i<=NF;i++) if ($i=="st") c=i; next} c && $1 ~ /^[0-9]+$/ {s
 
 ## 11. After the run — retrieve, clean up, keep the machine for later
 
-From your PC:
+From your PC — the packed results and `~/bench/logs`:
 
 ```bash
-scp ubuntu@<VM_IP>:~/bench/axiam/benchmarks/results-*.tar.xz .
+./run.sh fetch ~/axiam-results
 ```
 
-On the VM, drop the registry credentials:
+On the VM, drop every credential **before** the snapshot, which would otherwise carry them
+into every VM booted from it:
 
 ```bash
-docker logout ghcr.io; docker logout
+docker logout ghcr.io; docker logout; gh auth logout 2>/dev/null; rm -f ~/.git-credentials
 ```
 
-Revoke the GitHub PATs used on the VM. Then, **to stop paying while keeping the work**, take a
-snapshot of the provisioned instance (everything in §2–§6 is in it) and delete the instance;
-the improvement benchmarks start from that snapshot later:
+Revoke the PATs on GitHub too. Then, **to stop paying while keeping the work**, image the
+provisioned VM (everything §2–§6 installed is in it; §8 boots it) and delete the instance:
 
 ```bash
-openstack server image create --name axiam-bench-provisioned axiam-bench
+./run.sh snapshot
 ```
 
 ```bash
-openstack server delete axiam-bench
+./run.sh destroy
 ```
 
-(Variant B: snapshot the boot volume instead, `openstack volume snapshot create`.) Snapshots
-are billed by size; check the current rate in the manager.
+The snapshot of a running VM is crash-consistent, which is enough for an image of
+toolchains. For a volume-booted instance the image references a volume snapshot; both are
+billed by size, so check the rate in the manager. `destroy` asks for confirmation and deletes
+the boot volume with the instance (`delete_on_termination`).
 
 **Deferred to the improvement session, on the same flavor** (each in its own results tree, as
 run6 specifies): the 15 NEW AXIAM cells (run6 §12.8), the `rl=prod` pass and `rl-prod-check`

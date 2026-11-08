@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `infra/bench-vm/`: the benchmark VM as code. An OpenTofu module provisions an
+  OpenStack instance (Infomaniak Public Cloud) with SSH as its only inbound port
+  and refuses, at plan time, a flavor too small for a fair comparison (fewer
+  than 12 vCPUs or 60 GB of disk); five idempotent scripts prepare the host,
+  install Docker, Compose, k6 and the eleven SDK toolchains at pinned versions,
+  check out the release and its SDKs, verify the result and qualify the VM's
+  CPU (consistency and steal time). `claude_dev/bench-vm-runbook.md` is the
+  operator guide; the comparison round itself stays by hand.
+
 ## [1.3.0] - 2026-11-08
 
 ### Added

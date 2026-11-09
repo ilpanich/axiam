@@ -1301,11 +1301,19 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 /// sit within about 15 % of each other here); an early return that skips the
 /// site's reads, the batch and the row lands near 0.57 and outside it — which
 /// the structural test above also pins, exactly.
+///
+/// A single measurement can still leave the band by noise: under the
+/// instrumented coverage build, with the binary's other tests running beside
+/// it, "no candidate" once came in at 0.64. So the measurement is repeated, up
+/// to `ATTEMPTS` times, and the test fails only when every attempt leaves the
+/// band. A real early return sits outside it on every attempt, so the retry
+/// costs no detection; a noise excursion has to recur `ATTEMPTS` times in a row.
 #[actix_rt::test]
 async fn allow_no_candidate_and_another_tenant_cost_the_same() {
     const ROUNDS: usize = 31;
     const BAND_LOW: f64 = 1.0 / 1.5;
     const BAND_HIGH: f64 = 1.5;
+    const ATTEMPTS: usize = 3;
     let w = World::new().await;
     let s = site(&w, "hq").await;
     let caller = w.caller_at(network_root_id(w.tenant)).await;
@@ -1343,37 +1351,53 @@ async fn allow_no_candidate_and_another_tenant_cost_the_same() {
     for (_, body) in &kinds {
         srv.decide(&token, body.clone()).await;
     }
-    let mut samples: Vec<Vec<Duration>> = vec![Vec::new(); kinds.len()];
-    for round in 0..ROUNDS {
-        // Rotate the order each round, so no kind always goes first.
-        for k in 0..kinds.len() {
-            let i = (k + round) % kinds.len();
-            let started = Instant::now();
-            let (status, _) = srv.decide(&token, kinds[i].1.clone()).await;
-            samples[i].push(started.elapsed());
-            assert_eq!(status, 200);
+    let mut failed_attempts = Vec::new();
+    for attempt in 1..=ATTEMPTS {
+        let mut samples: Vec<Vec<Duration>> = vec![Vec::new(); kinds.len()];
+        for round in 0..ROUNDS {
+            // Rotate the order each round, so no kind always goes first.
+            for k in 0..kinds.len() {
+                let i = (k + round) % kinds.len();
+                let started = Instant::now();
+                let (status, _) = srv.decide(&token, kinds[i].1.clone()).await;
+                samples[i].push(started.elapsed());
+                assert_eq!(status, 200);
+            }
         }
-    }
-    let medians: Vec<Duration> = samples.into_iter().map(median).collect();
-    eprintln!(
-        "network decide medians: {}",
-        kinds
+        let medians: Vec<Duration> = samples.into_iter().map(median).collect();
+        eprintln!(
+            "network decide medians, attempt {attempt}: {}",
+            kinds
+                .iter()
+                .zip(&medians)
+                .map(|(k, m)| format!("{} {m:?}", k.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let allow = medians[0].as_secs_f64();
+        let outside: Vec<String> = kinds
             .iter()
             .zip(&medians)
-            .map(|(k, m)| format!("{} {m:?}", k.0))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let allow = medians[0].as_secs_f64();
-    for (k, m) in kinds.iter().zip(&medians).skip(1) {
-        let ratio = m.as_secs_f64() / allow;
-        assert!(
-            (BAND_LOW..=BAND_HIGH).contains(&ratio),
-            "{}: median {:?} against the placement's {:?} (ratio {ratio:.2})",
-            k.0,
-            m,
-            medians[0]
-        );
+            .skip(1)
+            .filter_map(|(k, m)| {
+                let ratio = m.as_secs_f64() / allow;
+                (!(BAND_LOW..=BAND_HIGH).contains(&ratio)).then(|| {
+                    format!(
+                        "{}: median {:?} against the placement's {:?} (ratio {ratio:.2})",
+                        k.0, m, medians[0]
+                    )
+                })
+            })
+            .collect();
+        if outside.is_empty() {
+            srv.stop().await;
+            return;
+        }
+        failed_attempts.push(format!("attempt {attempt}: {}", outside.join("; ")));
     }
     srv.stop().await;
+    panic!(
+        "every attempt left the band [{BAND_LOW:.2}, {BAND_HIGH:.2}]:\n{}",
+        failed_attempts.join("\n")
+    );
 }

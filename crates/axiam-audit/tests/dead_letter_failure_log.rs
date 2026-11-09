@@ -70,11 +70,19 @@ async fn a_failed_append_is_logged_though_its_awaiter_was_dropped() {
     };
 
     // One poll spawns the blocking task; dropping the future then leaves it
-    // without an awaiter before it can report.
+    // without an awaiter before it can report. The task must not finish
+    // first: a failed open takes microseconds, and a blocking thread that
+    // returned before the poll read its `JoinHandle` made the poll `Ready`.
+    // Its error line is written through `log_buf`, so holding that lock across
+    // the poll and the drop keeps the task inside its log call until the
+    // future is gone, whatever the scheduler does.
     let mut fut = Box::pin(append_off_thread(target, record));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    assert!(fut.as_mut().poll(&mut cx).is_pending());
-    drop(fut);
+    {
+        let _task_cannot_return = log_buf.lock().unwrap();
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        drop(fut);
+    }
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let logged = loop {

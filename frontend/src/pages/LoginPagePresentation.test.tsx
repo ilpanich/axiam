@@ -217,13 +217,15 @@ describe("login_hint", () => {
     expect(container.textContent ?? "").not.toContain("alert(1)");
     expect(container.textContent ?? "").not.toContain("<script>");
     // …and the *only* place the string occurs in the serialised markup is
-    // inside an attribute value. Blanking every `value="…"` and then looking
-    // for it again is the precise form of "in the DOM only as the input's
-    // value": an HTML serialiser does not escape `<` inside an attribute
-    // (it has no need to — an attribute is not markup), so asserting on
-    // `&lt;` would be asserting on the serialiser rather than on the page.
+    // inside an attribute value. The attribute itself carries the raw string;
+    // how the serialiser spells it is not this test's business — HTML now
+    // escapes `<` and `>` inside attribute values (jsdom 31 follows the spec
+    // change; earlier serialisers emitted them verbatim), so asserting either
+    // spelling would be asserting on the serialiser rather than on the page.
+    // Blanking every `value="…"` and then looking for the string again is the
+    // precise form of "in the DOM only as the input's value".
+    expect(field.getAttribute("value")).toBe(hostile);
     const html = container.innerHTML;
-    expect(html).toContain(`value="${hostile}"`);
     expect(html.replace(/ value="[^"]*"/g, " value=\"\"")).not.toContain(
       "<script>",
     );

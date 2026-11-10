@@ -282,7 +282,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             totp::encrypt_secret(&encryption_key, passkey_json_plain.as_bytes())?;
 
         // credential_id as base64url-no-pad for external correlation.
-        let credential_id_str = URL_SAFE_NO_PAD.encode(passkey.cred_id().as_ref());
+        let credential_id_str = URL_SAFE_NO_PAD.encode(&passkey.cred_id()[..]);
 
         let created = self
             .credential_repo
@@ -444,7 +444,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             return Err(AuthError::WebauthnStateInvalid.into());
         }
 
-        let (claimed_user_id, _cred_id) = self
+        let (claimed_user_id, asserted_cred_id) = self
             .webauthn
             .identify_discoverable_authentication(response)
             .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
@@ -455,23 +455,25 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .list_by_user(tenant_id, claimed_user_id)
             .await?;
 
-        let keys: Vec<DiscoverableKey> = credentials
+        // The assertion names its credential; verify against exactly that one
+        // of the claimed user's passkeys. A credential ID the user does not
+        // own matches nothing and fails like any other bad assertion.
+        let key = credentials
             .iter()
             .filter_map(|c| self.decrypt_passkey(&encryption_key, &c.passkey_json).ok())
-            .map(|p| DiscoverableKey::from(&p))
-            .collect();
+            .find(|p| p.cred_id()[..] == *asserted_cred_id);
 
-        if keys.is_empty() {
+        let Some(key) = key else {
             // Deliberately the generic assertion failure, not
             // `WebauthnNoCredentials`: distinguishing "no such user in this
             // tenant" from "assertion did not verify" would answer a question
             // the caller has not authenticated to ask.
             return Err(AuthError::WebauthnAuthentication("assertion rejected".into()).into());
-        }
+        };
 
         let auth_result = self
             .webauthn
-            .finish_discoverable_authentication(response, auth_state, &keys)
+            .finish_discoverable_authentication_v2(response, auth_state, &key)
             .map_err(|e| AuthError::WebauthnAuthentication(e.to_string()))?;
 
         self.accept_assertion(
@@ -556,7 +558,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         credentials: &[WebauthnCredential],
         auth_result: &AuthenticationResult,
     ) -> AxiamResult<()> {
-        let cred_id_b64 = URL_SAFE_NO_PAD.encode(auth_result.cred_id().as_ref());
+        let cred_id_b64 = URL_SAFE_NO_PAD.encode(&auth_result.cred_id()[..]);
         // The credential the assertion verified against came from this list;
         // one deleted since is no longer an authenticator of this account.
         let credential = credentials
@@ -989,7 +991,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .map_err(|e| AuthError::Crypto(format!("serialize passkey: {e}")))?;
         let passkey_json_enc =
             totp::encrypt_secret(&encryption_key, passkey_json_plain.as_bytes())?;
-        let credential_id_str = URL_SAFE_NO_PAD.encode(passkey.cred_id().as_ref());
+        let credential_id_str = URL_SAFE_NO_PAD.encode(&passkey.cred_id()[..]);
 
         let created = self
             .credential_repo

@@ -11,6 +11,15 @@ updates:
       interval: weekly
       day: monday
     groups:
+      # webauthn-rs re-exports webauthn-rs-proto types, and axiam-auth names
+      # some of them directly (e.g. ResidentKeyRequirement). Bumping one
+      # without the other puts two proto versions in the graph and fails to
+      # compile — #863/#864 did exactly that. Keep the family in one PR,
+      # majors included. Listed first: the first matching group wins.
+      webauthn:
+        patterns:
+          - "webauthn-rs*"
+          - "webauthn-attestation-ca"
       minor-patch:
         update-types:
           - minor

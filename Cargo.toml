@@ -145,11 +145,11 @@ base64 = "0.23"
 # caller: the same ceremony backs both passkey autofill and the explicit
 # "Sign in with a passkey" button, which are one server flow and two client
 # mediation modes.
-webauthn-rs = { version = "0.5", features = [
+webauthn-rs = { version = "0.6", features = [
     "danger-allow-state-serialisation",
     "conditional-ui",
 ] }
-webauthn-rs-proto = "0.5"
+webauthn-rs-proto = "0.6"
 aes-gcm = "0.11"
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 

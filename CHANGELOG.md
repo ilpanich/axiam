@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-11
+
+### Changed
+
+- Bump the minor-patch group with 3 updates
+
+- Bump hash-wasm in /frontend in the minor-patch group
+
+- Assert login_hint attribute, not its serialised spelling
+
+- Bump jsdom from 30.1.3 to 31.0.0 in /frontend
+
+- Bump webauthn-rs from 0.5.5 to 0.6.2
+
+- Bump the minor-patch group with 4 updates
+
+- Bump the base-images group in /docker with 2 updates
+
+- Bump the minor-patch group in /frontend with 11 updates
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump sigstore/cosign-installer from 4.1.2 to 4.1.3
+
+- Bump bufbuild/buf-action from 1.6.0 to 1.7.0
+
+- Bump docker/login-action from 4.7.0 to 4.8.0
+
+- Make two flaky tests deterministic about what they check
+
+- News posts for 1.2.0 to 1.3.0 and a Security pass at 1.3.0
+
 ### Fixed
 
 - Tests: `a_failed_append_is_logged_though_its_awaiter_was_dropped` (`axiam-audit`)
@@ -19,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   noise (ratio 0.64 against 0.67). The measurement now runs up to three times
   and fails only if every attempt leaves the band; an early return (about 0.57)
   still fails every attempt.
+
+- Move webauthn-rs-proto to 0.6 with webauthn-rs and adapt API
 
 ## [1.3.0] - 2026-11-08
 

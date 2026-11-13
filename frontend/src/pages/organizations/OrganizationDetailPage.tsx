@@ -1051,6 +1051,18 @@ function SettingsTab({
   // edits — that was the reported bug.
   const initializedRef = useRef(false);
   const [isDirty, setIsDirty] = useState(false);
+  // Clears the "Saved" notice after a delay. Held in a ref so a repeat save
+  // restarts it and unmount cancels it: a timer firing after unmount would
+  // set state on a component that is gone (and, in tests, on a torn-down DOM).
+  const saveSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+  useEffect(
+    () => () => {
+      if (saveSuccessTimerRef.current) clearTimeout(saveSuccessTimerRef.current);
+    },
+    []
+  );
 
   // Initialize form from loaded settings — once per mount/orgId only.
   useEffect(() => {
@@ -1106,7 +1118,11 @@ function SettingsTab({
       // to clean and the navigate-away guard deactivates").
       if (form) snapshotRef.current = form;
       setIsDirty(false);
-      setTimeout(() => setSaveSuccess(false), 3000);
+      if (saveSuccessTimerRef.current) clearTimeout(saveSuccessTimerRef.current);
+      saveSuccessTimerRef.current = setTimeout(() => {
+        saveSuccessTimerRef.current = null;
+        setSaveSuccess(false);
+      }, 3000);
     },
     onError: (err: unknown) => {
       // Prefer the server's own text: a rejected settings write explains which

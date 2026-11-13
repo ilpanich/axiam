@@ -226,7 +226,11 @@ jobs:
         run: |
           cargo llvm-cov clean --profraw-only || true
           find target/llvm-cov-target -type f \( -name '*.profraw' -o -name '*.profdata' \) -delete || true
-          find target/llvm-cov-target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete || true
+          # `deps` before Cargo 1.100, `build/<pkg>/<hash>/out` since; test
+          # executables end in `-<16 hex>`, build scripts do not.
+          find target/llvm-cov-target/debug/deps target/llvm-cov-target/debug/build \
+            -type f -perm -u+x ! -name '*.*' \
+            -regextype posix-extended -regex '.*-[0-9a-f]{16}' -delete 2>/dev/null || true
           rm -f lcov.info
           df -h
 

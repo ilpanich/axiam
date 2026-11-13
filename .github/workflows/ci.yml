@@ -638,7 +638,7 @@ jobs:
       - run: cargo test --workspace --no-fail-fast
       # The bulk of that 104G is, by construction, the linked test executables —
       # one per integration-test target across the workspace, most of them
-      # carrying the SurrealDB tree. The step prints `target/debug/deps` before
+      # carrying the SurrealDB tree. The step prints `target/debug` before
       # and after, so the log shows the saving. They have all just run, and nothing below reuses them:
       # the steps after this one build their own, differently-featured, test
       # targets. Deleting them frees the room those builds need. Libraries,
@@ -646,11 +646,20 @@ jobs:
       # (an executable that is missing is simply relinked if something does ask
       # for it). Only extension-less executables are touched: `*.rlib`, `*.rmeta`,
       # `*.d` and proc-macro `*.so` all carry a dot. No test step is dropped.
+      #
+      # Cargo 1.100 moved build units from `target/debug/deps` to
+      # `target/debug/build/<pkg>/<hash>/out`, so both are searched. A test
+      # executable is named `<target>-<16 hex>`; build scripts
+      # (`build_script_*`) carry no hash and are kept. No directory found at
+      # all fails the step, so a further layout change is noticed, not skipped.
       - name: Drop test executables that have already run
         run: |
-          du -sh target/debug/deps
-          find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.*' -delete
-          du -sh target/debug/deps
+          dirs=$(ls -d target/debug/deps target/debug/build 2>/dev/null || true)
+          [ -n "$dirs" ] || { echo "::error::no Cargo build directory under target/debug"; exit 1; }
+          du -sh target/debug
+          find $dirs -type f -perm -u+x ! -name '*.*' \
+            -regextype posix-extended -regex '.*-[0-9a-f]{16}' -delete
+          du -sh target/debug
           df -h /
       # The two steps below relink axiam-api-grpc under a different feature set
       # and are where the job ran out of disk. Report free space here so the

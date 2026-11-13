@@ -2921,7 +2921,10 @@ async fn refresh_lease<C: Connection>(
                     "The migration lease expired and was taken over or removed; \
                      continuing without it"
                 );
-                return std::future::pending().await;
+                // Park forever: the caller drops this future when the
+                // migrations finish. `pending::<()>` rather than an
+                // `Infallible` await, which rustc flags as unreachable code.
+                std::future::pending::<()>().await;
             }
             // A transient failure: the next tick tries again, well inside the TTL.
             Err(e) => warn!(error = %e, "Failed to refresh the migration lease"),

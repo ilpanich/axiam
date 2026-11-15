@@ -2078,3 +2078,151 @@ fn urlencoding_decode(s: &str) -> String {
 fn urlencoding_encode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
+
+// ---------------------------------------------------------------------------
+// SA-04 / N6 — a token AXIAM minted for one client is not an authorization
+// ---------------------------------------------------------------------------
+
+/// RFC 7636 S256 challenge for a fixed verifier.
+const N6_VERIFIER: &str = "n6-verifier-n6-verifier-n6-verifier-n6-verifier-0123456789";
+
+fn n6_challenge() -> String {
+    use base64::Engine;
+    use sha2::Digest;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(N6_VERIFIER))
+}
+
+/// A public client Y that opted into the browser hop.
+fn public_browser_client() -> serde_json::Value {
+    serde_json::json!({
+        "name": "N6 Public Client",
+        "redirect_uris": [REDIRECT_URI],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "scopes": ["openid"],
+        "token_endpoint_auth_method": "none",
+        "browser_sso": true,
+    })
+}
+
+/// Run the code flow for the confidential client X (signed in with `jwt`) and
+/// return the access token AXIAM minted for X.
+async fn access_token_minted_for(
+    app: &impl TestApp,
+    jwt: &str,
+    tenant_id: Uuid,
+    client_id: &str,
+    secret: &str,
+) -> String {
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!(
+            "/oauth2/authorize?{}",
+            inline_query(client_id, tenant_id)
+        ))
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let code = query_param(&location(&resp), "code").expect("a code for X");
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/token?tenant_id={tenant_id}"))
+        .insert_header(("Content-Type", "application/x-www-form-urlencoded"))
+        .set_payload(format!(
+            "grant_type=authorization_code&code={code}&redirect_uri={REDIRECT_URI}\
+             &client_id={client_id}&client_secret={secret}"
+        ))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "X's token exchange");
+    let tokens: serde_json::Value = test::read_body_json(resp).await;
+    tokens["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_owned()
+}
+
+fn y_query(y_client_id: &str, tenant_id: Uuid) -> String {
+    format!(
+        "{}&code_challenge={}&code_challenge_method=S256",
+        inline_query(y_client_id, tenant_id),
+        n6_challenge()
+    )
+}
+
+/// **N6.** X's access token, presented as a bearer on `/oauth2/authorize` for
+/// the public client Y, must not buy Y a code. The request is treated as
+/// anonymous: the browser is sent to the login page, not answered `403`.
+#[actix_rt::test]
+async fn n6_a_client_minted_token_does_not_authorize_another_client() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let y_id = create_client(&app, &jwt, public_browser_client()).await;
+
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/authorize?{}", y_query(&y_id, tenant_id)))
+        .insert_header(("Authorization", format!("Bearer {x_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status().as_u16(), 302, "login redirect, not 403");
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with("/login?return_to="),
+        "must fall through to the login page: {loc}"
+    );
+    assert!(!loc.contains("code="), "no code may be issued: {loc}");
+}
+
+/// Same, with the client-minted token carried in the `axiam_access` cookie.
+#[actix_rt::test]
+async fn n6_a_client_minted_token_in_the_access_cookie_does_not_authorize() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let y_id = create_client(&app, &jwt, public_browser_client()).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+
+    let resp = anonymous_authorize(
+        &app,
+        &y_query(&y_id, tenant_id),
+        Some(&format!("axiam_access={x_token}")),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(loc.starts_with("/login?return_to="), "{loc}");
+    assert!(!loc.contains("code="), "{loc}");
+}
+
+/// **N6 control.** A first-party console session token in the `axiam_access`
+/// cookie (no `client_id`) still authorizes, for the same public client.
+#[actix_rt::test]
+async fn n6_control_a_first_party_session_cookie_still_authorizes() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let y_id = create_client(&app, &jwt, public_browser_client()).await;
+
+    let resp = anonymous_authorize(
+        &app,
+        &y_query(&y_id, tenant_id),
+        Some(&format!("axiam_access={jwt}")),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 302);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with(REDIRECT_URI) && loc.contains("code="),
+        "a console session must still be issued a code: {loc}"
+    );
+}

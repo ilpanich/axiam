@@ -443,6 +443,28 @@ each purpose-token verifier.
 
 ### SA-04 — `/oauth2/authorize` refuses client-minted user tokens (N6)
 
+> **EXECUTED (2026-11-15, Sonnet 5.5). N6: reproduced.**
+> `resolve_authorize_principal` gains an arm before Path 1: a principal whose
+> token `minted_for_client()` becomes an `AuthenticationFailed` and flows into
+> the anonymous Path 2 — 302 to `/login?return_to=…` for a `browser_sso`
+> client, the ordinary anonymous 401 otherwise; never 403.
+>
+> - **Regression tests** (`oauth2_login_hop_test`, real tokens: confidential X
+>   via the code flow, public PKCE client Y):
+>   `n6_a_client_minted_token_does_not_authorize_another_client` (bearer)
+>   unfixed `FAILED: must fall through to the login page:
+>   https://rp.example.com/callback?code=…` → ok;
+>   `n6_a_client_minted_token_in_the_access_cookie_does_not_authorize`
+>   (same token in `axiam_access`) FAILED → ok.
+> - **Controls:** `n6_control_a_first_party_session_cookie_still_authorizes`
+>   ok before and after; existing
+>   `a_token_bearing_request_is_unaffected_and_ignores_the_tenant_parameter`
+>   (console bearer token) and the `axiam_op_session` hop tests pass. Ten
+>   oauth2 test files pass (243 tests).
+> - **Not anticipated:** the cookie-borne variant is closed by the same arm.
+>   The refresh-token half of the report's chain was not exercised: code
+>   issuance is the gating step.
+
 - **Model:** Sonnet 5.5. The rule exists (`minted_for_client`,
   `extractors/auth.rs:414`); it has to be applied in one more place.
 - **Files:** `crates/axiam-api-rest/src/handlers/oauth2.rs`

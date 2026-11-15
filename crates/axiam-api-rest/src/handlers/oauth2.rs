@@ -651,6 +651,21 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     use actix_web::ResponseError;
 
     let auth_error = match maybe_user.into_result() {
+        // **SA-04 / N6.** A token AXIAM minted for an OAuth2 client (code,
+        // refresh, CIBA grants carry `client_id` and the authorizing `sid`) is
+        // not the person's own authorization: a relying party holding one of
+        // its user's tokens must not mint a code for another client in the
+        // user's name. The same rule the approval surfaces apply (T-447,
+        // `minted_for_client`). The request is treated as anonymous — not
+        // answered 403 — so a browser that happens to send a stale header
+        // still reaches the login page, and the error handed to Path 2 is the
+        // one an anonymous request would have produced.
+        Ok(user) if user.minted_for_client() => {
+            axiam_core::error::AxiamError::AuthenticationFailed {
+                reason: "authorization requires a user sign-in".into(),
+            }
+            .into()
+        }
         Ok(user) => {
             // Path 1. `tenant_id` on the query is ignored here, deliberately:
             // the tenant a token was minted for is the tenant it acts in, and

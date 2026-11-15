@@ -635,8 +635,6 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         purpose: &str,
         state_json_value: JsonValue,
     ) -> Result<String, AuthError> {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
-
         let encryption_key = self.require_encryption_key()?;
         let state_json = serde_json::to_string(&state_json_value)
             .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
@@ -655,11 +653,21 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
-        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        let header = Header::new(Algorithm::EdDSA);
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        // SA-03 (N10): typed, so no access-token verifier can admit it.
+        crate::token::sign_purpose_token(&claims, crate::token::TYP_WEBAUTHN_STATE, &self.config)
+    }
+
+    /// SA-03 rule 6: a state reader accepts only a state token's `typ`.
+    fn require_state_typ(&self, header: &jsonwebtoken::Header) -> Result<(), AuthError> {
+        if crate::token::purpose_token_typ_accepted(
+            header.typ.as_deref(),
+            crate::token::TYP_WEBAUTHN_STATE,
+            &self.config,
+        ) {
+            Ok(())
+        } else {
+            Err(AuthError::WebauthnStateInvalid)
+        }
     }
 
     fn encode_state_token<T: Serialize>(
@@ -698,6 +706,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
 
         if data.claims.purpose != expected_purpose {
             return Err(AuthError::WebauthnStateInvalid);
@@ -761,6 +770,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
         if data.claims.purpose != expected_purpose || data.claims.jti.is_empty() {
             return Err(AuthError::WebauthnStateInvalid);
         }
@@ -789,6 +799,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
         Ok(data.claims.purpose)
     }
 
@@ -1398,6 +1409,14 @@ mod tests {
             .expect("service builds from a valid config")
     }
 
+    /// The header a state token is minted under (SA-03), for tests that
+    /// hand-build one so it is refused for the reason they assert.
+    fn state_header() -> jsonwebtoken::Header {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.typ = Some(crate::token::TYP_WEBAUTHN_STATE.into());
+        header
+    }
+
     fn ids() -> (Uuid, Uuid, Uuid) {
         (
             Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
@@ -1747,7 +1766,7 @@ mod tests {
 
     #[test]
     fn an_expired_token_is_refused() {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        use jsonwebtoken::EncodingKey;
         let svc = service();
         let (u, t, o) = ids();
 
@@ -1766,7 +1785,7 @@ mod tests {
             exp: past + 300,
         };
         let stale = jsonwebtoken::encode(
-            &Header::new(Algorithm::EdDSA),
+            &state_header(),
             &claims,
             &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
         )
@@ -1786,7 +1805,7 @@ mod tests {
 
     #[test]
     fn a_malformed_uuid_claim_is_refused_rather_than_defaulted() {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        use jsonwebtoken::EncodingKey;
         let svc = service();
 
         for (sub, tenant, org) in [
@@ -1818,7 +1837,7 @@ mod tests {
                 exp: chrono::Utc::now().timestamp() + 300,
             };
             let token = jsonwebtoken::encode(
-                &Header::new(Algorithm::EdDSA),
+                &state_header(),
                 &claims,
                 &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
             )
@@ -2091,6 +2110,79 @@ mod tests {
         let (tenant_id, org_id, _user_id) = ids();
         assert!(
             tokio_test_block_on(svc.start_discoverable_authentication(tenant_id, org_id)).is_ok()
+        );
+    }
+
+    // -- SA-03 rule 6: the state verifier requires its own `typ` -------------
+
+    /// Mint a state token whose claims are exactly what
+    /// [`WebauthnService::encode_state_token_json`] writes, under a header
+    /// whose `typ` the test chooses (`None` removes the member).
+    fn state_token_with_typ(typ: Option<&str>, purpose: &str) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let (u, t, o) = ids();
+        let now = chrono::Utc::now().timestamp();
+        let claims = WebauthnStateClaims {
+            sub: u.to_string(),
+            tenant_id: t.to_string(),
+            org_id: o.to_string(),
+            purpose: purpose.into(),
+            state: totp::encrypt_secret(&KEY, b"{}").unwrap(),
+            jti: Uuid::new_v4().to_string(),
+            iss: "axiam-test".into(),
+            iat: now,
+            exp: now + 300,
+        };
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = typ.map(str::to_owned);
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// A token carrying every state claim but typed as an access token, or
+    /// untyped as every token minted before SA-03 was, is refused by all three
+    /// state readers. Only the state `typ` is accepted.
+    #[test]
+    fn the_state_verifier_requires_the_state_typ() {
+        let svc = service();
+        for typ in [
+            Some("at+jwt"),
+            Some("application/at+jwt"),
+            Some("JWT"),
+            None,
+        ] {
+            let token = state_token_with_typ(typ, "webauthn_authenticate");
+            assert!(
+                matches!(
+                    svc.decode_state_token_json(&token, "webauthn_authenticate"),
+                    Err(AuthError::WebauthnStateInvalid)
+                ),
+                "decode_state_token_json accepted typ {typ:?}"
+            );
+            assert!(
+                svc.state_token_purpose(&token).is_err(),
+                "state_token_purpose accepted typ {typ:?}"
+            );
+            assert!(
+                svc.state_token_replay_key(&token, "webauthn_authenticate")
+                    .is_err(),
+                "state_token_replay_key accepted typ {typ:?}"
+            );
+        }
+
+        let typed = state_token_with_typ(Some("axiam-webauthn-state+jwt"), "webauthn_authenticate");
+        assert!(
+            svc.decode_state_token_json(&typed, "webauthn_authenticate")
+                .is_ok()
+        );
+        assert!(svc.state_token_purpose(&typed).is_ok());
+        assert!(
+            svc.state_token_replay_key(&typed, "webauthn_authenticate")
+                .is_ok()
         );
     }
 

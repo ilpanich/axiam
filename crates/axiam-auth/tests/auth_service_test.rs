@@ -3040,3 +3040,139 @@ async fn x7_2_create_session_and_tokens_stores_the_evidence_given_and_only_a_dig
         "presenting the raw value in place of its digest resolves nothing"
     );
 }
+
+// -----------------------------------------------------------------------
+// SA-03 (N10, N14 server side): purpose tokens and access tokens are typed
+// -----------------------------------------------------------------------
+
+/// Log in as alice under `policy` and return whatever the login produced.
+async fn login_alice_with(
+    svc: &AuthService<
+        SurrealUserRepository<surrealdb::engine::local::Db>,
+        SurrealSessionRepository<surrealdb::engine::local::Db>,
+        SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+        SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+    >,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    policy: Option<MfaPolicy>,
+) -> LoginResult {
+    svc.login(LoginInput {
+        tenant_id,
+        org_id,
+        username_or_email: "alice".into(),
+        password: test_password(),
+        ip_address: None,
+        user_agent: None,
+        mfa_policy: policy,
+        lockout_policy: None,
+    })
+    .await
+    .unwrap()
+}
+
+/// The MFA setup and MFA challenge tokens are signed with the access-token
+/// key. Each carries its own `typ`, neither is admitted by the access-token
+/// decoders, and neither is accepted where the other is expected.
+#[tokio::test]
+async fn sa03_mfa_purpose_tokens_are_typed_and_are_not_access_tokens() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let challenge_token =
+        match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+            LoginResult::MfaRequired(c) => c.challenge_token,
+            other => panic!("expected MfaRequired, got {other:?}"),
+        };
+
+    for (token, typ) in [
+        (&setup_token, "axiam-mfa-setup+jwt"),
+        (&challenge_token, "axiam-mfa-challenge+jwt"),
+    ] {
+        let header = jsonwebtoken::decode_header(token).unwrap();
+        assert_eq!(header.typ.as_deref(), Some(typ));
+        assert!(token::validate_access_token(token, &test_config()).is_err());
+        assert!(token::decode_access_token_any_audience(token, &test_config()).is_err());
+    }
+
+    // Each verifier accepts its own token and refuses the other one.
+    assert!(svc.decode_setup_token(&setup_token).is_ok());
+    assert!(svc.decode_mfa_challenge_ids(&challenge_token).is_ok());
+    assert!(svc.decode_setup_token(&challenge_token).is_err());
+    assert!(svc.decode_mfa_challenge_ids(&setup_token).is_err());
+}
+
+/// Sign `claims` with the test key under a header whose `typ` the test picks.
+fn sign_with_typ(claims: &serde_json::Value, typ: Option<&str>) -> String {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    header.typ = typ.map(str::to_owned);
+    jsonwebtoken::encode(
+        &header,
+        claims,
+        &jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap(),
+    )
+    .unwrap()
+}
+
+/// An access token is refused by both MFA verifiers (SA-03 rule 6), and so is
+/// a token with an MFA token's claims under any `typ` other than the
+/// verifier's own.
+#[tokio::test]
+async fn sa03_an_access_token_is_refused_by_the_mfa_verifiers() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let access = login_alice(&svc, tenant_id, org_id).await.access_token;
+    let header = jsonwebtoken::decode_header(&access).unwrap();
+    assert_eq!(header.typ.as_deref(), Some("at+jwt"));
+    assert!(header.kid.is_some(), "an access token names its key");
+    assert!(svc.decode_mfa_challenge_ids(&access).is_err());
+    assert!(svc.decode_setup_token(&access).is_err());
+
+    let now = Utc::now().timestamp();
+    for (purpose, own_typ) in [
+        ("mfa_challenge", "axiam-mfa-challenge+jwt"),
+        ("mfa_setup", "axiam-mfa-setup+jwt"),
+    ] {
+        let claims = serde_json::json!({
+            "sub": user_id.to_string(),
+            "tenant_id": tenant_id.to_string(),
+            "org_id": org_id.to_string(),
+            "purpose": purpose,
+            "iss": "axiam-test",
+            "iat": now,
+            "exp": now + 300,
+        });
+        let verify = |t: &str| match purpose {
+            "mfa_challenge" => svc.decode_mfa_challenge_ids(t).is_ok(),
+            _ => svc.decode_setup_token(t).is_ok(),
+        };
+        for typ in [Some("at+jwt"), Some("JWT"), None] {
+            assert!(
+                !verify(&sign_with_typ(&claims, typ)),
+                "{purpose} verifier accepted typ {typ:?}"
+            );
+        }
+        assert!(verify(&sign_with_typ(&claims, Some(own_typ))));
+    }
+}

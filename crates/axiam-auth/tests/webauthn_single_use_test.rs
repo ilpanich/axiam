@@ -446,3 +446,87 @@ async fn a_replayed_discoverable_assertion_is_refused() {
             .is_err()
     );
 }
+
+// ---------------------------------------------------------------------------
+// SA-03 (N10): a ceremony state token is not an access token
+// ---------------------------------------------------------------------------
+//
+// Both ceremonies' state tokens are signed with the access-token key and,
+// before SA-03, carried every claim `AccessTokenClaims` requires (`sub`,
+// `tenant_id`, `org_id`, `iss`, `iat`, `exp`, `jti`) and no `aud` — so
+// `validate_access_token` admitted them, and every verifier with no session
+// check (the gRPC interceptor and `ValidateToken`, RFC 8693 `subject_token`,
+// UMA `claim_token`) took the discoverable token's nil `sub` or the
+// second-factor token's real `sub` as an authenticated principal.
+
+/// The `typ` every ceremony state token carries.
+const STATE_TYP: &str = "axiam-webauthn-state+jwt";
+
+fn assert_not_an_access_token(token: &str, ceremony: &str) {
+    let decoded = axiam_auth::token::validate_access_token(token, &config());
+    assert!(
+        decoded.is_err(),
+        "the {ceremony} state token was accepted as an access token: {:?}",
+        decoded.map(|c| (c.0.sub, c.0.tenant_id, c.0.aud))
+    );
+    assert!(
+        axiam_auth::token::decode_access_token_any_audience(token, &config()).is_err(),
+        "introspection must not describe the {ceremony} state token as an access token"
+    );
+    let header = jsonwebtoken::decode_header(token).unwrap();
+    assert_eq!(header.typ.as_deref(), Some(STATE_TYP));
+}
+
+/// N10 variant (b): `start_authentication` (`sub` = the user, obtainable with
+/// the password factor alone).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn n10_a_second_factor_state_token_is_not_an_access_token() {
+    let w = world().await;
+    let (_, token) = start(&w).await;
+    assert_not_an_access_token(&token, "second-factor");
+}
+
+/// N10 variant (a): `start_discoverable_authentication` (public route,
+/// `sub` = the nil UUID).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn n10_a_discoverable_state_token_is_not_an_access_token() {
+    let w = world().await;
+    let (_, token) = w
+        .webauthn
+        .start_discoverable_authentication(w.tenant_id, w.org_id)
+        .await
+        .unwrap();
+    assert_not_an_access_token(&token, "discoverable");
+}
+
+/// The other direction (SA-03 rule 6): an access token is refused where a
+/// ceremony state token is expected, by both finish entry points.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_access_token_is_not_a_ceremony_state_token() {
+    let w = world().await;
+    let (challenge, _) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let access = axiam_auth::token::issue_access_token(
+        w.user_id,
+        w.tenant_id,
+        w.org_id,
+        &[],
+        &config(),
+        Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
+    assert!(
+        w.webauthn
+            .finish_authentication(w.tenant_id, &access, &assertion)
+            .await
+            .is_err()
+    );
+    assert!(
+        w.webauthn
+            .finish_discoverable_authentication(w.tenant_id, &access, &assertion)
+            .await
+            .is_err()
+    );
+    assert_eq!(sessions(&w).await, 0);
+}

@@ -102,7 +102,11 @@ pub fn issue_logout_token(
             .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
         &owned
     };
-    jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, key)
+    // SA-03 — explicitly typed, as Back-Channel Logout 1.0 §2.4 recommends,
+    // so no verifier of another AXIAM token kind can mistake it for its own.
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.typ = Some(axiam_auth::token::TYP_LOGOUT_TOKEN.to_owned());
+    jsonwebtoken::encode(&header, &claims, key)
         .map_err(|e| AuthError::Crypto(format!("logout token encode: {e}")))
 }
 
@@ -246,6 +250,24 @@ mod tests {
         assert_eq!(c.events.len(), 1);
         let member = c.events.get(BACKCHANNEL_LOGOUT_EVENT).expect("events key");
         assert_eq!(member, &Value::Object(Map::new()));
+    }
+
+    /// SA-03: the logout token is explicitly typed (BCL 1.0 §2.4) and no
+    /// access-token verifier admits it.
+    #[test]
+    fn logout_token_is_typed_and_is_not_an_access_token() {
+        let cfg = test_config();
+        let t = issue_logout_token(
+            "https://id.test.example",
+            "rp-1",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &cfg,
+        )
+        .unwrap();
+        let header = jsonwebtoken::decode_header(&t).unwrap();
+        assert_eq!(header.typ.as_deref(), Some("logout+jwt"));
+        assert!(axiam_auth::token::decode_access_token(&t, &cfg).is_err());
     }
 
     #[test]

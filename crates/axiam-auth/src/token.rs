@@ -22,6 +22,121 @@ pub const AUD_USER: &str = "axiam:user";
 /// OAuth2 Client Credentials grant — `sub` is a `client_id` string).
 pub const AUD_M2M: &str = "axiam:m2m";
 
+// ---------------------------------------------------------------------------
+// JOSE `typ` — what kind of token a signature over the deployment key is (SA-03)
+// ---------------------------------------------------------------------------
+//
+// One Ed25519 key signs every JWT AXIAM issues: access tokens, ID tokens, the
+// WebAuthn ceremony state, the MFA challenge and setup tokens, back-channel
+// logout tokens and SSF SETs. Before SA-03 only the SET was explicitly typed,
+// and a WebAuthn state token carried every claim `AccessTokenClaims` requires,
+// so `decode_access_token` admitted it (N10). Each kind now names itself in
+// the header, and every verifier requires its own name.
+
+/// RFC 9068 §2.1 — the `typ` of every AXIAM access token.
+pub const TYP_ACCESS_TOKEN: &str = "at+jwt";
+/// The `typ` of an OIDC ID token: the generic RFC 7519 §5.1 value, which
+/// every OIDC relying party already accepts.
+pub const TYP_ID_TOKEN: &str = "JWT";
+/// The `typ` of a WebAuthn ceremony state token.
+pub const TYP_WEBAUTHN_STATE: &str = "axiam-webauthn-state+jwt";
+/// The `typ` of the MFA challenge token issued after the password factor.
+pub const TYP_MFA_CHALLENGE: &str = "axiam-mfa-challenge+jwt";
+/// The `typ` of the MFA setup token issued when MFA is enforced but absent.
+pub const TYP_MFA_SETUP: &str = "axiam-mfa-setup+jwt";
+/// OIDC Back-Channel Logout 1.0 §2.4 — the `typ` of a logout token.
+pub const TYP_LOGOUT_TOKEN: &str = "logout+jwt";
+
+/// Whether a header `typ` names `expected`: case-insensitive, with the
+/// optional `application/` media-type prefix of RFC 7515 §4.1.9 removed.
+pub fn typ_matches(typ: Option<&str>, expected: &str) -> bool {
+    let Some(typ) = typ.map(str::trim) else {
+        return false;
+    };
+    let bare = typ
+        .get(..12)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("application/"))
+        .map_or(typ, |_| &typ[12..]);
+    bare.eq_ignore_ascii_case(expected)
+}
+
+/// Whether a header `typ` is what every JWT AXIAM signed before SA-03
+/// carried: absent, or the generic `JWT` that `jsonwebtoken::Header::new`
+/// writes. Such a token names no kind, so only its claims can tell.
+fn is_untyped(typ: Option<&str>) -> bool {
+    typ.is_none() || typ_matches(typ, "JWT")
+}
+
+/// Whether a purpose-token verifier accepts a header `typ` (SA-03 rule 6).
+///
+/// Its own `typ` always. An untyped token only while
+/// [`AuthConfig::require_access_token_typ`] is `false`, the one rolling
+/// upgrade during which tokens minted by the previous release are still in
+/// flight; the verifier's own `purpose` check then decides, as it did before.
+pub fn purpose_token_typ_accepted(typ: Option<&str>, expected: &str, config: &AuthConfig) -> bool {
+    typ_matches(typ, expected) || (!config.require_access_token_typ && is_untyped(typ))
+}
+
+/// The access-token type gate shared by both decoders (SA-03).
+///
+/// 1. `typ` is `at+jwt` (case-insensitive, `application/` allowed): pass.
+/// 2. `typ` is absent or the generic `JWT`: a token minted before SA-03.
+///    Refused while [`AuthConfig::require_access_token_typ`] is `true`, the
+///    default (D-7); admitted, with a warning, when an operator has relaxed it
+///    for one rolling upgrade.
+/// 3. Any other `typ`: another kind of token. Refused.
+///
+/// Then, whatever the `typ`: a token whose claims carry `purpose` is a
+/// purpose token and is refused. This is what protects a relaxed deployment,
+/// where a WebAuthn state or MFA token minted by the previous release is as
+/// untyped as an access token.
+fn check_access_token_type(
+    header: &Header,
+    token: &str,
+    config: &AuthConfig,
+) -> Result<(), AuthError> {
+    let typ = header.typ.as_deref();
+    if !typ_matches(typ, TYP_ACCESS_TOKEN) {
+        if !is_untyped(typ) {
+            return Err(AuthError::TokenInvalid("not an access token (typ)".into()));
+        }
+        if config.require_access_token_typ {
+            return Err(AuthError::TokenInvalid(
+                "access token has no typ at+jwt".into(),
+            ));
+        }
+        tracing::warn!(
+            "accepted an access token without typ at+jwt: require_access_token_typ is off \
+             (rolling-upgrade window)"
+        );
+    }
+    if claims_carry_purpose(token) {
+        return Err(AuthError::TokenInvalid(
+            "a purpose token is not an access token".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the (already signature-verified) payload of `token` has a
+/// `purpose` member. `AccessTokenClaims` ignores unknown members, so this is
+/// read from the payload itself. An unreadable payload counts as carrying one:
+/// it cannot have verified, and failing closed costs nothing.
+fn claims_carry_purpose(token: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Probe {
+        #[serde(default)]
+        purpose: Option<serde::de::IgnoredAny>,
+    }
+    let Some(payload) = token.split('.').nth(1) else {
+        return true;
+    };
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(payload) else {
+        return true;
+    };
+    serde_json::from_slice::<Probe>(&bytes).map_or(true, |p| p.purpose.is_some())
+}
+
 /// Self-describing subject kind carried by an access token (FUNC-04).
 ///
 /// Informational only (D-10) — no validator or authz path branches on this
@@ -467,7 +582,11 @@ pub const MAX_ACT_CHAIN_DEPTH: usize = 3;
 /// None. `config.jwt_encoding_key` is the same pre-parsed key cache (CQ-B14)
 /// the inline copies read; the PEM fallback is unchanged and still only taken
 /// when the cache is absent.
-fn sign_claims<T: Serialize>(claims: &T, config: &AuthConfig) -> Result<String, AuthError> {
+fn sign_claims<T: Serialize>(
+    claims: &T,
+    typ: &str,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
     // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
     let owned;
     let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
@@ -479,6 +598,8 @@ fn sign_claims<T: Serialize>(claims: &T, config: &AuthConfig) -> Result<String, 
     };
 
     let mut header = Header::new(Algorithm::EdDSA);
+    // SA-03 — every token names its kind; see `TYP_ACCESS_TOKEN`.
+    header.typ = Some(typ.to_owned());
     // X7 §1.3 — name the verifying key in the header.
     //
     // The JWKS at `/oauth2/jwks` has always published a `kid`; the tokens
@@ -495,6 +616,25 @@ fn sign_claims<T: Serialize>(claims: &T, config: &AuthConfig) -> Result<String, 
     header.kid = ed25519_jwk_kid(&config.jwt_public_key_pem);
     jsonwebtoken::encode(&header, claims, key)
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// Sign a purpose token (WebAuthn state, MFA challenge, MFA setup) with the
+/// deployment key, under its own `typ` (SA-03).
+///
+/// The same signer as the access and ID tokens, so a purpose token also names
+/// its verifying key. `typ` must not be [`TYP_ACCESS_TOKEN`]: the whole point
+/// of the header is that the two can never be mistaken for each other.
+pub fn sign_purpose_token<T: Serialize>(
+    claims: &T,
+    typ: &str,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    if typ_matches(Some(typ), TYP_ACCESS_TOKEN) || is_untyped(Some(typ)) {
+        return Err(AuthError::Crypto(format!(
+            "a purpose token cannot be typed {typ}"
+        )));
+    }
+    sign_claims(claims, typ, config)
 }
 
 /// The `kid` of an Ed25519 public key: the first 16 hex characters (64 bits)
@@ -893,7 +1033,7 @@ impl AccessTokenSpec {
     /// Mint and sign the token.
     pub fn issue(&self, config: &AuthConfig) -> Result<String, AuthError> {
         let claims = self.claims_at(config, Utc::now().timestamp())?;
-        sign_claims(&claims, config)
+        sign_claims(&claims, TYP_ACCESS_TOKEN, config)
     }
 }
 
@@ -1631,7 +1771,7 @@ pub fn issue_id_token(
         amr: evidence.amr.clone(),
     };
 
-    sign_claims(&claims, config)
+    sign_claims(&claims, TYP_ID_TOKEN, config)
 }
 
 /// Decode and verify an EdDSA JWT access token.
@@ -1686,6 +1826,15 @@ fn enforce_issuer(
     Ok(claims)
 }
 
+/// Decode and verify an AXIAM access token: signature, issuer, expiry, `aud`
+/// (when present, `axiam:user` or `axiam:m2m`) and token type.
+///
+/// Token type (SA-03, N10): the header `typ` must be `at+jwt` (an untyped
+/// token is admitted only while [`AuthConfig::require_access_token_typ`] is
+/// off), and a token whose claims carry `purpose` is refused whatever its
+/// `typ` — see `check_access_token_type`. Without this a WebAuthn ceremony
+/// state token, signed with the same key and carrying every required claim,
+/// decoded as an access token.
 pub fn decode_access_token(
     token: &str,
     config: &AuthConfig,
@@ -1718,13 +1867,16 @@ pub fn decode_access_token(
     validation.set_audience(&[AUD_USER, AUD_M2M]);
     validation.leeway = 60;
 
-    jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)
-        .map(|data| data.claims)
-        .map_err(|e| match e.kind() {
+    let data =
+        jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation).map_err(|e| match e
+            .kind()
+        {
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
             _ => AuthError::TokenInvalid(e.to_string()),
-        })
-        .and_then(|claims| enforce_issuer(claims, config))
+        })?;
+    // SA-03 (N10) — only an access token is an access token.
+    check_access_token_type(&data.header, token, config)?;
+    enforce_issuer(data.claims, config)
 }
 
 /// Decode and verify an access token **without pinning its audience** (T21.3).
@@ -1784,13 +1936,16 @@ pub fn decode_access_token_any_audience(
     validation.validate_aud = false;
     validation.leeway = 60;
 
-    jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)
-        .map(|data| data.claims)
-        .map_err(|e| match e.kind() {
+    let data =
+        jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation).map_err(|e| match e
+            .kind()
+        {
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
             _ => AuthError::TokenInvalid(e.to_string()),
-        })
-        .and_then(|claims| enforce_issuer(claims, config))
+        })?;
+    // SA-03 (N10) — only an access token is an access token.
+    check_access_token_type(&data.header, token, config)?;
+    enforce_issuer(data.claims, config)
 }
 
 /// Validated JWT claims — a newtype proving the token was verified.
@@ -2130,6 +2285,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
             session_validation_cache_ttl_secs: 0,
+            require_access_token_typ: true,
         }
     }
 
@@ -3927,5 +4083,172 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         // The audience-agnostic sibling introspection uses still reads it, and
         // still pins the issuer set.
         assert!(decode_access_token_any_audience(&foreign_audience, &on).is_ok());
+    }
+
+    // -- SA-03 (N10): typed access tokens ---------------------------------
+
+    /// Sign `claims` with the test key under a header whose `typ` the test
+    /// picks (`None` removes the member).
+    fn sign_with_typ(claims: &serde_json::Value, typ: Option<&str>) -> String {
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = typ.map(str::to_owned);
+        header.kid = ed25519_jwk_kid(&test_config().jwt_public_key_pem);
+        jsonwebtoken::encode(
+            &header,
+            claims,
+            &EncodingKey::from_ed_pem(test_config().jwt_private_key_pem.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Every claim `AccessTokenClaims` requires, plus `aud`.
+    fn access_shaped_claims() -> serde_json::Value {
+        let now = Utc::now().timestamp();
+        serde_json::json!({
+            "sub": Uuid::new_v4().to_string(),
+            "tenant_id": Uuid::new_v4().to_string(),
+            "org_id": Uuid::new_v4().to_string(),
+            "iss": "axiam-test",
+            "iat": now,
+            "exp": now + 900,
+            "jti": Uuid::new_v4().to_string(),
+            "aud": AUD_USER,
+        })
+    }
+
+    fn relaxed() -> AuthConfig {
+        AuthConfig {
+            require_access_token_typ: false,
+            ..test_config()
+        }
+    }
+
+    fn both_decoders_accept(token: &str, config: &AuthConfig) -> bool {
+        let strict = decode_access_token(token, config).is_ok();
+        let any = decode_access_token_any_audience(token, config).is_ok();
+        assert_eq!(strict, any, "the two decoders must agree on the type gate");
+        strict
+    }
+
+    /// Every kind of access token AXIAM mints carries `typ: at+jwt` and a
+    /// `kid`, and decodes. The ID token keeps the generic `JWT`.
+    #[test]
+    fn every_access_token_is_typed_at_jwt_and_names_its_key() {
+        let config = test_config();
+        let (t, o) = (Uuid::new_v4(), Uuid::new_v4());
+        let tokens = [
+            AccessTokenSpec::user(Uuid::new_v4(), t, o, "s")
+                .issue(&config)
+                .unwrap(),
+            AccessTokenSpec::oauth2_client("client", t, o)
+                .issue(&config)
+                .unwrap(),
+            AccessTokenSpec::service_account(Uuid::new_v4(), t, o, "s")
+                .issue(&config)
+                .unwrap(),
+            issue_client_credentials_token("client", t, o, &[], &config).unwrap(),
+        ];
+        for token in &tokens {
+            let header = jsonwebtoken::decode_header(token).unwrap();
+            assert_eq!(header.typ.as_deref(), Some(TYP_ACCESS_TOKEN));
+            assert!(header.kid.is_some());
+            assert!(both_decoders_accept(token, &config));
+        }
+
+        let id = issue_id_token(
+            Uuid::new_v4(),
+            "rp",
+            None,
+            None,
+            &[],
+            &config,
+            None,
+            &IdTokenEvidence::NONE,
+        )
+        .unwrap();
+        let header = jsonwebtoken::decode_header(&id).unwrap();
+        assert_eq!(header.typ.as_deref(), Some(TYP_ID_TOKEN));
+        assert!(header.kid.is_some());
+    }
+
+    /// `at+jwt` is compared case-insensitively, with or without the
+    /// `application/` prefix.
+    #[test]
+    fn the_access_token_typ_is_compared_as_a_media_type() {
+        let config = test_config();
+        for typ in [
+            "at+jwt",
+            "AT+JWT",
+            "application/at+jwt",
+            "Application/At+Jwt",
+        ] {
+            let token = sign_with_typ(&access_shaped_claims(), Some(typ));
+            assert!(both_decoders_accept(&token, &config), "typ {typ} refused");
+        }
+    }
+
+    /// Strict by default (D-7): a token with no `typ`, or the generic `JWT`
+    /// every earlier release wrote, is refused. Relaxed, it is accepted.
+    #[test]
+    fn an_untyped_access_token_is_refused_unless_the_operator_relaxes_it() {
+        assert!(AuthConfig::default().require_access_token_typ);
+        for typ in [None, Some("JWT")] {
+            let token = sign_with_typ(&access_shaped_claims(), typ);
+            assert!(!both_decoders_accept(&token, &test_config()), "{typ:?}");
+            assert!(both_decoders_accept(&token, &relaxed()), "{typ:?}");
+        }
+    }
+
+    /// Any other `typ` names another kind of token: refused in both modes.
+    #[test]
+    fn a_token_of_another_type_is_refused_in_both_modes() {
+        for typ in [
+            TYP_WEBAUTHN_STATE,
+            TYP_MFA_CHALLENGE,
+            TYP_MFA_SETUP,
+            TYP_LOGOUT_TOKEN,
+            "secevent+jwt",
+            "dpop+jwt",
+        ] {
+            let token = sign_with_typ(&access_shaped_claims(), Some(typ));
+            assert!(!both_decoders_accept(&token, &test_config()), "{typ}");
+            assert!(!both_decoders_accept(&token, &relaxed()), "{typ}");
+        }
+    }
+
+    /// Rule (b): a `purpose` claim is refused whatever the `typ` and mode.
+    /// This is what protects a relaxed deployment from the previous
+    /// release's untyped WebAuthn state and MFA tokens.
+    #[test]
+    fn a_purpose_claim_is_refused_whatever_the_typ() {
+        let mut claims = access_shaped_claims();
+        claims["purpose"] = "webauthn_authenticate_discoverable".into();
+        claims.as_object_mut().unwrap().remove("aud");
+        for typ in [Some("at+jwt"), Some("JWT"), None] {
+            let token = sign_with_typ(&claims, typ);
+            assert!(!both_decoders_accept(&token, &test_config()), "{typ:?}");
+            assert!(!both_decoders_accept(&token, &relaxed()), "{typ:?}");
+        }
+    }
+
+    #[test]
+    fn typ_matching_is_exact_after_normalisation() {
+        assert!(typ_matches(Some(" at+jwt "), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(Some("at+jwt2"), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(Some("application/"), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(Some("xapplication/at+jwt"), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(None, TYP_ACCESS_TOKEN));
+        // A multi-byte prefix must not panic on the slice.
+        assert!(!typ_matches(Some("ééééééé/at+jwt"), TYP_ACCESS_TOKEN));
+    }
+
+    /// A purpose token can never be signed as an access token or untyped.
+    #[test]
+    fn sign_purpose_token_refuses_an_access_or_untyped_typ() {
+        let claims = serde_json::json!({"sub": "x"});
+        for typ in [TYP_ACCESS_TOKEN, "application/at+jwt", "JWT"] {
+            assert!(sign_purpose_token(&claims, typ, &test_config()).is_err());
+        }
+        assert!(sign_purpose_token(&claims, TYP_MFA_SETUP, &test_config()).is_ok());
     }
 }

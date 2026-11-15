@@ -1269,3 +1269,96 @@ async fn validate_credentials_locked_user_is_invalid() {
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(!resp.valid);
 }
+
+// ---------------------------------------------------------------------------
+// SA-03 (N10): a WebAuthn ceremony state token is not an access token on gRPC
+// ---------------------------------------------------------------------------
+
+/// A credential store the discoverable ceremony start never reads.
+#[derive(Clone)]
+struct NoWebauthnStore;
+
+#[rustfmt::skip]
+impl axiam_core::repository::WebauthnCredentialRepository for NoWebauthnStore {
+    async fn create(&self, _i: axiam_core::models::webauthn_credential::CreateWebauthnCredential) -> AxiamResult<axiam_core::models::webauthn_credential::WebauthnCredential> { unreachable!() }
+    async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<axiam_core::models::webauthn_credential::WebauthnCredential> { unreachable!() }
+    async fn list_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<axiam_core::models::webauthn_credential::WebauthnCredential>> { unreachable!() }
+    async fn update_last_used(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!() }
+    async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!() }
+    async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!() }
+    async fn delete_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!() }
+}
+
+/// The configuration under which N10 reproduced: the access-token key signs
+/// the state token, `jwt_issuer` is the root issuer (no `OAUTH2_ISSUER_URL`),
+/// and the pre-SA-03 default of admitting an absent `aud` is set explicitly,
+/// so what refuses the token below is its type and not that flag.
+fn n10_config() -> AuthConfig {
+    AuthConfig {
+        mfa_encryption_key: Some([9u8; 32]),
+        allow_missing_aud_as_user: true,
+        ..auth_config()
+    }
+}
+
+/// What the public `POST /api/v1/auth/webauthn/authenticate/discoverable/start`
+/// hands an anonymous caller who names a tenant.
+async fn discoverable_state_token(tenant_id: Uuid) -> String {
+    let webauthn = axiam_auth::webauthn::WebauthnService::new(NoWebauthnStore, n10_config())
+        .expect("service builds");
+    webauthn
+        .start_discoverable_authentication(tenant_id, Uuid::new_v4())
+        .await
+        .expect("the ceremony starts")
+        .1
+}
+
+#[tokio::test]
+async fn n10_the_interceptor_refuses_a_webauthn_state_token() {
+    let token = discoverable_state_token(Uuid::new_v4()).await;
+    let mut interceptor = AuthInterceptor::new(n10_config());
+    let mut req = Request::new(());
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let err = interceptor
+        .call(req)
+        .map(|r| {
+            r.extensions()
+                .get::<ValidatedClaims>()
+                .map(|c| c.0.sub.clone())
+        })
+        .expect_err("a ceremony state token must not authenticate a gRPC caller");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+
+    // Positive control: an ordinary access token still passes.
+    let mut req = Request::new(());
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", token_for(Uuid::new_v4()))
+            .parse()
+            .unwrap(),
+    );
+    assert!(interceptor.call(req).is_ok());
+}
+
+#[tokio::test]
+async fn n10_validate_token_reports_a_webauthn_state_token_invalid() {
+    let tenant = Uuid::new_v4();
+    let token = discoverable_state_token(tenant).await;
+    let svc = TokenServiceImpl::new(
+        n10_config(),
+        MockUserRepo {
+            user: Some(active_user(Uuid::new_v4(), String::new())),
+        },
+    );
+    let mut req = Request::new(ValidateTokenRequest {
+        access_token: token,
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let resp = svc.validate_token(req).await.unwrap().into_inner();
+    assert!(
+        !resp.valid,
+        "ValidateToken called a ceremony state token valid (subject {:?})",
+        resp.subject_id
+    );
+}

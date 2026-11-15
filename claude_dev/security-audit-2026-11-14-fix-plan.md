@@ -354,6 +354,57 @@ Instructions:
 
 ### SA-03 — Typed access tokens (N10, server side of N14)
 
+> **EXECUTED (2026-11-15, Opus 5.5). N10: reproduced** (discoverable and
+> second-factor WebAuthn state tokens accepted by `validate_access_token`, the
+> gRPC `AuthInterceptor` and `ValidateToken`). Every access token is signed
+> with `typ: at+jwt` and a `kid` through the single `sign_claims` path; purpose
+> tokens go through a new `sign_purpose_token`, which refuses `at+jwt` and
+> `JWT`. `decode_access_token` **and** `decode_access_token_any_audience`
+> (introspection) apply `check_access_token_type` (typ rule + `purpose` rule).
+> `require_access_token_typ` (`AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP`) defaults
+> to `true`; `allow_missing_aud_as_user` now defaults to `false`. Documented in
+> `docs/deployment/README.md` ("Access-token type … and upgrading"), with a
+> startup warning when the flag is off.
+>
+> | Token | `typ` | `kid` |
+> |---|---|---|
+> | Access (user, client credentials, service account, RPT, exchange) | `at+jwt` | yes |
+> | OIDC ID token | `JWT` | yes |
+> | WebAuthn state | `axiam-webauthn-state+jwt` | yes (new) |
+> | MFA challenge / MFA setup | `axiam-mfa-challenge+jwt` / `axiam-mfa-setup+jwt` | yes (new) |
+> | Back-channel logout | `logout+jwt` (new) | no |
+> | SSF SET | `secevent+jwt` (unchanged) | yes |
+>
+> - **Regression tests (unfixed → fixed):**
+>   `webauthn_single_use_test::n10_a_discoverable_state_token_is_not_an_access_token`,
+>   `…n10_a_second_factor_state_token_is_not_an_access_token` (FAILED: "state
+>   token was accepted as an access token: Ok(…)") → ok;
+>   `grpc_units::n10_the_interceptor_refuses_a_webauthn_state_token`,
+>   `…n10_validate_token_reports_a_webauthn_state_token_invalid` (FAILED,
+>   subject nil UUID) → ok; `webauthn::tests::the_state_verifier_requires_the_state_typ`
+>   (rule 6; FAILED: accepted `at+jwt`) → ok;
+>   `auth_service_test::sa03_mfa_purpose_tokens_are_typed_and_are_not_access_tokens`,
+>   `…sa03_an_access_token_is_refused_by_the_mfa_verifiers` (FAILED on `typ`) → ok.
+>   Positive controls pass: REST, gRPC, `token_exchange_test`, `uma_test`
+>   (`claim_token`). The gRPC N10 tests set `allow_missing_aud_as_user: true`
+>   so that the type, not the new aud default, is what refuses.
+> - **MFA challenge/setup → access token: not reproduced as an acceptance**
+>   (no `jti`, so deserialisation already failed); typed anyway per step 2, tests kept as pins.
+> - **Rewritten:** `config_tests::default_has_sane_values` (now asserts
+>   `allow_missing_aud_as_user == false`, `require_access_token_typ == true`).
+> - **Not anticipated:** (1) Every pre-SA-03 token carried `typ: "JWT"`
+>   (`jsonwebtoken::Header::new`), not an absent `typ`. Absent and `JWT` are
+>   both treated as "untyped": refused in strict mode, accepted in relaxed
+>   mode only without `purpose`; any other `typ` is refused in both modes.
+>   (2) Purpose verifiers follow the same flag, so in-flight ceremonies survive
+>   a relaxed rolling upgrade. (3) Introspection reports purpose tokens
+>   inactive. (4) Logout tokens gain `typ: logout+jwt` (OIDC Back-Channel
+>   Logout §2.4). (5) Out of scope, unchanged: `logout::decode_id_token_hint`
+>   and `ciba::verify_id_token_hint` check no `typ` (CIBA refuses access
+>   tokens by `aud`). (6) Upgrade effect for SA-50: under the strict default
+>   every session re-authenticates or refreshes within one access-token
+>   lifetime (15 min).
+
 - **Model:** Opus 5.5. Token validation is shared by REST, gRPC, token exchange
   and UMA; a mistake either locks out valid tokens or leaves the hole open.
 - **Files:** `crates/axiam-auth/src/token.rs` (`decode_access_token`, 1714–1718,

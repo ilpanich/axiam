@@ -452,14 +452,22 @@ async fn main() -> std::io::Result<()> {
         .expect("client-secret pepper must resolve (OBS-1) — see AXIAM__AUTH__PEPPER");
     tracing::info!("Client-secret hasher installed (OBS-1)");
 
-    // Load allow_missing_aud_as_user override (bool, default true).
-    // The serde default already sets it to true; this allows an operator to
-    // explicitly disable the back-compat window via env var.
+    // Load allow_missing_aud_as_user override (bool, default false since
+    // SA-03). The serde default already sets it to false; this keeps the
+    // explicit env-var spelling an operator may already use.
     if let Ok(val) = std::env::var("AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER") {
         match val.to_lowercase().as_str() {
             "false" | "0" | "no" => config.auth.allow_missing_aud_as_user = false,
             _ => config.auth.allow_missing_aud_as_user = true,
         }
+    }
+    // SA-03 (N10, D-7): say so at startup when the access-token `typ` check is
+    // relaxed, so a rolling-upgrade setting is not left on by accident.
+    if !config.auth.require_access_token_typ {
+        tracing::warn!(
+            "AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false: access tokens without typ at+jwt \
+             are accepted (rolling-upgrade window only; set it back to true afterwards)"
+        );
     }
 
     // Connect to SurrealDB. `DbPool` holds N independent, individually-renewable

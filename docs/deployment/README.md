@@ -696,6 +696,51 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
 
+## Access-token type (`typ: at+jwt`) and upgrading
+
+Every access token AXIAM mints carries the JOSE header `typ: at+jwt`
+(RFC 9068 §2.1) and a `kid`. The other JWTs signed with the same key each name
+their own kind, and every verifier requires its own:
+
+| Token | `typ` |
+|---|---|
+| Access token (every grant, RPT, token exchange) | `at+jwt` |
+| OIDC ID token | `JWT` |
+| WebAuthn ceremony state | `axiam-webauthn-state+jwt` |
+| MFA challenge (after the password factor) | `axiam-mfa-challenge+jwt` |
+| MFA setup (MFA enforced, none enrolled) | `axiam-mfa-setup+jwt` |
+| Back-channel logout token | `logout+jwt` |
+| SSF Security Event Token | `secevent+jwt` |
+
+An access-token verifier (REST, gRPC interceptor and `ValidateToken`,
+introspection, RFC 8693 `subject_token`, UMA `claim_token`) also refuses any
+token whose claims carry `purpose`, whatever its `typ`.
+
+| Variable | Purpose |
+|---|---|
+| `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` | Default **`true`**: an access token without `typ: at+jwt` is refused. |
+| `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` | Default **`false`**: an access token without `aud` is refused on user routes and on gRPC. |
+
+**What the default costs on upgrade.** Releases before this change minted
+access tokens with the generic `typ: JWT`. With
+`AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=true` those tokens are refused as soon
+as a replica runs the new release, so every signed-in user has to sign in
+again, or refresh, within one access-token lifetime
+(`AXIAM__AUTH__ACCESS_TOKEN_LIFETIME_SECS`, 15 minutes by default). Refresh
+tokens are opaque and unaffected: a client that refreshes on a 401 gets a typed
+token and carries on. An MFA or WebAuthn ceremony in flight at the moment of
+the upgrade (at most `mfa_challenge_lifetime_secs`, 5 minutes) has to be
+started again.
+
+**Relaxing it for one rolling upgrade.** While old and new replicas serve
+together, set `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` on the new
+replicas. An untyped token is then accepted only if its claims carry no
+`purpose`, each acceptance is logged at `warn`, and the server logs a `warn`
+at startup. The MFA and WebAuthn verifiers likewise accept the previous
+release's untyped tokens of their own kind. Set it back to `true` (or unset
+it) once every replica runs the new release and one access-token lifetime has
+passed. A token of any other `typ` is refused in both modes.
+
 ## Recovering the bootstrap setup token
 
 On a deployment that has **not** been bootstrapped yet, an operator who lost

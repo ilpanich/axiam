@@ -12,7 +12,10 @@ fn default_has_sane_values() {
     assert_eq!(c.access_token_lifetime_secs, 900);
     assert_eq!(c.refresh_token_lifetime_secs, 2_592_000);
     assert_eq!(c.min_password_length, 12);
-    assert!(c.allow_missing_aud_as_user);
+    // SA-03 (N10): an `aud`-less token is not admitted by default, and an
+    // access token must carry `typ: at+jwt` from the first release (D-7).
+    assert!(!c.allow_missing_aud_as_user);
+    assert!(c.require_access_token_typ);
     assert!(c.cookie_secure);
     assert_eq!(c.max_failed_login_attempts, 5);
     assert_eq!(c.hibp_breaker_threshold, 5);

@@ -1892,8 +1892,6 @@ impl<
         tenant_id: Uuid,
         org_id: Uuid,
     ) -> Result<String, AuthError> {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
-
         let now = Utc::now().timestamp();
         let claims = MfaChallengeClaims {
             sub: user_id.to_string(),
@@ -1905,11 +1903,8 @@ impl<
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
-        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        let header = Header::new(Algorithm::EdDSA);
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        // SA-03: typed, so no access-token verifier can admit it.
+        token::sign_purpose_token(&claims, token::TYP_MFA_CHALLENGE, &self.config)
     }
 
     fn decode_mfa_challenge(&self, token: &str) -> Result<MfaChallengeClaims, AuthError> {
@@ -1930,7 +1925,13 @@ impl<
                 }
             })?;
 
-        if data.claims.purpose != "mfa_challenge" {
+        // SA-03 rule 6: an access token (or any other kind) is not a challenge.
+        if !token::purpose_token_typ_accepted(
+            data.header.typ.as_deref(),
+            token::TYP_MFA_CHALLENGE,
+            &self.config,
+        ) || data.claims.purpose != "mfa_challenge"
+        {
             return Err(AuthError::TokenInvalid("not an MFA challenge token".into()));
         }
 
@@ -1944,8 +1945,6 @@ impl<
         tenant_id: Uuid,
         org_id: Uuid,
     ) -> Result<String, AuthError> {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
-
         let now = Utc::now().timestamp();
         let claims = MfaChallengeClaims {
             sub: user_id.to_string(),
@@ -1957,11 +1956,8 @@ impl<
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
-        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        let header = Header::new(Algorithm::EdDSA);
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        // SA-03: typed, so no access-token verifier can admit it.
+        token::sign_purpose_token(&claims, token::TYP_MFA_SETUP, &self.config)
     }
 
     /// Decode and validate an MFA setup token, returning (user_id,
@@ -1986,7 +1982,13 @@ impl<
                 }
             })?;
 
-        if data.claims.purpose != "mfa_setup" {
+        // SA-03 rule 6: an access token (or any other kind) is not a setup token.
+        if !token::purpose_token_typ_accepted(
+            data.header.typ.as_deref(),
+            token::TYP_MFA_SETUP,
+            &self.config,
+        ) || data.claims.purpose != "mfa_setup"
+        {
             return Err(AuthError::MfaSetupTokenInvalid);
         }
 

@@ -1742,6 +1742,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
             session_validation_cache_ttl_secs: 0,
+            require_access_token_typ: true,
         }
     }
 
@@ -1797,7 +1798,10 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             ext: None,
         };
         let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
-        let header = Header::new(Algorithm::EdDSA);
+        // Typed as an access token (SA-03), so what these tests exercise is
+        // the absent `aud` and nothing else.
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some(axiam_auth::token::TYP_ACCESS_TOKEN.into());
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 

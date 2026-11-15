@@ -1,6 +1,7 @@
 # Fix plan — security audit of 2026-11-14
 
-> **Status: PLANNED — nothing executed yet.** Source report:
+> **Status: PLANNED — nothing executed yet. Open points closed with the owner
+> on 2026-11-15 (§2).** Source report:
 > [`security-audit-2026-11-14.md`](security-audit-2026-11-14.md). As each task
 > lands, add an `EXECUTED` block at the head of its section (what shipped, which
 > tests went in, what the plan did not anticipate), in the form
@@ -9,7 +10,7 @@
 The audit produced **7 confirmed findings** (C1–C7), **21 leads that need
 validation** (N1–N21) and about 90 hardening notes. This plan turns all 28
 records into development tasks, folds the hardening notes that have a concrete,
-low-risk fix into six further tasks, and lists explicitly what it leaves out and
+low-risk fix into six further tasks, puts a review gate after every wave (§1.6), and lists explicitly what it leaves out and
 why (§7).
 
 Two properties of the report shape the plan:
@@ -52,7 +53,11 @@ delete or `#[ignore]` a test to get green.
 
 - Server work happens in `ilpanich/axiam`; each SDK task in its own
   `ilpanich/axiam-<lang>-sdk` repository.
-- Work on the branch the executing session designates. One PR per repository.
+- Work on the branch the executing session designates. Waves **stack on the
+  same branch**: the next wave starts as soon as the previous wave's review gate
+  (§1.6) is green, without waiting for a merge.
+- One pull request per repository, opened when its first wave passes the gate
+  and updated by every later wave. The owner merges when they choose.
 - One **signed** commit per task, message `fix(security): <summary> (SA-NN, <finding>)`.
 - Never commit to `main` directly.
 
@@ -76,21 +81,52 @@ If a task changes a REST request or response type, regenerate
 - No unrelated refactoring.
 - `EXECUTED` block written into this document.
 
+### 1.6 Review gate after every wave
+
+No wave starts until the previous one has passed this gate.
+
+1. When the last task of a wave is committed, run **two independent reviews**
+   of the wave's complete diff, each by an **Opus 5.5** reviewer that wrote none
+   of the code under review:
+   - a **code-quality review**: correctness, error handling, test quality (does
+     each regression test really fail without its fix?), clarity, duplication,
+     adherence to the crate layering and to this plan's scope;
+   - a **security review**: does each fix close its finding on every path, does
+     it open a new one, are the fail-closed and upgrade-window behaviours right,
+     did any secret, token or personal datum reach a log or an error message.
+   The reviewers receive the diff, the task sections and the report sections —
+   not the implementers' own summaries.
+2. Wave 3 spans eleven repositories: review each repository's diff, and review
+   the login-glue port (C6, C7) across the six SDKs for consistency with SA-20.
+3. **Every finding must be resolved**, whatever its severity: either fixed, or
+   rejected with a written justification. Nothing is carried to a later wave.
+4. Fixes go to an agent on the model the original task used, one signed commit
+   per review round: `fix(review): <summary> (wave N, round M)`.
+5. After fixes, the same two reviews re-run on the changed code. The gate is
+   green when both return no open finding.
+6. Record the gate in this document under the wave's heading: the findings of
+   each review, how each was resolved, and the number of rounds.
+
 ---
 
 ## 2. Decisions taken by this plan
 
-Six findings have more than one defensible fix. The plan picks one so that work
-is not blocked; the owner may overrule any of them before the task starts.
+These points had more than one defensible answer. The owner settled them on
+2026-11-15; they are not to be reopened during execution.
 
 | # | Finding | Decision | Alternative rejected |
 |---|---|---|---|
-| D-1 | N15 `require_role` reads OAuth scopes | SDKs stop mapping `scope` to roles. `require_role` reads only a `roles` claim and **fails closed** when it is absent. A separate `require_scope` helper is added. The server emits no `roles` claim yet. | Emitting `roles` in access tokens now: larger tokens, stale roles for 15 minutes, and a server feature that deserves its own design. |
+| D-1 | N15 `require_role` reads OAuth scopes | SDKs stop mapping `scope` to roles. `require_role` reads only a `roles` claim and **fails closed** when it is absent. A separate `require_scope` helper is added. The server gains a `roles` claim (SA-18): the names of the subject's **global** roles in the tenant, emitted only when the client requested, and is allowed, the `roles` scope. | Always emitting the claim (every token grows, role names reach every client); a per-client flag (non-standard); deprecating `require_role`. |
 | D-2 | N4 gRPC `UserService` has no RBAC | `GetUser` requires `users:get` unless the caller reads itself. `ValidateCredentials` is restricted to machine principals (`axiam:m2m`) holding a new `users:validate_credentials` permission. | Leaving it as "inter-service use": the listener accepts user tokens, so the label is not a control. |
 | D-3 | N16 tenant `Suspended` is cosmetic | Suspension refuses sign-in, token issuance, refresh and API requests for the tenant's principals with `tenant_suspended`, and revokes live sessions and refresh tokens. Data is kept. Organization principals can still read and un-suspend the tenant. | Removing the status: it is already stored and exposed in the API. |
 | D-4 | N13 SSRF pin vs. environment proxy | `pinned_client` calls `.no_proxy()` unconditionally. Guarded fetches never traverse an environment proxy. | Trusting the proxy: the destination would be chosen by the proxy's DNS, which is exactly what the pin exists to prevent. |
 | D-5 | N21 SAML SP binding | Always compare `Recipient` on the form ACS **and** require `AudienceRestriction` containing the SP entity ID. No per-IdP opt-out. | Recipient only: the Web-SSO profile requires the audience, and an optional check is how this lead arose. |
 | D-6 | N18 dev compose image | Point at the namespace `release.yml` publishes to and pin a released version. | Keeping `:latest`. |
+
+| D-7 | N10 upgrade window | Access-token `typ` is **required from the first release that ships it**; an operator flag relaxes it for one rolling upgrade. | Lenient first, strict in the next minor release. |
+| D-8 | C1 setup secret | The logged first-boot token stays the only setup secret. No new environment variable. | An operator-supplied `AXIAM_BOOTSTRAP_SETUP_TOKEN`. |
+| D-9 | N2 SDK side | The seven SDKs with an AMQP transport verify the signed authz response within this plan (Wave 3). | Deferring SDK verification to a later conformance review. |
+| D-10 | Hardening notes | Executed in this run as Wave 4, all six tasks. | A separate backlog. |
 
 D-3 and D-5 change behaviour that a live deployment may rely on. Both get an
 entry in the upgrade notes (SA-50).
@@ -128,20 +164,21 @@ where the change is local and this plan specifies it completely.
 | SA-14 | N3 | Signed envelope on mail and outbound AMQP queues | Opus 5.5 |
 | SA-15 | N2 | Signed, per-producer authz responses | Opus 5.5 |
 | SA-16 | N17, N18, N19 | Pinned actions, dev image, SurrealDB credentials out of argv | Sonnet 5.5 |
-| SA-17 | C5–C7, N12, N14, N15 | CONTRACT 1.66 amendment | Opus 5.5 |
+| SA-18 | N15 (D-1) | `roles` scope and claim in access tokens | Opus 5.5 |
+| SA-17 | C5–C7, N2, N12, N14, N15 | CONTRACT 1.66 amendment (runs last in the wave) | Opus 5.5 |
 
 ### Wave 3 — SDKs (one task per repository, parallel)
 
 | Task | Repository | Findings | Model |
 |---|---|---|---|
-| SA-20 | `axiam-typescript-sdk` | C7 and C6 **reference implementation**, N14, N15 | Opus 5.5 |
-| SA-21 | `axiam-python-sdk` | C6, C7, N14, N15 | Sonnet 5.5 |
-| SA-22 | `axiam-php-sdk` | C5, C6, C7, N14, N15 | Sonnet 5.5 |
-| SA-23 | `axiam-csharp-sdk` | C5, C6, C7, N14 | Sonnet 5.5 |
-| SA-24 | `axiam-java-sdk` | C7, N14, N15, C2 parity check | Sonnet 5.5 |
+| SA-20 | `axiam-typescript-sdk` | C7 and C6 **reference implementation**, N2, N14, N15 | Opus 5.5 |
+| SA-21 | `axiam-python-sdk` | C6, C7, N2, N14, N15 | Sonnet 5.5 |
+| SA-22 | `axiam-php-sdk` | C5, C6, C7, N2, N14, N15 | Sonnet 5.5 |
+| SA-23 | `axiam-csharp-sdk` | C5, C6, C7, N2, N14, N15 | Sonnet 5.5 |
+| SA-24 | `axiam-java-sdk` | C7, N2, N14, N15, C2 parity check | Sonnet 5.5 |
 | SA-25 | `axiam-kotlin-sdk` | C6, C7, N12, N14, N15 | Sonnet 5.5 |
-| SA-26 | `axiam-go-sdk` | C2, N14, N15 | Sonnet 5.5 |
-| SA-27 | `axiam-rust-sdk` | N14, N15 | Sonnet 5.5 |
+| SA-26 | `axiam-go-sdk` | C2, N2, N14, N15 | Sonnet 5.5 |
+| SA-27 | `axiam-rust-sdk` | N2, N14, N15 | Sonnet 5.5 |
 | SA-28 | `axiam-cplusplus-sdk` | C4, N14 | Sonnet 5.5 |
 | SA-29 | `axiam-c-sdk` | N14 | Sonnet 5.5 |
 | SA-30 | `axiam-swift-sdk` | N14 | Sonnet 5.5 |
@@ -166,7 +203,8 @@ done. SA-26…SA-30 do not depend on it and may start with SA-20.
 |---|---|---|
 | SA-50 | Threat model, upgrade notes, admin docs, final regression gate | Sonnet 5.5 |
 
-**Totals:** 35 tasks — 9 on Opus 5.5, 26 on Sonnet 5.5.
+**Totals:** 36 tasks — 10 on Opus 5.5, 26 on Sonnet 5.5 — plus, after each of
+the five waves, the review gate of §1.6 (two Opus 5.5 reviews per round).
 
 ---
 
@@ -185,16 +223,15 @@ Instructions:
    **additional** restriction: mismatch → 403. Then, on every path, require
    `setup_token`, hash it, check `setup_token_is_valid`, and set
    `consumed_token_hash`. Follow the report's sketch.
-2. Search for an existing operator-supplied secret (an environment variable that
-   presets the setup token). If none exists, add `AXIAM_BOOTSTRAP_SETUP_TOKEN`:
-   when set (minimum 32 characters, refuse to start otherwise) the server stores
-   its hash as the setup token instead of minting and logging one. This is what
-   lets Kubernetes and the e2e stack bootstrap without scraping logs. Document
-   it in the **secrets** table of `docs/admin/README.md`.
-3. Update the e2e compose file and every test helper that bootstraps by email
-   only so that they pass a token.
+2. Add **no** new environment variable (D-8): the token printed once in the
+   first-boot log remains the only setup secret.
+3. Update every test helper that bootstraps by email only so that it passes a
+   token. The e2e stack and any bootstrap script must read the token from the
+   server's first-boot log; adapt them and keep the extraction in one helper.
 4. Correct the wording in `docs/admin/README.md` that calls the email variable
-   sufficient, and the first-boot log text.
+   sufficient, and the first-boot log text. State in the Kubernetes and compose
+   guides how the operator retrieves the token from the log, and that first-boot
+   logs are secret until bootstrap completes.
 
 Tests: email set + no token → 403; email set + garbage token → 403; email set +
 valid token + wrong email → 403; email set + valid token + right email → 201;
@@ -262,10 +299,11 @@ Instructions:
    and is not `at+jwt` (compare case-insensitively, accept `application/at+jwt`),
    or (b) the claims contain `purpose`. Rule (b) is what protects during a
    rolling upgrade, when tokens minted by the previous version have no `typ`.
-4. Access tokens **without** `typ` remain accepted for one access-token lifetime
-   only if they carry no `purpose` claim; add a configuration flag
-   `require_access_token_typ` (default `true` from the next minor release,
-   documented) so operators can close the window immediately.
+4. Strict by default (D-7): add `require_access_token_typ`, default **`true`**.
+   An access token without `typ` is refused. An operator may set the flag to
+   `false` for one rolling upgrade; in that mode a `typ`-less token is accepted
+   only if it carries no `purpose` claim. Document the flag and the 15-minute
+   re-authentication effect of leaving it at the default.
 5. Default `allow_missing_aud_as_user` to `false`. Update the tests that depend
    on the old default by setting it explicitly.
 6. Each purpose-token verifier must require its own `typ` once minted with one,
@@ -460,10 +498,9 @@ Instructions: validate with the broker-free harness in the report. Make the
 change **additive**: `AuthzResponse` gains `tenant_id`, the request `nonce` and
 `hmac_signature` computed with the tenant subkey over the canonical response;
 when the request carries AMQP `reply_to` the response goes there, otherwise to
-the shared queue as today. Specify the canonical form in CONTRACT §8 with a test
-vector. SDK verification of the response is deliberately **not** in this plan's
-SDK wave: record it in §7 as the follow-up it is, with the contract clause that
-obliges it.
+the shared queue as today. Produce the canonical form of the signed response
+and at least two test vectors (allow and deny) for SA-17 to put in CONTRACT §8;
+the seven AMQP SDKs verify against them in Wave 3 (D-9).
 
 ### SA-16 — Supply chain and deployment (N17, N18, N19)
 
@@ -486,10 +523,44 @@ Instructions:
    every command line, health checks included. Verify with
    `docker compose … config` that no password remains in a `command:`.
 
+### SA-18 — `roles` scope and claim (N15, D-1)
+
+- **Model:** Opus 5.5. New token content, touched by every grant.
+- **Depends on:** SA-03.
+- **Files:** `crates/axiam-oauth2` (scope handling, token minting for every
+  grant, discovery metadata), `crates/axiam-auth/src/token.rs` (claims),
+  `crates/axiam-authz` or the role repository (global-role lookup), the DCR and
+  client-management scope validation, `sdks/openapi.json` if a type changes.
+
+Instructions:
+
+1. Add a standard scope named `roles`. A client obtains it only if it is in the
+   client's allowed scopes, exactly like any other scope; nothing is granted by
+   default to existing clients.
+2. When the granted scope set contains `roles`, the access token carries
+   `roles`: a JSON array of the **names** of the subject's global roles in the
+   token's tenant — assigned directly or inherited through groups — at mint
+   time. Resource-specific role assignments are **not** included. Sort and
+   de-duplicate the array.
+3. Applies to user tokens and to service-account tokens. On refresh the claim is
+   recomputed. On token exchange it survives only if `roles` survives scope
+   narrowing. Never add it to ID tokens or to userinfo.
+4. Without the scope the claim is absent — not an empty array — so that SDKs
+   can tell "not requested" from "no roles".
+5. Advertise the scope in `scopes_supported` and the claim in
+   `claims_supported`. Document in `docs/` that the claim is a snapshot, stale
+   for at most one access-token lifetime, and that `require_access` remains the
+   authoritative check.
+
+Tests: scope absent → no claim; scope granted → exact role names, group
+inheritance included, resource-specific roles excluded; client not allowed the
+scope → request refused as for any unallowed scope; refresh after a role change
+reflects it; exchange with narrowed scope drops it.
+
 ### SA-17 — CONTRACT 1.66
 
 - **Model:** Opus 5.5. Eleven SDK tasks implement exactly what this says.
-- **Depends on:** SA-03, SA-15.
+- **Depends on:** SA-03, SA-15, SA-18. Runs last in Wave 2.
 - **Files:** `sdks/CONTRACT.md` (§3a, §10, §11, §12, §12.4, change log).
 
 Write normative text for:
@@ -514,7 +585,14 @@ Write normative text for:
    `kid` on the access-token path (no single-key fallback).
 5. **§11 `require_role` (N15, D-1).** Reads the `roles` claim only; never
    derived from `scope`; absent claim → 403. New `require_scope(scope...)`
-   helper. State plainly that AXIAM does not emit `roles` today.
+   helper. Specify the `roles` scope and claim exactly as SA-18 implements
+   them, and that an application wanting `require_role` must request the scope.
+7. **§8 signed authz response (N2).** The response fields, the canonical form
+   and the test vectors from SA-15. A consumer MUST verify the signature with
+   the tenant subkey, MUST check that `nonce` and `tenant_id` match its own
+   request, and MUST discard a response that fails either check. State the
+   behaviour against a server older than 1.66 (no signature): accepted only
+   when the integrator sets an explicit opt-out, refused by default.
 6. **§3a (N12).** Restate that the inbound double-submit check applies to every
    guard that accepts a cookie credential.
 
@@ -540,7 +618,15 @@ Common instructions for SA-20 … SA-30:
 - **N15 where listed:** remove the scope-to-role mapping, read `roles` only,
   add `require_scope`. Tests: scope `openid admin` with no `roles` → 403 on
   `require_role("admin")`; `roles: ["admin"]` → 200; `require_scope("admin")`
-  → 200 for the first token.
+  → 200 for the first token. Document that the application must request the
+  `roles` scope (SA-18) for `require_role` to work.
+- **N2 where listed** (Rust, TypeScript, Python, Java, C#, PHP, Go): verify the
+  signed authz response per CONTRACT §8 as amended — signature with the tenant
+  subkey, `nonce` and `tenant_id` equal to the request's — and publish requests
+  with a private `reply_to` queue. Tests: both contract test vectors verify; a
+  tampered decision, a response for another nonce and a response for another
+  tenant are each discarded; an unsigned response is refused unless the opt-out
+  is set. Take care not to repeat C2: verify and deliver the **same** bytes.
 
 ### SA-20 — TypeScript SDK (reference) — Opus 5.5
 
@@ -554,7 +640,7 @@ Common instructions for SA-20 … SA-30:
    optional binding digest without breaking custom stores.
 2. C6: validate `returnTo` in both adapters with one shared function and expose
    the optional predicate.
-3. N14, N15 as above.
+3. N2, N14, N15 as above.
 4. Ride-along, same files: reject a non-finite clock skew
    (`node/oidcIdToken.ts`); cap `MemoryOidcStateStore`; compare origin, not
    host, in `rest/session.ts:276`.
@@ -571,7 +657,7 @@ produce no redirect to that target.
 
 `src/axiam_sdk/django/oidc.py` (101, 118, 196, 198), the FastAPI/Flask login
 glue if present, `src/axiam_sdk/fastapi/__init__.py` (299). Port C7 and C6 from
-SA-20 (`_safe_return_to` as sketched in the report), N14, N15. Ride-along:
+SA-20 (`_safe_return_to` as sketched in the report), N2, N14, N15. Ride-along:
 `hmac.compare_digest` on encoded bytes (`fastapi/__init__.py:225`,
 `django/middleware.py:136`); cap the in-memory state store.
 
@@ -585,7 +671,7 @@ SA-20 (`_safe_return_to` as sketched in the report), N14, N15. Ride-along:
    60 s, while the cache is otherwise fresh, reject from cache. Cache the
    resolved `jwks_uri`. Test: 50 random kids → at most one fetch; a rotated key
    is accepted after the window.
-2. C6, C7 ported from SA-20; N14; N15.
+2. C6, C7 ported from SA-20; N2; N14; N15.
 3. Ride-along: `AxiamAccessMiddleware` attribute mode must **deny** when the
    route action cannot be reflected.
 
@@ -593,7 +679,8 @@ SA-20 (`_safe_return_to` as sketched in the report), N14, N15. Ride-along:
 
 `Axiam.Sdk/Auth/JwksVerifier.cs` (808), `Axiam.Sdk.AspNetCore/OidcLoginEndpoints.cs`.
 C5 (cooldown term in `IsFresh`, same test as PHP); C6 with `Url.IsLocalUrl`
-semantics; C7 ported from SA-20; N14. Ride-along: reject an empty expected nonce
+semantics; C7 ported from SA-20; N2; N14; N15 (document the framework-native
+`[Authorize(Roles = …)]` mapping reads the `roles` claim only). Ride-along: reject an empty expected nonce
 in `OidcExchangeAsync`; clamp `JwksCacheTtl`.
 
 ### SA-24 — Java SDK — Sonnet 5.5
@@ -602,7 +689,7 @@ in `OidcExchangeAsync`; clamp `JwksCacheTtl`.
 `spring/AxiamAuthorizationInterceptor.java` (358), `annotations/AxiamRequireRole.java`,
 `internal/JwksVerifier.java` (965–1000), the OIDC login glue, the AMQP consumer.
 
-1. C7 ported from SA-20; N14 (this also closes the `kid`-less acceptance in
+1. C7 ported from SA-20; N2; N14 (this also closes the `kid`-less acceptance in
    `selectKey`); N15, including the Spring authorities: prefix scopes with
    `SCOPE_` so a scope named `ROLE_X` cannot satisfy `hasRole("X")`.
 2. **C2 parity check:** port the Go regression test (a body with forged
@@ -634,14 +721,14 @@ in `OidcExchangeAsync`; clamp `JwksCacheTtl`.
    by case. Regression test: the forged body is nacked and the handler is never
    called; the plain-tamper control still nacks; a legitimate message still
    dispatches.
-2. N14; N15 (`middleware.RequireRole`).
+2. N2; N14; N15 (`middleware.RequireRole`).
 
 ### SA-27 — Rust SDK — Sonnet 5.5
 
 `src/token/jwks.rs` (552, 1126, 1158, 1391), `src/middleware/actix.rs` (451).
 Validate N14 with the report's test (kid-less `mfa_challenge` token accepted
 with only `expect_tenant_id`), then apply §10: `purpose` rejected, `typ`
-checked, no single-key fallback in `find_jwk` on the access-token path. N15.
+checked, no single-key fallback in `find_jwk` on the access-token path. N2. N15.
 Ride-along: checked arithmetic at `dpop.rs:417`.
 
 ### SA-28 — C++ SDK — Sonnet 5.5
@@ -725,8 +812,6 @@ Vault to `127.0.0.1`; `externalTrafficPolicy: Local` on the rpi5-k3s ServiceLB;
 | Item | Why |
 |---|---|
 | The 14 deferred coverage units, the final-clean critic, Phase 5 | Audit work. Re-run the audit after this plan lands. |
-| SDK verification of signed authz responses (follow-up to SA-15) | Seven SDKs; the server change is additive, so nothing breaks while this waits. Plan it with the next contract conformance review. |
-| A `roles` claim in access tokens (alternative to D-1) | Needs a design: token size, staleness, per-client opt-in. |
 | AAD binding for AES-256-GCM secrets | Requires re-encrypting every stored secret; needs a migration design. |
 | Privilege ceiling on `roles:assign`, `groups:add_member`, `permissions:grant` | Documented accepted risk (`threat-model-stride.md:429`, `:4777`); a "delegate only what you hold" rule is a feature. |
 | gRPC strict revocation off by default; refresh outliving session expiry | Documented accepted postures (#844). |
@@ -749,7 +834,8 @@ Vault to `127.0.0.1`; `externalTrafficPolicy: Local` on the rpi5-k3s ServiceLB;
    finding, with the control and the test that pins it; update the counts.
 2. Upgrade notes for the next release: SA-01 (bootstrap now needs the token),
    SA-02 (permissions withheld from Standard tenants), SA-03 (`typ`,
-   `allow_missing_aud_as_user`), SA-12 (gRPC permissions), SA-13 (suspension is
+   `allow_missing_aud_as_user`), SA-18 (new `roles` scope; `require_role` in
+   the SDKs now needs it), SA-12 (gRPC permissions), SA-13 (suspension is
    enforced), SA-11 (SAML audience required), SA-14 (queue drain), SA-10 (no
    egress proxy for guarded fetches).
 3. `docs/admin/`: bootstrap, tenant suspension, AMQP internal queue signing.
@@ -758,4 +844,4 @@ Vault to `127.0.0.1`; `externalTrafficPolicy: Local` on the rpi5-k3s ServiceLB;
    `python3 scripts/check-crate-layering.py`, and the `sdks/openapi.json` drift
    check.
 5. Set this document's status line to `EXECUTED`, with the list of leads that
-   did not reproduce.
+   did not reproduce and the outcome of the five review gates.

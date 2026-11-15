@@ -232,6 +232,9 @@ macro_rules! test_app {
                     state
                 }))
                 .app_data(web::Data::new(authz))
+                .wrap(axiam_audit::middleware::AuditMiddleware::spawn(
+                    axiam_db::SurrealAuditLogRepository::new($db.clone()),
+                ))
                 .configure(|cfg| {
                     register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
                 }),
@@ -572,6 +575,135 @@ async fn device_auth_mints_service_account_sub_kind() {
         401,
         "a device token must not be accepted on a user-facing route"
     );
+}
+
+/// N5 / SA-05: a service account that is not `Active` gets no token from
+/// `POST /api/v1/auth/device`, however valid the certificate bound to it.
+///
+/// Disabling an account only updates its status column; the `cert_bound_to`
+/// edge and the certificate stay usable, so the device path must check the
+/// status itself, as `client_credentials` and `network_decide` do. The refusal
+/// is audited under the proven tenant (never a nil one), and re-activating the
+/// account restores the token (control).
+#[actix_rt::test]
+async fn device_auth_refuses_a_non_active_service_account() {
+    use axiam_core::models::service_account::UpdateServiceAccount;
+    use axiam_core::models::user::UserStatus;
+    use axiam_core::repository::{
+        AuditLogFilter, AuditLogRepository, Pagination, ServiceAccountRepository,
+    };
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth.clone());
+
+    let anchor_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &anchor_id).await;
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, anchor_id);
+    let (cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
+    let sa_id = create_service_account!(app, token);
+
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/service-accounts/{sa_id}/bind-certificate"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({ "certificate_id": cert_id }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    let sa_repo = axiam_db::SurrealServiceAccountRepository::new(db.clone());
+    let sa_uuid = Uuid::parse_str(&sa_id).unwrap();
+    let encoded_pem = urlencode(&public_cert_pem);
+
+    let mut refusals = 0usize;
+    for status in [
+        UserStatus::Inactive,
+        UserStatus::Locked,
+        UserStatus::PendingVerification,
+    ] {
+        sa_repo
+            .update(
+                tenant_id,
+                sa_uuid,
+                UpdateServiceAccount {
+                    status: Some(status.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let req = test::TestRequest::post()
+            .uri("/api/v1/auth/device")
+            .peer_addr(device_peer())
+            .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let code = resp.status().as_u16();
+        let body = test::read_body(resp).await;
+        let body = String::from_utf8_lossy(&body).to_string();
+        assert_eq!(
+            code, 401,
+            "a {status:?} service account must not be issued a device token: {body}"
+        );
+        assert!(
+            !body.contains("access_token"),
+            "no token may be issued for a {status:?} account: {body}"
+        );
+        refusals += 1;
+    }
+
+    // The refusals are audited, under the tenant the certificate proved.
+    let repo = axiam_db::SurrealAuditLogRepository::new(db.clone());
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        rows = repo
+            .list(tenant_id, AuditLogFilter::default(), Pagination::default())
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|e| e.action == "POST /api/v1/auth/device" && e.metadata["http_status"] == 401)
+            .collect();
+        if rows.len() >= refusals {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        rows.len(),
+        refusals,
+        "each refusal must leave an audit row under the proven tenant: {rows:?}"
+    );
+
+    // Control: re-activated, the same certificate gets a token again.
+    sa_repo
+        .update(
+            tenant_id,
+            sa_uuid,
+            UpdateServiceAccount {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/device")
+        .peer_addr(device_peer())
+        .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let claims = decode_access_token(body["access_token"].as_str().unwrap(), &auth).unwrap();
+    assert_eq!(claims.sub, sa_id);
 }
 
 /// S-4 / DF-027: **401**, not 403.

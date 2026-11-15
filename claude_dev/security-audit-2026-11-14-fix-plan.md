@@ -481,6 +481,23 @@ working: add a control test for that.
 
 ### SA-05 — mTLS device login checks service-account status (N5)
 
+> **EXECUTED (2026-11-15, Sonnet 5.5). N5: reproduced.** `device_auth` loads
+> the bound service account and answers 401 ("the service account bound to
+> this certificate is not active") when it cannot be loaded or its status is
+> not `Active`, mirroring `network_decide.rs`. It also inserts
+> `AuditAttribution` for the proven tenant, so the refusal (and success) row is
+> written under that tenant rather than the nil partition.
+>
+> - **Regression test:** `device_auth_test::device_auth_refuses_a_non_active_service_account`
+>   (Inactive, Locked, PendingVerification in turn; 401, no `access_token`, an
+>   audit row with `http_status` 401 under the tenant; control: reactivated →
+>   200 with `sub` = the account). Unfixed: `FAILED … a Inactive service account
+>   must not be issued a device token … left: 200 right: 401`. Fixed: ok;
+>   `device_auth_test` 15 passed, `device_login_rate_limit_test` 6 passed.
+> - **Not anticipated:** the file's `test_app!` now wraps the app in
+>   `AuditMiddleware`. The OpenAPI 401 description was left unchanged (no spec
+>   change). `axiam-server`'s `radius_e2e.rs` was not run.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-api-rest/src/handlers/auth.rs` (`device_auth`, 934–976),
   `crates/axiam-api-rest/tests/device_auth_test.rs`.

@@ -6,9 +6,10 @@ use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput}
 use axiam_auth::token::{CnfClaim, issue_service_account_token, validate_access_token};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
+use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{
-    OrganizationRepository, PermissionRepository, RoleRepository, SettingsRepository,
-    TenantRepository, UserRepository,
+    OrganizationRepository, PermissionRepository, RoleRepository, ServiceAccountRepository,
+    SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::{SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository};
 use serde::{Deserialize, Serialize};
@@ -939,6 +940,35 @@ pub async fn device_auth<C: Connection + Clone>(
 
     // Resolve org_id from the tenant
     let tenant = state.tenant_repo.get_by_id(cert_auth.tenant_id).await?;
+
+    // Attribute the audit row to the tenant the certificate proved, so a
+    // refusal below is recorded under it rather than under a nil tenant.
+    req.extensions_mut().insert(axiam_audit::AuditAttribution {
+        tenant_id: cert_auth.tenant_id,
+        org_id: tenant.organization_id,
+    });
+
+    // N5 / SA-05: the certificate binding says *which* service account this
+    // device is, not that the account may still sign in. Disabling an account
+    // only updates its status; the binding and the certificate stay usable, so
+    // the status is checked here, as `client_credentials` and `network_decide`
+    // do. A non-Active account (or one that cannot be loaded) is refused
+    // without a token.
+    const NOT_ACTIVE: &str = "the service account bound to this certificate is not active";
+    let account = state
+        .service_account_repo
+        .get_by_id(cert_auth.tenant_id, cert_auth.service_account_id)
+        .await
+        .map_err(|_| {
+            AxiamApiError(AxiamError::AuthenticationFailed {
+                reason: NOT_ACTIVE.into(),
+            })
+        })?;
+    if account.status != UserStatus::Active {
+        return Err(AxiamApiError(AxiamError::AuthenticationFailed {
+            reason: NOT_ACTIVE.into(),
+        }));
+    }
 
     // S-3 / DF-014: bind the token to the certificate that obtained it
     // (RFC 8705 §3.1). The device has just proved possession of a private key;

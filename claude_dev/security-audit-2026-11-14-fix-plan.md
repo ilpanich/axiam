@@ -577,6 +577,19 @@ the parameters parsed from the dummy hash equal `production_params()`.
 
 ### SA-08 — Tenant predicate on group member counts (N20)
 
+> **EXECUTED (2026-11-15).** N20 **reproduced** for both functions: with a
+> tenant-B group of three members, `get_members(A, group_id)` and
+> `get_service_account_members(A, group_id)` returned empty items but
+> `total == 3`. Fix (`crates/axiam-db/src/repository/group.rs`): both count
+> queries now require `out.tenant_id = $tenant_id AND in.tenant_id = $tenant_id`
+> (the `member_of` edge has no tenant column; the predicate sits on its
+> endpoints) and bind `$tenant_id`. Tests in `group_repository_test.rs`:
+> `get_members_total_does_not_leak_other_tenant_count`,
+> `get_service_account_members_total_does_not_leak_other_tenant_count` — FAILED
+> before (`left: 3, right: 0`), pass after (11 passed); each includes a
+> same-tenant control (`total == 3`). The other count queries in `group.rs`
+> already filter on `tenant_id`.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-db/src/repository/group.rs` (`get_members`,
   `get_service_account_members`).

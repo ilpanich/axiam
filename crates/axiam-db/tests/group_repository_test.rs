@@ -2,14 +2,16 @@
 
 use axiam_core::models::group::{CreateGroup, UpdateGroup};
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::service_account::CreateServiceAccount;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
-    GroupRepository, OrganizationRepository, Pagination, TenantRepository, UserRepository,
+    GroupRepository, OrganizationRepository, Pagination, ServiceAccountRepository,
+    TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealGroupRepository, SurrealOrganizationRepository, SurrealTenantRepository,
-    SurrealUserRepository,
+    SurrealGroupRepository, SurrealOrganizationRepository, SurrealServiceAccountRepository,
+    SurrealTenantRepository, SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -395,4 +397,125 @@ async fn tenant_isolation() {
         not_found.is_err(),
         "group should not be visible in other tenant"
     );
+}
+
+/// Two tenants (A, B) in one org, plus a group in tenant B.
+async fn two_tenants_with_b_group() -> (
+    Surreal<surrealdb::engine::local::Db>,
+    uuid::Uuid, // tenant A
+    uuid::Uuid, // tenant B
+    uuid::Uuid, // group in B
+) {
+    let db = Surreal::new::<Mem>(()).await.unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+
+    let org = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Cnt Org".into(),
+            slug: "cnt-org".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let mut ids = Vec::new();
+    for slug in ["cnt-a", "cnt-b"] {
+        let t = tenant_repo
+            .create(CreateTenant {
+                organization_id: org.id,
+                kind: TenantKind::Standard,
+                name: slug.into(),
+                slug: slug.into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        ids.push(t.id);
+    }
+    let group = SurrealGroupRepository::new(db.clone())
+        .create(CreateGroup {
+            tenant_id: ids[1],
+            name: "B group".into(),
+            description: "tenant B".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    (db, ids[0], ids[1], group.id)
+}
+
+fn page() -> Pagination {
+    Pagination {
+        offset: 0,
+        limit: 10,
+        search: None,
+    }
+}
+
+/// N20: a tenant-A caller supplying a tenant-B group id must not learn B's
+/// user-member count.
+#[tokio::test]
+async fn get_members_total_does_not_leak_other_tenant_count() {
+    let (db, tenant_a, tenant_b, group_id) = two_tenants_with_b_group().await;
+    let repo = SurrealGroupRepository::new(db.clone());
+    let user_repo = SurrealUserRepository::new(db);
+    for n in 0..3 {
+        let u = user_repo
+            .create(CreateUser {
+                tenant_id: tenant_b,
+                username: format!("u{n}"),
+                email: format!("u{n}@example.com"),
+                password: "pass123".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        repo.add_member(tenant_b, u.id, group_id).await.unwrap();
+    }
+
+    // Control: the owning tenant sees all three.
+    let own = repo.get_members(tenant_b, group_id, page()).await.unwrap();
+    assert_eq!(own.total, 3);
+    assert_eq!(own.items.len(), 3);
+
+    // Cross-tenant: nothing, and no count.
+    let cross = repo.get_members(tenant_a, group_id, page()).await.unwrap();
+    assert!(cross.items.is_empty());
+    assert_eq!(cross.total, 0, "count leaked another tenant's membership");
+}
+
+/// N20: same, for service-account members.
+#[tokio::test]
+async fn get_service_account_members_total_does_not_leak_other_tenant_count() {
+    let (db, tenant_a, tenant_b, group_id) = two_tenants_with_b_group().await;
+    let repo = SurrealGroupRepository::new(db.clone());
+    let sa_repo = SurrealServiceAccountRepository::new(db);
+    for n in 0..3 {
+        let sa = sa_repo
+            .create(CreateServiceAccount {
+                tenant_id: tenant_b,
+                name: format!("svc-{n}"),
+                description: None,
+            })
+            .await
+            .unwrap();
+        repo.add_service_account_member(tenant_b, sa.0.id, group_id)
+            .await
+            .unwrap();
+    }
+
+    let own = repo
+        .get_service_account_members(tenant_b, group_id, page())
+        .await
+        .unwrap();
+    assert_eq!(own.total, 3);
+    assert_eq!(own.items.len(), 3);
+
+    let cross = repo
+        .get_service_account_members(tenant_a, group_id, page())
+        .await
+        .unwrap();
+    assert!(cross.items.is_empty());
+    assert_eq!(cross.total, 0, "count leaked another tenant's membership");
 }

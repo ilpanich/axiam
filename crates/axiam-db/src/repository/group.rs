@@ -623,9 +623,12 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .query(
                 "SELECT count() AS total FROM member_of \
                  WHERE out = type::record('group', $group_id) \
-                 AND record::tb(in) = 'user' GROUP ALL",
+                 AND out.tenant_id = $tenant_id \
+                 AND record::tb(in) = 'user' \
+                 AND in.tenant_id = $tenant_id GROUP ALL",
             )
             .bind(("group_id", group_id_str.clone()))
+            .bind(("tenant_id", tenant_id_str.clone()))
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
@@ -908,9 +911,12 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
             .query(
                 "SELECT count() AS total FROM member_of \
                  WHERE out = type::record('group', $group_id) \
-                 AND record::tb(in) = 'service_account' GROUP ALL",
+                 AND out.tenant_id = $tenant_id \
+                 AND record::tb(in) = 'service_account' \
+                 AND in.tenant_id = $tenant_id GROUP ALL",
             )
             .bind(("group_id", group_id_str.clone()))
+            .bind(("tenant_id", tenant_id_str.clone()))
             .await
             .map_err(DbError::from)?;
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;

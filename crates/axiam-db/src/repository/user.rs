@@ -773,23 +773,48 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
              WHERE tenant_id = $tenant_id",
                 sets.join(", ")
             );
-            let (query, update_slot) = if input.email.is_some() {
-                (
-                    format!(
-                        "BEGIN TRANSACTION; \
-                         LET $previous_email = (SELECT VALUE email FROM type::record('user', $id) \
-                             WHERE tenant_id = $tenant_id)[0]; \
-                         {update}; \
-                         IF $previous_email != NONE AND $previous_email != $email {{ \
+            // N7 / SA-06: a write of `password_hash` retires the user's OPAQUE
+            // record in the same transaction. The record is a verifier for the
+            // *previous* password; leaving it behind under `opaque_mode=optional`
+            // lets that password keep authenticating on the OPAQUE endpoint after
+            // a reset or change that supplied no new record. A caller that does
+            // enrol a new record writes it afterwards (an `upsert`), so a fresh
+            // record is never the one deleted. Living here, it covers every
+            // writer of the hash — reset, self-service change, SCIM — rather than
+            // each handler remembering to.
+            let rotates_hash = input.password_hash.is_some();
+            let email_changes = input.email.is_some();
+            let (query, update_slot) = if email_changes || rotates_hash {
+                let mut q = String::from("BEGIN TRANSACTION; ");
+                // BEGIN occupies slot 0; each `LET` below shifts the UPDATE.
+                let mut slot = 1;
+                if email_changes {
+                    q.push_str(
+                        "LET $previous_email = (SELECT VALUE email FROM type::record('user', $id) \
+                             WHERE tenant_id = $tenant_id)[0]; ",
+                    );
+                    slot += 1;
+                }
+                q.push_str(&update);
+                q.push_str("; ");
+                if email_changes {
+                    q.push_str(
+                        "IF $previous_email != NONE AND $previous_email != $email { \
                              DELETE email_verification_token WHERE tenant_id = $tenant_id \
                                  AND user_id = $id AND consumed_at IS NONE; \
                              DELETE password_reset_token WHERE tenant_id = $tenant_id \
                                  AND user_id = $id AND consumed_at IS NONE; \
-                         }}; \
-                         COMMIT TRANSACTION"
-                    ),
-                    2,
-                )
+                         }; ",
+                    );
+                }
+                if rotates_hash {
+                    q.push_str(
+                        "DELETE FROM opaque_credential \
+                         WHERE tenant_id = $tenant_id AND user_id = $id; ",
+                    );
+                }
+                q.push_str("COMMIT TRANSACTION");
+                (q, slot)
             } else {
                 (update, 0)
             };

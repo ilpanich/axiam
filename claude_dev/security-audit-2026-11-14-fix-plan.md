@@ -510,6 +510,32 @@ and returning 401 unless `status == UserStatus::Active`, mirroring
 
 ### SA-06 — Password reset and change retire the stale OPAQUE record (N7)
 
+> **EXECUTED (2026-11-15).** N7 **reproduced** for password reset and for
+> self-service change: on unfixed code, under `opaque_mode=optional`, OPAQUE
+> login with the pre-reset/pre-change password returned 200.
+> Fix: `SurrealUserRepository::update` (`crates/axiam-db/src/repository/user.rs`)
+> deletes the user's `opaque_credential` row in the same SurrealDB transaction
+> as any write of `password_hash`. Every writer of the hash — reset
+> (`PasswordResetService::confirm_reset`), change (`AuthService::change_password`)
+> and SCIM password PATCH — goes through that call, so one rule covers all of
+> them. Admin create and bootstrap create a user with no prior record; directory
+> linking already deleted the record; no login-time rehash of user passwords
+> exists. Deviation from the letter of the plan: the delete is unconditional on a
+> hash write rather than only when `enrolled` is `None`; when a new record is
+> supplied, `store_credential` upserts it immediately after (both handlers call
+> it after the hash update), so the outcome is identical on success, and on an
+> upsert failure the user is left with no record rather than one answering to the
+> old password. Tests: `opaque_login_test.rs`
+> `n7_a_reset_without_a_record_retires_the_old_opaque_record`,
+> `n7_a_change_without_a_record_retires_the_old_opaque_record` (FAILED before,
+> `left: 200 right: 200`; pass after), controls
+> `n7_control_a_reset_with_a_new_record_keeps_it`,
+> `n7_control_a_change_with_a_new_record_keeps_it`; `opaque_coverage_test.rs`
+> `writing_the_password_hash_retires_the_opaque_record`,
+> `writing_the_hash_and_the_email_together_retires_the_record` (FAILED before,
+> pass after), `an_update_that_leaves_the_hash_alone_keeps_the_record`. SCIM is
+> covered at the repository level only (no SCIM end-to-end test).
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-api-rest/src/handlers/opaque_enrollment.rs`
   (`store_credential`, 154–162), `password_reset.rs` (376), the

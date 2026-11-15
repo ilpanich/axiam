@@ -208,3 +208,87 @@ async fn another_tenants_users_are_not_counted() {
         0
     );
 }
+
+// N7 / SA-06: `UserRepository::update` is the one writer of the Argon2id hash
+// (password reset, self-service change, SCIM). A write of the hash retires the
+// OPAQUE record that verifies the previous password, in the same transaction;
+// every other write leaves it alone.
+
+async fn has_record(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> bool {
+    SurrealOpaqueCredentialRepository::new(db.clone())
+        .get_by_user(tenant_id, user_id)
+        .await
+        .is_ok()
+}
+
+#[tokio::test]
+async fn writing_the_password_hash_retires_the_opaque_record() {
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "rotated").await;
+    enrol(&db, tenant_id, user_id).await;
+    assert!(has_record(&db, tenant_id, user_id).await);
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$not-checked-here".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !has_record(&db, tenant_id, user_id).await,
+        "a record for the previous password must not outlive the hash"
+    );
+}
+
+#[tokio::test]
+async fn writing_the_hash_and_the_email_together_retires_the_record() {
+    // Both writes share one transaction; the statement slot the row is read
+    // back from must still be the UPDATE's.
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "both").await;
+    enrol(&db, tenant_id, user_id).await;
+
+    let updated = SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                email: Some("both-new@example.com".into()),
+                password_hash: Some("$argon2id$not-checked-here".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated.email, "both-new@example.com");
+    assert!(!has_record(&db, tenant_id, user_id).await);
+}
+
+#[tokio::test]
+async fn an_update_that_leaves_the_hash_alone_keeps_the_record() {
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "untouched").await;
+    enrol(&db, tenant_id, user_id).await;
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                username: Some("untouched-renamed".into()),
+                email: Some("untouched-new@example.com".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(has_record(&db, tenant_id, user_id).await);
+}

@@ -51,25 +51,15 @@ it — at any depth of the resource hierarchy, and at equal specificity. See
 
 ## First-run admin bootstrap
 
-On a fresh tenant with zero admins, `POST /api/v1/admin/bootstrap` creates the
-first super-admin user and seeds the default permission set and roles. The
-endpoint is fail-closed (SECHRD-04): it is refused unless **one** of two
-mandatory gates is satisfied — no admin can ever be created "unconditionally".
+On a fresh deployment with zero admins, `POST /api/v1/admin/bootstrap` creates
+the first super-admin user and seeds the default permission set and roles. The
+endpoint is fail-closed (SECHRD-04): it is **always** refused unless the request
+carries the valid, unconsumed one-time setup token — no admin can ever be
+created without it, and no environment variable replaces it.
 
-**Gate 1 — `AXIAM_BOOTSTRAP_ADMIN_EMAIL` env var.** If this environment
-variable is set on the `axiam-server` process, the bootstrap request's
-`email` field must match it exactly, or the request is rejected with `403`.
-This is a deploy-time env var — it is **not** part of the
-[deployment guide's required-secrets table](../deployment/README.md#required-secrets--environment)
-(`k8s/server/secret.yml`), since it is optional and low-sensitivity; add it
-to your `axiam-server` container's environment (e.g. a ConfigMap or a
-deployment-manifest override) if you want to lock first-run bootstrap to a
-known email address ahead of time.
-
-**Gate 2 — one-time setup token (fallback).** If `AXIAM_BOOTSTRAP_ADMIN_EMAIL`
-is not set, `axiam-server` mints a single-use setup token on first boot
-(only when no admin has ever been bootstrapped) and logs it once at `info`
-level:
+**The one-time setup token (always required).** On first boot (only when no
+admin has ever been bootstrapped) `axiam-server` mints a single-use setup token
+and logs it once at `info` level, as a `setup_token` field on this line:
 
 ```
 AXIAM first-run bootstrap setup token minted. Use this token ONCE to
@@ -79,11 +69,31 @@ field) ...
 
 Capture that token from the server logs and pass it in the bootstrap
 request's `setup_token` field. It is consumed atomically on first successful
-use — a replay of the same token is rejected.
+use — a replay of the same token is rejected. Only its hash is stored.
 
-If **neither** gate is satisfied (env var unset AND no/invalid/already-used
-setup token), bootstrap is refused with `403` — an unset gate never allows
-an arbitrary caller to create the first admin.
+How to retrieve it:
+
+- **Docker Compose:** `docker compose logs axiam-server` (or
+  `docker logs <container>`). The repository's `scripts/first-boot-token.sh
+  [container]` extracts it and is what `scripts/e2e-bootstrap.sh` uses.
+- **Kubernetes:** `kubectl -n axiam logs deploy/axiam-server | scripts/first-boot-token.sh -`
+  (add `--previous` if the pod has restarted).
+
+**First-boot logs are secret until bootstrap completes.** Anyone who can read
+that log line can create the first super-admin, so restrict log access
+accordingly, and do not ship first-boot logs to a shared aggregator before
+bootstrap has run. Once the token is consumed it is worthless.
+
+**Optional additional restriction — `AXIAM_BOOTSTRAP_ADMIN_EMAIL`.** If this
+environment variable is set (and non-empty) on the `axiam-server` process, the
+bootstrap request's `email` field must **also** match it exactly, or the request
+is rejected with `403`. It narrows who may bootstrap; it is **not** a
+credential and never substitutes for the setup token — an address is not
+secret. It is a deploy-time env var and is not part of the
+[deployment guide's required-secrets table](../deployment/README.md#required-secrets--environment).
+
+If the token is missing, invalid, unknown or already consumed, or the email
+restriction is set and does not match, bootstrap is refused with `403`.
 
 ### I lost the setup token
 
@@ -134,7 +144,7 @@ POST /api/v1/admin/bootstrap
   "email": "admin@example.com",
   "username": "admin",
   "password": "<strong password>",
-  "setup_token": "<only if AXIAM_BOOTSTRAP_ADMIN_EMAIL is unset>"
+  "setup_token": "<the one-time token from the first-boot log; always required>"
 }
 ```
 

@@ -22,6 +22,12 @@ on a workstation.
 just prod-up
 ```
 
+First-admin bootstrap needs the one-time setup token the server logs once at
+first boot: `docker compose -f docker/docker-compose.prod.yml logs axiam-server`
+(or `scripts/first-boot-token.sh <container>`). It is always required, even
+if `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set (that only restricts the email), and the
+first-boot log is secret until bootstrap completes.
+
 For a single node that does not need a message broker there is a smaller
 stack, [`docker/docker-compose.minimal.yml`](../../docker/docker-compose.minimal.yml)
 (`just minimal-up`): SurrealDB and `axiam-server` only, with
@@ -100,6 +106,13 @@ The Kubernetes manifests live under [`k8s/`](../../k8s/) and are assembled by
 ```bash
 kubectl apply -k k8s/
 ```
+
+First-admin bootstrap needs the one-time setup token the server logs once at
+first boot: `kubectl -n axiam logs deploy/axiam-server | scripts/first-boot-token.sh -`
+(add `--previous` after a pod restart; mint a new one before bootstrap with
+`axiam-server setup-token --remint`). It is always required, even if
+`AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set (that only restricts the email), and the
+first-boot log is secret until bootstrap completes.
 
 Key manifests:
 

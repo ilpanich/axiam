@@ -521,8 +521,8 @@ async fn main() -> std::io::Result<()> {
     // Boot: mint a one-time bootstrap setup token if this database has never
     // been bootstrapped (SECHRD-04 / D-03b). No-op on every subsequent boot.
     // Errors are logged, never fatal — an unminted token just means the
-    // env-var gate (AXIAM_BOOTSTRAP_ADMIN_EMAIL) remains the only way in,
-    // which is a safe (fail-closed) degraded state, not a startup blocker.
+    // bootstrap is refused until `setup-token --remint` mints one, which is a
+    // safe (fail-closed) degraded state, not a startup blocker.
     match axiam_db::mint_bootstrap_setup_token_if_needed(&pool.handle_for_repo().current()).await {
         Ok(Some(token)) => {
             // D-03b: the ONE deliberate secret-log exception — logged exactly
@@ -532,9 +532,10 @@ async fn main() -> std::io::Result<()> {
                 setup_token = %token,
                 "AXIAM first-run bootstrap setup token minted. Use this token \
                  ONCE to complete first-admin bootstrap (POST \
-                 /api/v1/admin/bootstrap, `setup_token` field) if \
-                 AXIAM_BOOTSTRAP_ADMIN_EMAIL is not set. This token will not \
-                 be shown again."
+                 /api/v1/admin/bootstrap, `setup_token` field). It is ALWAYS \
+                 required, even when AXIAM_BOOTSTRAP_ADMIN_EMAIL is set (that \
+                 only restricts the email). This token will not be shown \
+                 again; treat this log as secret until bootstrap completes."
             );
         }
         Ok(None) => {}

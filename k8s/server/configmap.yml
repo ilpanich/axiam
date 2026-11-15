@@ -205,9 +205,11 @@ data:
   # that points nowhere useful. Validated as a URL at startup.
   # AXIAM__AUTH__OAUTH2_ISSUER_URL: "https://axiam.example.com"
   #
-  # POST /api/v1/admin/bootstrap is fail-closed: it refuses unless this is set
-  # AND matches the request's email, or the request carries the one-time setup
-  # token printed in the first-boot log.
+  # POST /api/v1/admin/bootstrap is fail-closed: it ALWAYS requires the
+  # one-time setup token printed in the first-boot log (`kubectl -n axiam logs
+  # deploy/axiam-server | scripts/first-boot-token.sh -`; that log is secret
+  # until bootstrap completes). Setting this only ADDS a restriction: the
+  # request's email must also match it. The email is not a credential.
   # AXIAM_BOOTSTRAP_ADMIN_EMAIL: "admin@example.com"
   #
   # The sixth of that set — TLS on the backend — is NOT commented out. It is

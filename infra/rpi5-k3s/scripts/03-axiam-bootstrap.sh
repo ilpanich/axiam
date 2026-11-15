@@ -6,14 +6,13 @@
 # provider would be the wrong shape for what these two calls are.
 # `POST /api/v1/admin/bootstrap` is ONE-SHOT — a `bootstrap_lock:global`
 # uniqueness invariant means a second call answers 409 — and fail-closed: it
-# refuses unless AXIAM_BOOTSTRAP_ADMIN_EMAIL matches the request, or the request
-# carries a one-time setup token the server printed once, at first boot, in its
-# log. That is the opposite of a resource that converges. A script that reads
+# always requires the one-time setup token the server printed once, at first
+# boot, in its log (AXIAM_BOOTSTRAP_ADMIN_EMAIL, if set, only adds an email check). That is the opposite of a resource that converges. A script that reads
 # the token out of the pod log and posts twice is honest about what it is.
 #
 # IDEMPOTENT, and by asking rather than inferring: it signs in first, and skips
-# the bootstrap if the super-admin already authenticates. With a setup token the
-# 409 branch is unreachable — the token is consumed by the first success, so a
+# the bootstrap if the super-admin already authenticates. The 409 branch is
+# unreachable — the token is consumed by the first success, so a
 # second call is refused by the GATE (403) before anything checks whether the
 # system is initialised.
 #
@@ -26,7 +25,7 @@
 #   AXIAM_ORG_NAME        (default: Home Lab)
 #   AXIAM_ORG_SLUG        (default: homelab)
 #   AXIAM_ADMIN_EMAIL     must match AXIAM_BOOTSTRAP_ADMIN_EMAIL in the overlay,
-#                         unless a setup token is used
+#                         (the setup token is required either way)
 #   AXIAM_ADMIN_USERNAME  (default: admin)
 #   AXIAM_ADMIN_PASSWORD  REQUIRED. Pass it through the environment, not as an
 #                         argument — arguments are in /proc and in your history.
@@ -89,23 +88,27 @@ case "$probe" in
         # -----------------------------------------------------------------
         # 2. The setup token, from the FIRST-BOOT log
         # -----------------------------------------------------------------
-        # Only needed when the ConfigMap's AXIAM_BOOTSTRAP_ADMIN_EMAIL does not
-        # match; harmless to send when it does, since the handler ignores the
-        # field then. Read from the log because that is the only place it is
-        # ever written — it is minted once and never stored.
+        # ALWAYS required (SA-01): AXIAM_BOOTSTRAP_ADMIN_EMAIL only restricts the
+        # email; it never replaces the token. Read from the log because that is
+        # the only place it is ever written — it is minted once and never stored.
         say "Looking for the one-time setup token in the server's log"
-        setup_token="$(kubectl -n "$NS" logs deploy/axiam-server --tail=-1 2>/dev/null \
-            | grep -o '"setup_token":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+        setup_token="${AXIAM_SETUP_TOKEN:-}"
+        for prev in "" "--previous"; do
+            [[ -n "$setup_token" ]] && break
+            # shellcheck disable=SC2086  # $prev is deliberately unquoted: empty or one flag
+            setup_token="$(kubectl -n "$NS" logs deploy/axiam-server --tail=-1 $prev 2>/dev/null \
+                | grep -o '"setup_token":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+            [[ -n "$setup_token" ]] && break
+        done
         if [[ -n "$setup_token" ]]; then
             ok "Found a setup token in the log."
         else
-            warn "No setup token in the current log. That is expected if the pod
-  has restarted since first boot — the line is printed ONCE and Kubernetes keeps
-  only the current container's output. Falling back to the email gate, which
-  works as long as AXIAM_BOOTSTRAP_ADMIN_EMAIL matches:
-      $ADMIN_EMAIL
-  If it does not, and the token is gone, the log of the PREVIOUS container may
-  still have it:  kubectl -n $NS logs deploy/axiam-server --previous"
+            die "No setup token in the current or the previous container's log.
+  The line is printed ONCE at first boot and Kubernetes keeps only recent
+  output. The email alone is NOT enough to bootstrap. If nobody has bootstrapped
+  yet, mint a new token:
+      kubectl -n $NS exec deploy/axiam-server -- axiam-server setup-token --remint
+  and re-run with it:  AXIAM_SETUP_TOKEN=... $0"
         fi
 
         body="$(jq -nc \

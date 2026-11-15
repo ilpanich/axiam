@@ -18,9 +18,10 @@ import { getApiErrorMessage, getApiErrorStatus } from "@/lib/apiError";
  *
  * On a brand-new deployment nothing exists yet, so this page collects the
  * organization, the default tenant and the admin credentials and posts them to
- * `POST /api/v1/admin/bootstrap`, which creates all three in one call. When the
- * `AXIAM_BOOTSTRAP_ADMIN_EMAIL` env gate is not set, the server mints a one-time
- * setup token at first boot (logged once) — paste it into the Setup token field.
+ * `POST /api/v1/admin/bootstrap`, which creates all three in one call. The
+ * server mints a one-time setup token at first boot (logged once) that is always
+ * required — paste it into the Setup token field. `AXIAM_BOOTSTRAP_ADMIN_EMAIL`,
+ * when set, only adds a restriction on the email.
  * On success it redirects to `/login` with the org/tenant slugs pre-filled.
  */
 export function BootstrapPage() {
@@ -312,7 +313,8 @@ export function BootstrapPage() {
               autoComplete="off"
             />
             <p className="text-xs text-muted-foreground">
-              Required unless the server sets AXIAM_BOOTSTRAP_ADMIN_EMAIL.
+              Always required: the one-time token from the server's first-boot
+              log.
             </p>
           </div>
         </div>

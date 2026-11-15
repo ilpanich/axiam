@@ -212,6 +212,37 @@ the five waves, the review gate of §1.6 (two Opus 5.5 reviews per round).
 
 ### SA-01 — Bootstrap always requires the setup secret (C1)
 
+> **EXECUTED (2026-11-15, Sonnet 5.5).** `bootstrap()` now treats
+> `AXIAM_BOOTSTRAP_ADMIN_EMAIL` as an additional restriction only (mismatch →
+> 403) and requires a valid, unconsumed `setup_token` on every path; the token
+> hash is always consumed in the bootstrap transaction (`consumed_token_hash` is
+> no longer an `Option`). No new environment variable (D-8).
+>
+> - **Regression test:** `bootstrap_test::bootstrap_email_gate_still_requires_setup_token`
+>   (email set: no token → 403, garbage token → 403, valid token + wrong email →
+>   403, valid token + right email → 201). Unfixed code: `FAILED … left: 201
+>   right: 403` at the first assertion. Fixed: passes. Control
+>   `bootstrap_valid_token_without_email_gate_succeeds` (email unset + valid
+>   token → 201) passes before and after. Whole file: 15 passed.
+> - **Rewritten tests:** every email-only bootstrap test, including
+>   `bootstrap_creates_org_tenant_admin`, now mints and sends a token (helpers
+>   `first_boot_token`, `post_bootstrap_status`).
+> - **Not anticipated:** (1) `bootstrap_returns_409_after_admin`: the second
+>   sequential call now answers **403**, not 409, because the first call
+>   consumed the token and the gate runs before the lock — the same behaviour
+>   the email-unset path already had. The test asserts 403 and exactly one
+>   user; the 409 lock path stays covered by `bootstrap_concurrent_race_single_admin`.
+>   (2) Token extraction lives in one new helper, `scripts/first-boot-token.sh`,
+>   used by `scripts/e2e-bootstrap.sh` (CI and examples-smoke call it; no
+>   workflow change) and `benchmarks/runner/seed.sh`, which bootstrapped by
+>   email only. `infra/rpi5-k3s/scripts/03-axiam-bootstrap.sh` no longer falls
+>   back to email-only. (3) Doc-comment changes moved `sdks/openapi.json`
+>   (regenerated; digest checked) and two sentences of `sdks/CONTRACT.md`
+>   (bootstrap rows; no version bump) — both re-sync downstream with SA-17.
+> - Docs: `docs/admin/README.md`, `docs/deployment/README.md`,
+>   `docs/deployment/rpi5-k3s.md`, the k8s ConfigMap and e2e/bench compose
+>   comments, the first-boot log text in `main.rs`, the `BootstrapPage` hint.
+
 - **Model:** Sonnet 5.5. One handler, the fix is sketched in the report.
 - **Files:** `crates/axiam-api-rest/src/handlers/bootstrap.rs` (280–320),
   `crates/axiam-api-rest/tests/bootstrap_test.rs`, `crates/axiam-server/src/main.rs`

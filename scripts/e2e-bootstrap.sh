@@ -26,21 +26,17 @@
 # needed. Both steps are idempotent, so re-running against an already-seeded
 # stack is a no-op.
 #
-# The bootstrap gate is satisfied one of two ways, and which one depends on the
-# stack:
+# The setup token is ALWAYS required (SA-01): AXIAM_BOOTSTRAP_ADMIN_EMAIL, which
+# the E2E compose stack sets to E2E_ADMIN_EMAIL, is only an additional
+# restriction on the request's email. The server mints a one-time setup token on
+# its first boot and logs it once:
 #
-#   * The E2E compose stack sets AXIAM_BOOTSTRAP_ADMIN_EMAIL to E2E_ADMIN_EMAIL,
-#     and the gate is then a plain email match — no token needed.
-#   * A production-shaped stack (docker-compose.prod.yml) sets no such variable,
-#     because a deployment should not have to name its first administrator in an
-#     environment file. There the server mints a one-time setup token on its
-#     first boot and logs it once:
+#     AXIAM first-run bootstrap setup token minted ... "setup_token":"..."
 #
-#         AXIAM first-run bootstrap setup token minted ... "setup_token":"..."
-#
-#     Pass it as E2E_SETUP_TOKEN and this script forwards it. It is single-use;
-#     a second bootstrap against the same stack answers 409 and skips, which is
-#     the idempotent path, so a re-run needs no new token.
+# Unless E2E_SETUP_TOKEN is given, this script reads it from the server
+# container's log with scripts/first-boot-token.sh (the only place that
+# extraction lives). The token is single-use; a re-run against an already
+# bootstrapped stack is detected by signing in and needs no token.
 #
 # Environment variables (with E2E defaults):
 #   E2E_ORG_NAME      — organization name  (default: E2E Test Org)
@@ -57,8 +53,10 @@
 #                                          (default: tenant-admin)
 #   E2E_TENANT_ADMIN_PASSWORD — tenant-level admin password
 #                                          (default: E2E_ADMIN_PASSWORD)
-#   E2E_SETUP_TOKEN   — one-time bootstrap setup token, for a stack that does
-#                       not set AXIAM_BOOTSTRAP_ADMIN_EMAIL (default: unset)
+#   E2E_SETUP_TOKEN   — one-time bootstrap setup token (default: read from the
+#                       server's first-boot log via scripts/first-boot-token.sh)
+#   E2E_SERVER_CONTAINER — container whose log holds that token
+#                       (default: axiam-e2e-server)
 #   AXIAM_URL         — backend base URL   (default: http://localhost:8090)
 
 set -euo pipefail
@@ -113,10 +111,40 @@ fi
 # ---------------------------------------------------------------------------
 echo "[e2e-bootstrap] Calling /api/v1/admin/bootstrap ..."
 
-# `setup_token` is emitted only when one was supplied: the handler ignores the
-# field when AXIAM_BOOTSTRAP_ADMIN_EMAIL is set, but an empty string would be a
-# confusing thing to send, and jq keeps the quoting correct for a token that
-# happens to contain a JSON metacharacter.
+# Is the system already bootstrapped? Probe, rather than infer it from a status
+# code.
+#
+# The setup token is consumed by the first successful bootstrap, so a second
+# call is refused by the GATE (403 "setup token is invalid ... or already
+# consumed") before anything looks at whether the system is already
+# initialised. That ordering is defensible — /admin/bootstrap is public, and
+# answering 409 tells an unauthenticated caller the deployment is
+# initialised — but it made this script's documented idempotence false for every
+# production-shaped stack.
+#
+# Signing in is the honest question: if the super-admin can authenticate, the
+# bootstrap that created it has already happened, and there is nothing to do.
+PROBE=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H "Content-Type: application/json" \
+  -d "{\"org_slug\":\"${ORG_SLUG}\",\"username_or_email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
+  "${AXIAM_URL}/api/v1/auth/login" || echo "000")
+if [ "${PROBE}" = "200" ]; then
+  echo "[e2e-bootstrap] Already bootstrapped (${ADMIN_EMAIL} signs in) — skipping bootstrap."
+  HTTP_STATUS=409
+fi
+
+# Resolve the setup token only when a bootstrap is actually needed: an
+# already-bootstrapped stack has consumed it and logs it no more.
+if [ "${HTTP_STATUS:-}" != "409" ] && [ -z "${SETUP_TOKEN}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  SETUP_TOKEN="$("${SCRIPT_DIR}/first-boot-token.sh" "${E2E_SERVER_CONTAINER:-axiam-e2e-server}")" || {
+    echo "[e2e-bootstrap] ERROR: no setup token. Set E2E_SETUP_TOKEN, or run against a stack whose first-boot log still holds it."
+    exit 1
+  }
+fi
+
+# jq keeps the quoting correct for a token that happens to contain a JSON
+# metacharacter; the field is omitted only on the already-bootstrapped path.
 BOOTSTRAP_BODY=$(jq -nc \
   --arg org_name "${ORG_NAME}" \
   --arg org_slug "${ORG_SLUG}" \
@@ -135,29 +163,6 @@ BOOTSTRAP_BODY=$(jq -nc \
      password: $password
    }
    + (if $setup_token == "" then {} else {setup_token: $setup_token} end)')
-
-# Is the system already bootstrapped? Probe, rather than infer it from a status
-# code.
-#
-# The 409 branch below is only reachable when the gate is
-# AXIAM_BOOTSTRAP_ADMIN_EMAIL: with a setup token, the token is consumed by the
-# first successful bootstrap, so a second call is refused by the GATE (403
-# "bootstrap gate not satisfied") before anything looks at whether the system is
-# already initialised. That ordering is defensible — /admin/bootstrap is public,
-# and answering 409 tells an unauthenticated caller the deployment is
-# initialised — but it made this script's documented idempotence false for every
-# production-shaped stack.
-#
-# Signing in is the honest question: if the super-admin can authenticate, the
-# bootstrap that created it has already happened, and there is nothing to do.
-PROBE=$(curl -sS -o /dev/null -w '%{http_code}' \
-  -H "Content-Type: application/json" \
-  -d "{\"org_slug\":\"${ORG_SLUG}\",\"username_or_email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}" \
-  "${AXIAM_URL}/api/v1/auth/login" || echo "000")
-if [ "${PROBE}" = "200" ]; then
-  echo "[e2e-bootstrap] Already bootstrapped (${ADMIN_EMAIL} signs in) — skipping bootstrap."
-  HTTP_STATUS=409
-fi
 
 # Retry bootstrap up to 5 times in case the server is still initializing
 for i in $(seq 1 5); do

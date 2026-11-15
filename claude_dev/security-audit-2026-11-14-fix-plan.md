@@ -551,6 +551,21 @@ every writer of the Argon2 hash and apply the same rule.
 
 ### SA-07 — Dummy Argon2 hash uses production parameters (C3)
 
+> **EXECUTED (2026-11-15).** `crates/axiam-auth/src/password.rs`: new
+> `production_params()` (m=19456, t=2, p=1) is the single source used by
+> `hash_password`; the `DUMMY_HASH` constant (m=65536, t=3, p=4) is replaced by
+> `dummy_hash()`, a process-wide `OnceLock<String>` filled by `hash_password` on a
+> random UUID. `equalising_dummy_verify` still goes through `verify_password` with
+> the configured pepper, so the dummy does the same work as a real wrong-password
+> verify with or without a pepper (the pepper is a prefix, not a pre-hash). The
+> `OnceLock` init uses `expect`: its only failure paths are statically valid
+> params and a hash of a short random value. Doc comments in `password_reset.rs`
+> and `service.rs` updated (they named the removed constant). Test:
+> `password::tests::the_dummy_hash_uses_the_production_argon2_parameters` —
+> FAILED before (`memory cost left: 65536 right: 19456`), passes after
+> (`axiam-auth --lib`: 292 passed, 0 failed). No other hard-coded Argon2 PHC
+> strings or production parameters exist in `crates/`.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-auth/src/password.rs` (22, 43, 53).
 

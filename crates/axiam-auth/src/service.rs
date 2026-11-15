@@ -484,7 +484,7 @@ impl<
         }
     }
 
-    /// One Argon2id verify against [`password::DUMMY_HASH`], to make a branch
+    /// One Argon2id verify against the process-wide dummy hash ([`password::equalising_dummy_verify`]), to make a branch
     /// that verifies no real hash cost what one that does costs (SEC-026).
     ///
     /// B1: the crypto permit is acquired with the SAME acquire-with-timeout the

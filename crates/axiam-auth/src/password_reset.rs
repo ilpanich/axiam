@@ -101,7 +101,7 @@ where
     ///
     /// Mirrors the SEC-026 pattern already live in `AuthService::login`
     /// exactly: acquire the shared `crypto_semaphore`, run a dummy
-    /// Argon2id verify against the relocated `DUMMY_HASH` constant inside
+    /// Argon2id verify against the process-wide dummy hash (`password::equalising_dummy_verify`) inside
     /// `spawn_blocking`, and discard the result. Called from BOTH of
     /// `initiate_reset`'s `Ok(None)` branches (unknown email, federated
     /// user) so those responses are time-indistinguishable from the

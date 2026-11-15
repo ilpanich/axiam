@@ -8,19 +8,28 @@ use zeroize::Zeroizing;
 
 use crate::error::AuthError;
 
-/// Constant Argon2id hash used for timing equalization on
-/// user-not-found / unknown-account branches (SEC-026). Must be a valid
-/// Argon2 PHC string so that `verify_password` executes the full Argon2
-/// computation. Shared by `AuthService` and `PasswordResetService` so both
-/// timing-equalization call sites use the identical constant (no drift).
+/// Argon2id hash used for timing equalization on user-not-found /
+/// unknown-account branches (SEC-026). Generated once per process by
+/// [`hash_password`] on a random value, so it carries exactly
+/// [`production_params`] and cannot drift from the hashes AXIAM stores
+/// (SA-07 / C3). Shared by `AuthService` and `PasswordResetService`.
 ///
-/// The plaintext this hash was made from is irrelevant: the verify's result
-/// is always discarded, and its cost depends only on the Argon2 parameters
-/// encoded in the hash (`m`, `t`, `p`), never on the input. Nothing may rely
-/// on any particular input verifying or failing against it; use
+/// The plaintext is irrelevant: the verify's result is always discarded, and
+/// its cost depends only on the Argon2 parameters encoded in the hash. Use
 /// [`equalising_dummy_verify`] rather than calling `verify_password` on it.
-pub(crate) const DUMMY_HASH: &str =
-    "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaasfNiu6f6WSz0n28";
+///
+/// Initialisation cannot fail for the static, valid parameters and a random
+/// UUID input (`Params::new(19456, 2, 1)` is in range; hashing a short
+/// password with an OS-RNG salt has no failure path), so `expect` documents an
+/// invariant rather than a runtime risk. It also runs on first use, which a
+/// startup warm-up can pre-empt; it never takes request input.
+fn dummy_hash() -> &'static str {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        hash_password(&Uuid::new_v4().simple().to_string(), None)
+            .expect("hashing a random value with the static production Argon2 params cannot fail")
+    })
+}
 
 /// The probe the timing-equalising verify feeds to Argon2: random per
 /// process, stable within one, so no literal flows into the password sink.
@@ -29,18 +38,27 @@ fn dummy_probe() -> &'static str {
     PROBE.get_or_init(|| Uuid::new_v4().simple().to_string())
 }
 
-/// One full Argon2id verify against [`DUMMY_HASH`], result discarded.
+/// One full Argon2id verify against [`dummy_hash`], result discarded.
 ///
 /// Called on branches that would otherwise skip the hash (unknown user,
 /// unknown address, an account serving a lockout, every refusal of gRPC
 /// `ValidateCredentials`), so they cost what the real branch costs. The cost
-/// is fixed by the parameters baked into `DUMMY_HASH`, not by the probe, so the
+/// is fixed by the parameters baked into the dummy hash, not by the probe, so the
 /// probe is a runtime value rather than a literal. This is CPU-bound and
 /// blocking: callers run it under `spawn_blocking` and a crypto permit — the
 /// same permit, acquired the same way, as the verify it stands in for, or the
 /// `503` it answers under saturation becomes the oracle (T-469).
 pub fn equalising_dummy_verify(pepper: Option<&str>) {
-    let _ = verify_password(dummy_probe(), DUMMY_HASH, pepper);
+    let _ = verify_password(dummy_probe(), dummy_hash(), pepper);
+}
+
+/// The single source of the Argon2id cost parameters for every hash AXIAM
+/// writes, and for the timing-equalising dummy hash (SA-07): they cannot drift.
+///
+/// OWASP ASVS recommended: m=19456 (19 MiB), t=2, p=1.
+fn production_params() -> Result<argon2::Params, AuthError> {
+    argon2::Params::new(19456, 2, 1, None)
+        .map_err(|e| AuthError::Crypto(format!("argon2 params: {e}")))
 }
 
 /// Hash a password with Argon2id using OWASP-recommended parameters.
@@ -49,9 +67,7 @@ pub fn equalising_dummy_verify(pepper: Option<&str>) {
 /// hashing. A fresh 16-byte salt is drawn from the OS RNG for each call
 /// by `PasswordHasher::hash_password` itself.
 pub fn hash_password(password: &str, pepper: Option<&str>) -> Result<String, AuthError> {
-    // OWASP ASVS recommended: m=19456 (19 MiB), t=2, p=1
-    let params = argon2::Params::new(19456, 2, 1, None)
-        .map_err(|e| AuthError::Crypto(format!("argon2 params: {e}")))?;
+    let params = production_params()?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
 
     let peppered: Zeroizing<String>;
@@ -173,7 +189,29 @@ mod tests {
     fn the_dummy_hash_is_a_parseable_argon2_phc_string() {
         // What makes the equalising verify do real work: a hash that did not
         // parse would fail fast and equalise nothing.
-        let parsed = argon2::PasswordHash::new(DUMMY_HASH).expect("a valid PHC string");
+        let parsed = argon2::PasswordHash::new(dummy_hash()).expect("a valid PHC string");
         assert_eq!(parsed.algorithm.as_str(), "argon2id");
+    }
+
+    #[test]
+    fn the_dummy_hash_uses_the_production_argon2_parameters() {
+        let parsed = argon2::PasswordHash::new(dummy_hash()).expect("a valid PHC string");
+        let got = argon2::Params::try_from(&parsed).expect("argon2 params in PHC string");
+        let want = production_params().expect("production params");
+        assert_eq!(got.m_cost(), want.m_cost(), "memory cost");
+        assert_eq!(got.t_cost(), want.t_cost(), "time cost");
+        assert_eq!(got.p_cost(), want.p_cost(), "parallelism");
+        // `production_params()` leaves the output length unset (default 32);
+        // the PHC string records it, so compare against a real hash instead.
+        let real = super::hash_password("anything", None).expect("real hash");
+        let real = argon2::PasswordHash::new(&real).expect("a valid PHC string");
+        assert_eq!(
+            parsed.hash.map(|h| h.len()),
+            real.hash.map(|h| h.len()),
+            "output length"
+        );
+        assert_eq!(parsed.version, real.version, "version");
+        assert_eq!(parsed.algorithm.as_str(), "argon2id");
+        assert_eq!(parsed.version, Some(0x13));
     }
 }

@@ -109,6 +109,10 @@ struct Fixture {
     org_id: Uuid,
     tenant_id: Uuid,
     user_token: String,
+    /// For a user of the organization's reserved scope tenant: the
+    /// organization baseline is refused to a caller of an ordinary tenant
+    /// (SA-02, N8).
+    org_token: String,
 }
 
 async fn setup() -> Fixture {
@@ -157,12 +161,38 @@ async fn setup() -> Fixture {
     )
     .unwrap();
 
+    let scope = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org.id))
+        .await
+        .unwrap();
+    let operator = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id: scope.id,
+            username: "org-admin".into(),
+            email: "org-admin@example.com".into(),
+            password: format!("pw-{}", Uuid::new_v4()),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let org_token = issue_access_token(
+        operator.id,
+        scope.id,
+        org.id,
+        &[],
+        &auth,
+        Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
+
     Fixture {
         db,
         auth,
         org_id: org.id,
         tenant_id: tenant.id,
         user_token,
+        org_token,
     }
 }
 
@@ -958,7 +988,7 @@ async fn d3_cimd_cannot_be_enabled_without_audiences() {
     let req = test::TestRequest::put()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/organizations/{}/settings", f.org_id))
-        .insert_header(("Authorization", format!("Bearer {}", f.user_token)))
+        .insert_header(("Authorization", format!("Bearer {}", f.org_token)))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(&refused)
@@ -989,7 +1019,7 @@ async fn cimd_cannot_be_enabled_without_a_trusted_publisher() {
     let req = test::TestRequest::put()
         .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
         .uri(&format!("/api/v1/organizations/{}/settings", f.org_id))
-        .insert_header(("Authorization", format!("Bearer {}", f.user_token)))
+        .insert_header(("Authorization", format!("Bearer {}", f.org_token)))
         .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
         .insert_header(("X-CSRF-Token", CSRF_TOKEN))
         .set_json(&refused)

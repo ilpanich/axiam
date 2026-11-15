@@ -380,6 +380,11 @@ pub async fn get_org_settings<C: Connection + Clone>(
     RequirePermission::new("organizations:get_settings", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // SA-02 (N8): the permission alone is not the boundary — an ordinary
+    // tenant's seeded roles held it, and `org_id == user.org_id` below is
+    // satisfied by every principal of the organization. The caller must live
+    // in the organization scope. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
     let org_id = path.into_inner();
 
     // Authorization: only allow reads for the authenticated user's own org.
@@ -436,6 +441,12 @@ pub async fn set_org_settings<C: Connection + Clone>(
     RequirePermission::new("organizations:update_settings", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // SA-02 (N8): NEW-2's invariant needs the scope guard too. Every ordinary
+    // tenant's seeded admin held `organizations:update_settings`, and the
+    // `org_id == user.org_id` check below is passed by every principal of the
+    // organization — so a tenant administrator could weaken the baseline its
+    // sibling tenants inherit. See `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
     let org_id = path.into_inner();
 
     // Authorization: only allow writes to the authenticated user's own org.

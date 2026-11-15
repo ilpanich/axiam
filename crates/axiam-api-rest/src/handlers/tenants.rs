@@ -603,6 +603,18 @@ pub async fn get<C: Connection + Clone>(
         ));
     }
 
+    // SA-02 (N9): the path names a tenant, and `org_id == user.org_id` is
+    // passed by every principal of the organization — a tenant administrator
+    // read its siblings' records here. The caller must be an organization
+    // principal whose reach covers the named tenant. (An ordinary tenant
+    // principal still sees its own tenant through the reach-filtered `list`.)
+    crate::handlers::org_scope::require_organization_principal_for_tenant(
+        &user,
+        state.get_ref(),
+        path.tenant_id,
+    )
+    .await?;
+
     let tenant = state.tenant_repo.get_by_id(path.tenant_id).await?;
     if tenant.organization_id != path.org_id {
         return Err(AxiamError::NotFound {
@@ -896,6 +908,17 @@ pub async fn export_audit<C: Connection + Clone>(
             resource_id: None,
         }));
     }
+
+    // SA-02 (N9): the export streams the named tenant's whole trail and writes
+    // a receipt into it. Neither the permission (seeded to every ordinary
+    // tenant's admins) nor the org check above binds the path tenant to the
+    // caller; this does — an organization principal whose reach covers it.
+    crate::handlers::org_scope::require_organization_principal_for_tenant(
+        &user,
+        state.get_ref(),
+        path.tenant_id,
+    )
+    .await?;
 
     let existing = state.tenant_repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {

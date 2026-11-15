@@ -839,8 +839,25 @@ async fn erasure_honours_the_configured_window() {
     let app = test_app!(f.db, auth);
 
     // Shorten the org baseline to 7 days through the public endpoint, so this
-    // exercises the same path an operator takes.
-    let (bearer, header) = auth_headers(&token);
+    // exercises the same path an operator takes — an organization-level
+    // operator: the baseline is refused to a caller of an ordinary tenant
+    // (SA-02, N8).
+    let scope = SurrealTenantRepository::new(f.db.clone())
+        .create(CreateTenant::organization_scope(f.org_id))
+        .await
+        .unwrap();
+    let operator = SurrealUserRepository::new(f.db.clone())
+        .create(CreateUser {
+            tenant_id: scope.id,
+            username: "gdpr-operator".into(),
+            email: "gdpr-operator@example.com".into(),
+            password: TEST_PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let operator_token = mint_token(&auth, operator.id, scope.id, f.org_id);
+    let (bearer, header) = auth_headers(&operator_token);
     let mut settings = json!({
         "min_length": 12,
         "require_uppercase": true,

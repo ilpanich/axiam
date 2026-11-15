@@ -70,6 +70,12 @@ pub async fn list_system<C: Connection + Clone>(
     RequirePermission::new("audit_logs:list_system", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // SA-02 (N1): the nil-tenant partition is deployment-wide — it holds the
+    // unattributed request rows (client IP, method and path) of every tenant,
+    // other organizations' included. Reading it is an organization-level act,
+    // never a tenant administrator's, whatever its role carries. See
+    // `handlers::org_scope`.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
     let result = state
         .audit_repo
         .list_system(filter.into_inner(), pagination.into_inner())

@@ -152,6 +152,10 @@ pub async fn get_org_email_config<C: Connection + Clone>(
     RequirePermission::new("email_config:read", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // SA-02: the organization's mail configuration, like its setter, is
+    // organization-level. `email_config:read` stays grantable — the tenant
+    // handler shares it — so the scope guard is the only boundary here.
+    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
     let org_id = path.into_inner();
 
     if org_id != user.org_id {

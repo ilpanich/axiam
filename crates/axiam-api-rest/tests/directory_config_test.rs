@@ -452,6 +452,27 @@ impl World {
         self.token_for(self.admin)
     }
 
+    /// A token for a user of the organization's reserved scope tenant, created
+    /// on the call. The organization baseline is refused to a caller of an
+    /// ordinary tenant (SA-02, N8).
+    async fn org_admin_token(&self) -> String {
+        let scope = SurrealTenantRepository::new(self.db.clone())
+            .create(CreateTenant::organization_scope(self.org_id))
+            .await
+            .unwrap();
+        let operator = active_user(&self.db, scope.id, "org-admin").await;
+        issue_access_token(
+            operator,
+            scope.id,
+            self.org_id,
+            &[],
+            &self.auth,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap()
+    }
+
     /// `AppState` with the directory bundle the production composition builds:
     /// the encryption key when `keyed`, and the scripted resolver in the guard.
     fn state(&self, keyed: bool) -> AppState<TestDb> {
@@ -1572,6 +1593,7 @@ async fn required_is_refused_for_a_tenant_with_an_enabled_directory_on_every_set
     assert_eq!(json_of(&text)["error"], "conflict");
 
     // set_org, for the tenant that inherits the organization's baseline.
+    let org_token = w.org_admin_token().await;
     let mut org_body = serde_json::json!({
         "min_length": 12, "require_uppercase": true, "require_lowercase": true,
         "require_digits": true, "require_symbols": false, "password_history_count": 5,
@@ -1589,7 +1611,7 @@ async fn required_is_refused_for_a_tenant_with_an_enabled_directory_on_every_set
         request(
             Method::PUT,
             &format!("/api/v1/organizations/{}/settings", w.org_id),
-            &token,
+            &org_token,
         )
         .set_json(org_body.clone()),
     )
@@ -1604,7 +1626,7 @@ async fn required_is_refused_for_a_tenant_with_an_enabled_directory_on_every_set
         request(
             Method::PUT,
             &format!("/api/v1/organizations/{}/settings", w.org_id),
-            &token,
+            &org_token,
         )
         .set_json(org_body),
     )

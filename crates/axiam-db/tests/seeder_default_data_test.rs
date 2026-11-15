@@ -997,3 +997,130 @@ async fn reconcile_revokes_the_network_grants_from_an_upgraded_organization_scop
         SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.len()
     );
 }
+
+/// SA-02 (N1, N8, N9): the four actions moved into `ORGANIZATION_LEVEL_ACTIONS`
+/// are withheld from a new ordinary tenant's seeded roles, and the boot-time
+/// reconcile takes them back from a tenant an earlier version seeded with them —
+/// so existing deployments need no separate migration.
+const SA_02_ACTIONS: &[&str] = &[
+    "audit_logs:list_system",
+    "organizations:get_settings",
+    "organizations:update_settings",
+    "tenants:export_audit",
+];
+
+const SA_02_REGISTRY: &[(&str, &str)] = &[
+    ("users:create", "Create a user"),
+    ("audit_logs:list", "List this tenant's audit logs"),
+    ("audit_logs:list_system", "List system-wide audit logs"),
+    ("organizations:get_settings", "Read organization settings"),
+    (
+        "organizations:update_settings",
+        "Update organization settings",
+    ),
+    ("tenants:export_audit", "Export a tenant's audit trail"),
+];
+
+#[tokio::test]
+async fn the_sa_02_actions_are_withheld_from_a_new_ordinary_tenant() {
+    let (db, _org, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, SA_02_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, tenant_id, SA_02_REGISTRY)
+        .await
+        .unwrap();
+    for role_id in [
+        roles.super_admin_role_id,
+        roles.admin_role_id,
+        roles.viewer_role_id,
+    ] {
+        let held = actions_of(&db, tenant_id, role_id).await;
+        for action in SA_02_ACTIONS {
+            assert!(
+                !held.contains(&action.to_string()),
+                "{action} seeded to an ordinary tenant's role: {held:?}"
+            );
+        }
+    }
+    let admin = actions_of(&db, tenant_id, roles.admin_role_id).await;
+    assert!(admin.contains(&"audit_logs:list".to_string()), "{admin:?}");
+}
+
+#[tokio::test]
+async fn reconcile_revokes_the_sa_02_actions_from_an_existing_ordinary_tenant() {
+    let (db, org_id, tenant_id) = setup().await;
+    seed_permissions(&db, tenant_id, SA_02_REGISTRY)
+        .await
+        .unwrap();
+    let roles = seed_default_roles(&db, tenant_id, SA_02_REGISTRY)
+        .await
+        .unwrap();
+
+    // The pre-SA-02 state: super-admin and admin hold all four.
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let all = perm_repo
+        .list(
+            tenant_id,
+            Pagination {
+                offset: 0,
+                limit: 1000,
+                search: None,
+            },
+        )
+        .await
+        .unwrap();
+    for perm in all
+        .items
+        .iter()
+        .filter(|p| SA_02_ACTIONS.contains(&p.action.as_str()))
+    {
+        for role_id in [roles.super_admin_role_id, roles.admin_role_id] {
+            // A seeder that does not withhold them has already granted them.
+            match perm_repo.grant_to_role(tenant_id, role_id, perm.id).await {
+                Ok(()) | Err(axiam_core::error::AxiamError::AlreadyExists { .. }) => {}
+                Err(e) => panic!("grant {}: {e}", perm.action),
+            }
+        }
+    }
+
+    let outcome = reconcile_default_role_grants(&db, tenant_id).await.unwrap();
+    assert_eq!(
+        outcome,
+        ReconcileOutcome {
+            granted: 0,
+            revoked: 8,
+            network_revoked: 0
+        },
+        "four actions across two roles must be revoked"
+    );
+    for role_id in [roles.super_admin_role_id, roles.admin_role_id] {
+        let held = actions_of(&db, tenant_id, role_id).await;
+        for action in SA_02_ACTIONS {
+            assert!(!held.contains(&action.to_string()), "{action} survived");
+        }
+        assert!(held.contains(&"audit_logs:list".to_string()), "{held:?}");
+    }
+    assert_eq!(
+        reconcile_default_role_grants(&db, tenant_id).await.unwrap(),
+        ReconcileOutcome::default(),
+        "steady state is a no-op"
+    );
+
+    // The organization's own scope keeps them.
+    let scope_id = org_scope_tenant(&db, org_id).await;
+    seed_permissions(&db, scope_id, SA_02_REGISTRY)
+        .await
+        .unwrap();
+    let scope_roles = seed_default_roles(&db, scope_id, SA_02_REGISTRY)
+        .await
+        .unwrap();
+    let held = actions_of(&db, scope_id, scope_roles.super_admin_role_id).await;
+    for action in SA_02_ACTIONS {
+        assert!(held.contains(&action.to_string()), "scope lost {action}");
+    }
+    assert_eq!(
+        reconcile_default_role_grants(&db, scope_id).await.unwrap(),
+        ReconcileOutcome::default()
+    );
+}

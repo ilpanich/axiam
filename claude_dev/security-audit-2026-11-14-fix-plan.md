@@ -270,6 +270,52 @@ email unset + valid token → 201. Rewrite `bootstrap_creates_org_tenant_admin`.
 
 ### SA-02 — Organization-level guard on three handlers (N1, N8, N9)
 
+> **EXECUTED (2026-11-15, Opus 5.5). N1, N8, N9: all reproduced.**
+> `audit_logs:list_system`, `organizations:get_settings`,
+> `organizations:update_settings` and `tenants:export_audit` joined
+> `ORGANIZATION_LEVEL_ACTIONS`. `require_organization_principal` guards
+> `audit::list_system`, `settings::{get,set}_org_settings` and
+> `email_config::get_org_email_config`; `require_organization_principal_for_tenant`
+> guards `tenants::get` and `tenants::export_audit`.
+>
+> - **Validation (unfixed → fixed):**
+>   N1 `audit_test::standard_tenant_admin_cannot_read_the_system_audit_partition`:
+>   `left: 200 right: 403` (body held B's `POST /scim/v2/Users` row) → ok.
+>   N8 `rbac_test::standard_tenant_admin_cannot_rewrite_the_org_baseline` and
+>   `…_cannot_read_the_org_baseline`: `200` vs `403` → ok.
+>   N9 `tenant_test::standard_tenant_admin_cannot_export_a_sibling_tenants_audit_trail`,
+>   `…_cannot_read_a_sibling_tenant`,
+>   `a_restricted_organization_principal_exports_only_the_tenants_it_reaches`:
+>   `200` vs `403` → ok. Unfixed runs: handlers and `permission_scope.rs`
+>   stashed, tests in place.
+> - **Step 4 — no migration needed.** The server reconciles default-role grants
+>   at every boot (`main.rs:630` → `seeder.rs:839`
+>   `reconcile_default_role_grants`, revoke at `seeder.rs:992` driven by
+>   `is_organization_level_action`), so extending the list revokes the four
+>   actions from existing Standard tenants' super-admin and admin roles.
+>   Pinned by `seeder_default_data_test::reconcile_revokes_the_sa_02_actions_from_an_existing_ordinary_tenant`
+>   (unfixed: `revoked: 0`, expected 8) and
+>   `the_sa_02_actions_are_withheld_from_a_new_ordinary_tenant`. Limit: a
+>   custom role an operator granted one of these keeps the row; the handler
+>   guard refuses it (tested through the "explicit grant" caller).
+> - **Step 3:** the org email-config setters (`set_`, `delete_`,
+>   `test_org_email_config`) were already guarded; only the getter was not.
+>   `email_config:read`/`:write` are shared with the tenant handlers, so neither
+>   joins the list (the scope guard is the control there).
+> - **Step 5:** `organization_scope_consistency_test` now carries
+>   `ORGANIZATION_ROUTES` (all 25 `/organizations/{org_id}` routes, method,
+>   path, handler, guard; five GET routes `Exempt` with a reason).
+>   `every_organization_route_is_on_the_guard_list` compares it with
+>   `server.rs` both ways (checked by adding a probe route: FAILED, then
+>   reverted); `every_listed_organization_route_reaches_its_guard` failed on
+>   the five unguarded handlers before the fix.
+> - **Step 6:** `rbac_test::org_settings_update_allows_org_settings_permission`
+>   now uses a user of the organization's scope tenant.
+> - **Not anticipated:** 20 existing tests in `settings_test`, `cimd_test`,
+>   `dynamic_registration_test`, `directory_config_test`, `gdpr_handlers_test`
+>   and `ssf_shared_issuer_test` wrote the org settings with an ordinary-tenant
+>   token; each now uses a scope-tenant token for that request only.
+
 - **Model:** Opus 5.5. This is the highest-value boundary in the report, the
   existing tests pin the wrong behaviour, and already-seeded tenants hold the
   permissions.

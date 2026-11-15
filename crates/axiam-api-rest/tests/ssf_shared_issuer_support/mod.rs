@@ -287,6 +287,49 @@ impl World {
         state
     }
 
+    /// A token for a super-admin of the organization's reserved scope tenant,
+    /// created on the call (once per test).
+    ///
+    /// The organization baseline is organization-level (SA-02, N8): a caller
+    /// of an ordinary tenant is refused it whatever its role. The scope tenant
+    /// is not counted by the D-55 gate, which excludes the organization's own.
+    pub async fn org_admin_token(&self) -> String {
+        let scope = SurrealTenantRepository::new(self.db.clone())
+            .create(CreateTenant::organization_scope(self.org_id))
+            .await
+            .unwrap();
+        seed_permissions(&self.db, scope.id, PERMISSION_REGISTRY)
+            .await
+            .unwrap();
+        seed_default_roles(&self.db, scope.id, PERMISSION_REGISTRY)
+            .await
+            .unwrap();
+        let admin = active_user(&self.db, scope.id, "org-admin").await;
+        let super_admin = SurrealRoleRepository::new(self.db.clone())
+            .list(scope.id, all_pages())
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|r| r.name == "super-admin")
+            .expect("seeded role")
+            .id;
+        SurrealRoleRepository::new(self.db.clone())
+            .assign_to_user(scope.id, admin, super_admin, AssignmentScope::global())
+            .await
+            .unwrap();
+        issue_access_token(
+            admin,
+            scope.id,
+            self.org_id,
+            &[],
+            &self.auth,
+            Uuid::new_v4().to_string(),
+            AUD_USER,
+        )
+        .unwrap()
+    }
+
     pub fn admin_token(&self) -> String {
         issue_access_token(
             self.admin,

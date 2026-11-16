@@ -12,16 +12,17 @@
 //! inside the same transaction that creates the admin user means two concurrent
 //! first-run requests can create AT MOST ONE super-admin — the loser gets
 //! `AxiamError::AlreadyExists` (409) and its whole transaction rolls back.
-//! After the first admin is created, every subsequent call also hits the same
-//! `bootstrap_lock:global` uniqueness violation and is refused with 409.
-//! Additional organizations/tenants are created afterwards through the
-//! authenticated admin API.
+//! Once the deployment is bootstrapped, every later call is refused 403 by the
+//! gate, with the same reason as every other gate refusal (SA-01); 409 goes
+//! only to the loser of such a race. Additional organizations/tenants are
+//! created afterwards through the authenticated admin API.
 //!
-//! The endpoint is also gated (D-03a): a request is refused (fail-closed,
-//! no admin created) unless EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set and
-//! matches the request email, OR the request carries a valid one-time
-//! setup token (server-minted at first boot, logged once, consumed once —
-//! D-03b). An unset/absent gate never allows bootstrap.
+//! The endpoint is also gated (D-03a, SA-01): a request is refused (fail-closed,
+//! no admin created) unless it carries a valid, unconsumed one-time setup token
+//! (server-minted at first boot, logged once, consumed once — D-03b) and the
+//! deployment has not been bootstrapped yet. The token is always required.
+//! `AXIAM_BOOTSTRAP_ADMIN_EMAIL`, when set, is an additional restriction (the
+//! request email must also match it), never a substitute for the token.
 
 use actix_web::{HttpResponse, web};
 use axiam_auth::password;
@@ -183,8 +184,18 @@ fn hash_setup_token(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Returns `Ok(true)` iff `token`'s hash exists in `bootstrap_setup_token`
-/// and has NOT already been consumed. This is a fast-fail pre-check only —
+/// Returns `Ok(true)` iff `token`'s hash exists in `bootstrap_setup_token`,
+/// has NOT already been consumed, and the deployment has not been
+/// bootstrapped (`bootstrap_lock:global` absent).
+///
+/// The last condition is what makes a call after bootstrap a gate refusal
+/// (403) in every case (SA-01 review QR2-1): a deployment first bootstrapped
+/// through the pre-SA-01 email-only gate still holds a minted token that was
+/// never consumed, and without it that token would pass here and reach the
+/// lock pre-check's 409. A race loser that passed this check before the
+/// winner committed still gets its 409 from the pre-check or the transaction.
+///
+/// This is a fast-fail pre-check only —
 /// the authoritative single-use guarantee is the `bootstrap_setup_token_consumed`
 /// CREATE inside the same atomic transaction that creates the admin user
 /// (Task 3): a replayed token still loses to a UNIQUE-index violation even
@@ -211,8 +222,18 @@ async fn setup_token_is_valid<C: Connection + Clone>(
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
         .take(0)
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+    if !consumed.is_empty() {
+        return Ok(false);
+    }
 
-    Ok(consumed.is_empty())
+    let bootstrapped: Vec<BootstrapLockRow> = db
+        .query("SELECT locked_at FROM type::record('bootstrap_lock', 'global')")
+        .await
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
+        .take(0)
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+
+    Ok(bootstrapped.is_empty())
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -267,8 +288,9 @@ static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 /// without the token learns neither whether the email restriction is set nor
 /// whether a guessed address matches it.
 ///
-/// A call after a successful bootstrap is refused 403 by the gate, because the
-/// first call consumed the token; 409 is answered only to the loser of two
+/// A call after a successful bootstrap is refused 403 by the gate — the first
+/// call consumed the token, and the gate also refuses any token once
+/// `bootstrap_lock:global` exists; 409 is answered only to the loser of two
 /// calls racing with the same still-unconsumed token.
 #[utoipa::path(
     post,
@@ -360,10 +382,12 @@ pub async fn bootstrap<C: Connection + Clone>(
     let _serial = BOOTSTRAP_SERIAL.lock().await;
 
     // 3. Fast-fail one-shot gate: if the global bootstrap lock already exists
-    //    the system has been initialized. The authoritative guard is the
-    //    `bootstrap_lock:global` CREATE inside the atomic transaction below;
-    //    this pre-check just avoids creating a duplicate org on a call that is
-    //    going to be refused anyway.
+    //    the system has been initialized. A call arriving after that is
+    //    refused by the gate (step 1) with 403; only a request that passed the
+    //    gate before a concurrent winner committed gets here and answers 409.
+    //    The authoritative guard is the `bootstrap_lock:global` CREATE inside
+    //    the atomic transaction below; this pre-check just avoids creating a
+    //    duplicate org on a call that is going to be refused anyway.
     let existing_lock: Vec<BootstrapLockRow> = state
         .db
         .current()

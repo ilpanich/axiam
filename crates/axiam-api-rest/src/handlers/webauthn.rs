@@ -849,9 +849,9 @@ pub async fn start_authentication<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<StartAuthenticationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let (user_id, tenant_id, org_id) = state
+    let (user_id, tenant_id, org_id, challenge_issued_at) = state
         .auth_service
-        .decode_mfa_challenge_ids(&body.challenge_token)
+        .decode_mfa_challenge_ids_at(&body.challenge_token)
         .await
         .map_err(|e| AxiamApiError(e.into()))?;
 
@@ -868,7 +868,15 @@ pub async fn start_authentication<C: Connection + Clone>(
     let (challenge, state_token) = state
         .webauthn
         .webauthn_service
-        .start_authentication(tenant_id, org_id, user_id, user_verification)
+        // The state token carries the challenge's issue time: the finish
+        // refuses a ceremony whose challenge predates a credential change.
+        .start_authentication_for_challenge(
+            tenant_id,
+            org_id,
+            user_id,
+            user_verification,
+            Some(challenge_issued_at),
+        )
         .await?;
 
     Ok(HttpResponse::Ok().json(StartAuthenticationResponse {
@@ -1132,10 +1140,16 @@ pub async fn finish_authentication<C: Connection + Clone>(
     let b = body.into_inner();
     let tenant_id = peek_tenant_id(&b.state_token)?;
 
+    // SA-06 (SR2-1): refuses a ceremony whose challenge predates a credential
+    // change, with the answer an invalid state token gets, then finishes it.
     let (user_id, org_id) = state
-        .webauthn
-        .webauthn_service
-        .finish_authentication(tenant_id, &b.state_token, &b.response)
+        .auth_service
+        .finish_webauthn_authentication(
+            &state.webauthn.webauthn_service,
+            tenant_id,
+            &b.state_token,
+            &b.response,
+        )
         .await?;
 
     let out = state

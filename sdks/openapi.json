@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.3.1",
-    "x-axiam-spec-digest": "sha256:362bd825b89d94a84cbc7085da5909d79f3d2c5ede8b739d08e31c523a318a5c"
+    "x-axiam-spec-digest": "sha256:f1020dc1909e4e0c5476291ed8562da58c58b66ca6f885a697db7f8593c26504"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -486,7 +486,7 @@
           "admin"
         ],
         "summary": "`POST /api/v1/admin/bootstrap` — first-run admin setup.",
-        "description": "Creates the initial admin user with the super-admin role and seeds the\ndefault permission set. First-super-admin creation is atomic (SECHRD-04\n/ D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same\ntransaction means at most one admin is ever created; no partial admin or\norphan role RELATE can result. No token is issued — the user must\nauthenticate via `/api/v1/auth/login` (D-11).\n\nMandatory gate (D-03a, SA-01): ALWAYS requires a valid, unconsumed\n`setup_token`. When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set it is an additional\nrestriction: the request email must match it. The email is not a\ncredential and never replaces the token. The token is checked first, and\nevery gate refusal is the same 403 with the same reason, so a caller\nwithout the token learns neither whether the email restriction is set nor\nwhether a guessed address matches it.\n\nA call after a successful bootstrap is refused 403 by the gate, because the\nfirst call consumed the token; 409 is answered only to the loser of two\ncalls racing with the same still-unconsumed token.",
+        "description": "Creates the initial admin user with the super-admin role and seeds the\ndefault permission set. First-super-admin creation is atomic (SECHRD-04\n/ D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same\ntransaction means at most one admin is ever created; no partial admin or\norphan role RELATE can result. No token is issued — the user must\nauthenticate via `/api/v1/auth/login` (D-11).\n\nMandatory gate (D-03a, SA-01): ALWAYS requires a valid, unconsumed\n`setup_token`. When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set it is an additional\nrestriction: the request email must match it. The email is not a\ncredential and never replaces the token. The token is checked first, and\nevery gate refusal is the same 403 with the same reason, so a caller\nwithout the token learns neither whether the email restriction is set nor\nwhether a guessed address matches it.\n\nA call after a successful bootstrap is refused 403 by the gate — the first\ncall consumed the token, and the gate also refuses any token once\n`bootstrap_lock:global` exists; 409 is answered only to the loser of two\ncalls racing with the same still-unconsumed token.",
         "operationId": "bootstrap",
         "requestBody": {
           "content": {
@@ -7075,6 +7075,9 @@
               }
             }
           },
+          "403": {
+            "description": "The caller is not an organization-level principal, or lacks `email_config:read`"
+          },
           "404": {
             "description": "No email configuration set for this organization"
           }
@@ -7126,6 +7129,9 @@
           },
           "400": {
             "description": "Validation error, or the outbound address policy refuses the provider's host"
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, or lacks `email_config:write`"
           }
         },
         "security": [
@@ -7155,6 +7161,9 @@
         "responses": {
           "204": {
             "description": "Organization email configuration deleted"
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, or lacks `email_config:write`"
           }
         },
         "security": [
@@ -7240,6 +7249,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, or lacks `organizations:get_settings`"
           }
         },
         "security": [
@@ -7289,6 +7301,9 @@
           },
           "400": {
             "description": "Settings are internally inconsistent, enable OPAQUE on a server holding no OPAQUE keys, or turn ssf_enabled on while the deployment holds more than one tenant and serves no per-tenant issuers (D-55)"
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, or lacks `organizations:update_settings`"
           },
           "409": {
             "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory); or a tenant's directory or opaque_mode changed after this request read them, so nothing was written — reload and retry"
@@ -7539,6 +7554,9 @@
               }
             }
           },
+          "403": {
+            "description": "The caller is not an organization-level principal, or one whose reach does not cover the tenant, or lacks `tenants:get`"
+          },
           "404": {
             "description": "Tenant not found"
           }
@@ -7694,6 +7712,9 @@
             "content": {
               "application/x-ndjson": {}
             }
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, or one whose reach does not cover the tenant, or lacks `tenants:export_audit`"
           },
           "404": {
             "description": "Tenant not found"

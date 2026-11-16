@@ -140,6 +140,8 @@ async fn check_provider_address(
         (status = 200, description = "Organization email configuration (secrets omitted)",
          body = EmailConfig),
         (status = 404, description = "No email configuration set for this organization"),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      lacks `email_config:read`"),
     ),
     security(("bearer" = []))
 )]
@@ -189,6 +191,8 @@ pub async fn get_org_email_config<C: Connection + Clone>(
         (status = 200, description = "Organization email configuration updated (secrets omitted)",
          body = EmailConfig),
         (status = 400, description = "Validation error, or the outbound address policy refuses the provider's host"),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      lacks `email_config:write`"),
     ),
     security(("bearer" = []))
 )]
@@ -238,6 +242,8 @@ pub async fn set_org_email_config<C: Connection + Clone>(
     ),
     responses(
         (status = 204, description = "Organization email configuration deleted"),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      lacks `email_config:write`"),
     ),
     security(("bearer" = []))
 )]

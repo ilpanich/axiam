@@ -580,3 +580,87 @@ async fn an_access_token_is_not_a_ceremony_state_token() {
         "only the genuine second-factor finish"
     );
 }
+
+// ---------------------------------------------------------------------
+// SR2-1 — the second-factor finish honours the credential epoch.
+// ---------------------------------------------------------------------
+
+/// The finish exactly as `POST /auth/webauthn/authenticate/finish` runs it,
+/// keeping the error.
+async fn finish_like_the_handler(
+    w: &World,
+    state_token: &str,
+    assertion: &PublicKeyCredential,
+) -> axiam_core::error::AxiamResult<(Uuid, Uuid)> {
+    w.auth
+        .finish_webauthn_authentication(&w.webauthn, w.tenant_id, state_token, assertion)
+        .await
+}
+
+/// A password reset, as the reset handler writes it: a new hash.
+async fn reset_the_password(w: &World) {
+    SurrealUserRepository::new(w.db.clone())
+        .update(
+            w.tenant_id,
+            w.user_id,
+            axiam_core::models::user::UpdateUser {
+                password_hash: Some(
+                    axiam_auth::password::hash_password("A-brand-new-Passw0rd!", None).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// SR2-1: a ceremony started before a password reset cannot finish after it.
+/// The refusal is the answer an invalid state token gets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr2_1_a_ceremony_started_before_a_reset_cannot_finish_after_it() {
+    let w = world().await;
+    let (challenge, state_token) = start(&w).await;
+    reset_the_password(&w).await;
+
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let err = finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect_err("a ceremony that predates the reset must not finish");
+    assert!(
+        matches!(
+            &err,
+            axiam_core::error::AxiamError::AuthenticationFailed { reason }
+                if *reason == axiam_auth::error::AuthError::WebauthnStateInvalid.to_string()
+        ),
+        "expected the invalid-state-token answer, got {err:?}"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was opened");
+    assert_eq!(
+        stored_sign_count(&w).await.unwrap_or(0),
+        0,
+        "the refusal happened before the assertion was accepted"
+    );
+}
+
+/// SR2-1 control: with no reset in between, the same ceremony finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr2_1_control_a_ceremony_with_no_reset_still_finishes() {
+    let w = world().await;
+    let (challenge, state_token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect("no credential change: the ceremony finishes");
+}
+
+/// SR2-1 control: a ceremony started *after* the reset finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr2_1_control_a_ceremony_started_after_a_reset_finishes() {
+    let w = world().await;
+    reset_the_password(&w).await;
+    let (challenge, state_token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect("started after the reset: the ceremony finishes");
+}

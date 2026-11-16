@@ -578,6 +578,9 @@ fn page_of(tenants: Vec<Tenant>, pagination: &Pagination) -> PaginatedResult<Ten
     ),
     responses(
         (status = 200, description = "Tenant found", body = Tenant),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      one whose reach does not cover the tenant, or lacks \
+                                      `tenants:get`"),
         (status = 404, description = "Tenant not found"),
     ),
     security(("bearer" = []))
@@ -889,6 +892,9 @@ pub async fn delete<C: Connection + Clone>(
     responses(
         (status = 200, description = "Newline-delimited audit entries, then a \
              manifest line", content_type = "application/x-ndjson"),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      one whose reach does not cover the tenant, or lacks \
+                                      `tenants:export_audit`"),
         (status = 404, description = "Tenant not found"),
     ),
     security(("bearer" = []))

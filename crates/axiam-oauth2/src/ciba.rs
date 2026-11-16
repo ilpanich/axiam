@@ -672,7 +672,8 @@ pub fn select_hint(req: &BackchannelAuthenticationRequest) -> Result<CibaHint, O
 /// Verify an `id_token_hint` and return its subject.
 ///
 /// The hint must be an ID token (header `typ` `JWT` or absent, never
-/// `at+jwt` or another AXIAM kind) **this deployment** signed (its EdDSA key),
+/// `at+jwt` or another AXIAM kind, and no `jti`, `purpose`, `scope` or
+/// `client_id` claim) **this deployment** signed (its EdDSA key),
 /// issued **to this client** (`aud`) under **one of the issuers this request
 /// may name** (`iss`: the deployment's, or the tenant path's the request
 /// arrived under). Expiry is not checked: CIBA Core §7.1 describes the hint as
@@ -702,14 +703,10 @@ pub fn verify_id_token_hint(
     validation.validate_exp = false;
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
-    let data = jsonwebtoken::decode::<axiam_auth::token::IdTokenClaims>(token, &key, &validation)
-        .map_err(|_| invalid())?;
-    // Q-8 / S-10: an access token (or any other AXIAM kind) is not an ID
-    // token, however well its claims fit.
-    if !axiam_auth::token::id_token_hint_typ_accepted(data.header.typ.as_deref()) {
-        return Err(invalid());
-    }
-    let claims = data.claims;
+    // Q-8 / S-10, SR2-2: an access token (or any other AXIAM kind, typed or
+    // minted before SA-03) is not an ID token, however well its claims fit.
+    let claims = axiam_auth::token::decode_id_token_hint_claims(token, &key, &validation)
+        .ok_or_else(invalid)?;
     if claims.aud != client_id {
         return Err(invalid());
     }
@@ -2116,6 +2113,76 @@ mod tests {
             &cfg,
             None,
             &axiam_auth::token::IdTokenEvidence::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_id_token_hint(&id, &cfg.jwt_public_key_pem, "rp-1", &issuers).unwrap(),
+            user
+        );
+    }
+
+    /// SR2-2: an access token minted before SA-03 (`typ: "JWT"`, or none)
+    /// whose `aud` names the requesting client is not an `id_token_hint`
+    /// either. A real ID token, every optional claim populated, still is.
+    #[test]
+    fn a_legacy_untyped_access_token_is_not_an_id_token_hint() {
+        use base64::Engine;
+        let cfg = axiam_auth::config::AuthConfig {
+            jwt_private_key_pem: concat!(
+                "-----BEGIN PRIVATE KEY-----\n",
+                "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
+                "-----END PRIVATE KEY-----"
+            )
+            .into(), // gitleaks:allow
+            jwt_public_key_pem: concat!(
+                "-----BEGIN PUBLIC KEY-----\n",
+                "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
+                "-----END PUBLIC KEY-----"
+            )
+            .into(),
+            jwt_issuer: "axiam-test".into(),
+            ..axiam_auth::config::AuthConfig::default()
+        };
+        let issuers = vec![cfg.root_issuer().to_owned()];
+        let user = Uuid::new_v4();
+        let access =
+            axiam_auth::token::AccessTokenSpec::user(user, Uuid::new_v4(), Uuid::new_v4(), "s")
+                .aud("rp-1")
+                .issue(&cfg)
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(access.split('.').nth(1).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let key =
+            jsonwebtoken::EncodingKey::from_ed_pem(cfg.jwt_private_key_pem.as_bytes()).unwrap();
+        for typ in [Some("JWT"), None] {
+            let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+            header.typ = typ.map(str::to_owned);
+            let legacy = jsonwebtoken::encode(&header, &payload, &key).unwrap();
+            let verdict = verify_id_token_hint(&legacy, &cfg.jwt_public_key_pem, "rp-1", &issuers);
+            assert!(
+                verdict.is_err(),
+                "a legacy (typ {typ:?}) access token was accepted as an id_token_hint: {verdict:?}"
+            );
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        let id = axiam_auth::token::issue_id_token(
+            user,
+            "rp-1",
+            Some("n-0S6_WzA2Mj"),
+            Some("alice"),
+            &["openid".to_owned(), "profile".to_owned()],
+            &cfg,
+            Some(Uuid::new_v4()),
+            &axiam_auth::token::IdTokenEvidence {
+                auth_time: Some(now - 60),
+                acr: Some("urn:axiam:acr:mfa".into()),
+                amr: vec!["pwd".into(), "otp".into()],
+            },
         )
         .unwrap();
         assert_eq!(

@@ -327,6 +327,10 @@ pub struct AppState<C: Connection + Clone> {
     /// external-consent gate applies. See [`crate::client_managed_by_cache`]
     /// for why that field — and only that field — is safe to remember.
     pub client_managed_by_cache: Arc<crate::client_managed_by_cache::ClientManagedByCache>,
+    /// QR2-8 / SR2-4: what an organization or tenant id named in a token-less
+    /// request's path resolved to, for the system audit partition's
+    /// organization. See [`crate::audit_organization`] for what it bounds.
+    pub system_audit_org_cache: Arc<crate::audit_organization::SystemAuditOrgCache>,
     pub user_repo: SurrealUserRepository<C>,
     pub group_repo: SurrealGroupRepository<C>,
     pub role_repo: SurrealRoleRepository<C>,
@@ -881,6 +885,7 @@ impl<C: Connection + Clone> AppState<C> {
             tenant_repo,
             tenant_org_cache,
             client_managed_by_cache: Arc::new(Default::default()),
+            system_audit_org_cache: Arc::new(Default::default()),
             user_repo: user_repo.clone(),
             group_repo: SurrealGroupRepository::new(db.clone()),
             role_repo: SurrealRoleRepository::new(db.clone()),

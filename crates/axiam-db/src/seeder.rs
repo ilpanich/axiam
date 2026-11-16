@@ -418,9 +418,11 @@ const fn network_half(scope: Option<bool>) -> NetworkHalf {
 /// This is the second of two layers. `require_organization_principal` in
 /// `axiam-api-rest` is the load-bearing one and refuses such a caller whatever
 /// grants it holds; withholding the grant means the two layers agree instead of
-/// one quietly contradicting the other. The `viewer` role is untouched — every
-/// organization-level action is a mutation and viewer is seeded only with
-/// `:list` and `:get`.
+/// one quietly contradicting the other. The `viewer` role is untouched by
+/// construction: it is seeded only with actions ending exactly in `:list` or
+/// `:get`, and no organization-level action does. Most are mutations; the
+/// reads among them (`audit_logs:list_system`, `organizations:get_settings`)
+/// carry a longer verb, so the viewer was never seeded with them either.
 pub async fn seed_default_roles<C: Connection>(
     db: &Surreal<C>,
     tenant_id: Uuid,

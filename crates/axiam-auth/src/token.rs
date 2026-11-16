@@ -67,12 +67,45 @@ fn is_untyped(typ: Option<&str>) -> bool {
     typ.is_none() || typ_matches(typ, "JWT")
 }
 
-/// Whether an `id_token_hint` verifier accepts a header `typ`: an ID token's
-/// own `JWT`, or none at all. An access token (`at+jwt`), a purpose token or a
-/// logout token is not an ID token, however well its claims fit
-/// [`IdTokenClaims`].
-pub fn id_token_hint_typ_accepted(typ: Option<&str>) -> bool {
-    is_untyped(typ)
+/// Claim-set members that every AXIAM access token (`jti`, required by
+/// [`AccessTokenClaims`]), purpose token (`purpose`) or logout token (`jti`)
+/// carries, and that no ID token AXIAM has minted ever carried: neither
+/// [`IdTokenClaims`] nor [`issue_id_token`] has a `jti`, `purpose`, `scope`
+/// or `client_id` (SR2-2).
+const NEVER_IN_AN_ID_TOKEN: [&str; 4] = ["jti", "purpose", "scope", "client_id"];
+
+/// Verify an `id_token_hint` with `validation` and return its claims, or
+/// `None` when it is not an ID token this key signed.
+///
+/// Two rules beyond the signature, applied by both hint decoders
+/// (end-session and `/oauth2/authorize`, CIBA):
+///
+/// 1. **Header.** The `typ` is an ID token's own `JWT`, or absent. An access
+///    token (`at+jwt`), a purpose token or a logout token is refused, however
+///    well its claims fit [`IdTokenClaims`] (Q-8 / S-10).
+/// 2. **Claims.** None of [`NEVER_IN_AN_ID_TOKEN`] is present. Rule 1 cannot
+///    tell an access token minted before SA-03 (`typ: JWT`) from an ID token,
+///    and the hint decoders skip `exp`, so without this rule every such token
+///    would stay a valid hint for good (SR2-2). It needs no relax flag: it
+///    refuses nothing an ID token has ever contained.
+pub fn decode_id_token_hint_claims(
+    token: &str,
+    key: &DecodingKey,
+    validation: &Validation,
+) -> Option<IdTokenClaims> {
+    let data =
+        jsonwebtoken::decode::<serde_json::Map<String, serde_json::Value>>(token, key, validation)
+            .ok()?;
+    if !is_untyped(data.header.typ.as_deref()) {
+        return None;
+    }
+    if NEVER_IN_AN_ID_TOKEN
+        .iter()
+        .any(|member| data.claims.contains_key(*member))
+    {
+        return None;
+    }
+    serde_json::from_value(serde_json::Value::Object(data.claims)).ok()
 }
 
 /// Whether a purpose-token verifier accepts a header `typ` (SA-03 rule 6).

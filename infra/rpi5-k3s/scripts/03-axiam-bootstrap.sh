@@ -4,17 +4,20 @@
 #
 # WHY THIS IS NOT OPENTOFU. There is no AXIAM provider, and a generic REST
 # provider would be the wrong shape for what these two calls are.
-# `POST /api/v1/admin/bootstrap` is ONE-SHOT — a `bootstrap_lock:global`
-# uniqueness invariant means a second call answers 409 — and fail-closed: it
-# always requires the one-time setup token the server printed once, at first
-# boot, in its log (AXIAM_BOOTSTRAP_ADMIN_EMAIL, if set, only adds an email check). That is the opposite of a resource that converges. A script that reads
-# the token out of the pod log and posts twice is honest about what it is.
+# `POST /api/v1/admin/bootstrap` is ONE-SHOT and fail-closed: it always
+# requires the one-time setup token the server printed once, at first boot, in
+# its log (AXIAM_BOOTSTRAP_ADMIN_EMAIL, if set, only adds an email check). Once
+# the deployment is bootstrapped every later call answers 403, with the same
+# reason as any other gate refusal; 409 goes only to the loser of two calls
+# racing with the same still-unconsumed token. That is the opposite of a
+# resource that converges. A script that reads the token out of the pod log and
+# posts twice is honest about what it is.
 #
 # IDEMPOTENT, and by asking rather than inferring: it signs in first, and skips
-# the bootstrap if the super-admin already authenticates. The 409 branch is
-# unreachable — the token is consumed by the first success, so a
-# second call is refused by the GATE (403) before anything checks whether the
-# system is initialised.
+# the bootstrap if the super-admin already authenticates. A 403 cannot tell
+# "already bootstrapped" from "wrong token" (the server deliberately does not
+# say which), which is why the sign-in probe comes first. The 409 branch is
+# reached only by a concurrent run of this script.
 #
 # Usage:
 #   AXIAM_ADMIN_PASSWORD='...' ./03-axiam-bootstrap.sh
@@ -134,10 +137,11 @@ case "$probe" in
         case "$status" in
             201) ok "Bootstrapped. Organization '$ORG_SLUG', its organization-scope
   tenant, the permission and role seed, and the super-admin all exist." ;;
-            409) ok "Already initialised (409)." ;;
+            409) ok "Already initialised by a concurrent bootstrap (409)." ;;
             403) die "403 — the bootstrap gate is not satisfied. Either the setup
-  token is invalid or has already been consumed, or AXIAM_BOOTSTRAP_ADMIN_EMAIL
-  does not match '$ADMIN_EMAIL' (the server deliberately does not say which).
+  token is invalid or has already been consumed, the deployment is already
+  bootstrapped, or AXIAM_BOOTSTRAP_ADMIN_EMAIL does not match '$ADMIN_EMAIL'
+  (the server deliberately does not say which).
   $(cat "$resp")" ;;
             *) die "Bootstrap returned $status: $(cat "$resp")" ;;
         esac

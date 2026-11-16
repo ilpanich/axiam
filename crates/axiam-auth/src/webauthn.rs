@@ -147,7 +147,26 @@ struct WebauthnStateClaims {
     jti: String,
     iss: String,
     iat: i64,
+    /// The issue time, in nanoseconds since the Unix epoch, of what this
+    /// ceremony descends from: the MFA challenge that started a second-factor
+    /// authentication, or the moment the token was minted otherwise. The finish
+    /// refuses the ceremony if the user's credential changed after it
+    /// (SA-06, SR2-1). Absent on a token minted before it existed; `iat` is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iat_ns: Option<i64>,
     exp: i64,
+}
+
+/// When an authentication ceremony's challenge was issued, as its state token
+/// carries it: whole seconds, and the sub-second claim if the token has one.
+/// Compared against the user's credential epoch by
+/// `AuthService::finish_webauthn_authentication`.
+#[derive(Debug, Clone, Copy)]
+pub struct StateIssue {
+    /// The token's `iat`, whole seconds.
+    pub iat: i64,
+    /// Nanoseconds since the Unix epoch, when the token carries it.
+    pub iat_ns: Option<i64>,
 }
 
 // -------------------------------------------------------------------
@@ -330,6 +349,23 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         user_id: Uuid,
         user_verification: WebauthnUserVerification,
     ) -> AxiamResult<(RequestChallengeResponse, String)> {
+        self.start_authentication_for_challenge(tenant_id, org_id, user_id, user_verification, None)
+            .await
+    }
+
+    /// As [`Self::start_authentication`], for the ceremony that follows an MFA
+    /// challenge: the state token carries `challenge_issued_at`, the issue time
+    /// of that challenge, so the finish can refuse the ceremony if the
+    /// credential changed after the challenge was issued (SA-06, SR2-1). With
+    /// `None` the token carries the moment it is minted.
+    pub async fn start_authentication_for_challenge(
+        &self,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        user_id: Uuid,
+        user_verification: WebauthnUserVerification,
+        challenge_issued_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> AxiamResult<(RequestChallengeResponse, String)> {
         let existing = self
             .credential_repo
             .list_by_user(tenant_id, user_id)
@@ -360,12 +396,13 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
         restamp_user_verification(&mut state_json, "ast", user_verification)?;
 
-        let state_token = self.encode_state_token_json(
+        let state_token = self.encode_state_token_json_at(
             user_id,
             tenant_id,
             org_id,
             "webauthn_authenticate",
             state_json,
+            challenge_issued_at,
         )?;
 
         Ok((rcr, state_token))
@@ -635,12 +672,29 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         purpose: &str,
         state_json_value: JsonValue,
     ) -> Result<String, AuthError> {
+        self.encode_state_token_json_at(user_id, tenant_id, org_id, purpose, state_json_value, None)
+    }
+
+    /// [`Self::encode_state_token_json`] with the issue time the token's
+    /// `iat_ns` reports: `issued_at` when given (the MFA challenge the ceremony
+    /// descends from), the moment of minting otherwise. `iat` and `exp` are
+    /// always those of the minting, so the token's own lifetime is unchanged.
+    fn encode_state_token_json_at(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        purpose: &str,
+        state_json_value: JsonValue,
+        issued_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<String, AuthError> {
         let encryption_key = self.require_encryption_key()?;
         let state_json = serde_json::to_string(&state_json_value)
             .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
         let encrypted_state = totp::encrypt_secret(&encryption_key, state_json.as_bytes())?;
 
-        let now = chrono::Utc::now().timestamp();
+        let minted_at = chrono::Utc::now();
+        let now = minted_at.timestamp();
         let claims = WebauthnStateClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -650,6 +704,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             jti: Uuid::new_v4().to_string(),
             iss: self.config.jwt_issuer.clone(),
             iat: now,
+            iat_ns: issued_at.unwrap_or(minted_at).timestamp_nanos_opt(),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -777,6 +832,51 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         let expires_at = chrono::DateTime::from_timestamp(data.claims.exp, 0)
             .ok_or(AuthError::WebauthnStateInvalid)?;
         Ok((data.claims.jti, expires_at))
+    }
+
+    /// The `(user_id, tenant_id, issue time)` of a second-factor authentication
+    /// ceremony's state token, read **after** verifying its signature, issuer,
+    /// expiry, type and purpose — what
+    /// `AuthService::finish_webauthn_authentication` compares with the user's
+    /// credential epoch before the assertion is looked at. Every failure is
+    /// [`AuthError::WebauthnStateInvalid`], as for any bad state token.
+    pub fn authentication_state_issue(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, StateIssue), AuthError> {
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+
+        let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&self.config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+
+        let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
+        if data.claims.purpose != "webauthn_authenticate" {
+            return Err(AuthError::WebauthnStateInvalid);
+        }
+        let user_id: Uuid = data
+            .claims
+            .sub
+            .parse()
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        let tenant_id: Uuid = data
+            .claims
+            .tenant_id
+            .parse()
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        Ok((
+            user_id,
+            tenant_id,
+            StateIssue {
+                iat: data.claims.iat,
+                iat_ns: data.claims.iat_ns,
+            },
+        ))
     }
 
     /// Read a state token's `purpose` claim **after** verifying its
@@ -1782,6 +1882,7 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             iss: "axiam-test".into(),
             iat: past,
+            iat_ns: None,
             exp: past + 300,
         };
         let stale = jsonwebtoken::encode(
@@ -1834,6 +1935,7 @@ mod tests {
                 jti: Uuid::new_v4().to_string(),
                 iss: "axiam-test".into(),
                 iat: chrono::Utc::now().timestamp(),
+                iat_ns: None,
                 exp: chrono::Utc::now().timestamp() + 300,
             };
             let token = jsonwebtoken::encode(
@@ -2131,6 +2233,7 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             iss: "axiam-test".into(),
             iat: now,
+            iat_ns: None,
             exp: now + 300,
         };
         let mut header = Header::new(Algorithm::EdDSA);

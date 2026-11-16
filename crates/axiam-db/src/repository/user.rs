@@ -769,7 +769,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             // epoch in the same statement, so no moment exists at which the new
             // hash is stored and an artefact of the old one is still honoured.
             if input.password_hash.is_some() {
-                sets.push("credential_changed_at = time::now()");
+                sets.push("credential_changed_at = $credential_epoch");
             }
             sets.push("updated_at = time::now()");
 
@@ -846,7 +846,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 builder = builder.bind(("email", email));
             }
             if let Some(password_hash) = input.password_hash {
-                builder = builder.bind(("password_hash", password_hash));
+                builder = builder
+                    .bind(("password_hash", password_hash))
+                    .bind(("credential_epoch", Utc::now()));
             }
             if let Some(ref status) = input.status {
                 builder = builder.bind(("status", status_to_string(status).to_string()));
@@ -1049,7 +1051,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                  UPDATE type::record('user', $id) SET \
                      directory_external_id = $external_id, \
                      password_hash = $password_hash, \
-                     credential_changed_at = time::now(), \
+                     credential_changed_at = $credential_epoch, \
                      updated_at = time::now() \
                  WHERE tenant_id = $tenant_id; \
                  DELETE FROM opaque_credential \
@@ -1060,6 +1062,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("external_id", external_id.to_string()))
             .bind(("password_hash", unusable))
+            .bind(("credential_epoch", Utc::now()))
             .await
             .map_err(DbError::from)?;
         let mut result = result
@@ -1707,7 +1710,7 @@ impl<C: Connection> SurrealUserRepository<C> {
              scheduled_purge_at = NONE, \
              status = 'Anonymized', \
              erasure_audit_pending = $record_stamp, \
-             credential_changed_at = time::now(), \
+             credential_changed_at = $credential_epoch, \
              updated_at = time::now() \
              WHERE tenant_id = $tenant_id AND ($only_pending = false OR deletion_pending = true) \
              RETURN VALUE meta::id(id)); \
@@ -1733,6 +1736,7 @@ impl<C: Connection> SurrealUserRepository<C> {
                 .bind(("tenant_id", tenant_id.to_string()))
                 .bind(("record_stamp", record_stamp))
                 .bind(("only_pending", only_pending))
+                .bind(("credential_epoch", Utc::now()))
                 .await
                 .map_err(DbError::from)?;
             if let Some(text) = tx_error_text(result.take_errors()) {

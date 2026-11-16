@@ -363,6 +363,8 @@ async fn annotate_ssf<C: Connection + Clone>(
     responses(
         (status = 200, description = "Organization security settings",
          body = SecuritySettings),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      lacks `organizations:get_settings`"),
     ),
     security(("bearer" = []))
 )]
@@ -424,6 +426,8 @@ pub async fn get_org_settings<C: Connection + Clone>(
                         directory (LDAP / Active Directory); or a tenant's \
                         directory or opaque_mode changed after this request \
                         read them, so nothing was written — reload and retry"),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      lacks `organizations:update_settings`"),
     ),
     security(("bearer" = []))
 )]

@@ -14,9 +14,9 @@ use axiam_core::models::settings::{LockoutPolicy, MfaPolicy, PasswordPolicy};
 use axiam_core::models::user::{UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     FederationLinkRepository, PasswordHistoryRepository, RefreshTokenRepository, SessionRepository,
-    UserRepository,
+    UserRepository, WebauthnCredentialRepository,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -28,7 +28,9 @@ use crate::config::AuthConfig;
 use crate::crypto_gate::acquire_hash_permit;
 use crate::error::AuthError;
 use crate::token::AUD_USER;
+use crate::webauthn::WebauthnService;
 use crate::{password, token, totp};
+use webauthn_rs::prelude::PublicKeyCredential;
 
 mod directory;
 pub use directory::{
@@ -201,6 +203,13 @@ struct MfaChallengeClaims {
     purpose: String,
     iss: String,
     iat: i64,
+    /// The issue time in nanoseconds since the Unix epoch. `iat` is whole
+    /// seconds, which cannot tell a token minted just after a credential change
+    /// from one minted just before it in the same second (SA-06, QR2-6). Both
+    /// token kinds are server-internal, so the claim is ours to add. Absent on a
+    /// token minted before it existed; the comparison then uses `iat`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iat_ns: Option<i64>,
     exp: i64,
 }
 
@@ -963,7 +972,7 @@ impl<
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
         // SA-06 (S-6): a challenge minted before the credential last changed
         // answers to the old password. Refused as any invalid challenge is.
-        if user.credential_changed_since_secs(claims.iat) {
+        if user.credential_changed_since_claims(claims.iat, claims.iat_ns) {
             return Err(AuthError::TokenInvalid(
                 "MFA challenge predates a credential change".into(),
             )
@@ -1042,6 +1051,20 @@ impl<
         &self,
         token: &str,
     ) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+        self.decode_mfa_challenge_ids_at(token)
+            .await
+            .map(|(user_id, tenant_id, org_id, _)| (user_id, tenant_id, org_id))
+    }
+
+    /// As [`Self::decode_mfa_challenge_ids`], and also the challenge's issue
+    /// time, which the WebAuthn second-factor ceremony carries in its state
+    /// token so that its finish can be refused when the credential changed
+    /// after the challenge was issued (SA-06, SR2-1). A challenge minted before
+    /// the sub-second claim existed reports its whole-second `iat`.
+    pub async fn decode_mfa_challenge_ids_at(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, Uuid, DateTime<Utc>), AuthError> {
         let claims = self.decode_mfa_challenge(token)?;
         let user_id: Uuid = claims
             .sub
@@ -1060,12 +1083,55 @@ impl<
             .get_by_id(tenant_id, user_id)
             .await
             .map_err(|_| AuthError::TokenInvalid("unknown user".into()))?;
-        if user.credential_changed_since_secs(claims.iat) {
+        if user.credential_changed_since_claims(claims.iat, claims.iat_ns) {
             return Err(AuthError::TokenInvalid(
                 "MFA challenge predates a credential change".into(),
             ));
         }
-        Ok((user_id, tenant_id, org_id))
+        let issued_at = match claims.iat_ns {
+            Some(ns) => DateTime::from_timestamp_nanos(ns),
+            None => DateTime::from_timestamp(claims.iat, 0)
+                .ok_or_else(|| AuthError::TokenInvalid("bad iat".into()))?,
+        };
+        Ok((user_id, tenant_id, org_id, issued_at))
+    }
+
+    /// The WebAuthn second-factor finish: refuse a ceremony whose challenge
+    /// predates the user's last credential change, then verify the assertion
+    /// ([`WebauthnService::finish_authentication`]). Returns the
+    /// authenticated `(user_id, org_id)`.
+    ///
+    /// `start_authentication` checks the credential epoch when the ceremony
+    /// starts; the state token it mints lives
+    /// `mfa_challenge_lifetime_secs`, and a password reset or change between
+    /// start and finish must not be survived by it (SA-06, SR2-1). The state
+    /// token carries the issue time of the MFA challenge it descends from,
+    /// compared here at full precision. The refusal comes before the assertion
+    /// is looked at and is the answer an invalid state token gets, as is an
+    /// unreadable user (fail closed).
+    pub async fn finish_webauthn_authentication<W: WebauthnCredentialRepository>(
+        &self,
+        webauthn: &WebauthnService<W>,
+        tenant_id: Uuid,
+        state_token: &str,
+        response: &PublicKeyCredential,
+    ) -> AxiamResult<(Uuid, Uuid)> {
+        let (user_id, state_tenant_id, issued) =
+            webauthn.authentication_state_issue(state_token)?;
+        if state_tenant_id != tenant_id {
+            return Err(AuthError::WebauthnStateInvalid.into());
+        }
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        if user.credential_changed_since_claims(issued.iat, issued.iat_ns) {
+            return Err(AuthError::WebauthnStateInvalid.into());
+        }
+        webauthn
+            .finish_authentication(tenant_id, state_token, response)
+            .await
     }
 
     /// Start MFA enrollment for a user (step 1 of 2).
@@ -1919,7 +1985,8 @@ impl<
         tenant_id: Uuid,
         org_id: Uuid,
     ) -> Result<String, AuthError> {
-        let now = Utc::now().timestamp();
+        let issued_at = Utc::now();
+        let now = issued_at.timestamp();
         let claims = MfaChallengeClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -1927,6 +1994,7 @@ impl<
             purpose: "mfa_challenge".into(),
             iss: self.config.jwt_issuer.clone(),
             iat: now,
+            iat_ns: issued_at.timestamp_nanos_opt(),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -1972,7 +2040,8 @@ impl<
         tenant_id: Uuid,
         org_id: Uuid,
     ) -> Result<String, AuthError> {
-        let now = Utc::now().timestamp();
+        let issued_at = Utc::now();
+        let now = issued_at.timestamp();
         let claims = MfaChallengeClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -1980,6 +2049,7 @@ impl<
             purpose: "mfa_setup".into(),
             iss: self.config.jwt_issuer.clone(),
             iat: now,
+            iat_ns: issued_at.timestamp_nanos_opt(),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -2046,7 +2116,7 @@ impl<
             .get_by_id(tenant_id, user_id)
             .await
             .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
-        if user.credential_changed_since_secs(data.claims.iat) {
+        if user.credential_changed_since_claims(data.claims.iat, data.claims.iat_ns) {
             return Err(AuthError::MfaSetupTokenInvalid);
         }
 

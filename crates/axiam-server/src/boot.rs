@@ -3108,6 +3108,9 @@ where
         // `managed_by`, which never changes for a `client_id` — cache it
         // (see axiam_api_rest::client_managed_by_cache).
         client_managed_by_cache: Arc::new(Default::default()),
+        // QR2-8 / SR2-4: bounds the system-audit organization lookup (see
+        // axiam_api_rest::audit_organization).
+        system_audit_org_cache: Arc::new(Default::default()),
         user_repo: user_repo.clone(),
         group_repo: group_repo.clone(),
         role_repo: role_repo.clone(),
@@ -3797,9 +3800,18 @@ fn trusted_proxies_for_boot(
 /// `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER`, read by hand in `main` (the
 /// spelling operators already use).
 ///
-/// Fails closed (S-9): only `true`, `1` or `yes`, compared case-insensitively
-/// after trimming, enable the switch. Anything else — an empty Compose
-/// `${VAR:-}`, `off`, a typo — leaves it disabled, which is the default.
+/// The same variable is first read by the layered config loader
+/// (`load_config`), which binds it to `AuthConfig::allow_missing_aud_as_user`
+/// like every other `AXIAM__*` boolean. The loader accepts only `1`, `true`,
+/// `on`, `yes`, `0`, `false`, `off` and `no` (case-insensitive, untrimmed);
+/// any other value — an empty Compose `${VAR:-}`, a padded value, a typo —
+/// fails the load and the server does not start. This function never sees
+/// such a value.
+///
+/// It runs after a successful load and fails closed (S-9): only `true`, `1`
+/// or `yes` enable the switch. Of the values the loader accepts, the one
+/// whose outcome it changes is `on`: the loader reads it as `true`, and this
+/// override turns it back off.
 pub fn allow_missing_aud_override(value: &str) -> bool {
     let value = value.trim();
     ["true", "1", "yes"]
@@ -3843,8 +3855,10 @@ mod tests {
     }
 
     /// S-9: the `allow_missing_aud_as_user` override enables only on an
-    /// explicit affirmative; anything else — an empty Compose `${VAR:-}`,
-    /// `off`, a typo — leaves it disabled.
+    /// explicit affirmative. These are helper-level cases: at startup the
+    /// config loader has already refused every value it cannot read as a
+    /// boolean (empty, padded, a typo), so of the inputs below only `on`
+    /// reaches this function from a running server and changes its outcome.
     #[test]
     fn the_missing_aud_override_enables_only_on_an_affirmative() {
         for on in ["true", "TRUE", " True ", "1", "yes", "YES", " yes\n"] {

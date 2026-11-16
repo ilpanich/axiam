@@ -49,6 +49,7 @@ use crate::state::AppState;
 use crate::{AuthenticatedPrincipal, AuthenticatedUser};
 use axiam_core::error::AxiamError;
 use axiam_core::models::role::{TenantReach, tenant_reach_of};
+use axiam_core::models::tenant::Tenant;
 use axiam_core::repository::{RoleRepository as _, TenantRepository as _};
 
 /// Refuses a caller whose own record does not live in the organization's
@@ -64,10 +65,14 @@ use axiam_core::repository::{RoleRepository as _, TenantRepository as _};
 /// A tenant that cannot be resolved is refused rather than assumed ordinary:
 /// failing closed is the only safe direction for an authorization guard, and a
 /// principal whose own tenant has vanished has bigger problems.
+///
+/// On success it returns the caller's own tenant — the organization scope it
+/// had to load anyway — so a handler that needs the caller's organization
+/// reads `organization_id` from it instead of loading the same row again.
 pub async fn require_organization_principal<C: Connection + Clone>(
     user: &AuthenticatedUser,
     state: &AppState<C>,
-) -> Result<(), AxiamApiError> {
+) -> Result<Tenant, AxiamApiError> {
     let deny = |reason: &str| -> AxiamApiError {
         AxiamApiError(AxiamError::AuthorizationDenied {
             reason: reason.to_string(),
@@ -117,7 +122,7 @@ pub async fn require_organization_principal<C: Connection + Clone>(
         ));
     }
 
-    Ok(())
+    Ok(home)
 }
 
 /// Whether this caller's own record lives in the organization's reserved

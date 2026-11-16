@@ -192,11 +192,29 @@ impl User {
     /// is whole seconds (a JWT `iat`). The epoch is truncated to its second, so
     /// a token minted in the same second as a later change is refused; the
     /// price is that one minted in that second *after* the change is too, and
-    /// the user signs in again.
+    /// the user signs in again. Only a fallback now, for a token that carries
+    /// no sub-second issue time: see [`Self::credential_changed_since_claims`].
     #[must_use]
     pub fn credential_changed_since_secs(&self, iat_secs: i64) -> bool {
         self.credential_changed_at
             .is_some_and(|epoch| iat_secs <= epoch.timestamp())
+    }
+
+    /// Whether a short-lived artefact whose claims carry `iat` (whole seconds)
+    /// and, if it was minted with it, `iat_ns` (the issue time in nanoseconds
+    /// since the Unix epoch) predates the last credential change.
+    ///
+    /// With `iat_ns` the comparison is [`Self::credential_changed_since`], at
+    /// full precision, so an artefact minted after the change in the same
+    /// second is accepted. A token minted without it (before the claim
+    /// existed: a rolling upgrade) falls back to the whole-second
+    /// [`Self::credential_changed_since_secs`].
+    #[must_use]
+    pub fn credential_changed_since_claims(&self, iat_secs: i64, iat_ns: Option<i64>) -> bool {
+        match iat_ns {
+            Some(ns) => self.credential_changed_since(DateTime::from_timestamp_nanos(ns)),
+            None => self.credential_changed_since_secs(iat_secs),
+        }
     }
 
     /// Whether the tenant's directory, not AXIAM, holds this account's

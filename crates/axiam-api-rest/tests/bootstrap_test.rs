@@ -186,34 +186,6 @@ async fn first_boot_token(db: &Surreal<TestDb>) -> String {
         .expect("a fresh DB must mint a first-boot setup token")
 }
 
-/// POST a bootstrap request for `email` with an optional `setup_token` and
-/// return the HTTP status. Shared by the SA-01 gate tests.
-async fn post_bootstrap_status(
-    db: &Surreal<TestDb>,
-    email: &str,
-    setup_token: Option<&str>,
-) -> u16 {
-    let auth = test_auth_config();
-    let authz = make_authz(db);
-    let app = test_app!(db.clone(), auth, authz);
-    let mut body = serde_json::json!({
-        "organization_name": "Gate Org",
-        "email": email,
-        "username": "gateadmin",
-        "password": TEST_PASSWORD,
-    });
-    if let Some(t) = setup_token {
-        body["setup_token"] = serde_json::json!(t);
-    }
-    let peer: SocketAddr = TEST_PEER.parse().unwrap();
-    let req = test::TestRequest::post()
-        .uri("/api/v1/admin/bootstrap")
-        .peer_addr(peer)
-        .set_json(body)
-        .to_request();
-    test::call_service(&app, req).await.status().as_u16()
-}
-
 /// SA-01 (C1): `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is an additional restriction,
 /// never a substitute for the setup token.
 #[actix_rt::test]
@@ -272,6 +244,56 @@ async fn post_bootstrap_raw(
     let status = resp.status().as_u16();
     let bytes = test::read_body(resp).await.to_vec();
     (status, bytes)
+}
+
+/// POST a bootstrap request for `email` with an optional `setup_token` and
+/// return the HTTP status. Shared by the SA-01 gate tests.
+async fn post_bootstrap_status(
+    db: &Surreal<TestDb>,
+    email: &str,
+    setup_token: Option<&str>,
+) -> u16 {
+    post_bootstrap_raw(db, email, setup_token).await.0
+}
+
+/// SA-01 review (QR2-1): a deployment first bootstrapped through the pre-SA-01
+/// email-only gate holds a minted setup token that was never consumed. Once an
+/// admin exists (`bootstrap_lock:global`), presenting that token must still be
+/// refused by the gate — 403 with the one gate reason — not reach the lock
+/// pre-check and answer 409.
+#[actix_rt::test]
+async fn bootstrap_after_admin_with_unconsumed_token_is_refused_by_the_gate() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    let db = setup_empty_db().await;
+    let token = first_boot_token(&db).await;
+    // The state an email-only bootstrap left behind: the deployment is
+    // bootstrapped, the minted token is not marked consumed.
+    db.query("CREATE type::record('bootstrap_lock', 'global') SET locked_at = time::now()")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let with_old_token = post_bootstrap_raw(&db, "late@example.com", Some(&token)).await;
+    let no_token = post_bootstrap_raw(&db, "late@example.com", None).await;
+
+    let show = |r: &(u16, Vec<u8>)| format!("{} {}", r.0, String::from_utf8_lossy(&r.1));
+    assert_eq!(
+        with_old_token.0,
+        403,
+        "a bootstrap after an admin exists must be 403 even with an unconsumed \
+         token, got {}",
+        show(&with_old_token)
+    );
+    assert_eq!(
+        show(&with_old_token),
+        show(&no_token),
+        "the post-bootstrap refusal must carry the one gate reason"
+    );
 }
 
 /// SA-01 review (Q-6 / S-4): without a valid setup token the gate must not

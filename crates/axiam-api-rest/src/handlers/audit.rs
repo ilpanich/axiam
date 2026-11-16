@@ -1,8 +1,6 @@
 use actix_web::{HttpResponse, web};
 use axiam_core::models::audit::AuditLogEntry;
-use axiam_core::repository::{
-    AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination, TenantRepository,
-};
+use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination};
 use surrealdb::Connection;
 use uuid::Uuid;
 
@@ -91,14 +89,14 @@ pub async fn list_system<C: Connection + Clone>(
     // other organizations' included. Reading it is an organization-level act,
     // never a tenant administrator's, whatever its role carries. See
     // `handlers::org_scope`.
-    crate::handlers::org_scope::require_organization_principal(&user, state.get_ref()).await?;
+    //
     // And only the rows of the caller's own organization (review Q-3/S-2):
-    // the organization of the caller's own record, as the datastore has it.
-    let organization_id = state
-        .tenant_repo
-        .get_by_id(user.principal_tenant_id)
-        .await?
-        .organization_id;
+    // the organization of the caller's own record, as the datastore has it —
+    // read from the scope tenant the guard has just loaded (QR2-10).
+    let organization_id =
+        crate::handlers::org_scope::require_organization_principal(&user, state.get_ref())
+            .await?
+            .organization_id;
     let result = state
         .audit_repo
         .list_system(

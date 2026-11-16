@@ -3414,3 +3414,125 @@ async fn login_alice_with_password(
     .await
     .unwrap()
 }
+
+// ---------------------------------------------------------------------
+// QR2-6 — an MFA token minted after a credential change, within the same
+// whole second, is not "issued before it".
+// ---------------------------------------------------------------------
+
+/// Set alice's stored credential epoch directly, so the comparison is
+/// deterministic instead of depending on how long a login took.
+async fn set_alices_epoch(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    user_id: Uuid,
+    epoch: chrono::DateTime<chrono::Utc>,
+) {
+    db.query("UPDATE type::record('user', $id) SET credential_changed_at = $epoch")
+        .bind(("id", user_id.to_string()))
+        .bind(("epoch", epoch))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+}
+
+/// The `iat` (whole seconds) and, if the token carries it, the sub-second issue
+/// time in nanoseconds (`iat_ns`) of a purpose token.
+fn token_issue_time(token: &str) -> (i64, Option<i64>) {
+    use base64::Engine;
+    let payload = token.split('.').nth(1).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap(),
+    )
+    .unwrap();
+    (
+        json["iat"].as_i64().unwrap(),
+        json.get("iat_ns").and_then(serde_json::Value::as_i64),
+    )
+}
+
+/// QR2-6: a challenge and a setup token issued after the epoch but in the same
+/// second as it are accepted; one issued before it, in that second, is refused.
+#[tokio::test]
+async fn qr2_6_a_token_issued_after_the_epoch_in_the_same_second_is_accepted() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let _totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let challenge_token =
+        match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+            LoginResult::MfaRequired(c) => c.challenge_token,
+            other => panic!("expected MfaRequired, got {other:?}"),
+        };
+
+    // The epoch is the start of the second the challenge was minted in: before
+    // the token, and in its whole second.
+    let (iat, iat_ns) = token_issue_time(&challenge_token);
+    let epoch = chrono::DateTime::from_timestamp(iat, 0).unwrap();
+    if let Some(ns) = iat_ns {
+        assert!(ns > iat * 1_000_000_000, "the claim is sub-second");
+    }
+    set_alices_epoch(&db, user_id, epoch).await;
+    assert!(
+        svc.decode_mfa_challenge_ids(&challenge_token).await.is_ok(),
+        "a challenge issued after the epoch, in the same second, is not stale"
+    );
+
+    // A token issued *before* the epoch, in that same second, is still refused.
+    let before = match iat_ns {
+        Some(ns) => chrono::DateTime::from_timestamp_nanos(ns + 1_000),
+        None => chrono::DateTime::from_timestamp(iat + 1, 0).unwrap(),
+    };
+    set_alices_epoch(&db, user_id, before).await;
+    assert!(
+        svc.decode_mfa_challenge_ids(&challenge_token)
+            .await
+            .is_err(),
+        "a challenge issued before the epoch is refused"
+    );
+}
+
+/// QR2-6, the setup token: the same property.
+#[tokio::test]
+async fn qr2_6_a_setup_token_issued_after_the_epoch_in_the_same_second_is_accepted() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    let (iat, iat_ns) = token_issue_time(&setup_token);
+    set_alices_epoch(
+        &db,
+        user_id,
+        chrono::DateTime::from_timestamp(iat, 0).unwrap(),
+    )
+    .await;
+    assert!(
+        svc.decode_setup_token(&setup_token).await.is_ok(),
+        "a setup token issued after the epoch, in the same second, is not stale"
+    );
+    let before = match iat_ns {
+        Some(ns) => chrono::DateTime::from_timestamp_nanos(ns + 1_000),
+        None => chrono::DateTime::from_timestamp(iat + 1, 0).unwrap(),
+    };
+    set_alices_epoch(&db, user_id, before).await;
+    assert!(svc.decode_setup_token(&setup_token).await.is_err());
+}

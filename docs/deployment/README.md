@@ -486,9 +486,21 @@ backfill). An MFA challenge token, an MFA setup token or an in-flight OPAQUE log
 (`login/start` already answered, `login/finish` not yet sent) issued before that instant is
 refused with the response an invalid or expired one gets, so a reset also stops a login the
 holder of the old password had in flight. A user whose credential has not changed since the
-upgrade has no stamp and is refused nothing. `iat` of the two tokens is whole seconds, so a
-token minted in the same second as the change is refused too, and the person signs in again; the
-OPAQUE exchange compares at sub-second precision.
+upgrade has no stamp and is refused nothing. The two MFA tokens (and the WebAuthn
+second-factor state token, which carries the challenge's issue time and is checked again when the
+ceremony finishes) carry a sub-second issue time, `iat_ns`, and are compared with the stamp at full
+precision, as the OPAQUE exchange is: a token minted after the change, even in the same second, is
+accepted. A token minted without the claim (during a rolling upgrade) is compared by its
+whole-second `iat`, and one minted in the same second as a later change is refused.
+
+*Clock assumption.* The stamp is written from the application replica's clock, bound into the
+credential's own transaction, not from the datastore's, because the artefacts it is compared with
+are stamped by an application replica too. Run the replicas (and, for a remote cluster, the
+datastore) NTP-synchronised, as JWT `exp` handling already requires. A skew of delta shifts the
+refusal window by delta: if the replica that minted a token runs delta ahead of the one that wrote
+the stamp, a token minted up to delta before the change is still accepted; if it runs delta behind,
+one minted up to delta after the change is refused and the person signs in again. Normal NTP keeps
+delta in the milliseconds.
 
 **Accounts whose entry has no usable e-mail address cannot be provisioned.** A
 local account must have an e-mail address, and AXIAM does not invent one: a
@@ -732,12 +744,15 @@ An access-token verifier (REST, gRPC interceptor and `ValidateToken`,
 introspection, RFC 8693 `subject_token`, UMA `claim_token`) also refuses any
 token whose claims carry `purpose`, whatever its `typ`. An `id_token_hint`
 (end-session, `/oauth2/authorize`, CIBA) is accepted only with `typ: JWT` or
-no `typ`; an access token or any other kind above is refused as a hint.
+no `typ`, and only if its claims carry none of `jti`, `purpose`, `scope` or
+`client_id`, which no ID token has ever carried; an access token or any other
+kind above is refused as a hint, including an access token minted by a
+release before this one (`typ: JWT`), however old.
 
 | Variable | Purpose |
 |---|---|
 | `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` | Default **`true`**: an access token without `typ: at+jwt` is refused. `false`, `0`, `no` or `off` (any case) relax it; an unrecognised value stops the server at startup with a configuration error. |
-| `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` | Default **`false`**: an access token without `aud` is refused on user routes and on gRPC. Enabled only by `true`, `1` or `yes` (any case, surrounding whitespace ignored); any other value — empty, `off`, a typo — leaves it disabled. |
+| `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` | Default **`false`**: an access token without `aud` is refused on user routes and on gRPC. Enabled only by `true`, `1` or `yes` (any case). `false`, `0`, `no`, `off` and also `on` leave it disabled. Like every `AXIAM__*` boolean, any other value — empty, padded with whitespace, a typo — stops the server at startup with a configuration error. |
 
 **What the default costs on upgrade.** Releases before this change minted
 access tokens with the generic `typ: JWT`. With

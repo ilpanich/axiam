@@ -1183,6 +1183,104 @@ async fn n7_a_reset_without_a_record_retires_the_old_opaque_record() {
     );
 }
 
+/// `login/start` for `password`, then the client's `KE3`, held back: the
+/// attacker's "login always in flight" (S-1). Returns the pieces `finish_held`
+/// sends.
+async fn start_and_hold(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    org_id: Uuid,
+    tenant_id: Uuid,
+    password: &str,
+) -> (String, String) {
+    let (state, ke1) = ClientLoginState::start(password).unwrap();
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/opaque/login/start")
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "username_or_email": USERNAME,
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "login/start");
+    let started: serde_json::Value = test::read_body_json(resp).await;
+    let ksf = ksf_from_response(&started);
+    let finished = state
+        .finish(password, started["ke2"].as_str().unwrap(), &ksf)
+        .expect("the client opens KE2 with the right password");
+    (
+        started["opaque_session"].as_str().unwrap().to_string(),
+        finished.ke3,
+    )
+}
+
+async fn finish_held(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    held: &(String, String),
+) -> (u16, bool) {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/opaque/login/finish")
+        .set_json(serde_json::json!({ "opaque_session": held.0, "ke3": held.1 }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let session = resp
+        .response()
+        .cookies()
+        .any(|c| c.name() == "axiam_access");
+    (status, session)
+}
+
+/// S-1 (SA-06 / N7): a login started before a reset must not finish after it.
+#[actix_web::test]
+async fn s1_a_login_in_flight_across_a_reset_is_refused() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("s1-inflight");
+
+    // Control: a login that is not interrupted finishes.
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    assert_eq!(finish_held(&app, &held).await, (200, true), "control");
+
+    // The attacker, holding the old password, has an exchange in flight...
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    // ...the victim resets (with no new record, so the old one is retired)...
+    let status = confirm_reset(&app, &db, tenant_id, user_id, reset_password(), None).await;
+    assert_eq!(status, 200);
+    // ...and the pending exchange must not mint a session the reset never saw.
+    let (finish, session) = finish_held(&app, &held).await;
+    assert_eq!(
+        finish, 401,
+        "the in-flight login must be refused after a reset"
+    );
+    assert!(!session, "no session cookie may be issued");
+
+    // A login started after the reset is unaffected (password path agrees).
+    assert!(
+        password_login(&app, org_id, tenant_id, reset_password())
+            .await
+            .is_some()
+    );
+}
+
+/// S-1 control: enrolment wrote a record and so stamped the credential epoch;
+/// a login started after it is not refused.
+#[actix_web::test]
+async fn s1_a_login_started_after_the_last_credential_write_finishes() {
+    let (_db, org_id, tenant_id, _user_id, app) = enrolled_app!("s1-fresh");
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    assert_eq!(finish_held(&app, &held).await, (200, true));
+}
+
 #[actix_web::test]
 async fn n7_a_change_without_a_record_retires_the_old_opaque_record() {
     let (db, org_id, tenant_id, user_id, app) = enrolled_app!("n7-change");

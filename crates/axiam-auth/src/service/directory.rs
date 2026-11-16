@@ -712,6 +712,7 @@ impl<
             outcome,
             ip_address,
             metadata: Some(metadata),
+            organization_id: None,
         })
         .await;
     }

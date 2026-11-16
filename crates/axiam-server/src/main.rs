@@ -456,10 +456,8 @@ async fn main() -> std::io::Result<()> {
     // SA-03). The serde default already sets it to false; this keeps the
     // explicit env-var spelling an operator may already use.
     if let Ok(val) = std::env::var("AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER") {
-        match val.to_lowercase().as_str() {
-            "false" | "0" | "no" => config.auth.allow_missing_aud_as_user = false,
-            _ => config.auth.allow_missing_aud_as_user = true,
-        }
+        config.auth.allow_missing_aud_as_user =
+            axiam_server::boot::allow_missing_aud_override(&val);
     }
     // SA-03 (N10, D-7): say so at startup when the access-token `typ` check is
     // relaxed, so a rolling-upgrade setting is not left on by accident.
@@ -525,6 +523,10 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to run database migrations");
 
     tracing::info!("Database connected and migrations applied");
+
+    // Q-11 / S-12: build the timing-equalisation dummy hash now, so the first
+    // unknown-user refusal after a restart costs what every later one does.
+    axiam_auth::password::warm_up_equalisation();
 
     // Boot: mint a one-time bootstrap setup token if this database has never
     // been bootstrapped (SECHRD-04 / D-03b). No-op on every subsequent boot.

@@ -3104,15 +3104,33 @@ async fn sa03_mfa_purpose_tokens_are_typed_and_are_not_access_tokens() {
     ] {
         let header = jsonwebtoken::decode_header(token).unwrap();
         assert_eq!(header.typ.as_deref(), Some(typ));
+        // S-8: a purpose token names no JWKS key, so a verifier that selects
+        // keys strictly by `kid` finds none for it.
+        assert_eq!(header.kid, None, "{typ} token must carry no kid");
         assert!(token::validate_access_token(token, &test_config()).is_err());
         assert!(token::decode_access_token_any_audience(token, &test_config()).is_err());
     }
 
     // Each verifier accepts its own token and refuses the other one.
-    assert!(svc.decode_setup_token(&setup_token).is_ok());
-    assert!(svc.decode_mfa_challenge_ids(&challenge_token).is_ok());
-    assert!(svc.decode_setup_token(&challenge_token).is_err());
-    assert!(svc.decode_mfa_challenge_ids(&setup_token).is_err());
+    assert!(svc.decode_setup_token(&setup_token).await.is_ok());
+    assert!(svc.decode_mfa_challenge_ids(&challenge_token).await.is_ok());
+    assert!(svc.decode_setup_token(&challenge_token).await.is_err());
+    assert!(svc.decode_mfa_challenge_ids(&setup_token).await.is_err());
+}
+
+type TestSvc = AuthService<
+    SurrealUserRepository<surrealdb::engine::local::Db>,
+    SurrealSessionRepository<surrealdb::engine::local::Db>,
+    SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+    SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+>;
+
+/// Whether the verifier for `purpose` admits `token`.
+async fn purpose_token_accepted(svc: &TestSvc, purpose: &str, token: &str) -> bool {
+    match purpose {
+        "mfa_challenge" => svc.decode_mfa_challenge_ids(token).await.is_ok(),
+        _ => svc.decode_setup_token(token).await.is_ok(),
+    }
 }
 
 /// Sign `claims` with the test key under a header whose `typ` the test picks.
@@ -3127,9 +3145,14 @@ fn sign_with_typ(claims: &serde_json::Value, typ: Option<&str>) -> String {
     .unwrap()
 }
 
-/// An access token is refused by both MFA verifiers (SA-03 rule 6), and so is
-/// a token with an MFA token's claims under any `typ` other than the
-/// verifier's own.
+/// A token typed as an access token is refused by both MFA verifiers (SA-03
+/// rule 6), and so is a token with an MFA token's claims under any `typ` other
+/// than the verifier's own.
+///
+/// A real access token carries no `purpose`, so `MfaChallengeClaims` already
+/// refuses it at deserialisation; what only the `typ` check refuses is a token
+/// whose claims are an MFA token's and whose header is an access token's.
+/// Both halves below sign exactly that.
 #[tokio::test]
 async fn sa03_an_access_token_is_refused_by_the_mfa_verifiers() {
     let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
@@ -3146,8 +3169,32 @@ async fn sa03_an_access_token_is_refused_by_the_mfa_verifiers() {
     let header = jsonwebtoken::decode_header(&access).unwrap();
     assert_eq!(header.typ.as_deref(), Some("at+jwt"));
     assert!(header.kid.is_some(), "an access token names its key");
-    assert!(svc.decode_mfa_challenge_ids(&access).is_err());
-    assert!(svc.decode_setup_token(&access).is_err());
+
+    // The access token's own claims, made MFA-shaped — `purpose` added, and
+    // `aud` removed, since the MFA verifiers set no audience and so already
+    // refuse any token that carries one — re-signed under the access token's
+    // own header (`at+jwt` and its `kid`).
+    let payload = access.split('.').nth(1).unwrap();
+    let mut access_claims: serde_json::Value = serde_json::from_slice(
+        &base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+            .unwrap(),
+    )
+    .unwrap();
+    access_claims.as_object_mut().unwrap().remove("aud");
+    for purpose in ["mfa_challenge", "mfa_setup"] {
+        access_claims["purpose"] = purpose.into();
+        let forged = jsonwebtoken::encode(
+            &header,
+            &access_claims,
+            &jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        let accepted = purpose_token_accepted(&svc, purpose, &forged).await;
+        assert!(
+            !accepted,
+            "{purpose} verifier accepted an at+jwt access token carrying purpose"
+        );
+    }
 
     let now = Utc::now().timestamp();
     for (purpose, own_typ) in [
@@ -3163,16 +3210,207 @@ async fn sa03_an_access_token_is_refused_by_the_mfa_verifiers() {
             "iat": now,
             "exp": now + 300,
         });
-        let verify = |t: &str| match purpose {
-            "mfa_challenge" => svc.decode_mfa_challenge_ids(t).is_ok(),
-            _ => svc.decode_setup_token(t).is_ok(),
-        };
         for typ in [Some("at+jwt"), Some("JWT"), None] {
             assert!(
-                !verify(&sign_with_typ(&claims, typ)),
+                !purpose_token_accepted(&svc, purpose, &sign_with_typ(&claims, typ)).await,
                 "{purpose} verifier accepted typ {typ:?}"
             );
         }
-        assert!(verify(&sign_with_typ(&claims, Some(own_typ))));
+        assert!(
+            purpose_token_accepted(&svc, purpose, &sign_with_typ(&claims, Some(own_typ))).await
+        );
     }
+}
+
+// -----------------------------------------------------------------------
+// SA-06 (N7; S-6): MFA purpose tokens do not survive a credential change
+// -----------------------------------------------------------------------
+
+/// A reset: the same write `PasswordResetService::confirm_reset` makes.
+async fn reset_alices_password(
+    users: &SurrealUserRepository<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) {
+    users
+        .update(
+            tenant_id,
+            user_id,
+            axiam_core::models::user::UpdateUser {
+                password_hash: Some(
+                    axiam_auth::password::hash_password("A-brand-new-Passw0rd!", None).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// S-6: an MFA setup token issued before a reset is refused after it, by every
+/// path that takes one, with the answer an invalid token gets.
+#[tokio::test]
+async fn s6_an_mfa_setup_token_issued_before_a_reset_is_refused_after_it() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    // Control: before any reset the token is good (and a user with no epoch is
+    // unaffected).
+    assert!(svc.decode_setup_token(&setup_token).await.is_ok());
+
+    reset_alices_password(&users, tenant_id, user_id).await;
+
+    let invalid = |e: axiam_core::error::AxiamError| {
+        assert!(
+            matches!(
+                &e,
+                axiam_core::error::AxiamError::AuthenticationFailed { .. }
+            ),
+            "expected the invalid-token answer, got {e:?}"
+        );
+    };
+    invalid(svc.decode_setup_token(&setup_token).await.unwrap_err());
+    invalid(
+        svc.enroll_mfa_with_setup_token(&setup_token)
+            .await
+            .unwrap_err(),
+    );
+    invalid(
+        svc.confirm_mfa_with_setup_token(&setup_token, "000000", None, None)
+            .await
+            .unwrap_err(),
+    );
+    // Nothing was enrolled behind the refusal.
+    assert!(
+        !users
+            .get_by_id(tenant_id, user_id)
+            .await
+            .unwrap()
+            .mfa_enabled
+    );
+}
+
+/// S-6: the same for an MFA challenge token, at verification and at the
+/// WebAuthn entry that reads its ids.
+#[tokio::test]
+async fn s6_an_mfa_challenge_token_issued_before_a_reset_is_refused_after_it() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let challenge_token =
+        match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+            LoginResult::MfaRequired(c) => c.challenge_token,
+            other => panic!("expected MfaRequired, got {other:?}"),
+        };
+    assert!(svc.decode_mfa_challenge_ids(&challenge_token).await.is_ok());
+
+    reset_alices_password(&users, tenant_id, user_id).await;
+
+    assert!(
+        svc.decode_mfa_challenge_ids(&challenge_token)
+            .await
+            .is_err()
+    );
+    let code = totp.generate_current().to_string();
+    let err = svc
+        .verify_mfa(VerifyMfaInput {
+            challenge_token: challenge_token.clone(),
+            totp_code: code,
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            axiam_core::error::AxiamError::AuthenticationFailed { .. }
+        ),
+        "expected the invalid-token answer, got {err:?}"
+    );
+}
+
+/// S-6 controls: a token issued after the change (a second later, so past the
+/// whole-second `iat`) is accepted, and so is a user who never had a change.
+#[tokio::test]
+async fn s6_a_token_issued_after_the_reset_is_accepted() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    assert!(
+        users
+            .get_by_id(tenant_id, user_id)
+            .await
+            .unwrap()
+            .credential_changed_at
+            .is_none(),
+        "a user nobody has changed has no epoch"
+    );
+    reset_alices_password(&users, tenant_id, user_id).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+
+    let setup_token = match login_alice_with_password(
+        &svc,
+        tenant_id,
+        org_id,
+        "A-brand-new-Passw0rd!",
+        mfa_enforced_policy(),
+    )
+    .await
+    {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    assert!(svc.decode_setup_token(&setup_token).await.is_ok());
+}
+
+/// Log in as alice with an explicit password.
+async fn login_alice_with_password(
+    svc: &TestSvc,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    password: &str,
+    policy: Option<MfaPolicy>,
+) -> LoginResult {
+    svc.login(LoginInput {
+        tenant_id,
+        org_id,
+        username_or_email: "alice".into(),
+        password: password.into(),
+        ip_address: None,
+        user_agent: None,
+        mfa_policy: policy,
+        lockout_policy: None,
+    })
+    .await
+    .unwrap()
 }

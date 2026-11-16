@@ -25,6 +25,9 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+mod org_scope_support;
+use org_scope_support::{org_operator, real_authz, seed_tenant, tenant_user};
+
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
@@ -143,6 +146,7 @@ async fn seed_audit_entries(
         outcome: AuditOutcome::Success,
         ip_address: Some("127.0.0.1".into()),
         metadata: None,
+        organization_id: None,
     })
     .await
     .unwrap();
@@ -156,6 +160,7 @@ async fn seed_audit_entries(
         outcome: AuditOutcome::Denied,
         ip_address: Some("127.0.0.1".into()),
         metadata: None,
+        organization_id: None,
     })
     .await
     .unwrap();
@@ -169,6 +174,7 @@ async fn seed_audit_entries(
         outcome: AuditOutcome::Failure,
         ip_address: None,
         metadata: None,
+        organization_id: None,
     })
     .await
     .unwrap();
@@ -295,12 +301,7 @@ async fn list_audit_logs_requires_auth() {
 async fn list_system_audit_logs_returns_only_nil_tenant() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
-    let scope = SurrealTenantRepository::new(db.clone())
-        .create(CreateTenant::organization_scope(org_id))
-        .await
-        .unwrap();
-    let user_id = create_admin_user(&db, scope.id).await;
-    let token = mint_token(&auth, user_id, scope.id, org_id);
+    let (_scope, user_id, token) = org_operator(&db, &auth, org_id, "admin").await;
 
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
 
@@ -318,6 +319,8 @@ async fn list_system_audit_logs_returns_only_nil_tenant() {
             outcome: AuditOutcome::Failure,
             ip_address: Some("10.0.0.1".into()),
             metadata: None,
+            // SA-02 (N1): the system partition is read per organization.
+            organization_id: Some(org_id),
         })
         .await
         .unwrap();
@@ -357,22 +360,6 @@ async fn list_system_audit_logs_requires_auth() {
 // SA-02 (N1): the system partition is not a tenant administrator's to read
 // -------------------------------------------------------------------------
 
-/// The real engine, so the seeded roles' grants decide `RequirePermission`
-/// rather than `AllowAllAuthzChecker`.
-fn real_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
-    use axiam_db::repository::{
-        SurrealGroupRepository, SurrealPermissionRepository, SurrealResourceRepository,
-        SurrealRoleRepository, SurrealScopeRepository,
-    };
-    Arc::new(axiam_authz::AuthorizationEngine::new(
-        SurrealRoleRepository::new(db.clone()),
-        SurrealPermissionRepository::new(db.clone()),
-        SurrealResourceRepository::new(db.clone()),
-        SurrealScopeRepository::new(db.clone()),
-        SurrealGroupRepository::new(db.clone()),
-    ))
-}
-
 macro_rules! real_authz_app {
     ($db:expr, $auth:expr) => {
         test::init_service(
@@ -391,94 +378,11 @@ macro_rules! real_authz_app {
     };
 }
 
-/// Seed the permission registry and default roles into `tenant_id`, as the
-/// tenant-create path does for every new tenant.
-async fn seed_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) {
-    use axiam_api_rest::permissions::PERMISSION_REGISTRY;
-    axiam_db::seed_permissions(db, tenant_id, PERMISSION_REGISTRY)
-        .await
-        .unwrap();
-    axiam_db::seed_default_roles(db, tenant_id, PERMISSION_REGISTRY)
-        .await
-        .unwrap();
-}
-
-/// A user in `tenant_id` holding the seeded role `role_name`, or — with
-/// `action` — a fresh global role granting only that action.
-async fn tenant_user(
-    db: &Surreal<TestDb>,
-    tenant_id: Uuid,
-    username: &str,
-    role_name: Option<&str>,
-    action: Option<&str>,
-) -> Uuid {
-    use axiam_core::models::role::{AssignmentScope, CreateRole};
-    use axiam_core::repository::{Pagination, PermissionRepository, RoleRepository};
-    use axiam_db::repository::{SurrealPermissionRepository, SurrealRoleRepository};
-
-    let user = SurrealUserRepository::new(db.clone())
-        .create(CreateUser {
-            tenant_id,
-            username: username.into(),
-            email: format!("{username}@example.com"),
-            password: TEST_PASSWORD.into(),
-            metadata: None,
-        })
-        .await
-        .unwrap();
-    let role_repo = SurrealRoleRepository::new(db.clone());
-    let page = Pagination {
-        offset: 0,
-        limit: 1000,
-        search: None,
-    };
-    let role_id = if let Some(name) = role_name {
-        role_repo
-            .list(tenant_id, page)
-            .await
-            .unwrap()
-            .items
-            .into_iter()
-            .find(|r| r.name == name)
-            .unwrap_or_else(|| panic!("default role `{name}` not seeded"))
-            .id
-    } else {
-        let action = action.expect("a role name or an action");
-        let role = role_repo
-            .create(CreateRole {
-                tenant_id,
-                name: format!("role-{username}"),
-                description: format!("grants only {action}"),
-                is_global: true,
-            })
-            .await
-            .unwrap();
-        let perm_repo = SurrealPermissionRepository::new(db.clone());
-        let perm = perm_repo
-            .list(tenant_id, page)
-            .await
-            .unwrap()
-            .items
-            .into_iter()
-            .find(|p| p.action == action)
-            .unwrap_or_else(|| panic!("permission `{action}` not seeded"));
-        perm_repo
-            .grant_to_role(tenant_id, role.id, perm.id)
-            .await
-            .unwrap();
-        role.id
-    };
-    role_repo
-        .assign_to_user(tenant_id, user.id, role_id, AssignmentScope::global())
-        .await
-        .unwrap();
-    user.id
-}
-
 /// The row the request audit middleware writes for a request it cannot
 /// attribute to a tenant (`middleware.rs`, nil tenant, `METHOD /path` as the
-/// action) — here, tenant B's SCIM call from 192.0.2.10.
-async fn sibling_traffic_in_the_system_partition(db: &Surreal<TestDb>) {
+/// action) — here, tenant B's SCIM call from 192.0.2.10, recorded for
+/// organization `org_id` (SA-02, N1).
+async fn sibling_traffic_in_the_system_partition(db: &Surreal<TestDb>, org_id: Uuid) {
     SurrealAuditLogRepository::new(db.clone())
         .append(CreateAuditLogEntry {
             tenant_id: Uuid::nil(),
@@ -489,6 +393,7 @@ async fn sibling_traffic_in_the_system_partition(db: &Surreal<TestDb>) {
             outcome: AuditOutcome::Success,
             ip_address: Some("192.0.2.10".into()),
             metadata: None,
+            organization_id: Some(org_id),
         })
         .await
         .unwrap();
@@ -515,7 +420,7 @@ async fn standard_tenant_admin_cannot_read_the_system_audit_partition() {
         .unwrap();
     seed_tenant(&db, tenant_a).await;
     seed_tenant(&db, tenant_b.id).await;
-    sibling_traffic_in_the_system_partition(&db).await;
+    sibling_traffic_in_the_system_partition(&db, org_id).await;
 
     let seeded_admin = tenant_user(&db, tenant_a, "a-admin", Some("admin"), None).await;
     let explicit = tenant_user(
@@ -554,17 +459,14 @@ async fn standard_tenant_admin_cannot_read_the_system_audit_partition() {
 #[actix_rt::test]
 async fn organization_principal_reads_the_system_audit_partition() {
     let (db, org_id, _tenant_id) = setup_db().await;
-    let scope = SurrealTenantRepository::new(db.clone())
-        .create(CreateTenant::organization_scope(org_id))
-        .await
-        .unwrap();
-    seed_tenant(&db, scope.id).await;
-    sibling_traffic_in_the_system_partition(&db).await;
-    let operator = tenant_user(&db, scope.id, "org-admin", Some("super-admin"), None).await;
+    let scope = org_scope_support::organization_scope(&db, org_id).await;
+    seed_tenant(&db, scope).await;
+    sibling_traffic_in_the_system_partition(&db, org_id).await;
+    let operator = tenant_user(&db, scope, "org-admin", Some("super-admin"), None).await;
 
     let auth = test_auth_config();
     let app = real_authz_app!(db, auth);
-    let token = mint_token(&auth, operator, scope.id, org_id);
+    let token = mint_token(&auth, operator, scope, org_id);
     let req = test::TestRequest::get()
         .uri("/api/v1/audit-logs/system")
         .insert_header(("Authorization", format!("Bearer {token}")))

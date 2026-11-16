@@ -961,6 +961,14 @@ impl<
 
         // 2. Fetch user and verify TOTP.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        // SA-06 (S-6): a challenge minted before the credential last changed
+        // answers to the old password. Refused as any invalid challenge is.
+        if user.credential_changed_since_secs(claims.iat) {
+            return Err(AuthError::TokenInvalid(
+                "MFA challenge predates a credential change".into(),
+            )
+            .into());
+        }
         Self::check_user_status(
             &user.status,
             user.created_at,
@@ -1026,7 +1034,14 @@ impl<
     /// This is used by the WebAuthn REST handler to extract
     /// `(user_id, tenant_id, org_id)` from an MFA challenge token
     /// so it can start a WebAuthn authentication ceremony.
-    pub fn decode_mfa_challenge_ids(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+    ///
+    /// Async because a challenge minted before the user's credential last
+    /// changed is refused (SA-06, S-6), which needs the user's credential
+    /// epoch; the refusal is the one an invalid token gets.
+    pub async fn decode_mfa_challenge_ids(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, Uuid), AuthError> {
         let claims = self.decode_mfa_challenge(token)?;
         let user_id: Uuid = claims
             .sub
@@ -1040,6 +1055,16 @@ impl<
             .org_id
             .parse()
             .map_err(|_| AuthError::TokenInvalid("bad org_id".into()))?;
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| AuthError::TokenInvalid("unknown user".into()))?;
+        if user.credential_changed_since_secs(claims.iat) {
+            return Err(AuthError::TokenInvalid(
+                "MFA challenge predates a credential change".into(),
+            ));
+        }
         Ok((user_id, tenant_id, org_id))
     }
 
@@ -1657,7 +1682,7 @@ impl<
         &self,
         setup_token: &str,
     ) -> AxiamResult<EnrollMfaOutput> {
-        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token)?;
+        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token).await?;
 
         // Guard: if MFA is already configured, reject.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
@@ -1680,7 +1705,7 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token)?;
+        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token).await?;
 
         // Confirm MFA (validates code, flips mfa_enabled to true).
         self.confirm_mfa(tenant_id, user_id, totp_code).await?;
@@ -1732,7 +1757,7 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, org_id) = self.decode_mfa_setup_token(setup_token)?;
+        let (user_id, tenant_id, org_id) = self.decode_mfa_setup_token(setup_token).await?;
         self.create_session_and_tokens(user_id, tenant_id, org_id, ip_address, user_agent, evidence)
             .await
     }
@@ -1751,8 +1776,10 @@ impl<
     /// this service holds only the first. The caller asks
     /// [`crate::mfa_methods::MfaMethodService::available_method_types`], which
     /// holds both.
-    pub fn decode_setup_token(&self, setup_token: &str) -> AxiamResult<(Uuid, Uuid, Uuid)> {
-        self.decode_mfa_setup_token(setup_token).map_err(Into::into)
+    pub async fn decode_setup_token(&self, setup_token: &str) -> AxiamResult<(Uuid, Uuid, Uuid)> {
+        self.decode_mfa_setup_token(setup_token)
+            .await
+            .map_err(Into::into)
     }
 
     // `reset_mfa` used to live here. It moved to
@@ -1962,7 +1989,11 @@ impl<
 
     /// Decode and validate an MFA setup token, returning (user_id,
     /// tenant_id, org_id).
-    fn decode_mfa_setup_token(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+    ///
+    /// A token minted before the user's credential last changed is refused
+    /// with the same [`AuthError::MfaSetupTokenInvalid`] an expired or forged
+    /// one gets (SA-06, S-6).
+    async fn decode_mfa_setup_token(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
         use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 
         let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
@@ -2007,6 +2038,17 @@ impl<
             .org_id
             .parse()
             .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
+
+        // SA-06 (S-6): fail closed — an unreadable user is as unusable as a
+        // forged token, and one whose credential changed after `iat` is stale.
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
+        if user.credential_changed_since_secs(data.claims.iat) {
+            return Err(AuthError::MfaSetupTokenInvalid);
+        }
 
         Ok((user_id, tenant_id, org_id))
     }

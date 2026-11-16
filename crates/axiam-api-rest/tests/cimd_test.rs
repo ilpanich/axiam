@@ -69,6 +69,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 type TestDb = surrealdb::engine::local::Db;
 
+mod org_scope_support;
+use org_scope_support::org_operator_token;
+
 const TEST_PEER: &str = "127.0.0.1:12345";
 const CSRF_TOKEN: &str = "test-csrf-token";
 const ISSUER: &str = "https://localhost";
@@ -161,30 +164,7 @@ async fn setup() -> Fixture {
     )
     .unwrap();
 
-    let scope = SurrealTenantRepository::new(db.clone())
-        .create(CreateTenant::organization_scope(org.id))
-        .await
-        .unwrap();
-    let operator = SurrealUserRepository::new(db.clone())
-        .create(CreateUser {
-            tenant_id: scope.id,
-            username: "org-admin".into(),
-            email: "org-admin@example.com".into(),
-            password: format!("pw-{}", Uuid::new_v4()),
-            metadata: None,
-        })
-        .await
-        .unwrap();
-    let org_token = issue_access_token(
-        operator.id,
-        scope.id,
-        org.id,
-        &[],
-        &auth,
-        Uuid::new_v4().to_string(),
-        axiam_auth::token::AUD_USER,
-    )
-    .unwrap();
+    let org_token = org_operator_token(&db, &auth, org.id, "org-admin").await;
 
     Fixture {
         db,

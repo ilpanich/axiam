@@ -25,6 +25,12 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+/// Organization-baseline requests (`/organizations/{org_id}/settings`) are
+/// organization-level: `require_organization_principal` refuses them to a
+/// caller of an ordinary tenant (SA-02, N8), so they carry an operator token.
+mod org_scope_support;
+use org_scope_support::org_operator_token;
+
 /// Arbitrary CSRF token for the double-submit check (SEC-046). These
 /// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
 /// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
@@ -137,30 +143,6 @@ async fn activate(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
         .unwrap();
 }
 
-/// A token for an administrator of the organization's reserved scope tenant.
-///
-/// The organization baseline (`/organizations/{org_id}/settings`) is
-/// organization-level: `require_organization_principal` refuses it to a caller
-/// whose own record lives in an ordinary tenant, whatever it holds (SA-02, N8).
-/// Tenant-level requests in these tests keep the ordinary tenant's token.
-async fn org_admin_token(db: &Surreal<TestDb>, auth: &AuthConfig, org_id: Uuid) -> String {
-    let scope = SurrealTenantRepository::new(db.clone())
-        .create(CreateTenant::organization_scope(org_id))
-        .await
-        .unwrap();
-    let user = SurrealUserRepository::new(db.clone())
-        .create(CreateUser {
-            tenant_id: scope.id,
-            username: "org-admin".into(),
-            email: "org-admin@example.com".into(),
-            password: "password12345".into(),
-            metadata: None,
-        })
-        .await
-        .unwrap();
-    mint_token(auth, user.id, scope.id, org_id)
-}
-
 fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -> String {
     issue_access_token(
         user_id,
@@ -202,7 +184,7 @@ macro_rules! test_app {
 async fn get_org_settings_returns_defaults() {
     let (db, org_id, _tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::get()
@@ -227,7 +209,7 @@ async fn get_org_settings_returns_defaults() {
 async fn set_org_settings_returns_200() {
     let (db, org_id, _tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -486,7 +468,7 @@ async fn set_org_settings_refuses_opaque_without_the_server_keys() {
     let (db, org_id, _tenant_id, _user_id) = setup_db().await;
     // No OPAQUE keys — `AppState::for_test` leaves `opaque_server` as `None`.
     let auth = test_auth_config();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -521,7 +503,7 @@ async fn set_org_settings_refuses_opaque_without_the_server_keys() {
 async fn set_org_settings_refuses_opaque_optional_without_the_server_keys() {
     let (db, org_id, _tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -551,7 +533,7 @@ async fn set_org_settings_accepts_opaque_when_the_server_keys_are_configured() {
     activate(&db, tenant_id, user_id).await;
     enrol_in_opaque(&db, tenant_id, user_id).await;
     let auth = test_auth_config_with_opaque_keys();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -583,7 +565,7 @@ async fn set_org_settings_refuses_required_while_a_user_has_no_record() {
     let (db, org_id, tenant_id, user_id) = setup_db().await;
     activate(&db, tenant_id, user_id).await;
     let auth = test_auth_config_with_opaque_keys();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -612,7 +594,7 @@ async fn set_org_settings_refuses_required_while_a_user_has_no_record() {
 async fn set_org_settings_leaves_the_disabled_path_alone() {
     let (db, org_id, _tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     for body in [org_settings_body(None), org_settings_body(Some("disabled"))] {
@@ -739,7 +721,7 @@ async fn opaque_setup_count(db: &Surreal<TestDb>, tenant_id: Uuid) -> usize {
 async fn enabling_opaque_on_the_org_provisions_every_tenant() {
     let (db, org_id, tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config_with_opaque_keys();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     assert_eq!(opaque_setup_count(&db, tenant_id).await, 0);
@@ -769,7 +751,7 @@ async fn provisioning_is_idempotent_across_repeated_writes() {
     // tenant with two seeds has records that only sometimes open.
     let (db, org_id, tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config_with_opaque_keys();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     for _ in 0..3 {
@@ -790,7 +772,7 @@ async fn provisioning_is_idempotent_across_repeated_writes() {
 async fn leaving_opaque_disabled_provisions_nothing() {
     let (db, org_id, tenant_id, _user_id) = setup_db().await;
     let auth = test_auth_config_with_opaque_keys();
-    let token = org_admin_token(&db, &auth, org_id).await;
+    let token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
 
     let req = test::TestRequest::put()
@@ -1067,7 +1049,7 @@ async fn server_cert_allowed_names_are_set_by_the_org_and_only_narrowed_by_a_ten
     let (db, org_id, tenant_id, user_id) = setup_db().await;
     let auth = test_auth_config();
     let token = mint_token(&auth, user_id, tenant_id, org_id);
-    let org_token = org_admin_token(&db, &auth, org_id).await;
+    let org_token = org_operator_token(&db, &auth, org_id, "org-admin").await;
     let app = test_app!(db, auth);
     let put = |uri: String, body: serde_json::Value| {
         test::TestRequest::put()

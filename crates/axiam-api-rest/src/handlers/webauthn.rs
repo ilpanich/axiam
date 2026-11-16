@@ -551,6 +551,7 @@ async fn setup_token_registration_context<C: Connection + Clone>(
     let (user_id, tenant_id, org_id) = state
         .auth_service
         .decode_setup_token(setup_token)
+        .await
         .map_err(AxiamApiError)?;
 
     let existing = state
@@ -851,6 +852,7 @@ pub async fn start_authentication<C: Connection + Clone>(
     let (user_id, tenant_id, org_id) = state
         .auth_service
         .decode_mfa_challenge_ids(&body.challenge_token)
+        .await
         .map_err(|e| AxiamApiError(e.into()))?;
 
     // Second-factor authentication follows the tenant's policy. Relaxing it

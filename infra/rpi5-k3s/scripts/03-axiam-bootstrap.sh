@@ -91,14 +91,21 @@ case "$probe" in
         # ALWAYS required (SA-01): AXIAM_BOOTSTRAP_ADMIN_EMAIL only restricts the
         # email; it never replaces the token. Read from the log because that is
         # the only place it is ever written — it is minted once and never stored.
+        # The extraction itself is scripts/first-boot-token.sh, the one place
+        # the token is parsed out of a log (it also requires the
+        # "first-run bootstrap setup token minted" message, so an unrelated
+        # `setup_token` field — an MFA setup token, say — is never picked up).
         say "Looking for the one-time setup token in the server's log"
         setup_token="${AXIAM_SETUP_TOKEN:-}"
+        first_boot_token="$HERE/../../../scripts/first-boot-token.sh"
+        [[ -x "$first_boot_token" ]] || die "Cannot find $first_boot_token.
+  Run this script from a checkout of the axiam repository, or pass the token
+  yourself:  AXIAM_SETUP_TOKEN=... $0"
         for prev in "" "--previous"; do
             [[ -n "$setup_token" ]] && break
             # shellcheck disable=SC2086  # $prev is deliberately unquoted: empty or one flag
             setup_token="$(kubectl -n "$NS" logs deploy/axiam-server --tail=-1 $prev 2>/dev/null \
-                | grep -o '"setup_token":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-            [[ -n "$setup_token" ]] && break
+                | "$first_boot_token" - 2>/dev/null || true)"
         done
         if [[ -n "$setup_token" ]]; then
             ok "Found a setup token in the log."
@@ -128,9 +135,10 @@ case "$probe" in
             201) ok "Bootstrapped. Organization '$ORG_SLUG', its organization-scope
   tenant, the permission and role seed, and the super-admin all exist." ;;
             409) ok "Already initialised (409)." ;;
-            403) die "403 — the bootstrap gate is not satisfied. Either
-  AXIAM_BOOTSTRAP_ADMIN_EMAIL does not match '$ADMIN_EMAIL', or the setup token
-  has already been consumed. $(cat "$resp")" ;;
+            403) die "403 — the bootstrap gate is not satisfied. Either the setup
+  token is invalid or has already been consumed, or AXIAM_BOOTSTRAP_ADMIN_EMAIL
+  does not match '$ADMIN_EMAIL' (the server deliberately does not say which).
+  $(cat "$resp")" ;;
             *) die "Bootstrap returned $status: $(cat "$resp")" ;;
         esac
         ;;

@@ -124,6 +124,7 @@ fn gdpr_audit_dlq_on_db_failure() {
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: Some(serde_json::json!({ "pseudonym": "DELETED_USER_test0123456789" })),
+        organization_id: None,
     };
 
     let log_buf = Arc::new(Mutex::new(Vec::new()));
@@ -219,6 +220,7 @@ fn failed_pseudonymization(tenant_id: Uuid) -> CreateAuditLogEntry {
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: Some(json!({ "pseudonym": "DELETED_USER_cancel0123456789" })),
+        organization_id: None,
     }
 }
 
@@ -629,6 +631,7 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
             "subject_id": f.user_id.to_string(),
             "note": "quote \" backslash \\ unicode \u{e9}"
         })),
+        organization_id: None,
     };
     let without_resource = CreateAuditLogEntry {
         tenant_id: f.tenant_id,
@@ -639,6 +642,7 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         outcome: AuditOutcome::Denied,
         ip_address: Some("203.0.113.9".into()),
         metadata: None,
+        organization_id: None,
     };
 
     // The file as the writer leaves it: `encode_line` per record, each with its

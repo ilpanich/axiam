@@ -608,6 +608,16 @@ static MIGRATIONS: &[Migration] = &[
         name: "session_lineage",
         sql: SCHEMA_V115,
     },
+    Migration {
+        version: 116,
+        name: "audit_log_system_organization",
+        sql: SCHEMA_V116,
+    },
+    Migration {
+        version: 117,
+        name: "user_credential_changed_at",
+        sql: SCHEMA_V117,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5849,9 +5859,108 @@ DEFINE FIELD IF NOT EXISTS lineage_id ON TABLE session_client TYPE option<string
 DEFINE INDEX IF NOT EXISTS idx_session_client_lineage ON TABLE session_client FIELDS tenant_id, lineage_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v116 — the organization of a system audit row (SA-02, N1)
+// -----------------------------------------------------------------------
+//
+// `GET /api/v1/audit-logs/system` returned the whole nil-tenant partition —
+// the unattributed request rows and deleted-tenant records of every
+// organization — to any organization-level principal. `organization_id` is
+// the organization a system row concerns, written on a new row only where the
+// server resolved it with certainty; the endpoint returns a row only to that
+// organization.
+//
+// One optional column and its index, **no `DEFAULT` and no backfill**: the
+// audit log is append-only, so an existing row is never updated. A row
+// written before this version reads `NONE`, which the endpoint returns to
+// nobody (said so in `docs/admin/README.md`). The index serves that read:
+// tenant (always nil there), organization, newest first.
+const SCHEMA_V116: &str = "\
+DEFINE FIELD IF NOT EXISTS organization_id ON TABLE audit_log TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_audit_tenant_org_time ON TABLE audit_log FIELDS tenant_id, organization_id, timestamp;
+";
+
+// -----------------------------------------------------------------------
+// Schema v117 — the credential epoch of a user (SA-06, N7; S-1, S-6)
+// -----------------------------------------------------------------------
+//
+// `credential_changed_at` is when a credential that proves who is signing in
+// last changed: the Argon2 hash or the OPAQUE record, written or deleted. It is
+// written by the same transaction as the credential and is read to refuse the
+// short-lived artefacts of the *previous* credential — an MFA challenge token,
+// an MFA setup token, an in-flight OPAQUE login — that a reset or change did
+// not otherwise reach.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a row that has not had
+// a credential change since this version reads `NONE`, and a user with no
+// epoch is refused nothing, exactly as before.
+const SCHEMA_V117: &str = "\
+DEFINE FIELD IF NOT EXISTS credential_changed_at ON TABLE user TYPE option<datetime>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-06 (N7) — v117 is the one optional `credential_changed_at` column on
+    /// `user`, and nothing else: no `DEFAULT`, no backfill, no index.
+    #[test]
+    fn v117_adds_only_the_optional_credential_epoch_column() {
+        let statements: Vec<&str> = SCHEMA_V117
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS credential_changed_at ON TABLE user \
+              TYPE option<datetime>"
+            ],
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT ",
+            "INDEX",
+        ] {
+            assert!(
+                !SCHEMA_V117.contains(forbidden),
+                "v117 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V117));
+    }
+
+    /// SA-02 (N1) — v116 is the one optional `organization_id` column on
+    /// `audit_log` and its index, and nothing else: no `DEFAULT`, no backfill
+    /// (the audit log is append-only).
+    #[test]
+    fn v116_adds_only_the_system_audit_organization_column_and_index() {
+        let statements: Vec<&str> = SCHEMA_V116
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS organization_id ON TABLE audit_log \
+                 TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_audit_tenant_org_time ON TABLE audit_log \
+                 FIELDS tenant_id, organization_id, timestamp",
+            ],
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT "] {
+            assert!(
+                !SCHEMA_V116.contains(forbidden),
+                "v116 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V116));
+    }
 
     /// #837/#838 — v114 is three optional columns on the two short-lived
     /// federation tables, and nothing else: no `DEFAULT`, no backfill, no index.
@@ -8012,10 +8121,14 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&115),
-            "v115 is the newest migration (#844, D-N43 — `lineage_id` on `session`, \
+            Some(&117),
+            "v117 is the newest migration (SA-06, N7 — `user.credential_changed_at`, the \
+             credential epoch, optional, absent reading as no change on record); \
+             v116 was SA-02, N1 — `audit_log.organization_id`, the \
+             organization a system-partition row concerns, optional, absent reading as none); \
+             v115 was #844, D-N43 — `lineage_id` on `session`, \
              `oauth2_refresh_token` and `session_client`, the session lineage key a logout \
-             ends, optional, absent reading as the row's own session id); v114 is #837/#838; \
+             ends, optional, absent reading as the row's own session id; v114 is #837/#838; \
              v113 was G-B, #817 — `oauth2_client.default_idp`, a \
              client's default sign-in provider, optional, absent reading as none; v112 was \
              G-A, #816, D-N10 — the `federation_id_token_replay` \

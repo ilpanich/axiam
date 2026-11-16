@@ -74,6 +74,9 @@ struct AuditLogRow {
     ip_address: Option<String>,
     metadata: serde_json::Value,
     timestamp: DateTime<Utc>,
+    /// SA-02 (N1): absent on every row written before v116.
+    #[surreal(default)]
+    organization_id: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -88,6 +91,9 @@ struct AuditLogRowWithId {
     ip_address: Option<String>,
     metadata: serde_json::Value,
     timestamp: DateTime<Utc>,
+    /// SA-02 (N1): absent on every row written before v116.
+    #[surreal(default)]
+    organization_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +136,12 @@ fn outcome_str(o: &AuditOutcome) -> &'static str {
     }
 }
 
+fn parse_organization(raw: Option<&str>) -> Result<Option<Uuid>, DbError> {
+    raw.map(Uuid::parse_str)
+        .transpose()
+        .map_err(|e| DbError::Migration(format!("invalid organization UUID: {e}")))
+}
+
 // ---------------------------------------------------------------------------
 // Row → domain conversion
 // ---------------------------------------------------------------------------
@@ -158,6 +170,7 @@ impl AuditLogRow {
             ip_address: self.ip_address,
             metadata: self.metadata,
             timestamp: self.timestamp,
+            organization_id: parse_organization(self.organization_id.as_deref())?,
         })
     }
 }
@@ -188,6 +201,7 @@ impl AuditLogRowWithId {
             ip_address: self.ip_address,
             metadata: self.metadata,
             timestamp: self.timestamp,
+            organization_id: parse_organization(self.organization_id.as_deref())?,
         })
     }
 }
@@ -298,85 +312,24 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
     }
 }
 
-impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
-    async fn datastore_now(&self) -> AxiamResult<DateTime<Utc>> {
-        // The same function that stamps `audit_log.timestamp` (`DEFAULT
-        // time::now()`), read from the same server: a bound taken here and a
-        // row stamped by an append share one clock, whatever the application
-        // host's says.
-        let mut result = self
-            .db
-            .current()
-            .query("RETURN time::now()")
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-        let now: Option<DateTime<Utc>> = result.take(0).map_err(DbError::from)?;
-        Ok(now.ok_or_else(|| DbError::Migration("RETURN time::now() returned no value".into()))?)
-    }
-
-    async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
-        let id = new_id();
-        let id_str = id.to_string();
-
-        // T-110: the last thing before the write, because the table is
-        // append-only and there is no second chance by construction.
-        let mut input = input;
-        self.minimisation.apply(&mut input);
-
-        let metadata = input
-            .metadata
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-
-        let resource_id_str = input.resource_id.map(|r| r.to_string());
-
-        let result = self
-            .db
-            .current()
-            .query(
-                "CREATE type::record('audit_log', $id) SET \
-                 tenant_id = $tenant_id, \
-                 actor_id = $actor_id, \
-                 actor_type = $actor_type, \
-                 action = $action, \
-                 resource_id = $resource_id, \
-                 outcome = $outcome, \
-                 ip_address = $ip_address, \
-                 metadata = $metadata",
-            )
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", input.tenant_id.to_string()))
-            .bind(("actor_id", input.actor_id.to_string()))
-            .bind(("actor_type", actor_type_str(&input.actor_type).to_string()))
-            .bind(("action", input.action))
-            .bind(("resource_id", resource_id_str))
-            .bind(("outcome", outcome_str(&input.outcome).to_string()))
-            .bind(("ip_address", input.ip_address))
-            .bind(("metadata", metadata))
-            .await
-            .map_err(DbError::from)?;
-
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-
-        let rows: Vec<AuditLogRow> = result.take(0).map_err(DbError::from)?;
-        let row = take_first_or_not_found(rows, "audit_log", &id_str)?;
-
-        Ok(row.into_entry(id)?)
-    }
-
-    async fn list(
+impl<C: Connection> SurrealAuditLogRepository<C> {
+    /// The rows of `tenant_id` matching `filter` and, with `organization_id`,
+    /// recording that organization (SA-02, N1: the system partition's read).
+    async fn list_where(
         &self,
         tenant_id: Uuid,
+        organization_id: Option<Uuid>,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
         let tenant_id_str = tenant_id.to_string();
 
         // Build dynamic WHERE clause.
-        let (where_clause, binds) = build_filter_clause(&filter);
+        let (mut where_clause, mut binds) = build_filter_clause(&filter);
+        if let Some(org) = organization_id {
+            where_clause.push_str(" AND organization_id = $organization_id");
+            binds.push(FilterBind::Str("organization_id", org.to_string()));
+        }
 
         // Count query.
         let count_sql =
@@ -412,14 +365,107 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
 
         Ok(paginate(items, count_rows, &pagination))
     }
+}
 
-    async fn list_system(
+impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
+    async fn datastore_now(&self) -> AxiamResult<DateTime<Utc>> {
+        // The same function that stamps `audit_log.timestamp` (`DEFAULT
+        // time::now()`), read from the same server: a bound taken here and a
+        // row stamped by an append share one clock, whatever the application
+        // host's says.
+        let mut result = self
+            .db
+            .current()
+            .query("RETURN time::now()")
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let now: Option<DateTime<Utc>> = result.take(0).map_err(DbError::from)?;
+        Ok(now.ok_or_else(|| DbError::Migration("RETURN time::now() returned no value".into()))?)
+    }
+
+    async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
+        let id = new_id();
+        let id_str = id.to_string();
+
+        // T-110: the last thing before the write, because the table is
+        // append-only and there is no second chance by construction.
+        let mut input = input;
+        self.minimisation.apply(&mut input);
+
+        let metadata = input
+            .metadata
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        let resource_id_str = input.resource_id.map(|r| r.to_string());
+        // SA-02 (N1): the organization of a system-partition row only. A
+        // tenant's row belongs to its tenant's organization, and a second copy
+        // of that would be one that can disagree.
+        let organization_id_str = input
+            .organization_id
+            .filter(|_| input.tenant_id.is_nil())
+            .map(|o| o.to_string());
+
+        let result = self
+            .db
+            .current()
+            .query(
+                "CREATE type::record('audit_log', $id) SET \
+                 tenant_id = $tenant_id, \
+                 actor_id = $actor_id, \
+                 actor_type = $actor_type, \
+                 action = $action, \
+                 resource_id = $resource_id, \
+                 outcome = $outcome, \
+                 ip_address = $ip_address, \
+                 metadata = $metadata, \
+                 organization_id = $organization_id",
+            )
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", input.tenant_id.to_string()))
+            .bind(("actor_id", input.actor_id.to_string()))
+            .bind(("actor_type", actor_type_str(&input.actor_type).to_string()))
+            .bind(("action", input.action))
+            .bind(("resource_id", resource_id_str))
+            .bind(("outcome", outcome_str(&input.outcome).to_string()))
+            .bind(("ip_address", input.ip_address))
+            .bind(("metadata", metadata))
+            .bind(("organization_id", organization_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<AuditLogRow> = result.take(0).map_err(DbError::from)?;
+        let row = take_first_or_not_found(rows, "audit_log", &id_str)?;
+
+        Ok(row.into_entry(id)?)
+    }
+
+    async fn list(
         &self,
+        tenant_id: Uuid,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
-        // System/unauthenticated entries are stored with nil tenant_id.
-        self.list(Uuid::nil(), filter, pagination).await
+        self.list_where(tenant_id, None, filter, pagination).await
+    }
+
+    async fn list_system(
+        &self,
+        organization_id: Uuid,
+        filter: AuditLogFilter,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
+        // System/unauthenticated entries are stored with nil tenant_id; of
+        // those, only the ones that record this organization (SA-02, N1). A
+        // row recording none — every row written before v116 — matches no
+        // organization.
+        self.list_where(Uuid::nil(), Some(organization_id), filter, pagination)
+            .await
     }
 
     async fn pseudonymize_actor(
@@ -687,6 +733,7 @@ mod tests {
                 outcome: AuditOutcome::Success,
                 ip_address: Some("192.168.1.1".into()),
                 metadata: Some(json!({ "email": "user@example.com", "username": "alice" })),
+                organization_id: None,
             })
             .await
             .unwrap();
@@ -767,6 +814,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         };
 
         repo.append(entry("old.event")).await.unwrap();
@@ -813,6 +861,7 @@ mod tests {
                 "user_agent": "Mozilla/5.0 (X11; Linux) Firefox/128.0",
                 "client_id": "oa_reporting",
             })),
+            organization_id: None,
         }
     }
 
@@ -952,6 +1001,7 @@ mod tests {
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: None,
+                organization_id: None,
             })
             .await
             .unwrap();
@@ -992,6 +1042,7 @@ mod tests {
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: None,
+                organization_id: None,
             })
             .await
             .unwrap();
@@ -1015,6 +1066,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();

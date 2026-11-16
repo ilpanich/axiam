@@ -15,6 +15,9 @@
 
 #![allow(dead_code)]
 
+#[path = "../org_scope_support/mod.rs"]
+mod org_scope_support;
+
 pub use std::net::SocketAddr;
 pub use std::sync::{Arc, Mutex, OnceLock};
 
@@ -294,19 +297,11 @@ impl World {
     /// of an ordinary tenant is refused it whatever its role. The scope tenant
     /// is not counted by the D-55 gate, which excludes the organization's own.
     pub async fn org_admin_token(&self) -> String {
-        let scope = SurrealTenantRepository::new(self.db.clone())
-            .create(CreateTenant::organization_scope(self.org_id))
-            .await
-            .unwrap();
-        seed_permissions(&self.db, scope.id, PERMISSION_REGISTRY)
-            .await
-            .unwrap();
-        seed_default_roles(&self.db, scope.id, PERMISSION_REGISTRY)
-            .await
-            .unwrap();
-        let admin = active_user(&self.db, scope.id, "org-admin").await;
+        let scope = org_scope_support::organization_scope(&self.db, self.org_id).await;
+        org_scope_support::seed_tenant(&self.db, scope).await;
+        let admin = active_user(&self.db, scope, "org-admin").await;
         let super_admin = SurrealRoleRepository::new(self.db.clone())
-            .list(scope.id, all_pages())
+            .list(scope, all_pages())
             .await
             .unwrap()
             .items
@@ -315,19 +310,10 @@ impl World {
             .expect("seeded role")
             .id;
         SurrealRoleRepository::new(self.db.clone())
-            .assign_to_user(scope.id, admin, super_admin, AssignmentScope::global())
+            .assign_to_user(scope, admin, super_admin, AssignmentScope::global())
             .await
             .unwrap();
-        issue_access_token(
-            admin,
-            scope.id,
-            self.org_id,
-            &[],
-            &self.auth,
-            Uuid::new_v4().to_string(),
-            AUD_USER,
-        )
-        .unwrap()
+        org_scope_support::user_token(&self.auth, admin, scope, self.org_id)
     }
 
     pub fn admin_token(&self) -> String {

@@ -624,6 +624,7 @@ pub async fn login<C: Connection + Clone>(
             if let Ok((user_id, tenant_id, _org_id)) = state
                 .auth_service
                 .decode_mfa_challenge_ids(&challenge.challenge_token)
+                .await
                 && let Ok(types) = state
                     .mfa_method_service
                     .available_method_types(tenant_id, user_id)
@@ -912,6 +913,41 @@ pub async fn verify_mfa<C: Connection + Clone>(
     .await
 }
 
+/// Q-10 / SA-05: an explicit audit row for a refused device sign-in, naming the
+/// service account (actor), the failure outcome, its status and the reason.
+/// Fire-and-forget: a failed append is logged, never turned into another error.
+async fn append_device_refusal_audit<C: Connection + Clone>(
+    state: &AppState<C>,
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    service_account_id: Uuid,
+    reason: &str,
+    status: &str,
+) {
+    use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+    use axiam_core::repository::AuditLogRepository;
+
+    let entry = CreateAuditLogEntry {
+        tenant_id,
+        actor_id: service_account_id,
+        actor_type: ActorType::ServiceAccount,
+        action: "auth.device.refused".into(),
+        resource_id: Some(service_account_id),
+        outcome: AuditOutcome::Failure,
+        ip_address: client_ip(req),
+        metadata: Some(serde_json::json!({ "reason": reason, "status": status })),
+        organization_id: None,
+    };
+    if let Err(error) = state.audit_repo.append(entry).await {
+        tracing::error!(
+            %tenant_id,
+            %service_account_id,
+            %error,
+            "device auth: the refusal audit row could not be written"
+        );
+    }
+}
+
 /// `POST /api/v1/auth/device`
 ///
 /// Authenticate a device via its client certificate (mTLS).
@@ -955,16 +991,45 @@ pub async fn device_auth<C: Connection + Clone>(
     // do. A non-Active account (or one that cannot be loaded) is refused
     // without a token.
     const NOT_ACTIVE: &str = "the service account bound to this certificate is not active";
-    let account = state
+    let account = match state
         .service_account_repo
         .get_by_id(cert_auth.tenant_id, cert_auth.service_account_id)
         .await
-        .map_err(|_| {
-            AxiamApiError(AxiamError::AuthenticationFailed {
+    {
+        Ok(account) => account,
+        Err(error) => {
+            // Q-10: a lookup failure (including a database outage) is still
+            // answered 401, but is no longer silent.
+            tracing::warn!(
+                tenant_id = %cert_auth.tenant_id,
+                service_account_id = %cert_auth.service_account_id,
+                %error,
+                "device auth: the bound service account could not be loaded; refusing"
+            );
+            append_device_refusal_audit(
+                &state,
+                &req,
+                cert_auth.tenant_id,
+                cert_auth.service_account_id,
+                "service_account_lookup_failed",
+                "unknown",
+            )
+            .await;
+            return Err(AxiamApiError(AxiamError::AuthenticationFailed {
                 reason: NOT_ACTIVE.into(),
-            })
-        })?;
+            }));
+        }
+    };
     if account.status != UserStatus::Active {
+        append_device_refusal_audit(
+            &state,
+            &req,
+            cert_auth.tenant_id,
+            cert_auth.service_account_id,
+            "service_account_not_active",
+            &format!("{:?}", account.status).to_lowercase(),
+        )
+        .await;
         return Err(AxiamApiError(AxiamError::AuthenticationFailed {
             reason: NOT_ACTIVE.into(),
         }));
@@ -1070,7 +1135,8 @@ pub async fn setup_confirm_mfa<C: Connection + Clone>(
     // G-5 (D-52): the first factor of a forced enrolment, a TOTP authenticator.
     // The token was just accepted above, so decoding it again names the same
     // account; a failure here is not the request's failure.
-    if let Ok((user_id, tenant_id, _org_id)) = state.auth_service.decode_setup_token(&b.setup_token)
+    if let Ok((user_id, tenant_id, _org_id)) =
+        state.auth_service.decode_setup_token(&b.setup_token).await
     {
         state
             .ssf

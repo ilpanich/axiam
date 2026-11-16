@@ -4,13 +4,15 @@
 //!
 //! - `POST /api/v1/admin/bootstrap` creates the organization, the default
 //!   tenant AND the first admin user in one call on a fresh, empty database.
-//! - After the first admin is created, the endpoint is disabled (returns 409
-//!   Conflict — the global `bootstrap_lock` uniqueness invariant).
+//! - After the first admin is created, a later call is refused 403 by the gate
+//!   (the first call consumed the setup token); 409 Conflict — the global
+//!   `bootstrap_lock` uniqueness invariant — reaches only a concurrent race
+//!   loser.
 //! - The one-time setup token is always required (SA-01); when
 //!   `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set a mismatching email additionally
-//!   returns 403.
-//! - The mandatory gate refuses bootstrap when neither the env var nor a
-//!   valid setup token is presented (SECHRD-04 / D-03a).
+//!   returns 403, with the same reason as every other gate refusal.
+//! - The mandatory gate refuses bootstrap when no valid setup token is
+//!   presented (SECHRD-04 / D-03a).
 //! - Two concurrent first-run requests create at most one super-admin
 //!   (SECHRD-04 / D-03c).
 //! - The newly-bootstrapped admin can authenticate via `/auth/login`.
@@ -240,6 +242,97 @@ async fn bootstrap_email_gate_still_requires_setup_token() {
     assert_eq!(right, 201, "valid token + right email must be 201");
 }
 
+/// POST a bootstrap request for `email` with an optional `setup_token` and
+/// return the HTTP status and the raw response body. Shared by the SA-01 gate
+/// tests that compare refusals byte for byte.
+async fn post_bootstrap_raw(
+    db: &Surreal<TestDb>,
+    email: &str,
+    setup_token: Option<&str>,
+) -> (u16, Vec<u8>) {
+    let auth = test_auth_config();
+    let authz = make_authz(db);
+    let app = test_app!(db.clone(), auth, authz);
+    let mut body = serde_json::json!({
+        "organization_name": "Gate Org",
+        "email": email,
+        "username": "gateadmin",
+        "password": TEST_PASSWORD,
+    });
+    if let Some(t) = setup_token {
+        body["setup_token"] = serde_json::json!(t);
+    }
+    let peer: SocketAddr = TEST_PEER.parse().unwrap();
+    let req = test::TestRequest::post()
+        .uri("/api/v1/admin/bootstrap")
+        .peer_addr(peer)
+        .set_json(body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status().as_u16();
+    let bytes = test::read_body(resp).await.to_vec();
+    (status, bytes)
+}
+
+/// SA-01 review (Q-6 / S-4): without a valid setup token the gate must not
+/// reveal whether `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set, nor whether a guessed
+/// address is the configured one. The token is checked first and every gate
+/// refusal carries one reason, so a matching and a non-matching email get
+/// byte-identical answers.
+#[actix_rt::test]
+async fn bootstrap_gate_refusals_do_not_reveal_the_email_restriction() {
+    let _guard = env_guard().await;
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::set_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL", "gate@example.com");
+    }
+    let db = setup_empty_db().await;
+    let token = first_boot_token(&db).await;
+
+    let match_no_token = post_bootstrap_raw(&db, "gate@example.com", None).await;
+    let other_no_token = post_bootstrap_raw(&db, "guess@example.com", None).await;
+    let match_garbage = post_bootstrap_raw(&db, "gate@example.com", Some("garbage")).await;
+    let other_garbage = post_bootstrap_raw(&db, "guess@example.com", Some("garbage")).await;
+    // With the operator's token a wrong email is still refused, and with the
+    // same reason as every other gate refusal.
+    let other_valid = post_bootstrap_raw(&db, "guess@example.com", Some(&token)).await;
+
+    // SAFETY: serialized via env_lock.
+    unsafe {
+        std::env::remove_var("AXIAM_BOOTSTRAP_ADMIN_EMAIL");
+    }
+    // Without the restriction, an unauthenticated refusal looks the same too.
+    let unset_no_token = post_bootstrap_raw(&db, "guess@example.com", None).await;
+
+    let show = |r: &(u16, Vec<u8>)| format!("{} {}", r.0, String::from_utf8_lossy(&r.1));
+    assert_eq!(match_no_token.0, 403, "{}", show(&match_no_token));
+    assert_eq!(
+        show(&match_no_token),
+        show(&other_no_token),
+        "no token: a matching and a non-matching email must get identical responses"
+    );
+    assert_eq!(
+        show(&match_garbage),
+        show(&other_garbage),
+        "garbage token: a matching and a non-matching email must get identical responses"
+    );
+    assert_eq!(
+        show(&match_no_token),
+        show(&match_garbage),
+        "every gate refusal carries the same reason"
+    );
+    assert_eq!(
+        show(&match_no_token),
+        show(&other_valid),
+        "every gate refusal carries the same reason"
+    );
+    assert_eq!(
+        show(&match_no_token),
+        show(&unset_no_token),
+        "the refusal must not reveal whether the email restriction is set"
+    );
+}
+
 /// SA-01 (C1): with no email gate, a valid token alone still bootstraps.
 #[actix_rt::test]
 async fn bootstrap_valid_token_without_email_gate_succeeds() {
@@ -427,14 +520,14 @@ async fn bootstrap_creates_org_tenant_admin() {
     );
 }
 
-/// `bootstrap_returns_409_after_admin`
+/// `bootstrap_refused_after_admin`
 ///
 /// A second bootstrap call, once the system has been initialized, must be
 /// refused and must not create a second admin. With the setup token consumed by
 /// the first call the gate answers 403; the global `bootstrap_lock` 409 is
 /// covered by the concurrent-race test.
 #[actix_rt::test]
-async fn bootstrap_returns_409_after_admin() {
+async fn bootstrap_refused_after_admin() {
     let _guard = env_guard().await;
     // SAFETY: serialized via env_lock.
     unsafe {

@@ -486,6 +486,9 @@ curl -X DELETE "https://id.example.com/api/v1/account/consents/oidc-scopes/$CLIE
   -H "Authorization: Bearer $USER_TOKEN"
 ```
 
+`$USER_TOKEN` is the user's own console sign-in. A token AXIAM minted for an
+OAuth2 client can neither grant nor withdraw this consent (`403`).
+
 The record covers the **scope set** the user was shown, so a client that later
 asks for more re-prompts rather than inheriting. A client that has been
 declined — the user reached the consent screen and came back without granting —

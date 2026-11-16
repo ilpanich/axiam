@@ -366,17 +366,30 @@ seed_axiam() {
   local boot code body setup_token="${BENCH_SETUP_TOKEN:-}"
   local opaque_mode="${BENCH_OPAQUE_MODE:-optional}"
   # SA-01: the setup token is always required; AXIAM_BOOTSTRAP_ADMIN_EMAIL only
-  # restricts the email. Read it from the first-boot log (the one extraction
-  # helper) unless pre-supplied. A re-seed finds no token — it was consumed —
-  # and sends none; the server then answers 403, which is handled below.
-  if [ -z "$setup_token" ]; then
-    setup_token=$("$(dirname "${BASH_SOURCE[0]}")/../../scripts/first-boot-token.sh" \
-      "${BENCH_AXIAM_CONTAINER:-bench-axiam-server}" 2>/dev/null) || setup_token=""
-  fi
-  boot=$(curl -sSk -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
+  # restricts the email. The first bootstrap consumes the token, so a re-seed
+  # against a persisted `surrealdb-data` volume would be refused 403 by the
+  # gate (it runs before the server looks at whether an admin exists) and could
+  # never reach the 409 branch below. So probe first, as
+  # scripts/e2e-bootstrap.sh does: if the admin already signs in at
+  # organization level, the bootstrap has happened and the 409 path applies
+  # without calling /admin/bootstrap at all. Only otherwise read the token from
+  # the first-boot log (the one extraction helper) unless pre-supplied.
+  local probe
+  probe=$(curl -sSk -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/auth/login" \
     -H "Content-Type: application/json" \
-    -d "{\"organization_name\":\"Bench Org\",\"organization_slug\":\"$ORG_SLUG\",\"tenant_name\":\"Bench Tenant\",\"tenant_slug\":\"$TENANT_SLUG\",\"email\":\"$ADMIN_EMAIL\",\"username\":\"admin\",\"password\":\"$ADMIN_PW\",\"opaque_mode\":\"$opaque_mode\",\"setup_token\":\"$setup_token\"}")
-  code="${boot##*$'\n'}"; body="${boot%$'\n'*}"
+    -d "{\"org_slug\":\"$ORG_SLUG\",\"username_or_email\":\"admin\",\"password\":\"$ADMIN_PW\"}") || probe="000"
+  if [ "$probe" = "200" ]; then
+    code=409; body=""
+  else
+    if [ -z "$setup_token" ]; then
+      setup_token=$("$(dirname "${BASH_SOURCE[0]}")/../../scripts/first-boot-token.sh" \
+        "${BENCH_AXIAM_CONTAINER:-bench-axiam-server}" 2>/dev/null) || setup_token=""
+    fi
+    boot=$(curl -sSk -o - -w $'\n%{http_code}' -c "$JAR" -X POST "$BASE/api/v1/admin/bootstrap" \
+      -H "Content-Type: application/json" \
+      -d "{\"organization_name\":\"Bench Org\",\"organization_slug\":\"$ORG_SLUG\",\"tenant_name\":\"Bench Tenant\",\"tenant_slug\":\"$TENANT_SLUG\",\"email\":\"$ADMIN_EMAIL\",\"username\":\"admin\",\"password\":\"$ADMIN_PW\",\"opaque_mode\":\"$opaque_mode\",\"setup_token\":\"$setup_token\"}")
+    code="${boot##*$'\n'}"; body="${boot%$'\n'*}"
+  fi
   case "$code" in
     201)
       ORG_ID=$(echo "$body" | jq -r '.organization_id // empty')
@@ -385,6 +398,8 @@ seed_axiam() {
       TENANT_SLUG=$(echo "$body" | jq -r '.tenant_slug // "default"')
       ;;
     409)
+      # Reached from the sign-in probe above (the usual re-seed), or from a
+      # bootstrap that lost a concurrent race and was answered 409.
       echo "[seed/axiam] already bootstrapped — recovering tenant via admin login"
       # The bootstrap admin does NOT live in a tenant this script names. Both
       # `tenant_name` and `tenant_slug` in the request above are accepted and

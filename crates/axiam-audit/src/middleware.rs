@@ -68,6 +68,22 @@ pub struct AuditAttribution {
     pub org_id: Uuid,
 }
 
+/// The organization a request the middleware records in the **system**
+/// partition (nil tenant) concerns (SA-02, N1).
+///
+/// For a request with neither a verified token nor an [`AuditAttribution`]:
+/// the row stays in the system partition, and records this organization as
+/// its `organization_id`, which is what lets `GET /api/v1/audit-logs/system`
+/// show it to that organization and to no other. Inserted into the request's
+/// extensions, after a lookup of the server's own, by
+/// `axiam_api_rest::audit_organization`, which says what counts as resolved;
+/// never from a client-supplied value. Ignored on a row attributed to a tenant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditOrganization {
+    /// The organization the request concerns.
+    pub org_id: Uuid,
+}
+
 /// One audit entry plus the organization it belongs to.
 ///
 /// `CreateAuditLogEntry` carries a tenant but no organization, and the
@@ -76,7 +92,9 @@ pub struct AuditAttribution {
 /// will send with. Rather than widening the persisted audit row — the
 /// organization is derivable from the tenant and storing it would be a second
 /// copy that can disagree — it travels beside the entry on the channel and is
-/// dropped before the write.
+/// dropped before the write. (A system-partition row is the exception: its
+/// tenant is nil, so nothing derives its organization, and the entry carries
+/// it as `organization_id` — see [`AuditOrganization`].)
 #[derive(Debug, Clone)]
 pub struct AuditEvent {
     /// The entry to append.
@@ -580,7 +598,7 @@ where
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let (status, result, attribution, verdict) = match fut.await {
+            let (status, result, attribution, verdict, system_org) = match fut.await {
                 Ok(res) => {
                     let s = res.status().as_u16();
                     let extensions = res.request().extensions();
@@ -588,12 +606,13 @@ where
                     let verdict = extensions
                         .get::<axiam_auth::carrier::AuthVerdict>()
                         .copied();
+                    let system_org = extensions.get::<AuditOrganization>().copied();
                     drop(extensions);
-                    (s, Ok(res), attribution, verdict)
+                    (s, Ok(res), attribution, verdict, system_org)
                 }
                 Err(err) => {
                     let s = err.as_response_error().status_code().as_u16();
-                    (s, Err(err), None, None)
+                    (s, Err(err), None, None, None)
                 }
             };
 
@@ -618,11 +637,20 @@ where
             // expiry. The actor is still the token's subject either way.
             let authenticated =
                 user_info.is_some() && verdict != Some(axiam_auth::carrier::AuthVerdict::Refused);
-            let (actor_id, tenant_id, org_id, actor_type) = match user_info {
-                Some((uid, tid, oid, kind)) => (uid, tid, oid, kind),
+            // The organization of a system-partition row (SA-02, N1): only a
+            // row neither the token nor an attribution places in a tenant's
+            // log records one, and only as `AuditOrganization` resolved it.
+            let (actor_id, tenant_id, org_id, actor_type, organization_id) = match user_info {
+                Some((uid, tid, oid, kind)) => (uid, tid, oid, kind, None),
                 None => match attribution {
-                    Some(a) => (Uuid::nil(), a.tenant_id, a.org_id, ActorType::System),
-                    None => (Uuid::nil(), Uuid::nil(), Uuid::nil(), ActorType::System),
+                    Some(a) => (Uuid::nil(), a.tenant_id, a.org_id, ActorType::System, None),
+                    None => (
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        ActorType::System,
+                        system_org.map(|o| o.org_id),
+                    ),
                 },
             };
 
@@ -645,6 +673,7 @@ where
                 outcome,
                 ip_address,
                 metadata: Some(metadata),
+                organization_id,
             };
             // The path and the forwarded address are the client's to size; the
             // row, its dead-letter line and the notification all see them cut

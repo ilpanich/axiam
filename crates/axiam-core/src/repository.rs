@@ -267,6 +267,20 @@ pub trait UserRepository: Send + Sync {
     /// may outlive it (the atomicity audit's item A). Every writer inherits
     /// this — self-service, an administrator, SCIM — because it is decided
     /// here, against the stored value, and not by the caller.
+    ///
+    /// A write that sets `password_hash` also, **in the same transaction**,
+    /// deletes the user's OPAQUE record (the verifier of the *previous*
+    /// password, which must not keep authenticating) and stamps the user's
+    /// credential epoch, `credential_changed_at`. A caller that supplies a new
+    /// OPAQUE record writes it afterwards through
+    /// [`OpaqueCredentialRepository::upsert`], which stamps the epoch again; if
+    /// that second write fails the user is left with no record, not with one
+    /// that answers to the old password. The epoch is what refuses the
+    /// short-lived artefacts of the old credential — an MFA challenge or setup
+    /// token, an in-flight OPAQUE login — that were issued at or before it.
+    /// Every writer of the hash inherits both effects (reset, self-service
+    /// change, SCIM); a caller that cannot supply a record, such as SCIM, must
+    /// not write a password for a tenant whose OPAQUE mode is `required`.
     fn update(
         &self,
         tenant_id: Uuid,
@@ -1624,9 +1638,16 @@ pub trait AuditLogRepository: Send + Sync {
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;
-    /// List audit logs for unauthenticated/system requests (nil tenant_id).
+    /// List the system partition's entries (nil `tenant_id`) that record
+    /// `organization_id` as their organization (SA-02, N1).
+    ///
+    /// A system entry whose organization was not resolved — every one written
+    /// before [`AuditLogEntry::organization_id`] existed among them — is
+    /// returned for no organization. The whole partition is `list(Uuid::nil(), …)`,
+    /// which no handler calls.
     fn list_system(
         &self,
+        organization_id: Uuid,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;

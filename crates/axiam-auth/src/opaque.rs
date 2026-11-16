@@ -204,7 +204,22 @@ struct SealedLogin {
     user_id: Option<Uuid>,
     /// Hex serialized `ServerLogin` KE2 state.
     ke2_state: String,
+    /// When `login/start` built this state from the record as it then was
+    /// (SA-06, S-1). `login/finish` refuses the exchange when the user's
+    /// credential changed at or after it. Absent only in a blob sealed by a
+    /// build that predates the field, which reads as `expires_at` minus the
+    /// session lifetime — the same instant, since that is how `expires_at` was
+    /// derived.
+    #[serde(default)]
+    issued_at: Option<DateTime<Utc>>,
     expires_at: DateTime<Utc>,
+}
+
+impl SealedLogin {
+    fn issued_at(&self) -> DateTime<Utc> {
+        self.issued_at
+            .unwrap_or(self.expires_at - Duration::seconds(SESSION_LIFETIME_SECS))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +279,10 @@ pub struct OpaqueVerified {
     pub org_id: Uuid,
     /// The authenticated user.
     pub user_id: Uuid,
+    /// When `login/start` built the exchange. The caller refuses it when the
+    /// user's credential changed at or after this instant: the state was built
+    /// from a record that no longer stands (SA-06, S-1).
+    pub issued_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +601,7 @@ impl OpaqueServer {
             tenant_id: sealed.tenant_id,
             org_id: sealed.org_id,
             user_id,
+            issued_at: sealed.issued_at(),
         })
     }
 
@@ -617,6 +637,7 @@ impl OpaqueServer {
         )
         .map_err(|_| AuthError::OpaqueMalformed("ke1".into()))?;
 
+        let issued_at = Utc::now();
         let sealed = SealedLogin {
             v: SEALED_VERSION,
             kind: KIND_LOGIN.to_string(),
@@ -624,7 +645,8 @@ impl OpaqueServer {
             org_id,
             user_id,
             ke2_state: hex::encode(started.state.serialize()),
-            expires_at: Utc::now() + Duration::seconds(SESSION_LIFETIME_SECS),
+            issued_at: Some(issued_at),
+            expires_at: issued_at + Duration::seconds(SESSION_LIFETIME_SECS),
         };
 
         let (ksf, memory_kib, iterations, parallelism, log_n, r, p) = ksf_wire_fields(ksf_params);
@@ -1328,6 +1350,7 @@ mod tests {
             org_id: Uuid::new_v4(),
             user_id: Some(Uuid::new_v4()),
             ke2_state: hex::encode([0u8; 128]),
+            issued_at: None,
             expires_at: Utc::now() - Duration::seconds(1),
         };
         let token = srv.seal_session(&sealed).unwrap();
@@ -1347,6 +1370,7 @@ mod tests {
             org_id: Uuid::new_v4(),
             user_id: Some(Uuid::new_v4()),
             ke2_state: hex::encode([0u8; 128]),
+            issued_at: None,
             expires_at: Utc::now() + Duration::seconds(60),
         };
         let token = srv.seal_session(&sealed).unwrap();

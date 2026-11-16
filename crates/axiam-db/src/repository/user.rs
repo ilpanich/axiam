@@ -70,6 +70,9 @@ struct UserRow {
     /// G-3 marker (schema v71). `Option` because a row written before v71 has
     /// no such column.
     directory_external_id: Option<String>,
+    /// SA-06 credential epoch (schema v117). `Option` because a row written
+    /// before v117 — or never touched since — has no such column.
+    credential_changed_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -144,6 +147,9 @@ struct UserRowWithId {
     /// G-3 marker (schema v71). `Option` because a row written before v71 has
     /// no such column.
     directory_external_id: Option<String>,
+    /// SA-06 credential epoch (schema v117). `Option` because a row written
+    /// before v117 — or never touched since — has no such column.
+    credential_changed_at: Option<DateTime<Utc>>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -346,6 +352,7 @@ impl UserRow {
             phone_number_verified_at: self.phone_number_verified_at,
             address: decode_address(self.address),
             directory_external_id: self.directory_external_id,
+            credential_changed_at: self.credential_changed_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -392,6 +399,7 @@ impl UserRowWithId {
             phone_number_verified_at: self.phone_number_verified_at,
             address: decode_address(self.address),
             directory_external_id: self.directory_external_id,
+            credential_changed_at: self.credential_changed_at,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -757,6 +765,12 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             if input.address.is_some() {
                 sets.push("address = $address");
             }
+            // SA-06 (N7; S-1, S-6): a write of the hash moves the credential
+            // epoch in the same statement, so no moment exists at which the new
+            // hash is stored and an artefact of the old one is still honoured.
+            if input.password_hash.is_some() {
+                sets.push("credential_changed_at = time::now()");
+            }
             sets.push("updated_at = time::now()");
 
             // Item A of the 1.1.0 atomicity audit: a write that changes the
@@ -1035,6 +1049,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                  UPDATE type::record('user', $id) SET \
                      directory_external_id = $external_id, \
                      password_hash = $password_hash, \
+                     credential_changed_at = time::now(), \
                      updated_at = time::now() \
                  WHERE tenant_id = $tenant_id; \
                  DELETE FROM opaque_credential \
@@ -1148,7 +1163,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
                         phone_number, phone_number_verified_at, address, \
-                        directory_external_id, \
+                        directory_external_id, credential_changed_at, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id AND directory_external_id = $external_id \
@@ -1187,7 +1202,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
                         phone_number, phone_number_verified_at, address, \
-                        directory_external_id, \
+                        directory_external_id, credential_changed_at, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id \
@@ -1488,7 +1503,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
                         phone_number, phone_number_verified_at, address, \
-                        directory_external_id, \
+                        directory_external_id, credential_changed_at, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id AND status != 'Deleted'{search} \
@@ -1692,6 +1707,7 @@ impl<C: Connection> SurrealUserRepository<C> {
              scheduled_purge_at = NONE, \
              status = 'Anonymized', \
              erasure_audit_pending = $record_stamp, \
+             credential_changed_at = time::now(), \
              updated_at = time::now() \
              WHERE tenant_id = $tenant_id AND ($only_pending = false OR deletion_pending = true) \
              RETURN VALUE meta::id(id)); \

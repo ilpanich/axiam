@@ -229,6 +229,24 @@ pub struct BootstrapResponse {
 // Handler
 // -----------------------------------------------------------------------
 
+/// The one refusal every unsatisfied bootstrap gate answers (SA-01, Q-6/S-4).
+///
+/// One reason for a missing token, an unknown or consumed token and an email
+/// that does not match `AXIAM_BOOTSTRAP_ADMIN_EMAIL`: the reason is echoed to
+/// the client, and distinct texts would tell an unauthenticated caller whether
+/// the email restriction is set and whether a guessed address is the one
+/// configured.
+fn gate_refused() -> AxiamApiError {
+    AxiamApiError(AxiamError::AuthorizationDenied {
+        reason: "bootstrap gate not satisfied: a valid, unconsumed setup_token (the \
+                 one-time token logged at first boot) is required, and the email must \
+                 match AXIAM_BOOTSTRAP_ADMIN_EMAIL if that is set"
+            .into(),
+        action: None,
+        resource_id: None,
+    })
+}
+
 /// Serialises [`bootstrap`] within one process (step 2b).
 static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -237,16 +255,21 @@ static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 /// Creates the initial admin user with the super-admin role and seeds the
 /// default permission set. First-super-admin creation is atomic (SECHRD-04
 /// / D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same
-/// transaction means a second call — concurrent OR sequential — against a
-/// tenant that already has an admin is refused with 409 Conflict; no
-/// partial admin or orphan role RELATE can result. No token is issued —
-/// the user must authenticate via `/api/v1/auth/login` (D-11).
+/// transaction means at most one admin is ever created; no partial admin or
+/// orphan role RELATE can result. No token is issued — the user must
+/// authenticate via `/api/v1/auth/login` (D-11).
 ///
 /// Mandatory gate (D-03a, SA-01): ALWAYS requires a valid, unconsumed
-/// `setup_token` (403 if missing/invalid/already consumed). When
-/// `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set it is an additional restriction: the
-/// request email must match it (403 on mismatch). The email is not a
-/// credential and never replaces the token.
+/// `setup_token`. When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set it is an additional
+/// restriction: the request email must match it. The email is not a
+/// credential and never replaces the token. The token is checked first, and
+/// every gate refusal is the same 403 with the same reason, so a caller
+/// without the token learns neither whether the email restriction is set nor
+/// whether a guessed address matches it.
+///
+/// A call after a successful bootstrap is refused 403 by the gate, because the
+/// first call consumed the token; 409 is answered only to the loser of two
+/// calls racing with the same still-unconsumed token.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/bootstrap",
@@ -255,8 +278,8 @@ static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
     responses(
         (status = 201, description = "Organization, tenant and admin user created", body = BootstrapResponse),
         (status = 400, description = "Invalid request (missing required fields)"),
-        (status = 403, description = "Bootstrap gate not satisfied (email mismatch or invalid/missing setup token)"),
-        (status = 409, description = "Bootstrap already completed"),
+        (status = 403, description = "Bootstrap gate not satisfied: missing, invalid or consumed setup token, or email mismatch (one undifferentiated reason). Also the answer to any call after a successful bootstrap"),
+        (status = 409, description = "A concurrent bootstrap with the same setup token won the race"),
     )
 )]
 pub async fn bootstrap<C: Connection + Clone>(
@@ -269,10 +292,24 @@ pub async fn bootstrap<C: Connection + Clone>(
     //
     //    The one-time setup token is ALWAYS required. `AXIAM_BOOTSTRAP_ADMIN_EMAIL`
     //    is a non-secret address, so it is never a credential: when set it is an
-    //    ADDITIONAL restriction (the request email must match, else 403), and the
-    //    token is then checked on top of it. Before SA-01 a matching email alone
-    //    skipped the token, which made the setting strictly weaken the gate.
+    //    ADDITIONAL restriction (the request email must also match). Before SA-01
+    //    a matching email alone skipped the token, which made the setting
+    //    strictly weaken the gate.
     //
+    //    The token is checked FIRST, and every refusal below is the same 403
+    //    with the same reason (`gate_refused`). The reason is echoed to the
+    //    client, so distinct texts — or an email check ahead of the token —
+    //    would let an unauthenticated caller learn whether the restriction is
+    //    set and confirm a guess at the first administrator's address.
+    let token_hash = req
+        .setup_token
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .map(hash_setup_token)
+        .ok_or_else(gate_refused)?;
+    if !setup_token_is_valid(&state.db.current(), &token_hash).await? {
+        return Err(gate_refused());
+    }
     // `.ok().filter(|s| !s.trim().is_empty())`, not a bare `var()`: Docker
     // Compose sets a variable to the EMPTY STRING for `FOO: "${FOO:-}"`, and
     // `Ok("")` taken as "restriction set" would compare the request email
@@ -283,32 +320,7 @@ pub async fn bootstrap<C: Connection + Clone>(
         .filter(|s| !s.trim().is_empty())
         && req.email != expected
     {
-        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-            reason: "email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL".into(),
-            action: None,
-            resource_id: None,
-        }));
-    }
-    let token_hash = req
-        .setup_token
-        .as_deref()
-        .filter(|t| !t.is_empty())
-        .map(hash_setup_token)
-        .ok_or_else(|| {
-            AxiamApiError(AxiamError::AuthorizationDenied {
-                reason: "bootstrap gate not satisfied: a valid setup_token is required \
-                         (the one-time token logged at first boot)"
-                    .into(),
-                action: None,
-                resource_id: None,
-            })
-        })?;
-    if !setup_token_is_valid(&state.db.current(), &token_hash).await? {
-        return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-            reason: "setup token is invalid, unknown, or already consumed".into(),
-            action: None,
-            resource_id: None,
-        }));
+        return Err(gate_refused());
     }
     let consumed_token_hash = token_hash;
 

@@ -475,6 +475,11 @@ fn assert_not_an_access_token(token: &str, ceremony: &str) {
     );
     let header = jsonwebtoken::decode_header(token).unwrap();
     assert_eq!(header.typ.as_deref(), Some(STATE_TYP));
+    // S-8: a state token names no JWKS key.
+    assert_eq!(
+        header.kid, None,
+        "the {ceremony} state token must carry no kid"
+    );
 }
 
 /// N10 variant (b): `start_authentication` (`sub` = the user, obtainable with
@@ -499,34 +504,79 @@ async fn n10_a_discoverable_state_token_is_not_an_access_token() {
     assert_not_an_access_token(&token, "discoverable");
 }
 
-/// The other direction (SA-03 rule 6): an access token is refused where a
-/// ceremony state token is expected, by both finish entry points.
+/// The claims of a genuine ceremony state token — `purpose`, encrypted
+/// `state` and all — re-signed with the deployment key under the header an
+/// access token carries (`typ: at+jwt` and the JWKS `kid`). Only the header
+/// differs from the token the ceremony issued, so only a `typ` check can tell
+/// them apart.
+fn resigned_as_access_token(state_token: &str) -> String {
+    let payload = state_token.split('.').nth(1).expect("a compact JWS");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+    assert!(claims.get("purpose").is_some() && claims.get("state").is_some());
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    header.typ = Some(axiam_auth::token::TYP_ACCESS_TOKEN.into());
+    header.kid = axiam_auth::token::ed25519_jwk_kid(TEST_PUBLIC_KEY);
+    jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The other direction: a token typed `at+jwt` is refused where a ceremony
+/// state token is expected, by both finish entry points, even when its claims
+/// are a genuine state token's. The untouched token then still finishes, so
+/// the refusal was the header's doing and spent nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_access_token_is_not_a_ceremony_state_token() {
     let w = world().await;
-    let (challenge, _) = start(&w).await;
+
+    // Second factor.
+    let (challenge, state_token) = start(&w).await;
     let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
-    let access = axiam_auth::token::issue_access_token(
-        w.user_id,
-        w.tenant_id,
-        w.org_id,
-        &[],
-        &config(),
-        Uuid::new_v4().to_string(),
-        axiam_auth::token::AUD_USER,
-    )
-    .unwrap();
+    let forged = resigned_as_access_token(&state_token);
+    let refused = w
+        .webauthn
+        .finish_authentication(w.tenant_id, &forged, &assertion)
+        .await;
     assert!(
-        w.webauthn
-            .finish_authentication(w.tenant_id, &access, &assertion)
-            .await
-            .is_err()
+        refused.is_err(),
+        "an at+jwt token with state claims finished the second-factor ceremony: {refused:?}"
     );
+    assert!(finish(&w, &state_token, &assertion).await);
+
+    // Usernameless.
+    let (rcr, state_token) = w
+        .webauthn
+        .start_discoverable_authentication(w.tenant_id, w.org_id)
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 2, w.user_id);
+    let forged = resigned_as_access_token(&state_token);
+    let refused = w
+        .webauthn
+        .finish_discoverable_authentication(w.tenant_id, &forged, &assertion)
+        .await;
     assert!(
-        w.webauthn
-            .finish_discoverable_authentication(w.tenant_id, &access, &assertion)
-            .await
-            .is_err()
+        refused.is_err(),
+        "an at+jwt token with state claims finished the usernameless ceremony: {refused:?}"
     );
-    assert_eq!(sessions(&w).await, 0);
+    assert_eq!(
+        w.webauthn
+            .finish_discoverable_authentication(w.tenant_id, &state_token, &assertion)
+            .await
+            .unwrap(),
+        (w.user_id, w.org_id)
+    );
+    assert_eq!(
+        sessions(&w).await,
+        1,
+        "only the genuine second-factor finish"
+    );
 }

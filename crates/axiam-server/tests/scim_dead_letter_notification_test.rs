@@ -67,6 +67,7 @@ fn dispatcher_row(
         outcome,
         ip_address: None,
         metadata: Some(serde_json::json!({"error": "the receiver refused the request"})),
+        organization_id: None,
     }
 }
 

@@ -403,6 +403,7 @@ pub async fn revoke<C: Connection + Clone>(
                     "ca_certificate_id": id,
                     "reason": axiam_pki::vault_forward::sanitise_reason(&reason),
                 })),
+                organization_id: None,
             })
             .await
     {
@@ -888,6 +889,9 @@ pub async fn sign_intermediate_csr<C: Connection + Clone>(
     responses(
         (status = 200, description = "List of tenant signing CAs",
          body = inline(PaginatedResult<CaCertificate>)),
+        (status = 403, description = "The path names another organization, or a tenant other \
+                                      than the caller's own that the caller, an \
+                                      organization-level principal, does not reach"),
     ),
     security(("bearer" = []))
 )]
@@ -903,6 +907,21 @@ pub async fn list_intermediates<C: Connection + Clone>(
         .await?;
     let (org_id, tenant_id) = path.into_inner();
     require_own_org(&user, org_id)?;
+    // SA-02 (N9 sibling, review S-5): `org_id == user.org_id` is passed by
+    // every principal of the organization, so the path tenant must be bound
+    // too. A principal's own tenant is listed as before — a Standard tenant
+    // needs its signing CAs' ids to issue under them, and has no other route
+    // to them. Any other tenant takes the guard its siblings
+    // (`generate_intermediate`, `sign_intermediate_csr`, `tenants::get`) take:
+    // an organization principal whose reach covers the tenant.
+    if tenant_id != user.principal_tenant_id {
+        crate::handlers::org_scope::require_organization_principal_for_tenant(
+            &user,
+            state.get_ref(),
+            tenant_id,
+        )
+        .await?;
+    }
 
     let result = state
         .pki

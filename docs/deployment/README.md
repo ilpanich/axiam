@@ -479,6 +479,17 @@ for the tenants that inherit it) that would make `required` true for a tenant wi
 an enabled directory. A disabled configuration may coexist; enabling it is then
 the refused write.
 
+**A credential change ends the artefacts of the old credential (SA-06).** Every write of a
+user's password hash, and every write or deletion of the user's OPAQUE record, stamps
+`user.credential_changed_at` in the same transaction (schema v117: one optional column, no
+backfill). An MFA challenge token, an MFA setup token or an in-flight OPAQUE login
+(`login/start` already answered, `login/finish` not yet sent) issued before that instant is
+refused with the response an invalid or expired one gets, so a reset also stops a login the
+holder of the old password had in flight. A user whose credential has not changed since the
+upgrade has no stamp and is refused nothing. `iat` of the two tokens is whole seconds, so a
+token minted in the same second as the change is refused too, and the person signs in again; the
+OPAQUE exchange compares at sub-second precision.
+
 **Accounts whose entry has no usable e-mail address cannot be provisioned.** A
 local account must have an e-mail address, and AXIAM does not invent one: a
 placeholder would be released as the user's e-mail `NameID` and as the OIDC
@@ -702,24 +713,31 @@ Every access token AXIAM mints carries the JOSE header `typ: at+jwt`
 (RFC 9068 §2.1) and a `kid`. The other JWTs signed with the same key each name
 their own kind, and every verifier requires its own:
 
-| Token | `typ` |
-|---|---|
-| Access token (every grant, RPT, token exchange) | `at+jwt` |
-| OIDC ID token | `JWT` |
-| WebAuthn ceremony state | `axiam-webauthn-state+jwt` |
-| MFA challenge (after the password factor) | `axiam-mfa-challenge+jwt` |
-| MFA setup (MFA enforced, none enrolled) | `axiam-mfa-setup+jwt` |
-| Back-channel logout token | `logout+jwt` |
-| SSF Security Event Token | `secevent+jwt` |
+| Token | `typ` | `kid` |
+|---|---|---|
+| Access token (every grant, RPT, token exchange) | `at+jwt` | yes |
+| OIDC ID token | `JWT` | yes |
+| WebAuthn ceremony state | `axiam-webauthn-state+jwt` | no |
+| MFA challenge (after the password factor) | `axiam-mfa-challenge+jwt` | no |
+| MFA setup (MFA enforced, none enrolled) | `axiam-mfa-setup+jwt` | no |
+| Back-channel logout token | `logout+jwt` | no |
+| SSF Security Event Token | `secevent+jwt` | yes |
+
+The ceremony tokens (WebAuthn state, MFA challenge and setup) are only ever
+read back by AXIAM itself, which verifies them with its own key rather than
+by JWKS lookup, so they name no JWKS key: a relying party that selects keys
+strictly by `kid` finds none for them.
 
 An access-token verifier (REST, gRPC interceptor and `ValidateToken`,
 introspection, RFC 8693 `subject_token`, UMA `claim_token`) also refuses any
-token whose claims carry `purpose`, whatever its `typ`.
+token whose claims carry `purpose`, whatever its `typ`. An `id_token_hint`
+(end-session, `/oauth2/authorize`, CIBA) is accepted only with `typ: JWT` or
+no `typ`; an access token or any other kind above is refused as a hint.
 
 | Variable | Purpose |
 |---|---|
-| `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` | Default **`true`**: an access token without `typ: at+jwt` is refused. |
-| `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` | Default **`false`**: an access token without `aud` is refused on user routes and on gRPC. |
+| `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` | Default **`true`**: an access token without `typ: at+jwt` is refused. `false`, `0`, `no` or `off` (any case) relax it; an unrecognised value stops the server at startup with a configuration error. |
+| `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` | Default **`false`**: an access token without `aud` is refused on user routes and on gRPC. Enabled only by `true`, `1` or `yes` (any case, surrounding whitespace ignored); any other value — empty, `off`, a typo — leaves it disabled. |
 
 **What the default costs on upgrade.** Releases before this change minted
 access tokens with the generic `typ: JWT`. With
@@ -735,8 +753,9 @@ started again.
 **Relaxing it for one rolling upgrade.** While old and new replicas serve
 together, set `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` on the new
 replicas. An untyped token is then accepted only if its claims carry no
-`purpose`, each acceptance is logged at `warn`, and the server logs a `warn`
-at startup. The MFA and WebAuthn verifiers likewise accept the previous
+`purpose`; acceptances are logged at `warn` at most once a minute per process,
+each line giving how many were accepted since the last one, and the server
+logs a `warn` at startup. The MFA and WebAuthn verifiers likewise accept the previous
 release's untyped tokens of their own kind. Set it back to `true` (or unset
 it) once every replica runs the new release and one access-token lifetime has
 passed. A token of any other `typ` is refused in both modes.

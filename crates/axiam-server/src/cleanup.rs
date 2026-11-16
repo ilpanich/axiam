@@ -518,6 +518,7 @@ where
                     "permissions": network_permissions,
                     "reason": "account_erasure",
                 })),
+                organization_id: None,
             },
         )
         .await;
@@ -830,7 +831,8 @@ where
         return Ok(PurgeOutcome::Skipped);
     };
     work.step(UnitStep::TenantRowRemoved(tenant_id)).await;
-    record_tenant_purged(audit.as_ref(), tenant_id, false, &report).await;
+    let organization_id = tenants.deleted_tenant_organization(tenant_id).await;
+    record_tenant_purged(audit.as_ref(), tenant_id, organization_id, false, &report).await;
     work.step(UnitStep::Recorded(tenant_id)).await;
     record.settle().await;
     Ok(PurgeOutcome::Purged)
@@ -947,7 +949,15 @@ where
         {
             Ok(true) => {}
             Ok(false) => {
-                record_tenant_purged(audit, marker.tenant_id, false, &marker.report).await;
+                let organization_id = tenants.deleted_tenant_organization(marker.tenant_id).await;
+                record_tenant_purged(
+                    audit,
+                    marker.tenant_id,
+                    organization_id,
+                    false,
+                    &marker.report,
+                )
+                .await;
                 recorded += 1;
                 tracing::warn!(
                     tenant_id = %marker.tenant_id,
@@ -1055,16 +1065,21 @@ where
         return Ok(PurgeOutcome::Skipped);
     };
     work.step(UnitStep::TenantRowRemoved(tenant_id)).await;
-    record_tenant_purged(audit.as_ref(), tenant_id, true, &report).await;
+    let organization_id = tenants.deleted_tenant_organization(tenant_id).await;
+    record_tenant_purged(audit.as_ref(), tenant_id, organization_id, true, &report).await;
     work.step(UnitStep::Recorded(tenant_id)).await;
     record.settle().await;
     Ok(PurgeOutcome::Purged)
 }
 
 /// Write `tenants.purged` to the system log for a purge that finished.
+///
+/// `organization_id` is the one the tenant's `tenants.deleted` record names
+/// (SA-02, N1): what lets the system log show the purge to that organization.
 async fn record_tenant_purged<S: AuditWriteSink>(
     audit: &S,
     tenant_id: Uuid,
+    organization_id: Option<Uuid>,
     orphan: bool,
     report: &axiam_db::repository::tenant_purge::TenantPurgeReport,
 ) {
@@ -1086,6 +1101,7 @@ async fn record_tenant_purged<S: AuditWriteSink>(
                 "audit_rows_deleted": report.audit_rows_deleted,
                 "audit_rows_kept": report.audit_rows_kept,
             })),
+            organization_id,
         },
     )
     .await;
@@ -2658,6 +2674,7 @@ where
                 // count, as directory linking records its own.
                 "certificates_revoked": certificates_revoked,
             })),
+            organization_id: None,
         },
     )
     .await;
@@ -2801,6 +2818,7 @@ where
                             "certificates_revoked": null,
                             "recovered": true,
                         })),
+                        organization_id: None,
                     },
                 )
                 .await;
@@ -4550,6 +4568,7 @@ mod personal_data_export_tests {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: None,
         }
     }
 

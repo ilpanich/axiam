@@ -108,6 +108,9 @@ fn parse_handlers(file: &str, source: &str) -> Vec<Handler> {
             out.push(current.take().expect("just checked"));
             continue;
         }
+        // Only code counts (review Q-16): a comment that mentions the guard,
+        // or a call commented out, must not read as the guard being there.
+        let line = code_of(line);
         if h.action.is_none()
             && let Some(rest) = line.split_once("RequirePermission::new(")
             && let Some(action) = rest.1.split('"').nth(1)
@@ -128,6 +131,56 @@ fn parse_handlers(file: &str, source: &str) -> Vec<Handler> {
         out.push(h);
     }
     out
+}
+
+/// `line` without its `//` comment (`///` and `//!` included).
+///
+/// A `//` inside a string literal (`"https://…"`) is not a comment, so the
+/// scan tracks string literals; escapes inside them are honoured. Block
+/// comments are not handled: the handler modules use none.
+fn code_of(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let (mut i, mut in_str) = (0, false);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_str => i += 1,
+            b'"' => in_str = !in_str,
+            b'/' if !in_str && bytes.get(i + 1) == Some(&b'/') => return &line[..i],
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+/// The scan reads code only (review Q-16): a body whose only mention of the
+/// guard is a comment is not guarded, and a `//` inside a string does not hide
+/// the call after it.
+#[test]
+fn the_handler_scan_ignores_comments() {
+    let source = "\
+pub async fn commented(user: AuthenticatedUser) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new(\"a:b\", Uuid::nil())
+    // require_organization_principal(&user, state.get_ref()).await?;
+    /// require_organization_principal_for_tenant(&user, state.get_ref(), t).await?;
+    let x = 1; // require_organization_principal(&user, state.get_ref())
+}
+pub async fn guarded(user: AuthenticatedUser) -> Result<HttpResponse, AxiamApiError> {
+    let _u = \"https://example.com\"; require_organization_principal(&user, s).await?;
+}
+";
+    let handlers = parse_handlers("probe.rs", source);
+    let commented = handlers.iter().find(|h| h.name == "commented").unwrap();
+    assert_eq!(commented.action.as_deref(), Some("a:b"));
+    assert!(
+        !commented.scope_guarded && !commented.org_guard && !commented.tenant_guard,
+        "a guard named only in comments was read as present: {commented:?}"
+    );
+    let guarded = handlers.iter().find(|h| h.name == "guarded").unwrap();
+    assert!(
+        guarded.scope_guarded && guarded.org_guard,
+        "a call after a `//` inside a string was hidden: {guarded:?}"
+    );
 }
 
 fn all_handlers() -> Vec<Handler> {
@@ -469,12 +522,11 @@ const ORGANIZATION_ROUTES: &[(&str, &str, &str, Guard)] = &[
     (
         "GET",
         "/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+        // Review S-5: a principal's own tenant is listed without the guard (a
+        // Standard tenant needs its signing CAs to issue under); any other
+        // tenant needs an organization principal that reaches it.
         "ca_certificates::list_intermediates",
-        Guard::Exempt(
-            "public signing-CA certificates of the named tenant, bound only to \
-             user.org_id. Not bound to the caller's reach: noted as a follow-up \
-             in SA-02, not changed by it",
-        ),
+        Guard::OrganizationForTenant,
     ),
     (
         "POST",

@@ -671,7 +671,8 @@ pub fn select_hint(req: &BackchannelAuthenticationRequest) -> Result<CibaHint, O
 
 /// Verify an `id_token_hint` and return its subject.
 ///
-/// The hint must be an ID token **this deployment** signed (its EdDSA key),
+/// The hint must be an ID token (header `typ` `JWT` or absent, never
+/// `at+jwt` or another AXIAM kind) **this deployment** signed (its EdDSA key),
 /// issued **to this client** (`aud`) under **one of the issuers this request
 /// may name** (`iss`: the deployment's, or the tenant path's the request
 /// arrived under). Expiry is not checked: CIBA Core §7.1 describes the hint as
@@ -701,9 +702,14 @@ pub fn verify_id_token_hint(
     validation.validate_exp = false;
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
-    let claims = jsonwebtoken::decode::<axiam_auth::token::IdTokenClaims>(token, &key, &validation)
-        .map_err(|_| invalid())?
-        .claims;
+    let data = jsonwebtoken::decode::<axiam_auth::token::IdTokenClaims>(token, &key, &validation)
+        .map_err(|_| invalid())?;
+    // Q-8 / S-10: an access token (or any other AXIAM kind) is not an ID
+    // token, however well its claims fit.
+    if !axiam_auth::token::id_token_hint_typ_accepted(data.header.typ.as_deref()) {
+        return Err(invalid());
+    }
+    let claims = data.claims;
     if claims.aud != client_id {
         return Err(invalid());
     }
@@ -2062,6 +2068,59 @@ mod tests {
         assert_eq!(
             resolve_scopes(Some("openid profile openid"), &registered).unwrap(),
             ["openid", "profile"]
+        );
+    }
+
+    /// Q-8 / S-10: an `at+jwt` access token is not an `id_token_hint`, even
+    /// one whose `aud` names the requesting client and whose `iss` is
+    /// acceptable — its claims fit `IdTokenClaims`, so only the header can
+    /// refuse it. An ID token for the same client and subject still verifies.
+    #[test]
+    fn an_access_token_is_not_an_id_token_hint() {
+        // The fixed test keypair the crate's other suites use; no real value.
+        let cfg = axiam_auth::config::AuthConfig {
+            jwt_private_key_pem: concat!(
+                "-----BEGIN PRIVATE KEY-----\n",
+                "MC4CAQAwBQYDK2VwBCIEINvQFIZqeI5OX7TDEFKcYhLxO5R75FOv/nC4+o+HHPfM\n",
+                "-----END PRIVATE KEY-----"
+            )
+            .into(), // gitleaks:allow
+            jwt_public_key_pem: concat!(
+                "-----BEGIN PUBLIC KEY-----\n",
+                "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
+                "-----END PUBLIC KEY-----"
+            )
+            .into(),
+            jwt_issuer: "axiam-test".into(),
+            ..axiam_auth::config::AuthConfig::default()
+        };
+        let issuers = vec![cfg.root_issuer().to_owned()];
+        let user = Uuid::new_v4();
+        let access =
+            axiam_auth::token::AccessTokenSpec::user(user, Uuid::new_v4(), Uuid::new_v4(), "s")
+                .aud("rp-1")
+                .issue(&cfg)
+                .unwrap();
+        let verdict = verify_id_token_hint(&access, &cfg.jwt_public_key_pem, "rp-1", &issuers);
+        assert!(
+            verdict.is_err(),
+            "an at+jwt access token was accepted as an id_token_hint: {verdict:?}"
+        );
+
+        let id = axiam_auth::token::issue_id_token(
+            user,
+            "rp-1",
+            None,
+            None,
+            &[],
+            &cfg,
+            None,
+            &axiam_auth::token::IdTokenEvidence::NONE,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_id_token_hint(&id, &cfg.jwt_public_key_pem, "rp-1", &issuers).unwrap(),
+            user
         );
     }
 

@@ -84,6 +84,7 @@ impl AuditLogRepository for RecordingRepo {
             ip_address: input.ip_address.clone(),
             metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         };
         self.entries.lock().unwrap().push(input);
         Ok(entry)
@@ -100,6 +101,7 @@ impl AuditLogRepository for RecordingRepo {
 
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _filter: AuditLogFilter,
         _pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -153,6 +155,7 @@ async fn service_log_delegates_to_repository() {
         outcome: AuditOutcome::Success,
         ip_address: Some("10.0.0.1".into()),
         metadata: None,
+        organization_id: None,
     };
 
     let stored = service.log(entry).await.unwrap();
@@ -178,6 +181,7 @@ async fn service_log_propagates_repository_error() {
         outcome: AuditOutcome::Failure,
         ip_address: None,
         metadata: None,
+        organization_id: None,
     };
 
     assert!(service.log(entry).await.is_err());
@@ -1114,6 +1118,7 @@ impl AuditLogRepository for PanicRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _filter: AuditLogFilter,
         _pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -1272,6 +1277,59 @@ async fn a_request_with_no_attribution_is_still_recorded_with_a_nil_tenant() {
 
     wait_for_entries(&repo, 1).await;
     assert_eq!(repo.snapshot()[0].tenant_id, Uuid::nil());
+}
+
+/// SA-02 (N1): an organization a handler resolved for a request that stays in
+/// the system partition is recorded on the row; the same extension beside an
+/// attribution — the row then belongs to a tenant — records none.
+#[actix_web::test]
+async fn a_system_row_records_the_organization_resolved_for_it() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let org_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+
+    let app = test::init_service(
+        App::new()
+            .wrap(mw)
+            .route(
+                "/scim/v2/Users",
+                web::get().to(move |req: actix_web::HttpRequest| async move {
+                    req.extensions_mut()
+                        .insert(axiam_audit::AuditOrganization { org_id });
+                    HttpResponse::Ok().finish()
+                }),
+            )
+            .route(
+                "/api/v1/auth/login",
+                web::post().to(move |req: actix_web::HttpRequest| async move {
+                    req.extensions_mut()
+                        .insert(axiam_audit::AuditOrganization { org_id });
+                    req.extensions_mut()
+                        .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
+                    HttpResponse::Unauthorized().finish()
+                }),
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/scim/v2/Users").to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/login")
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 2).await;
+
+    let entries = repo.snapshot();
+    assert_eq!(entries[0].tenant_id, Uuid::nil());
+    assert_eq!(entries[0].organization_id, Some(org_id));
+    assert_eq!(entries[1].tenant_id, tenant_id);
+    assert_eq!(
+        entries[1].organization_id, None,
+        "a row attributed to a tenant records no organization of its own"
+    );
 }
 
 #[actix_web::test]

@@ -149,7 +149,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
             .db
             .current()
             .query(
-                "UPDATE opaque_credential SET \
+                "BEGIN TRANSACTION; \
+                 UPDATE opaque_credential SET \
                  credential_identifier = $credential_identifier, \
                  suite = $suite, \
                  ksf = $ksf, \
@@ -162,7 +163,10 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  record = $record, \
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 RETURN meta::id(id) AS record_id, *",
+                 RETURN meta::id(id) AS record_id, *; \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = time::now() \
+                 WHERE tenant_id = $tenant_id; \
+                 COMMIT TRANSACTION",
             )
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("user_id", input.user_id.to_string()))
@@ -182,7 +186,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let updated: Vec<CredentialRow> = result.take(0).map_err(DbError::from)?;
+        // BEGIN=0, UPDATE=1, epoch=2.
+        let updated: Vec<CredentialRow> = result.take(1).map_err(DbError::from)?;
         if let Some(row) = updated.into_iter().next() {
             return Ok(row.try_into_credential()?);
         }
@@ -193,7 +198,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
             .db
             .current()
             .query(
-                "CREATE type::record('opaque_credential', $id) SET \
+                "BEGIN TRANSACTION; \
+                 CREATE type::record('opaque_credential', $id) SET \
                  tenant_id = $tenant_id, \
                  user_id = $user_id, \
                  credential_identifier = $credential_identifier, \
@@ -206,7 +212,10 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  ksf_r = $ksf_r, \
                  ksf_p = $ksf_p, \
                  record = $record \
-                 RETURN meta::id(id) AS record_id, *",
+                 RETURN meta::id(id) AS record_id, *; \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = time::now() \
+                 WHERE tenant_id = $tenant_id; \
+                 COMMIT TRANSACTION",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -227,7 +236,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<CredentialRow> = result.take(0).map_err(DbError::from)?;
+        // BEGIN=0, CREATE=1, epoch=2.
+        let rows: Vec<CredentialRow> = result.take(1).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "opaque_credential", &id_str)?;
         Ok(row.try_into_credential()?)
     }
@@ -259,9 +269,13 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
             .db
             .current()
             .query(
-                "DELETE FROM opaque_credential \
+                "BEGIN TRANSACTION; \
+                 DELETE FROM opaque_credential \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 RETURN BEFORE",
+                 RETURN BEFORE; \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = time::now() \
+                 WHERE tenant_id = $tenant_id; \
+                 COMMIT TRANSACTION",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
@@ -271,7 +285,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<CredentialRow> = result.take(0).map_err(DbError::from)?;
+        // BEGIN=0, DELETE=1, epoch=2.
+        let rows: Vec<CredentialRow> = result.take(1).map_err(DbError::from)?;
         Ok(!rows.is_empty())
     }
 

@@ -330,7 +330,7 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER",
-            "Compatibility switch — treat a token with no audience claim as a user token. Default `true` (this row used to read as if it were off); set `false` to refuse such a token with a `401`.",
+            "Compatibility switch — treat a token with no audience claim as a user token. Default `false`: such a token is refused with a `401`. Enabled only by `true`, `1` or `yes`; any other value leaves it off.",
             "false",
           ],
         ],

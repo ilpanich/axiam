@@ -28,6 +28,9 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+mod org_scope_support;
+use org_scope_support::{org_operator_token, real_authz, seed_tenant, tenant_user};
+
 /// Arbitrary CSRF token for the double-submit check (SEC-046). These
 /// Bearer-token tests have no login/`axiam_csrf` cookie, so we send a matching
 /// `axiam_csrf` cookie + `X-CSRF-Token` header; the middleware only checks they
@@ -474,6 +477,7 @@ async fn audit_export_streams_every_entry_and_digests_them() {
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: None,
+                organization_id: None,
             })
             .await
             .unwrap();
@@ -551,6 +555,7 @@ async fn a_stale_export_receipt_does_not_unblock_delete() {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -627,6 +632,7 @@ async fn a_receipt_claiming_rows_after_itself_does_not_unblock_delete() {
                 "record_count": 0,
                 "exported_through": Utc::now() + Duration::days(1),
             })),
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -654,6 +660,7 @@ async fn a_receipt_claiming_rows_after_itself_does_not_unblock_delete() {
     );
     let deletions = SurrealAuditLogRepository::new(db.clone())
         .list_system(
+            org_id,
             AuditLogFilter {
                 action: Some(axiam_api_rest::handlers::tenants::TENANT_DELETED_ACTION.to_string()),
                 ..Default::default()
@@ -752,6 +759,7 @@ async fn deleting_a_tenant_records_it_in_the_system_audit_log() {
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
     let system = audit_repo
         .list_system(
+            org_id,
             AuditLogFilter {
                 action: Some(axiam_api_rest::handlers::tenants::TENANT_DELETED_ACTION.to_string()),
                 ..Default::default()
@@ -785,6 +793,80 @@ async fn deleting_a_tenant_records_it_in_the_system_audit_log() {
     assert_ne!(
         entry.metadata["audit_exported_through"],
         entry.metadata["audit_exported_at"]
+    );
+}
+
+/// SA-02 (N1, review Q-3/S-2): the `tenants.deleted` record of organization
+/// Y's tenant lives in the system partition, and only Y's organization-level
+/// principals read it through `GET /api/v1/audit-logs/system`. Organization
+/// X's administrator, as organization-level in X as Y's is in Y, does not see
+/// it.
+#[actix_rt::test]
+async fn a_deleted_tenants_system_record_is_read_by_its_own_organization_only() {
+    let (db, org_y, _tenant_id, y_admin, y_scope) = setup_db().await;
+    let auth = test_auth_config();
+    let y_token = mint_token(&auth, y_admin, y_scope, org_y);
+
+    let org_x = SurrealOrganizationRepository::new(db.clone())
+        .create(CreateOrganization {
+            name: "Org X".into(),
+            slug: "org-x".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    let tenant_repo = SurrealTenantRepository::new(db.clone());
+    let x_token = org_operator_token(&db, &auth, org_x.id, "x-admin").await;
+
+    let doomed = tenant_repo
+        .create(CreateTenant {
+            organization_id: org_y,
+            kind: TenantKind::Standard,
+            name: "Doomed Y".into(),
+            slug: "doomed-y".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    let app = test_app!(db, auth);
+    export_audit_body!(app, y_token, org_y, doomed.id);
+    let req = test::TestRequest::delete()
+        .uri(&format!(
+            "/api/v1/organizations/{org_y}/tenants/{}",
+            doomed.id
+        ))
+        .insert_header(("Authorization", format!("Bearer {y_token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    let system_log = |token: String| {
+        test::TestRequest::get()
+            .uri("/api/v1/audit-logs/system?limit=100")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+    let resp = test::call_service(&app, system_log(x_token)).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(
+        !body.contains(&doomed.id.to_string()),
+        "organization X's administrator read organization Y's tenant deletion: {body}"
+    );
+
+    let resp = test::call_service(&app, system_log(y_token)).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let rows = body["items"].as_array().expect("a page of rows");
+    let deletion = rows
+        .iter()
+        .find(|r| r["resource_id"] == doomed.id.to_string())
+        .unwrap_or_else(|| panic!("Y's own deletion record is missing: {body}"));
+    assert_eq!(
+        deletion["action"],
+        axiam_api_rest::handlers::tenants::TENANT_DELETED_ACTION
     );
 }
 
@@ -1600,6 +1682,7 @@ async fn populate_tenant(db: &Surreal<TestDb>, tenant_id: Uuid) -> (String, Stri
             outcome: AuditOutcome::Success,
             ip_address: Some("192.0.2.1".into()),
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -2009,6 +2092,7 @@ async fn deleting_a_populated_tenant_revokes_its_last_session_and_the_purge_empt
     // The system-log record of the deletion is kept.
     let system = SurrealAuditLogRepository::new(db.clone())
         .list_system(
+            org_id,
             AuditLogFilter {
                 action: Some(axiam_api_rest::handlers::tenants::TENANT_DELETED_ACTION.to_string()),
                 ..Default::default()
@@ -2097,6 +2181,7 @@ async fn an_audit_row_written_after_the_export_survives_the_purge() {
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: None,
+        organization_id: None,
     };
     let held = audit_repo.append(entry("users.updated")).await.unwrap();
     let body = export_audit_body!(app, token, org_id, doomed);
@@ -2150,21 +2235,6 @@ async fn an_audit_row_written_after_the_export_survives_the_purge() {
 // administrator's to read
 // ---------------------------------------------------------------------------
 
-/// The real engine, so the seeded roles' grants decide `RequirePermission`.
-fn real_authz(db: &Surreal<TestDb>) -> Arc<dyn AuthzChecker> {
-    use axiam_db::repository::{
-        SurrealGroupRepository, SurrealPermissionRepository, SurrealResourceRepository,
-        SurrealRoleRepository, SurrealScopeRepository,
-    };
-    Arc::new(axiam_authz::AuthorizationEngine::new(
-        SurrealRoleRepository::new(db.clone()),
-        SurrealPermissionRepository::new(db.clone()),
-        SurrealResourceRepository::new(db.clone()),
-        SurrealScopeRepository::new(db.clone()),
-        SurrealGroupRepository::new(db.clone()),
-    ))
-}
-
 macro_rules! real_authz_app {
     ($db:expr, $auth:expr) => {
         test::init_service(
@@ -2196,7 +2266,6 @@ macro_rules! real_authz_app {
 /// An ordinary tenant of `org_id`, seeded with the permission registry and the
 /// default roles — the two calls `handlers::tenants::create` makes.
 async fn seeded_standard_tenant(db: &Surreal<TestDb>, org_id: Uuid, slug: &str) -> Uuid {
-    use axiam_api_rest::permissions::PERMISSION_REGISTRY;
     let tenant = SurrealTenantRepository::new(db.clone())
         .create(CreateTenant {
             organization_id: org_id,
@@ -2207,82 +2276,54 @@ async fn seeded_standard_tenant(db: &Surreal<TestDb>, org_id: Uuid, slug: &str) 
         })
         .await
         .unwrap();
-    axiam_db::seed_permissions(db, tenant.id, PERMISSION_REGISTRY)
-        .await
-        .unwrap();
-    axiam_db::seed_default_roles(db, tenant.id, PERMISSION_REGISTRY)
-        .await
-        .unwrap();
+    seed_tenant(db, tenant.id).await;
     tenant.id
 }
 
-/// A user of `tenant_id` holding the seeded role `role_name`, or — with
-/// `action` — a fresh global role granting only that action.
-async fn tenant_user(
-    db: &Surreal<TestDb>,
-    tenant_id: Uuid,
-    username: &str,
-    role_name: Option<&str>,
-    action: Option<&str>,
-) -> Uuid {
-    use axiam_core::models::role::{AssignmentScope, CreateRole};
-    use axiam_core::repository::{PermissionRepository, RoleRepository};
-    use axiam_db::repository::{SurrealPermissionRepository, SurrealRoleRepository};
+/// An organization-level principal of `org_tenant` (the organization scope,
+/// seeded here) holding `super-admin` restricted to `reach` alone.
+async fn restricted_org_principal(db: &Surreal<TestDb>, org_tenant: Uuid, reach: Uuid) -> Uuid {
+    use axiam_core::models::role::AssignmentScope;
+    use axiam_core::repository::RoleRepository;
+    use axiam_db::repository::SurrealRoleRepository;
 
+    seed_tenant(db, org_tenant).await;
     let user = SurrealUserRepository::new(db.clone())
         .create(CreateUser {
-            tenant_id,
-            username: username.into(),
-            email: format!("{username}@example.com"),
+            tenant_id: org_tenant,
+            username: "scoped-org-admin".into(),
+            email: "scoped-org-admin@example.com".into(),
             password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await
         .unwrap();
     let role_repo = SurrealRoleRepository::new(db.clone());
-    let page = Pagination {
-        offset: 0,
-        limit: 1000,
-        search: None,
-    };
-    let role_id = if let Some(name) = role_name {
-        role_repo
-            .list(tenant_id, page)
-            .await
-            .unwrap()
-            .items
-            .into_iter()
-            .find(|r| r.name == name)
-            .unwrap_or_else(|| panic!("default role `{name}` not seeded"))
-            .id
-    } else {
-        let action = action.expect("a role name or an action");
-        let role = role_repo
-            .create(CreateRole {
-                tenant_id,
-                name: format!("role-{username}"),
-                description: format!("grants only {action}"),
-                is_global: true,
-            })
-            .await
-            .unwrap();
-        let perm_repo = SurrealPermissionRepository::new(db.clone());
-        let perm = perm_repo
-            .list(tenant_id, page)
-            .await
-            .unwrap()
-            .items
-            .into_iter()
-            .find(|p| p.action == action)
-            .unwrap_or_else(|| panic!("permission `{action}` not seeded"));
-        perm_repo
-            .grant_to_role(tenant_id, role.id, perm.id)
-            .await
-            .unwrap();
-        role.id
-    };
+    let super_admin = role_repo
+        .list(
+            org_tenant,
+            Pagination {
+                offset: 0,
+                limit: 100,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|r| r.name == "super-admin")
+        .unwrap();
     role_repo
-        .assign_to_user(tenant_id, user.id, role_id, AssignmentScope::global())
+        .assign_to_user(
+            org_tenant,
+            user.id,
+            super_admin.id,
+            AssignmentScope {
+                tenant_scope: Some(vec![reach]),
+                ..AssignmentScope::global()
+            },
+        )
         .await
         .unwrap();
     user.id
@@ -2329,6 +2370,7 @@ async fn standard_tenant_admin_cannot_export_a_sibling_tenants_audit_trail() {
             outcome: AuditOutcome::Success,
             ip_address: Some("198.51.100.7".into()),
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -2407,64 +2449,13 @@ async fn standard_tenant_admin_cannot_read_a_sibling_tenant() {
 /// (`require_organization_principal_for_tenant`).
 #[actix_rt::test]
 async fn a_restricted_organization_principal_exports_only_the_tenants_it_reaches() {
-    use axiam_core::models::role::AssignmentScope;
-    use axiam_core::repository::{Pagination as Page, RoleRepository};
-    use axiam_db::repository::SurrealRoleRepository;
-
     let (db, org_id, _tenant_id, _user_id, org_tenant) = setup_db().await;
     let tenant_a = seeded_standard_tenant(&db, org_id, "tenant-a").await;
     let tenant_b = seeded_standard_tenant(&db, org_id, "tenant-b").await;
-    {
-        use axiam_api_rest::permissions::PERMISSION_REGISTRY;
-        axiam_db::seed_permissions(&db, org_tenant, PERMISSION_REGISTRY)
-            .await
-            .unwrap();
-        axiam_db::seed_default_roles(&db, org_tenant, PERMISSION_REGISTRY)
-            .await
-            .unwrap();
-    }
-    let user = SurrealUserRepository::new(db.clone())
-        .create(CreateUser {
-            tenant_id: org_tenant,
-            username: "scoped-org-admin".into(),
-            email: "scoped-org-admin@example.com".into(),
-            password: axiam_test_support::test_password(),
-            metadata: None,
-        })
-        .await
-        .unwrap();
-    let role_repo = SurrealRoleRepository::new(db.clone());
-    let super_admin = role_repo
-        .list(
-            org_tenant,
-            Page {
-                offset: 0,
-                limit: 100,
-                search: None,
-            },
-        )
-        .await
-        .unwrap()
-        .items
-        .into_iter()
-        .find(|r| r.name == "super-admin")
-        .unwrap();
-    role_repo
-        .assign_to_user(
-            org_tenant,
-            user.id,
-            super_admin.id,
-            AssignmentScope {
-                tenant_scope: Some(vec![tenant_a]),
-                ..AssignmentScope::global()
-            },
-        )
-        .await
-        .unwrap();
-
+    let user = restricted_org_principal(&db, org_tenant, tenant_a).await;
     let auth = test_auth_config();
     let app = real_authz_app!(db, auth);
-    let token = mint_token(&auth, user.id, org_tenant, org_id);
+    let token = mint_token(&auth, user, org_tenant, org_id);
     let export = |tenant: Uuid| {
         test::TestRequest::post()
             .uri(&format!(
@@ -2494,4 +2485,58 @@ async fn a_restricted_organization_principal_exports_only_the_tenants_it_reaches
         "an organization principal restricted to tenant A must not export tenant B"
     );
     assert_eq!(export_receipts(&db, tenant_b).await, 0);
+}
+
+/// SA-02 (N9 sibling, review S-5): `GET /organizations/{org}/tenants/{T}/signing-cas`
+/// is bound to the caller's tenant. Tenant A's seeded admin lists its own
+/// tenant's signing CAs and is refused its sibling B's; an organization-level
+/// principal restricted to tenant A lists A's and is refused B's.
+#[actix_rt::test]
+async fn signing_cas_are_listed_only_for_a_tenant_the_caller_reaches() {
+    let (db, org_id, _tenant_id, _user_id, org_tenant) = setup_db().await;
+    let tenant_a = seeded_standard_tenant(&db, org_id, "tenant-a").await;
+    let tenant_b = seeded_standard_tenant(&db, org_id, "tenant-b").await;
+    let a_admin = tenant_user(&db, tenant_a, "a-admin", Some("admin"), None).await;
+    let restricted = restricted_org_principal(&db, org_tenant, tenant_a).await;
+    let auth = test_auth_config();
+    let app = real_authz_app!(db, auth);
+    let list = |token: &str, tenant: Uuid, act_in: Option<Uuid>| {
+        let mut req = test::TestRequest::get()
+            .uri(&format!(
+                "/api/v1/organizations/{org_id}/tenants/{tenant}/signing-cas"
+            ))
+            .insert_header(("Authorization", format!("Bearer {token}")));
+        if let Some(t) = act_in {
+            req = req.insert_header(("X-Axiam-Tenant", t.to_string()));
+        }
+        req.to_request()
+    };
+
+    let a_token = mint_token(&auth, a_admin, tenant_a, org_id);
+    let own = test::call_service(&app, list(&a_token, tenant_a, None)).await;
+    assert_eq!(
+        own.status().as_u16(),
+        200,
+        "tenant A's admin lists its own tenant's signing CAs"
+    );
+    let sibling = test::call_service(&app, list(&a_token, tenant_b, None)).await;
+    assert_eq!(
+        sibling.status().as_u16(),
+        403,
+        "tenant A's admin must not list sibling tenant B's signing CAs"
+    );
+
+    let r_token = mint_token(&auth, restricted, org_tenant, org_id);
+    let reached = test::call_service(&app, list(&r_token, tenant_a, Some(tenant_a))).await;
+    assert_eq!(
+        reached.status().as_u16(),
+        200,
+        "an organization principal restricted to tenant A lists A's signing CAs"
+    );
+    let unreached = test::call_service(&app, list(&r_token, tenant_b, Some(tenant_a))).await;
+    assert_eq!(
+        unreached.status().as_u16(),
+        403,
+        "an organization principal restricted to tenant A must not list B's signing CAs"
+    );
 }

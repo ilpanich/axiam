@@ -21,14 +21,40 @@ use crate::error::AuthError;
 /// Initialisation cannot fail for the static, valid parameters and a random
 /// UUID input (`Params::new(19456, 2, 1)` is in range; hashing a short
 /// password with an OS-RNG salt has no failure path), so `expect` documents an
-/// invariant rather than a runtime risk. It also runs on first use, which a
-/// startup warm-up can pre-empt; it never takes request input.
+/// invariant rather than a runtime risk. It also runs on first use, which
+/// [`warm_up_equalisation`] pre-empts at server start; it never takes request
+/// input.
+///
+/// The dummy is hashed with `pepper: None` while the equalising verify uses the
+/// configured pepper (Q-12). That does not change the cost: the pepper is only
+/// a prefix of the Argon2 input, and Argon2's cost is fixed by the parameters
+/// (`m`, `t`, `p`) encoded in the hash, not by the input length. The verify
+/// simply fails, as intended, and its result is discarded.
 fn dummy_hash() -> &'static str {
-    static HASH: OnceLock<String> = OnceLock::new();
-    HASH.get_or_init(|| {
+    dummy_hash_cell().get_or_init(|| {
         hash_password(&Uuid::new_v4().simple().to_string(), None)
             .expect("hashing a random value with the static production Argon2 params cannot fail")
     })
+}
+
+fn dummy_hash_cell() -> &'static OnceLock<String> {
+    static HASH: OnceLock<String> = OnceLock::new();
+    &HASH
+}
+
+/// Force the timing-equalisation dummy hash and probe to be built now (Q-11 /
+/// S-12). Without this, the first unknown-user / locked-account /
+/// `ValidateCredentials` refusal after a process start pays an extra hash, a
+/// one-shot timing oracle per restart. Call once at server start.
+pub fn warm_up_equalisation() {
+    let _ = dummy_hash();
+    let _ = dummy_probe();
+}
+
+/// Whether the dummy hash has been built (test probe for the warm-up).
+#[cfg(test)]
+pub(crate) fn dummy_hash_initialised() -> bool {
+    dummy_hash_cell().get().is_some()
 }
 
 /// The probe the timing-equalising verify feeds to Argon2: random per
@@ -126,6 +152,17 @@ pub fn verify_password(
 mod tests {
     use super::*;
     use argon2::PasswordHasher;
+
+    /// Q-11 / S-12: the warm-up builds the dummy hash up front, so no request
+    /// pays for it. (The cell is process-global, so this asserts the
+    /// post-condition; the pre-change failure is a compile error, the function
+    /// not existing.)
+    #[test]
+    fn warm_up_equalisation_initialises_the_dummy_hash() {
+        warm_up_equalisation();
+        assert!(dummy_hash_initialised());
+        assert!(dummy_hash().starts_with("$argon2id$"));
+    }
 
     /// Helper: hash a password with optional pepper using Argon2id.
     fn hash_password(password: &str, pepper: Option<&str>) -> String {

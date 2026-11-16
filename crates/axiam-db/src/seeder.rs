@@ -744,6 +744,7 @@ async fn audit_network_revocation<C: Connection>(
             "permission_id": permission_id.to_string(),
             "reason": "the seeded role may not hold this network: permission in this tenant",
         })),
+        organization_id: None,
     };
     if let Err(e) = SurrealAuditLogRepository::new(db.clone())
         .append(entry)

@@ -90,7 +90,9 @@ export const auditService = {
    * This is where failed logins against a non-existent account, bootstrap, and
    * anything else that happened before a tenant was known end up — so it is
    * the half of the trail an operator investigating an intrusion actually
-   * wants. Gated on `audit_logs:list_system`.
+   * wants. Gated on `audit_logs:list_system` and an organization-level caller,
+   * and limited to the entries that record the caller's organization (SA-02):
+   * entries written before that rule record none and are not returned.
    */
   listSystem: (filters: AuditFilters = {}): Promise<PaginatedAuditLogs> =>
     api

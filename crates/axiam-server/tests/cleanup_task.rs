@@ -233,6 +233,7 @@ impl AuditLogRepository for FailingAuditRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _: AuditLogFilter,
         _: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -418,6 +419,7 @@ async fn run_erasure_pipeline_success_path_scrubs_audit_anonymizes_user_and_writ
             outcome: AuditOutcome::Success,
             ip_address: Some("203.0.113.7".into()),
             metadata: Some(serde_json::json!({ "email": "erasure_success@example.com" })),
+            organization_id: None,
         })
         .await
         .expect("append audit entry");
@@ -582,6 +584,7 @@ async fn run_erasure_pipeline_aborts_before_proof_when_anonymize_user_fails() {
             outcome: AuditOutcome::Success,
             ip_address: Some("198.51.100.4".into()),
             metadata: None,
+            organization_id: None,
         })
         .await
         .expect("append audit entry");
@@ -2150,7 +2153,8 @@ async fn users_in(db: &Surreal<surrealdb::engine::local::Db>, tenant: Uuid) -> u
 
 async fn purged_records(db: &Surreal<surrealdb::engine::local::Db>) -> Vec<AuditLogEntry> {
     SurrealAuditLogRepository::new(db.clone())
-        .list_system(
+        .list(
+            Uuid::nil(),
             AuditLogFilter {
                 action: Some(axiam_api_rest::handlers::tenants::TENANT_PURGED_ACTION.into()),
                 ..Default::default()
@@ -2205,6 +2209,7 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
                     outcome: AuditOutcome::Success,
                     ip_address: None,
                     metadata,
+                    organization_id: None,
                 })
                 .await
                 .unwrap()
@@ -2237,6 +2242,8 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
                 "audit_export_receipt_id": late.id,
                 "audit_exported_through": exported_through,
             })),
+            // As the deletion handler records it (SA-02, N1).
+            organization_id: Some(org),
         })
         .await
         .unwrap();
@@ -2292,6 +2299,24 @@ async fn the_tenant_purge_sweep_purges_tombstoned_and_orphaned_tenants_and_recor
         serde_json::Value::Null
     );
     assert!(of(live).is_none());
+    // SA-02 (N1): the purge record carries the organization the deletion
+    // record names, so the system log shows it to that organization; an
+    // orphan has no deletion record, and its purge records none.
+    assert_eq!(of(tombstoned).unwrap().organization_id, Some(org));
+    assert_eq!(of(orphan).unwrap().organization_id, None);
+    let for_org = audit
+        .list_system(
+            org,
+            AuditLogFilter {
+                action: Some(axiam_api_rest::handlers::tenants::TENANT_PURGED_ACTION.into()),
+                ..Default::default()
+            },
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(for_org.total, 1, "{:?}", for_org.items);
+    assert_eq!(for_org.items[0].resource_id, Some(tombstoned));
 
     // The row written after the export survived under the tenant id, and the
     // audit retention sweep (T-119) removes it once it is past the window.
@@ -2881,7 +2906,11 @@ async fn the_certificate_sweep_deletes_rows_past_the_grace_and_the_crl_does_not_
         "the nine-day rows are not on the list: it dropped them already"
     );
     let audit_before = SurrealAuditLogRepository::new(db.clone())
-        .list_system(AuditLogFilter::default(), Pagination::default())
+        .list(
+            Uuid::nil(),
+            AuditLogFilter::default(),
+            Pagination::default(),
+        )
         .await
         .unwrap()
         .total;
@@ -2911,7 +2940,11 @@ async fn the_certificate_sweep_deletes_rows_past_the_grace_and_the_crl_does_not_
     assert_eq!(list().await, before, "the list is unchanged");
     assert_eq!(
         SurrealAuditLogRepository::new(db.clone())
-            .list_system(AuditLogFilter::default(), Pagination::default())
+            .list(
+                Uuid::nil(),
+                AuditLogFilter::default(),
+                Pagination::default()
+            )
             .await
             .unwrap()
             .total,
@@ -5079,6 +5112,7 @@ async fn an_erasure_writes_one_unassigned_row_per_network_role_and_no_network_ro
                 "role_id": network_a,
                 "grantee": { "kind": "user", "id": user.id },
             })),
+            organization_id: None,
         })
         .await
         .unwrap();

@@ -433,8 +433,11 @@ impl actix_web::FromRequest for AuthenticatedUser {
 /// An [`AuthenticatedUser`] whose token is a console sign-in's: one AXIAM did
 /// **not** mint for an OAuth2 client (T-447, #681).
 ///
-/// For an approval surface — the device verification page — which is the
-/// person's own act. A token from the code, refresh, CIBA or device grant is
+/// For an approval surface — the device verification page, the OIDC
+/// scope-consent grant and withdraw (`/account/consents/oidc-scopes`, S-3),
+/// and the GDPR export request, export download and erasure request
+/// (`/account/export`, `/account/export/{token}`, `/account/delete`, S-3b) —
+/// which is the person's own act. A token from the code, refresh, CIBA or device grant is
 /// refused `403 authorization_denied`, and refused **before** the session
 /// check: the refusal rests on [`AuthenticatedUser::minted_for_client`], which
 /// every such token answers, and not on whether the token happens to name a
@@ -776,6 +779,19 @@ impl actix_web::FromRequest for AuthenticatedServiceAccount {
 // Shared token extraction
 // ---------------------------------------------------------------------------
 
+/// The refusal a request carrying no credential at all gets: `401
+/// authentication_failed`, "missing authentication credentials".
+///
+/// Shared so that a caller which must answer "as if anonymous" — the
+/// authorization endpoint treating a client-minted token as no sign-in (SA-04,
+/// N6) — produces the anonymous answer byte for byte instead of a look-alike.
+pub(crate) fn missing_credentials() -> AxiamApiError {
+    AxiamError::AuthenticationFailed {
+        reason: "missing authentication credentials".into(),
+    }
+    .into()
+}
+
 /// Decode and validate the JWT from the request — shared between the
 /// extractors. Does not apply audience narrowing.
 pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaims, AxiamApiError> {
@@ -802,12 +818,7 @@ pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaim
             }
             .into());
         }
-        None => {
-            return Err(AxiamError::AuthenticationFailed {
-                reason: "missing authentication credentials".into(),
-            }
-            .into());
-        }
+        None => return Err(missing_credentials()),
     };
 
     validate_presented_token(req, &token, config)

@@ -2226,3 +2226,356 @@ async fn n6_control_a_first_party_session_cookie_still_authorizes() {
         "a console session must still be issued a code: {loc}"
     );
 }
+
+/// **SA-04 review (Q-14).** A client-minted token on `/oauth2/authorize` for a
+/// client that did **not** opt into `browser_sso` is answered exactly as an
+/// anonymous request is: the golden 401 of invariant 4, byte for byte, and no
+/// redirect.
+#[actix_rt::test]
+async fn n6_a_client_minted_token_for_a_non_browser_sso_client_gets_the_anonymous_401() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let w_id = create_client(&app, &jwt, plain_client(false)).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+
+    let query = inline_query(&w_id, tenant_id);
+    let anonymous = anonymous_authorize(&app, &query, None).await;
+    let anonymous_status = anonymous.status().as_u16();
+    let anonymous_body = test::read_body(anonymous).await;
+
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/oauth2/authorize?{query}"))
+        .insert_header(("Authorization", format!("Bearer {x_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.headers().get("Location").is_none(),
+        "an opt-out client must never be redirected anywhere"
+    );
+    let status = resp.status().as_u16();
+    let body = test::read_body(resp).await;
+
+    assert_eq!(anonymous_status, 401);
+    assert_eq!(status, anonymous_status, "the anonymous status");
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        std::str::from_utf8(&anonymous_body).unwrap(),
+        "the anonymous 401 body, byte for byte"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SA-04 review (S-3) — OIDC scope consent is the person's own act
+// ---------------------------------------------------------------------------
+
+/// A client registered with the sensitive `address` scope, and the
+/// organization's sensitive-scope switch on, so a consent for it can be
+/// recorded at all.
+async fn consent_target(
+    db: &Surreal<TestDb>,
+    app: &impl TestApp,
+    jwt: &str,
+    org_id: Uuid,
+) -> String {
+    let mut defaults = system_defaults();
+    defaults.sensitive_scopes_enabled = true;
+    SurrealSettingsRepository::new(db.clone())
+        .set_org_settings(org_id, defaults)
+        .await
+        .unwrap();
+    create_client(
+        app,
+        jwt,
+        serde_json::json!({
+            "name": "S3 Consent Target",
+            "redirect_uris": [REDIRECT_URI],
+            "grant_types": ["authorization_code"],
+            "scopes": ["openid", "address"],
+        }),
+    )
+    .await
+}
+
+/// `POST /api/v1/account/consents/oidc-scopes`, bearer only — no CSRF pair,
+/// which is what a relying party holding the token sends.
+async fn grant_scope_consent(app: &impl TestApp, token: &str, client_id: &str) -> u16 {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/account/consents/oidc-scopes")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({ "client_id": client_id, "scopes": ["address"] }))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// `DELETE /api/v1/account/consents/oidc-scopes/{client_id}`, bearer only.
+async fn withdraw_scope_consent(app: &impl TestApp, token: &str, client_id: &str) -> u16 {
+    let req = test::TestRequest::delete()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/account/consents/oidc-scopes/{client_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// How many OIDC scope-release consents the user holds, read with `token`.
+async fn scope_consents(app: &impl TestApp, token: &str) -> usize {
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/account/consents")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "listing own consents");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    body.as_array()
+        .expect("a list")
+        .iter()
+        .filter(|c| c["withdrawable"].as_bool() == Some(true))
+        .count()
+}
+
+/// **S-3.** A token AXIAM minted for relying party X must not record, nor
+/// withdraw, an OIDC scope consent in its user's name: `/oauth2/authorize`
+/// reads exactly these records to skip the consent screen, so recording one is
+/// minting a silent authorization for another client. Refused `403`, as the
+/// other approval surfaces refuse it (T-447), and nothing changes.
+#[actix_rt::test]
+async fn s3_a_client_minted_token_can_neither_grant_nor_withdraw_scope_consent() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let z_id = consent_target(&db, &app, &jwt, org_id).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+
+    // Grant.
+    let granted = grant_scope_consent(&app, &x_token, &z_id).await;
+    let after_grant = scope_consents(&app, &jwt).await;
+
+    // Withdraw a consent the person did give, first-party.
+    assert_eq!(grant_scope_consent(&app, &jwt, &z_id).await, 200);
+    let withdrawn = withdraw_scope_consent(&app, &x_token, &z_id).await;
+    let after_withdraw = scope_consents(&app, &jwt).await;
+
+    assert_eq!(granted, 403, "a client-minted token must not grant consent");
+    assert_eq!(after_grant, 0, "no consent may have been recorded");
+    assert_eq!(
+        withdrawn, 403,
+        "a client-minted token must not withdraw consent"
+    );
+    assert_eq!(after_withdraw, 1, "the person's consent must still stand");
+}
+
+/// **S-3 control.** A first-party session token (no `client_id`) still grants
+/// and withdraws.
+#[actix_rt::test]
+async fn s3_control_a_first_party_token_still_grants_and_withdraws_scope_consent() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let z_id = consent_target(&db, &app, &jwt, org_id).await;
+
+    assert_eq!(grant_scope_consent(&app, &jwt, &z_id).await, 200);
+    assert_eq!(scope_consents(&app, &jwt).await, 1);
+    assert_eq!(withdraw_scope_consent(&app, &jwt, &z_id).await, 200);
+    assert_eq!(scope_consents(&app, &jwt).await, 0);
+}
+
+// ---------------------------------------------------------------------------
+// SA-04 review S-3b — the other `/account/*` person-only acts
+// ---------------------------------------------------------------------------
+
+/// The key the export blob is sealed with, so a download can succeed.
+const S3B_EXPORT_KEY: [u8; 32] = [7u8; 32];
+
+/// The single-use download token of the seeded, ready export.
+const S3B_DOWNLOAD_TOKEN: &str = "s3b-ready-export-download-token";
+
+/// The export's plaintext.
+const S3B_EXPORT_BODY: &[u8] = br#"{"export":"s3b"}"#;
+
+/// [`test_app!`] with an export encryption key configured, so the download
+/// route reaches its success path.
+macro_rules! test_app_with_export_key {
+    ($db:expr, $auth:expr) => {{
+        let mut state = AppState::for_test($db.clone(), $auth.clone());
+        state.mail.email_encryption_key = Some(S3B_EXPORT_KEY);
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new(state))
+                .app_data(web::Data::new(
+                    Arc::new(AllowAllAuthzChecker) as Arc<dyn AuthzChecker>
+                ))
+                .configure(|cfg| register_api_v1_routes::<TestDb>(cfg, &permissive_rate_limits())),
+        )
+        .await
+    }};
+}
+
+/// SHA-256 hex, as the export job stores its download token.
+fn s3b_token_hash(token: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(token.as_bytes()))
+}
+
+/// Seed a ready export for `user_id` whose download token is
+/// [`S3B_DOWNLOAD_TOKEN`] — what the cleanup sweep leaves behind and mails.
+async fn seed_ready_export(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    use axiam_core::models::gdpr::CreateExportJob;
+    use axiam_core::repository::ExportJobRepository;
+    let repo = axiam_db::repository::SurrealExportJobRepository::new(db.clone());
+    let job = repo
+        .create(CreateExportJob { tenant_id, user_id })
+        .await
+        .unwrap();
+    let (nonce, ciphertext) =
+        axiam_auth::crypto::encrypt_separate(&S3B_EXPORT_KEY, S3B_EXPORT_BODY).unwrap();
+    repo.set_ready(
+        job.id,
+        s3b_token_hash(S3B_DOWNLOAD_TOKEN),
+        Some(ciphertext),
+        None,
+        Some(nonce),
+        chrono::Utc::now() + chrono::Duration::hours(24),
+    )
+    .await
+    .unwrap();
+}
+
+/// `GET /api/v1/account/export/{token}`, bearer only; status and body.
+async fn download_export(app: &impl TestApp, token: &str) -> (u16, Vec<u8>) {
+    let req = test::TestRequest::get()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/account/export/{S3B_DOWNLOAD_TOKEN}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    (status, test::read_body(resp).await.to_vec())
+}
+
+/// `POST /api/v1/account/export` (own account), bearer only — no CSRF pair.
+async fn request_export(app: &impl TestApp, token: &str) -> u16 {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/account/export")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({}))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// `POST /api/v1/account/delete` (own account), bearer only — no CSRF pair.
+async fn request_delete(app: &impl TestApp, token: &str) -> u16 {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/account/delete")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({}))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// Is the seeded export still there, ready, to be downloaded?
+async fn ready_export_survives(db: &Surreal<TestDb>, tenant_id: Uuid) -> bool {
+    use axiam_core::models::gdpr::ExportJobStatus;
+    use axiam_core::repository::ExportJobRepository;
+    axiam_db::repository::SurrealExportJobRepository::new(db.clone())
+        .find_by_download_token_hash(tenant_id, &s3b_token_hash(S3B_DOWNLOAD_TOKEN))
+        .await
+        .unwrap()
+        .is_some_and(|job| job.status == ExportJobStatus::Ready)
+}
+
+/// How many queued export jobs `user_id` has.
+async fn queued_exports(db: &Surreal<TestDb>, user_id: Uuid) -> usize {
+    use axiam_core::repository::ExportJobRepository;
+    axiam_db::repository::SurrealExportJobRepository::new(db.clone())
+        .find_queued()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|job| job.user_id == user_id)
+        .count()
+}
+
+/// Is `user_id` scheduled for erasure?
+async fn deletion_pending(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> bool {
+    SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .deletion_pending
+}
+
+/// **S-3b.** A token AXIAM minted for relying party X must not download the
+/// user's personal-data export, request a new one, or schedule the user's
+/// erasure. The three are the person's own acts and bearer-only (hence
+/// CSRF-exempt), so a relying party holding one of its user's tokens could
+/// otherwise do all three. Refused `403`, as the consent endpoints refuse it
+/// (S-3), and nothing changes.
+#[actix_rt::test]
+async fn s3b_a_client_minted_token_can_neither_export_nor_download_nor_delete_the_account() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app_with_export_key!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+    seed_ready_export(&db, tenant_id, user_id).await;
+
+    let (downloaded, body) = download_export(&app, &x_token).await;
+    let exported = request_export(&app, &x_token).await;
+    let deleted = request_delete(&app, &x_token).await;
+
+    assert_eq!(
+        (downloaded, exported, deleted),
+        (403, 403, 403),
+        "a client-minted token must not download the export, request one, or \
+         schedule erasure (download body: {})",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        ready_export_survives(&db, tenant_id).await,
+        "the person's ready export must not have been consumed"
+    );
+    assert_eq!(
+        queued_exports(&db, user_id).await,
+        0,
+        "no export may be queued"
+    );
+    assert!(
+        !deletion_pending(&db, tenant_id, user_id).await,
+        "the account must not be scheduled for erasure"
+    );
+}
+
+/// **S-3b control.** A first-party sign-in token (no `client_id`) still
+/// downloads, requests an export and schedules erasure.
+#[actix_rt::test]
+async fn s3b_control_a_first_party_token_still_exports_downloads_and_deletes() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app_with_export_key!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    seed_ready_export(&db, tenant_id, user_id).await;
+
+    let (downloaded, body) = download_export(&app, &jwt).await;
+    assert_eq!(downloaded, 200, "a console token downloads its own export");
+    assert_eq!(body, S3B_EXPORT_BODY);
+    assert!(!ready_export_survives(&db, tenant_id).await, "single use");
+
+    assert_eq!(request_export(&app, &jwt).await, 200);
+    assert_eq!(queued_exports(&db, user_id).await, 1);
+
+    assert_eq!(request_delete(&app, &jwt).await, 200);
+    assert!(deletion_pending(&db, tenant_id, user_id).await);
+}

@@ -822,6 +822,7 @@ async fn audit_sha1_allowed<C: Connection + Clone>(
                 "provider_kind": config.provider_kind.as_str(),
                 "allow_sha1_signatures": true,
             })),
+            organization_id: None,
         })
         .await
     {
@@ -879,6 +880,7 @@ async fn audit_signing_cert_change<C: Connection + Clone>(
             outcome: AuditOutcome::Success,
             ip_address: client_ip(http_req),
             metadata: Some(metadata),
+            organization_id: None,
         })
         .await
     {
@@ -937,6 +939,7 @@ async fn audit_sso_host_change<C: Connection + Clone>(
                 "old_host": change.old_host,
                 "new_host": change.new_host,
             })),
+            organization_id: None,
         })
         .await
     {

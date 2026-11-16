@@ -853,6 +853,9 @@ pub async fn delete<C: Connection + Clone>(
                 // name yet; the cleanup job's sweep forwards them.
                 "signing_ca_vault_revocations_pending": signing_cas.vault_pending,
             })),
+            // SA-02 (N1): the deleted tenant's organization, as its record had
+            // it, so the system log shows this row to that organization only.
+            organization_id: Some(existing.organization_id),
         },
     )
     .await;
@@ -1070,6 +1073,7 @@ where
                                     "digest": format!("sha256:{digest}"),
                                     "exported_through": started_at,
                                 })),
+                                organization_id: None,
                             })
                             .await;
                         let receipt = match receipt {

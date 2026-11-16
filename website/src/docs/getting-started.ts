@@ -159,12 +159,12 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "admin", text: "2. Create the first admin" },
       {
         type: "p",
-        text: "A fresh deployment has no users at all, and the bootstrap endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. It creates an organization and an organization-level super-admin, and no ordinary tenant: create the tenant you will work in from the signed-in session, with `POST /api/v1/organizations/{org_id}/tenants`. The full procedure, both gates and the seeded role set are on [First organization and admin](#/docs/bootstrap).",
+        text: "A fresh deployment has no users at all, and the bootstrap endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. It creates an organization and an organization-level super-admin, and no ordinary tenant: create the tenant you will work in from the signed-in session, with `POST /api/v1/organizations/{org_id}/tenants`. The full procedure, the gate and the seeded role set are on [First organization and admin](#/docs/bootstrap).",
       },
       {
         type: "code",
         caption: "the short version",
-        code: "# Lock bootstrap to a known address before starting the server\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+        code: "# The server logged a one-time setup token once at first boot — always required:\n#   AXIAM first-run bootstrap setup token minted ... \"setup_token\":\"...\"\nexport SETUP_TOKEN=...\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\",\n        \"setup_token\": \"'\"$SETUP_TOKEN\"'\"\n      }'",
       },
       { type: "h", id: "authz", text: "3. Your first authorization check" },
       {
@@ -391,10 +391,10 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
         type: "warn",
         text: "**Bootstrap no longer creates an ordinary tenant.** It used to, and that is precisely what left every *later* tenant unreachable by everybody: the super-admin's grants were rows in the one tenant bootstrap happened to create, and the authorization engine filters every lookup by tenant. The super-admin is now organization-level and reaches new tenants by rule rather than by a grant somebody has to remember to write. `tenant_name` and `tenant_slug` are still **accepted and ignored**, so an older client's request succeeds rather than failing on an unknown field — but nothing reads them, and the `tenant_slug` in the response is the organization scope's own. See [Organization-level principals](#/docs/organization-scope).",
       },
-      { type: "h", id: "gates", text: "The gate — fail-closed, two ways to satisfy it" },
+      { type: "h", id: "gates", text: "The gate — fail-closed, one secret" },
       {
         type: "p",
-        text: "A request is refused with `403` unless **one** of two gates is satisfied. Neither gate being configured does not mean *allow*; it means the endpoint is unusable until an operator configures one. There is no deployment in which an arbitrary caller can create the first admin.",
+        text: "A request is refused with `403` unless it carries the one-time setup token the server logged at first boot. That token is **always** required — no environment variable replaces it, so there is no deployment in which an arbitrary caller can create the first admin. `AXIAM_BOOTSTRAP_ADMIN_EMAIL` can narrow the gate further, never widen it. The normative statement of the gate, and how to read the token from a Compose or Kubernetes log, is the [administration guide](https://github.com/ilpanich/axiam/blob/main/docs/admin/README.md#first-run-admin-bootstrap).",
       },
       {
         type: "table",
@@ -402,14 +402,14 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
         headers: ["Gate", "How it works", "When to prefer it"],
         rows: [
           [
-            "`AXIAM_BOOTSTRAP_ADMIN_EMAIL`",
-            "Set this environment variable on the `axiam-server` process before it starts. The request's `email` field must match it **exactly**, or the call is refused. When this variable is set to a non-empty value, `setup_token` is ignored entirely.",
-            "Automated and declarative deployments. The operator names the first admin before the server exists, and nothing has to be recovered from a log.",
+            "One-time setup token",
+            "**Always required.** On first boot — and only while no admin has ever been bootstrapped — the server mints a random token, stores its SHA-256 hash, and logs the token once at `info`. Pass it as `setup_token`. First-boot logs are secret until bootstrap completes.",
+            "Every deployment. Unattended installs read it from the log (`scripts/first-boot-token.sh`).",
           ],
           [
-            "One-time setup token",
-            "Used only when the variable is unset. On first boot — and only while no admin has ever been bootstrapped — the server mints a random token, stores its SHA-256 hash, and logs the token once at `info`. Pass it as `setup_token`.",
-            "Interactive installs and local exploration, where you are watching the server start.",
+            "`AXIAM_BOOTSTRAP_ADMIN_EMAIL` (optional)",
+            "An **additional** restriction, set on the `axiam-server` process before it starts: the request's `email` must also match it exactly. An address is not secret, so it never substitutes for the token.",
+            "When you want to pin who the first admin is, on top of the token.",
           ],
         ],
       },
@@ -419,7 +419,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       },
       {
         type: "warn",
-        text: "The setup token is written to the server log exactly once, at `info` level, and only its SHA-256 hash is stored, so it cannot be read back. If your log pipeline drops `info`, buffers it, or you simply scroll past it, mint a fresh one with `axiam-server setup-token --remint` (below) — or set `AXIAM_BOOTSTRAP_ADMIN_EMAIL` and restart. For anything unattended, prefer that gate in the first place. Earlier releases of this page said a lost token could not be re-minted at all; that stopped being true in `1.0.0-beta17`.",
+        text: "The setup token is written to the server log exactly once, at `info` level, and only its SHA-256 hash is stored, so it cannot be read back. If your log pipeline drops `info`, buffers it, or you simply scroll past it, mint a fresh one with `axiam-server setup-token --remint` (below). Setting `AXIAM_BOOTSTRAP_ADMIN_EMAIL` does not help: it is a restriction, not a substitute for the token. Earlier releases of this page said a lost token could not be re-minted at all; that stopped being true in `1.0.0-beta17`.",
       },
       { type: "h", id: "lost-token", text: "I lost the setup token" },
       {
@@ -447,11 +447,11 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       },
       {
         type: "note",
-        text: "**An empty value is not a gate.** `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set to the empty string — the shape Docker Compose produces for `AXIAM_BOOTSTRAP_ADMIN_EMAIL: \"${AXIAM_BOOTSTRAP_ADMIN_EMAIL:-}\"` when nothing is exported — is treated as unset, and the call falls through to the setup-token path. It used to be read as \"gate configured\", compared the request email against nothing, answered 403 and made the token path unreachable, so a deployment holding a perfectly valid one-time token could not bootstrap at all.",
+        text: "**An empty value is no restriction.** `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set to the empty string — the shape Docker Compose produces for `AXIAM_BOOTSTRAP_ADMIN_EMAIL: \"${AXIAM_BOOTSTRAP_ADMIN_EMAIL:-}\"` when nothing is exported — is treated as unset, and only the setup token is checked. It used to be read as \"restriction configured\", compared the request email against nothing and answered 403, so a deployment holding a perfectly valid one-time token could not bootstrap at all.",
       },
       {
         type: "note",
-        text: "`AXIAM_BOOTSTRAP_ADMIN_EMAIL` uses a **single** underscore after the prefix, unlike the `AXIAM__*` configuration variables. It is read straight from the environment rather than through the layered config loader, which is why it does not follow that convention — and why doubling the underscore here silently disables the gate.",
+        text: "`AXIAM_BOOTSTRAP_ADMIN_EMAIL` uses a **single** underscore after the prefix, unlike the `AXIAM__*` configuration variables. It is read straight from the environment rather than through the layered config loader, which is why it does not follow that convention — and why doubling the underscore here silently drops the email restriction (the token is still required).",
       },
       { type: "h", id: "once", text: "Why it can only ever run once" },
       {
@@ -462,7 +462,7 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
         type: "list",
         items: [
           "**Two concurrent first-run requests** — both attempt the lock, one wins, the loser gets `409 Conflict` and rolls back completely. At most one super-admin can exist, with no orphaned role assignment left behind.",
-          "**Any later call** — hits the same uniqueness violation and is refused with `409`. Additional organizations, tenants and admins are created through the authenticated admin API from then on.",
+          "**Any later call** — is refused `403` by the gate, because the first bootstrap consumed the setup token; the lock behind it would refuse it too. Additional organizations, tenants and admins are created through the authenticated admin API from then on.",
         ],
       },
       { type: "h", id: "request", text: "Request fields" },
@@ -482,13 +482,13 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
             "**Deprecated and ignored.** Accepted so an older client's request still succeeds. Bootstrap creates no ordinary tenant; use `POST /api/v1/organizations/{org_id}/tenants` once signed in.",
           ],
           ["tenant_slug", "no", "**Deprecated and ignored.** See `tenant_name`."],
-          ["email", "yes", "Admin email address. Must match `AXIAM_BOOTSTRAP_ADMIN_EMAIL` when that gate is in use."],
+          ["email", "yes", "Admin email address. Must also match `AXIAM_BOOTSTRAP_ADMIN_EMAIL` when that restriction is set."],
           ["username", "yes", "Admin username."],
           ["password", "yes", "Admin password. Hashed with Argon2id before storage."],
           [
             "setup_token",
-            "conditional",
-            "Required when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored when it is.",
+            "yes",
+            "The one-time token from the first-boot log. Always required, whether or not `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set.",
           ],
           [
             "opaque_mode",
@@ -510,13 +510,8 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "call", text: "Making the call" },
       {
         type: "code",
-        caption: "gate 1 — AXIAM_BOOTSTRAP_ADMIN_EMAIL",
-        code: "# Set on the axiam-server process, BEFORE it starts.\nexport AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST https://iam.acme.dev/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme Corporation\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
-      },
-      {
-        type: "code",
-        caption: "gate 2 — the one-time setup token",
-        code: "# Capture the token the server logged once at first boot:\n#   AXIAM first-run bootstrap setup token minted. Use this token ONCE ...\nexport SETUP_TOKEN=...\n\ncurl -X POST https://iam.acme.dev/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme Corporation\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\",\n        \"setup_token\": \"'\"$SETUP_TOKEN\"'\"\n      }'",
+        caption: "the one-time setup token (always required)",
+        code: "# Capture the token the server logged once at first boot:\n#   AXIAM first-run bootstrap setup token minted. Use this token ONCE ...\n# (or: docker logs <container> 2>&1 | scripts/first-boot-token.sh -)\nexport SETUP_TOKEN=...\n# Optional, on the axiam-server process before it starts: also pin the email.\n#   AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev\n\ncurl -X POST https://iam.acme.dev/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme Corporation\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\",\n        \"setup_token\": \"'\"$SETUP_TOKEN\"'\"\n      }'",
       },
       {
         type: "code",
@@ -540,19 +535,19 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
           ],
           [
             "403",
-            "The gate was not satisfied — email mismatch, or a missing/unknown/already-consumed setup token. The error names which.",
-            "Check that `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set on the *server* process and matches byte-for-byte, or that you are using a fresh token.",
+            "The gate was not satisfied — a missing, unknown or already-consumed setup token, or an email that does not match `AXIAM_BOOTSTRAP_ADMIN_EMAIL`. Every refusal carries the same reason, so an unauthenticated caller cannot probe the email restriction.",
+            "Check that you are sending the current first-boot token, and, if `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set on the *server* process, that the email matches it byte-for-byte.",
           ],
           [
             "409",
-            "Bootstrap has already completed on this deployment, or a concurrent request won the race.",
+            "A concurrent bootstrap request won the race. A later call on an already-bootstrapped deployment gets `403` instead (the token is consumed).",
             "Not an error to retry. Log in as the existing admin; create further tenants and admins through the authenticated API.",
           ],
         ],
       },
       {
         type: "note",
-        text: "On an already-bootstrapped deployment, **which** of those two you get depends on the gate, and deliberately so. The gate is evaluated first: a second call carrying a consumed setup token is refused `403` for the token, never reaching the already-initialised check — so an unauthenticated caller cannot use bootstrap to learn whether a deployment has been initialised. With `AXIAM_BOOTSTRAP_ADMIN_EMAIL` configured, the gate passes and the `409` is what you see.",
+        text: "On an already-bootstrapped deployment you get `403`, not `409`, and deliberately so. The gate is evaluated first: a later call carrying the consumed setup token is refused for the token and never reaches the already-initialised check — so an unauthenticated caller cannot use bootstrap to learn whether a deployment has been initialised. `409` is left only for the loser of two requests racing with the same unconsumed token. To check whether a deployment is bootstrapped, sign in as the admin.",
       },
       { type: "h", id: "opaque", text: "Seeding an OPAQUE baseline at bootstrap" },
       {
@@ -591,8 +586,8 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
             code: "GET /api/v1/organizations/{org_id}/settings",
           },
           {
-            title: "Unset the bootstrap gate",
-            body: "Once bootstrap has completed, `AXIAM_BOOTSTRAP_ADMIN_EMAIL` does nothing — the lock refuses every further call regardless. Removing it keeps your deployment manifest honest about what is still load-bearing.",
+            title: "Unset the bootstrap email restriction",
+            body: "Once bootstrap has completed, `AXIAM_BOOTSTRAP_ADMIN_EMAIL` does nothing — the consumed setup token and the lock refuse every further call regardless. Removing it keeps your deployment manifest honest about what is still load-bearing.",
           },
         ],
       },
@@ -765,12 +760,12 @@ export const GETTING_STARTED_PAGES: DocPage[] = [
       { type: "h", id: "bootstrap", text: "2. Create the organization and its admin" },
       {
         type: "p",
-        text: "A fresh deployment has no users, and the endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. Both gates and the seeded role set are on [First organization and admin](#/docs/bootstrap); the short version:",
+        text: "A fresh deployment has no users, and the endpoint that creates the first one is fail-closed — it refuses unless you prove you are the operator. The gate and the seeded role set are on [First organization and admin](#/docs/bootstrap); the short version:",
       },
       {
         type: "code",
         caption: "terminal",
-        code: "export AXIAM_BOOTSTRAP_ADMIN_EMAIL=admin@acme.dev   # set before starting the server\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\"\n      }'",
+        code: "# The server logged a one-time setup token once at first boot — always required:\n#   AXIAM first-run bootstrap setup token minted ... \"setup_token\":\"...\"\nexport SETUP_TOKEN=...\n\ncurl -X POST localhost:8090/api/v1/admin/bootstrap \\\n  -H 'content-type: application/json' \\\n  -d '{\n        \"organization_name\": \"Acme\",\n        \"organization_slug\": \"acme\",\n        \"email\": \"admin@acme.dev\",\n        \"username\": \"admin\",\n        \"password\": \"'\"$ADMIN_PASSWORD\"'\",\n        \"setup_token\": \"'\"$SETUP_TOKEN\"'\"\n      }'",
       },
       {
         type: "p",

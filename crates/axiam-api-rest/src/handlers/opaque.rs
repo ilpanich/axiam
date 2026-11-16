@@ -309,6 +309,18 @@ pub async fn opaque_login_finish<C: Connection + Clone>(
         }));
     }
 
+    // SA-06 (S-1): `login/start` sealed KE2 state built from the record as it
+    // then was, and `login/finish` never reloads it. When the credential has
+    // changed since — a reset, a change, an OPAQUE record written or deleted —
+    // the exchange was built from a verifier that no longer stands, and
+    // finishing it would mint a session the change never saw. Refused with the
+    // same 401 as every other failure here, and not counted: the KE3 was valid.
+    if user.credential_changed_since(verified.issued_at) {
+        return Err(AxiamApiError(AxiamError::AuthenticationFailed {
+            reason: "invalid credentials".into(),
+        }));
+    }
+
     // Lockout is checked here rather than at login/start on purpose: the start
     // response must stay indistinguishable for every identity, and refusing it
     // for a locked account would announce that the account exists and is under
@@ -356,6 +368,7 @@ pub async fn opaque_login_finish<C: Connection + Clone>(
             if let Ok((user_id, tenant_id, _org_id)) = state
                 .auth_service
                 .decode_mfa_challenge_ids(&challenge.challenge_token)
+                .await
                 && let Ok(types) = state
                     .mfa_method_service
                     .available_method_types(tenant_id, user_id)

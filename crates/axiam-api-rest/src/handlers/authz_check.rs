@@ -131,6 +131,7 @@ async fn append_check_as_audit<C: Connection + Clone>(
             metadata: Some(serde_json::json!({
                 "queried_subject": queried_subject.to_string()
             })),
+            organization_id: None,
         })
         .await
     {

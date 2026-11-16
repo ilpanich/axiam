@@ -395,6 +395,11 @@ where
         // values (a SAML handle, `RelayState`, `state`, a reset token) and
         // `{token}` path segments redacted from `http.target`.
         .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
+        // SA-02 (N1): inside the audit wrap, so the organization it resolves
+        // for a system-partition request row is there when the row is built.
+        .wrap(actix_web::middleware::from_fn(
+            axiam_api_rest::audit_organization::system_audit_organization::<C, _>,
+        ))
         .wrap(deps.audit_middleware)
         .wrap(build_cors(&deps.cors_allowed_origins))
         // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
@@ -3789,9 +3794,68 @@ fn trusted_proxies_for_boot(
         .map_err(|e| format!("invalid rate-limit configuration: {e}"))
 }
 
+/// `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER`, read by hand in `main` (the
+/// spelling operators already use).
+///
+/// Fails closed (S-9): only `true`, `1` or `yes`, compared case-insensitively
+/// after trimming, enable the switch. Anything else — an empty Compose
+/// `${VAR:-}`, `off`, a typo — leaves it disabled, which is the default.
+pub fn allow_missing_aud_override(value: &str) -> bool {
+    let value = value.trim();
+    ["true", "1", "yes"]
+        .iter()
+        .any(|on| value.eq_ignore_ascii_case(on))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    /// Q-9: the rolling-upgrade escape hatch loads from its documented
+    /// environment spelling — the `config` crate coerces the string to a
+    /// `bool` — and the default stays strict.
+    #[test]
+    fn require_access_token_typ_is_read_from_the_environment() {
+        assert!(config_from(&[]).auth.require_access_token_typ);
+        for off in ["false", "FALSE", "0", "no", "off"] {
+            let cfg = config_from(&[("AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP", off)]);
+            assert!(!cfg.auth.require_access_token_typ, "{off:?} must relax it");
+        }
+        let on = config_from(&[("AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP", "true")]);
+        assert!(on.auth.require_access_token_typ);
+
+        // A value that is not a boolean stops the load (and so the server)
+        // rather than silently leaving either posture in force.
+        let typo: HashMap<String, String> = [(
+            "AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP".to_owned(),
+            "flase".to_owned(),
+        )]
+        .into();
+        let loaded = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("AXIAM")
+                    .separator("__")
+                    .source(Some(typo)),
+            )
+            .build()
+            .and_then(|c| c.try_deserialize::<super::AppConfig>());
+        assert!(loaded.is_err(), "a typo must not load");
+    }
+
+    /// S-9: the `allow_missing_aud_as_user` override enables only on an
+    /// explicit affirmative; anything else — an empty Compose `${VAR:-}`,
+    /// `off`, a typo — leaves it disabled.
+    #[test]
+    fn the_missing_aud_override_enables_only_on_an_affirmative() {
+        for on in ["true", "TRUE", " True ", "1", "yes", "YES", " yes\n"] {
+            assert!(super::allow_missing_aud_override(on), "{on:?}");
+        }
+        for off in [
+            "", " ", "false", "0", "no", "off", "on?", "ture", "enabled", "2",
+        ] {
+            assert!(!super::allow_missing_aud_override(off), "{off:?}");
+        }
+    }
 
     #[test]
     fn a_non_utf8_trusted_proxies_value_stops_the_boot() {

@@ -667,6 +667,48 @@ impl<C: Connection> SurrealTenantRepository<C> {
         Ok(rows.first().is_some_and(|r| r.total > 0))
     }
 
+    /// The organization the newest `tenants.deleted` record of tenant `id`
+    /// records (SA-02, N1), for the purge's `tenants.purged` record: `None`
+    /// for an orphan, a deletion recorded before the field existed, or a
+    /// datastore failure (logged; the purge record is written either way).
+    pub async fn deleted_tenant_organization(&self, id: Uuid) -> Option<Uuid> {
+        let read = async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "SELECT VALUE organization_id FROM audit_log \
+                     WHERE tenant_id = $nil AND action = $action AND resource_id = $id \
+                       AND organization_id != NONE \
+                     ORDER BY timestamp DESC LIMIT 1",
+                )
+                .bind(("nil", Uuid::nil().to_string()))
+                .bind((
+                    "action",
+                    super::tenant_purge::TENANT_DELETED_ACTION.to_string(),
+                ))
+                .bind(("id", id.to_string()))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(DbError::from)?;
+            let rows: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(rows.into_iter().next())
+        };
+        match read.await {
+            Ok(org) => org.and_then(|o| Uuid::parse_str(&o).ok()),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    tenant_id = %id,
+                    "could not read a deleted tenant's organization; its purge record \
+                     names none"
+                );
+                None
+            }
+        }
+    }
+
     /// Tenant ids that own rows but have no tenant row at all — the residue of
     /// deletions made before the tombstone existed (#523), which removed the
     /// tenant row and nothing else.

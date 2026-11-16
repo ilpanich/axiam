@@ -47,10 +47,11 @@ impl<A: AuditLogRepository> AuditLogRepository for HeldAuditLog<A> {
 
     fn list_system(
         &self,
+        organization_id: uuid::Uuid,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send {
-        self.inner.list_system(filter, pagination)
+        self.inner.list_system(organization_id, filter, pagination)
     }
 
     fn get_by_ids(
@@ -116,6 +117,7 @@ mod tests {
             ip_address: None,
             metadata: serde_json::json!({}),
             timestamp: Utc::now(),
+            organization_id: None,
         }
     }
 
@@ -147,6 +149,7 @@ mod tests {
 
         async fn list_system(
             &self,
+            _organization_id: uuid::Uuid,
             _: AuditLogFilter,
             pagination: Pagination,
         ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -189,6 +192,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         }
     }
 
@@ -290,7 +294,7 @@ mod tests {
         assert_eq!(listed.items[0].tenant_id, tenant);
 
         let system = repo
-            .list_system(AuditLogFilter::default(), page)
+            .list_system(Uuid::nil(), AuditLogFilter::default(), page)
             .await
             .unwrap();
         assert_eq!((system.total, system.items.len()), (3, 0));

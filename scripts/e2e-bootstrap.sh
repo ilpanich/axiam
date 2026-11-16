@@ -106,8 +106,9 @@ fi
 # Step 2: Call POST /api/v1/admin/bootstrap (public endpoint).
 #
 # Creates the organization, the default tenant, all permissions/roles, and the
-# admin user with the super-admin role. Returns 201 on success, 409 if the
-# system has already been initialized.
+# admin user with the super-admin role. Returns 201 on success; on an
+# initialised system a later call is refused 403 by the consumed token (hence
+# the sign-in probe below), and 409 only reaches the loser of a concurrent race.
 # ---------------------------------------------------------------------------
 echo "[e2e-bootstrap] Calling /api/v1/admin/bootstrap ..."
 
@@ -115,9 +116,9 @@ echo "[e2e-bootstrap] Calling /api/v1/admin/bootstrap ..."
 # code.
 #
 # The setup token is consumed by the first successful bootstrap, so a second
-# call is refused by the GATE (403 "setup token is invalid ... or already
-# consumed") before anything looks at whether the system is already
-# initialised. That ordering is defensible — /admin/bootstrap is public, and
+# call is refused by the GATE (403 "bootstrap gate not satisfied", the one
+# reason every gate refusal carries) before anything looks at whether the
+# system is already initialised. That ordering is defensible — /admin/bootstrap is public, and
 # answering 409 tells an unauthenticated caller the deployment is
 # initialised — but it made this script's documented idempotence false for every
 # production-shaped stack.

@@ -8513,8 +8513,8 @@ consistently rather than rediscovered:
 | Status | `error` | Meaning |
 |---|---|---|
 | `201` | — | Created. The body is `{ message, organization_id, organization_slug, tenant_id, tenant_slug, user_id }`. `tenant_id` is the organization's own scope tenant (§5.2.1), not an ordinary tenant. **No token is issued**: the administrator signs in afterwards with an ordinary §5.1 login against `tenant_slug: "organization"`. |
-| `403` | `authorization_denied` | The gate is not satisfied. Either `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set and the email differs from it, or no setup token was sent, or the setup token is unknown or already consumed. The gate is checked **before** the fields, so a request that fails both answers `403`. |
-| `409` | `already_exists` | Bootstrap has already happened on this deployment, including a lost race between two concurrent calls. It is final: treat it as "this deployment exists", not as a retryable conflict, and never retry it under §16. |
+| `403` | `authorization_denied` | The gate is not satisfied. Either no setup token was sent, or the setup token is unknown or already consumed, or `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set and the email differs from it. Every one of these carries the **same** `message`, so the body does not say which. The gate is checked **before** the fields, so a request that fails both answers `403`. A call on a deployment that has already been bootstrapped also answers `403`: the first bootstrap consumed the token. |
+| `409` | `already_exists` | Only for a lost concurrent race: two calls presented the same still-unconsumed token and the other one won. A later call is refused `403` by the consumed token instead. It is final: treat it as "this deployment exists", not as a retryable conflict, and never retry it under §16. |
 | `400` | `validation_error` | A required field is missing (`organization_name`, `email`, `username`, `password`), `organization_name` has no alphanumeric character, or OPAQUE was requested where the deployment has no OPAQUE engine. |
 
 The route is public and never answers `401`. A lost setup token is re-minted by the

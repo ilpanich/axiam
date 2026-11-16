@@ -161,12 +161,44 @@ pub struct User {
     /// can set or clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_external_id: Option<String>,
+    /// The credential epoch (SA-06, N7; S-1 and S-6): when a credential that
+    /// proves who is signing in last changed — the Argon2 hash or the OPAQUE
+    /// record, written or deleted. A short-lived artefact of the *old*
+    /// credential (an MFA challenge or setup token, an in-flight OPAQUE login)
+    /// issued before this instant is refused.
+    ///
+    /// `None` for a user whose credential has not changed since the column was
+    /// added (schema v117, no backfill): such a user behaves exactly as before.
+    /// Server-internal bookkeeping, never serialised or documented as API.
+    #[serde(default, skip_serializing)]
+    #[schema(ignore = true)]
+    pub credential_changed_at: Option<DateTime<Utc>>,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl User {
+    /// Whether a short-lived artefact issued at `issued_at` (to the
+    /// nanosecond) predates the last credential change. The comparison is
+    /// inclusive: issued *at* the epoch is refused.
+    #[must_use]
+    pub fn credential_changed_since(&self, issued_at: DateTime<Utc>) -> bool {
+        self.credential_changed_at
+            .is_some_and(|epoch| issued_at <= epoch)
+    }
+
+    /// As [`Self::credential_changed_since`], for an artefact whose issue time
+    /// is whole seconds (a JWT `iat`). The epoch is truncated to its second, so
+    /// a token minted in the same second as a later change is refused; the
+    /// price is that one minted in that second *after* the change is too, and
+    /// the user signs in again.
+    #[must_use]
+    pub fn credential_changed_since_secs(&self, iat_secs: i64) -> bool {
+        self.credential_changed_at
+            .is_some_and(|epoch| iat_secs <= epoch.timestamp())
+    }
+
     /// Whether the tenant's directory, not AXIAM, holds this account's
     /// password (see [`Self::directory_external_id`]).
     #[must_use]
@@ -485,6 +517,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             directory_external_id: None,
+            credential_changed_at: None,
         }
     }
 

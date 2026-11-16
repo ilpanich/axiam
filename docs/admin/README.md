@@ -93,7 +93,10 @@ secret. It is a deploy-time env var and is not part of the
 [deployment guide's required-secrets table](../deployment/README.md#required-secrets--environment).
 
 If the token is missing, invalid, unknown or already consumed, or the email
-restriction is set and does not match, bootstrap is refused with `403`.
+restriction is set and does not match, bootstrap is refused with `403`. The
+token is checked first, and every one of these refusals carries the same
+reason text, so a caller without the token can learn neither whether the email
+restriction is set nor whether a guessed address is the configured one.
 
 ### I lost the setup token
 
@@ -156,9 +159,12 @@ the tenant's first admin against them).
 
 On success (`201`), no token is issued — log in via `POST
 /api/v1/auth/login` with the new admin's credentials to obtain a session.
-Bootstrapping the same tenant again always returns `409 Conflict` (at most
-one super-admin can ever be created per tenant via this endpoint, even under
-concurrent first-run requests).
+A later bootstrap call is refused `403` by the gate, because the first one
+consumed the setup token; `409 Conflict` is answered only to the loser of two
+requests racing with the same still-unconsumed token. Either way at most one
+super-admin can ever be created via this endpoint, even under concurrent
+first-run requests. To find out whether a deployment is bootstrapped, sign in
+as the admin (as `scripts/e2e-bootstrap.sh` and `benchmarks/runner/seed.sh` do).
 
 ## Creating an organization and tenant
 
@@ -247,6 +253,33 @@ twice — once as the receipt inside the tenant, and once as a
 /api/v1/audit-logs/system`), which survives the tenant and names the receipt
 that authorised it. It cannot prove you kept the file. Streaming the export to
 `/dev/null` is possible and is exactly as deliberate an act as it looks.
+
+#### Who reads the system audit log
+
+The system audit log is the deployment-wide partition of entries that belong
+to no tenant: requests the server could not attribute to one (a SCIM
+provisioning call, a request with a refused or expired token, unauthenticated
+OAuth2 and SAML traffic), and the `tenants.deleted` / `tenants.purged` records
+of deleted tenants. Since SA-02 (security audit 2026-11-14, N1) it is read
+**per organization**:
+
+- `GET /api/v1/audit-logs/system` requires `audit_logs:list_system` **and** a
+  caller whose own record lives in the organization's scope tenant; a tenant
+  administrator is refused `403` whatever its role holds.
+- It returns only the entries whose recorded `organization_id` is the
+  caller's organization. The server records it on a new entry only when it can
+  resolve it with certainty: the deleted tenant's organization for
+  `tenants.deleted` and `tenants.purged`; the provisioning token's tenant for a
+  SCIM call; an organization (`/api/v1/organizations/{org_id}/…`) or tenant
+  (`/saml/v2/{tenant_id}/…`, `/t/{tenant_id}/…`) the request's path names and
+  that exists. An entry whose organization cannot be resolved — a request that
+  names none (`/oauth2/token?tenant_id=…`, `/api/v1/users` without a token), one
+  naming an organization or tenant that does not exist, an orphaned tenant's
+  purge — records none and is returned to **nobody** through this endpoint.
+- Entries written **before** this change record no organization, so they are
+  no longer returned by this endpoint. They are not modified or deleted (the
+  audit log is append-only; nothing is backfilled) and stay in the datastore
+  until the retention sweep removes them.
 
 The admin UI does this for you: confirming **Delete Tenant** downloads the
 trail to your browser and then deletes.

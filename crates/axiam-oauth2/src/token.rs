@@ -1195,6 +1195,7 @@ where
                     // `null` otherwise.
                     "failed_writes": response.and_then(RefusedReplayResponse::failed_writes),
                 })),
+                organization_id: None,
             })
             .await
         {

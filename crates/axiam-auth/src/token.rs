@@ -67,6 +67,14 @@ fn is_untyped(typ: Option<&str>) -> bool {
     typ.is_none() || typ_matches(typ, "JWT")
 }
 
+/// Whether an `id_token_hint` verifier accepts a header `typ`: an ID token's
+/// own `JWT`, or none at all. An access token (`at+jwt`), a purpose token or a
+/// logout token is not an ID token, however well its claims fit
+/// [`IdTokenClaims`].
+pub fn id_token_hint_typ_accepted(typ: Option<&str>) -> bool {
+    is_untyped(typ)
+}
+
 /// Whether a purpose-token verifier accepts a header `typ` (SA-03 rule 6).
 ///
 /// Its own `typ` always. An untyped token only while
@@ -76,6 +84,47 @@ fn is_untyped(typ: Option<&str>) -> bool {
 pub fn purpose_token_typ_accepted(typ: Option<&str>, expected: &str, config: &AuthConfig) -> bool {
     typ_matches(typ, expected) || (!config.require_access_token_typ && is_untyped(typ))
 }
+
+/// Rate limit for the relaxed-window `warn!` in [`check_access_token_type`]:
+/// with `require_access_token_typ` off every request may carry an untyped
+/// token, and one log line per request would flood the log for the whole
+/// rolling upgrade. At most one line per [`Self::INTERVAL_SECS`] per process,
+/// carrying how many tokens were accepted since the previous line.
+struct RelaxedTypWarning {
+    /// Unix second of the last line written; `i64::MIN` before the first.
+    last_logged: std::sync::atomic::AtomicI64,
+    /// Acceptances since the last line, the current one included.
+    accepted: std::sync::atomic::AtomicU64,
+}
+
+impl RelaxedTypWarning {
+    const INTERVAL_SECS: i64 = 60;
+
+    const fn new() -> Self {
+        Self {
+            last_logged: std::sync::atomic::AtomicI64::new(i64::MIN),
+            accepted: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Record one acceptance at `now` (Unix seconds). `Some(n)` when a line is
+    /// due, `n` being the acceptances it reports; `None` when it is not.
+    fn admit(&self, now: i64) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+        self.accepted.fetch_add(1, Ordering::Relaxed);
+        let last = self.last_logged.load(Ordering::Relaxed);
+        if last != i64::MIN && now.saturating_sub(last) < Self::INTERVAL_SECS {
+            return None;
+        }
+        // One caller wins the interval; a racing one sees the new value.
+        self.last_logged
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .ok()?;
+        Some(self.accepted.swap(0, Ordering::Relaxed))
+    }
+}
+
+static RELAXED_TYP_WARNING: RelaxedTypWarning = RelaxedTypWarning::new();
 
 /// The access-token type gate shared by both decoders (SA-03).
 ///
@@ -105,10 +154,14 @@ fn check_access_token_type(
                 "access token has no typ at+jwt".into(),
             ));
         }
-        tracing::warn!(
-            "accepted an access token without typ at+jwt: require_access_token_typ is off \
-             (rolling-upgrade window)"
-        );
+        if let Some(accepted) = RELAXED_TYP_WARNING.admit(Utc::now().timestamp()) {
+            tracing::warn!(
+                accepted,
+                "accepted access tokens without typ at+jwt: require_access_token_typ is off \
+                 (rolling-upgrade window; logged at most once every {}s)",
+                RelaxedTypWarning::INTERVAL_SECS
+            );
+        }
     }
     if claims_carry_purpose(token) {
         return Err(AuthError::TokenInvalid(
@@ -587,19 +640,6 @@ fn sign_claims<T: Serialize>(
     typ: &str,
     config: &AuthConfig,
 ) -> Result<String, AuthError> {
-    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let mut header = Header::new(Algorithm::EdDSA);
-    // SA-03 — every token names its kind; see `TYP_ACCESS_TOKEN`.
-    header.typ = Some(typ.to_owned());
     // X7 §1.3 — name the verifying key in the header.
     //
     // The JWKS at `/oauth2/jwks` has always published a `kid`; the tokens
@@ -613,7 +653,32 @@ fn sign_claims<T: Serialize>(
     // from is not an error here: `build_jwks` will refuse it at the JWKS
     // endpoint with a message about the PEM, and failing token issuance with
     // the same complaint would turn a metadata problem into an outage.
-    header.kid = ed25519_jwk_kid(&config.jwt_public_key_pem);
+    let kid = ed25519_jwk_kid(&config.jwt_public_key_pem);
+    sign_with_header(claims, typ, kid, config)
+}
+
+/// The one encoder behind [`sign_claims`] and [`sign_purpose_token`]: the
+/// deployment key, EdDSA, the given `typ` and (optionally) `kid`.
+fn sign_with_header<T: Serialize>(
+    claims: &T,
+    typ: &str,
+    kid: Option<String>,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
+
+    let mut header = Header::new(Algorithm::EdDSA);
+    // SA-03 — every token names its kind; see `TYP_ACCESS_TOKEN`.
+    header.typ = Some(typ.to_owned());
+    header.kid = kid;
     jsonwebtoken::encode(&header, claims, key)
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
 }
@@ -621,9 +686,13 @@ fn sign_claims<T: Serialize>(
 /// Sign a purpose token (WebAuthn state, MFA challenge, MFA setup) with the
 /// deployment key, under its own `typ` (SA-03).
 ///
-/// The same signer as the access and ID tokens, so a purpose token also names
-/// its verifying key. `typ` must not be [`TYP_ACCESS_TOKEN`]: the whole point
-/// of the header is that the two can never be mistaken for each other.
+/// The same key as the access and ID tokens, but **no `kid`** (S-8): only
+/// AXIAM reads a purpose token back, and it verifies with its own configured
+/// key, never by JWKS lookup. A relying party that selects keys strictly by
+/// `kid` therefore finds no key for a purpose token, which is the one
+/// separation such verifiers relied on before purpose tokens were typed (N14).
+/// `typ` must not be [`TYP_ACCESS_TOKEN`]: the whole point of the header is
+/// that the two can never be mistaken for each other.
 pub fn sign_purpose_token<T: Serialize>(
     claims: &T,
     typ: &str,
@@ -634,7 +703,7 @@ pub fn sign_purpose_token<T: Serialize>(
             "a purpose token cannot be typed {typ}"
         )));
     }
-    sign_claims(claims, typ, config)
+    sign_with_header(claims, typ, None, config)
 }
 
 /// The `kid` of an Ed25519 public key: the first 16 hex characters (64 bits)
@@ -4250,5 +4319,53 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             assert!(sign_purpose_token(&claims, typ, &test_config()).is_err());
         }
         assert!(sign_purpose_token(&claims, TYP_MFA_SETUP, &test_config()).is_ok());
+    }
+
+    /// Q-9: the relaxed-window warning is written once per interval, and each
+    /// line counts every acceptance since the previous one.
+    #[test]
+    fn the_relaxed_typ_warning_is_rate_limited() {
+        let w = RelaxedTypWarning::new();
+        let t0 = 1_000_000;
+        assert_eq!(w.admit(t0), Some(1), "the first acceptance is logged");
+        for dt in [0, 1, 30, RelaxedTypWarning::INTERVAL_SECS - 1] {
+            assert_eq!(w.admit(t0 + dt), None, "suppressed at +{dt}s");
+        }
+        assert_eq!(
+            w.admit(t0 + RelaxedTypWarning::INTERVAL_SECS),
+            Some(5),
+            "the next line reports the four suppressed acceptances and itself"
+        );
+        assert_eq!(w.admit(t0 + RelaxedTypWarning::INTERVAL_SECS + 1), None);
+        // A clock that steps back does not unlock a burst of lines.
+        assert_eq!(w.admit(t0), None);
+    }
+
+    /// S-8: a purpose token names no JWKS key — a verifier that selects keys
+    /// strictly by `kid` finds none for it — and still verifies under the
+    /// deployment key, which is how every AXIAM purpose verifier selects it.
+    #[test]
+    fn a_purpose_token_names_no_key_and_still_verifies() {
+        let config = test_config();
+        let now = Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": Uuid::new_v4().to_string(),
+            "purpose": "mfa_setup",
+            "iss": config.jwt_issuer,
+            "iat": now,
+            "exp": now + 300,
+        });
+        let key = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+        for typ in [TYP_WEBAUTHN_STATE, TYP_MFA_CHALLENGE, TYP_MFA_SETUP] {
+            let token = sign_purpose_token(&claims, typ, &config).unwrap();
+            let header = jsonwebtoken::decode_header(&token).unwrap();
+            assert_eq!(header.kid, None, "a {typ} token must carry no kid");
+            assert_eq!(header.typ.as_deref(), Some(typ));
+            jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation)
+                .unwrap_or_else(|e| panic!("a kid-less {typ} token must still verify: {e}"));
+        }
     }
 }

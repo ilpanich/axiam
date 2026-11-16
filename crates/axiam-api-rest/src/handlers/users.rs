@@ -654,6 +654,7 @@ pub async fn delete<C: Connection + Clone>(
                     "certificates_revoked": certificates_revoked,
                     "cause": "user_deleted",
                 })),
+                organization_id: None,
             })
             .await
         {

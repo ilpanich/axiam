@@ -602,6 +602,42 @@ fn random_password() -> String {
     format!("{}{}", Uuid::new_v4(), Uuid::new_v4())
 }
 
+/// SA-06 (N7, S-7): refuse a SCIM write of a password when the tenant's
+/// effective OPAQUE mode is `required`.
+///
+/// Every write of `password_hash` retires the user's OPAQUE record in the same
+/// transaction (`UserRepository::update`), and SCIM has no way to supply a new
+/// one: the protocol carries a plaintext `password`, and an OPAQUE record is
+/// computed on the client so that the server never sees one. Under `required`
+/// the Argon2 login path is refused (`handlers::auth`), so the record SCIM
+/// deleted was the user's only usable credential. Refused with RFC 7644 §3.12's
+/// `mutability` — the attribute is not writable *in this tenant's mode* —
+/// rather than silently locking the person out. `optional` and `off` are
+/// unchanged: under `optional` the Argon2 login still works.
+///
+/// The mode is read the way every other handler reads it: the tenant's
+/// organization, then the effective (organization over tenant) settings.
+async fn refuse_password_write_under_opaque_required<C: Connection + Clone>(
+    state: &AppState<C>,
+    tenant_id: Uuid,
+) -> Result<(), ScimError> {
+    use axiam_core::repository::{SettingsRepository as _, TenantRepository as _};
+
+    let tenant = state.tenant_repo.get_by_id(tenant_id).await?;
+    let settings = state
+        .settings_repo
+        .get_effective_settings(tenant.organization_id, tenant_id)
+        .await?;
+    if settings.opaque.opaque_mode == axiam_core::models::opaque::OpaqueMode::Required {
+        return Err(ScimError::mutability(
+            "\"password\" cannot be written over SCIM while this tenant's OPAQUE mode is \
+             `required`: the write would delete the user's OPAQUE record, and SCIM cannot \
+             supply a new one. The user sets a password through the self-service flow",
+        ));
+    }
+    Ok(())
+}
+
 /// `POST /scim/v2/Users`
 pub async fn create<C: Connection + Clone>(
     http_req: HttpRequest,
@@ -619,6 +655,9 @@ pub async fn create<C: Connection + Clone>(
         )
     })?;
 
+    if req.password.is_some() {
+        refuse_password_write_under_opaque_required(&state, user.tenant_id()).await?;
+    }
     let metadata = build_scim_metadata(&req.external_id, &req.name);
     let password = req.password.clone().unwrap_or_else(random_password);
 
@@ -697,6 +736,12 @@ pub async fn replace<C: Connection + Clone>(
     let id = path.into_inner();
     let current = state.user_repo.get_by_id(user.tenant_id(), id).await?;
     let req = body.into_inner();
+    // PUT does not write the `password` it may carry (the hash is only ever
+    // written by create and PATCH), but a client that sends one is told, under
+    // `required`, that it cannot be set rather than that it was.
+    if req.password.is_some() {
+        refuse_password_write_under_opaque_required(&state, user.tenant_id()).await?;
+    }
 
     let email = primary_email(&req.emails).ok_or_else(|| {
         ScimError::invalid_value("\"emails\" with at least one entry is required")
@@ -963,6 +1008,9 @@ pub async fn patch<C: Connection + Clone>(
         return Err(ScimError::mutability(
             "\"password\" is managed by the tenant's directory for this account",
         ));
+    }
+    if delta.password.is_some() {
+        refuse_password_write_under_opaque_required(&state, user.tenant_id()).await?;
     }
     let pepper = state.auth_config.pepper.as_ref().map(|p| p.expose_secret());
     let password_hash = match &delta.password {

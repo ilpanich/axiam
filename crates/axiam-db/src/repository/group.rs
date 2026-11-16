@@ -125,6 +125,7 @@ impl MemberRow {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: None,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -642,7 +643,10 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
                  WHERE tenant_id = $tenant_id \
                  AND id IN (\
                      SELECT VALUE in FROM member_of \
-                     WHERE out = type::record('group', $group_id)\
+                     WHERE out = type::record('group', $group_id) \
+                     AND out.tenant_id = $tenant_id \
+                     AND record::tb(in) = 'user' \
+                     AND in.tenant_id = $tenant_id\
                  ) \
                  ORDER BY created_at ASC \
                  LIMIT $limit START $offset",
@@ -929,7 +933,10 @@ impl<C: Connection> GroupRepository for SurrealGroupRepository<C> {
                  WHERE tenant_id = $tenant_id \
                  AND id IN (\
                      SELECT VALUE in FROM member_of \
-                     WHERE out = type::record('group', $group_id)\
+                     WHERE out = type::record('group', $group_id) \
+                     AND out.tenant_id = $tenant_id \
+                     AND record::tb(in) = 'service_account' \
+                     AND in.tenant_id = $tenant_id\
                  ) \
                  ORDER BY created_at ASC \
                  LIMIT $limit START $offset",

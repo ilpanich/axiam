@@ -387,6 +387,7 @@ where
                     outcome: AuditOutcome::Failure,
                     ip_address: None,
                     metadata: Some(audit_metadata),
+                    organization_id: None,
                 };
 
                 if let Err(ae) = audit_repo.append(entry).await {

@@ -19,6 +19,7 @@ fn entry(action: String, ip_address: Option<String>) -> CreateAuditLogEntry {
         outcome: AuditOutcome::Failure,
         ip_address,
         metadata: None,
+        organization_id: None,
     }
 }
 

@@ -682,6 +682,45 @@ async fn device_auth_refuses_a_non_active_service_account() {
         "each refusal must leave an audit row under the proven tenant: {rows:?}"
     );
 
+    // Q-10: and each refusal also leaves an explicit row that NAMES the
+    // service account (actor), with the failure outcome, status and reason.
+    let mut explicit = Vec::new();
+    for _ in 0..100 {
+        explicit = repo
+            .list(tenant_id, AuditLogFilter::default(), Pagination::default())
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|e| e.action == "auth.device.refused")
+            .collect();
+        if explicit.len() >= refusals {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        explicit.len(),
+        refusals,
+        "each refusal must leave an explicit device-refusal row: {explicit:?}"
+    );
+    let mut statuses = Vec::new();
+    for row in &explicit {
+        assert_eq!(row.actor_id, sa_uuid, "actor must be the service account");
+        assert_eq!(
+            row.actor_type,
+            axiam_core::models::audit::ActorType::ServiceAccount
+        );
+        assert_eq!(
+            row.outcome,
+            axiam_core::models::audit::AuditOutcome::Failure
+        );
+        assert_eq!(row.metadata["reason"], "service_account_not_active");
+        statuses.push(row.metadata["status"].as_str().unwrap_or("").to_string());
+    }
+    assert_eq!(statuses.len(), 3);
+    assert!(statuses.iter().all(|s| !s.is_empty() && s != "active"));
+
     // Control: re-activated, the same certificate gets a token again.
     sa_repo
         .update(

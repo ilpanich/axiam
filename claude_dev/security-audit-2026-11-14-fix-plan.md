@@ -370,8 +370,8 @@ Instructions:
 > |---|---|---|
 > | Access (user, client credentials, service account, RPT, exchange) | `at+jwt` | yes |
 > | OIDC ID token | `JWT` | yes |
-> | WebAuthn state | `axiam-webauthn-state+jwt` | yes (new) |
-> | MFA challenge / MFA setup | `axiam-mfa-challenge+jwt` / `axiam-mfa-setup+jwt` | yes (new) |
+> | WebAuthn state | `axiam-webauthn-state+jwt` | no (wave 1 review S-8) |
+> | MFA challenge / MFA setup | `axiam-mfa-challenge+jwt` / `axiam-mfa-setup+jwt` | no (wave 1 review S-8) |
 > | Back-channel logout | `logout+jwt` (new) | no |
 > | SSF SET | `secevent+jwt` (unchanged) | yes |
 >
@@ -399,9 +399,9 @@ Instructions:
 >   (2) Purpose verifiers follow the same flag, so in-flight ceremonies survive
 >   a relaxed rolling upgrade. (3) Introspection reports purpose tokens
 >   inactive. (4) Logout tokens gain `typ: logout+jwt` (OIDC Back-Channel
->   Logout §2.4). (5) Out of scope, unchanged: `logout::decode_id_token_hint`
->   and `ciba::verify_id_token_hint` check no `typ` (CIBA refuses access
->   tokens by `aud`). (6) Upgrade effect for SA-50: under the strict default
+>   Logout §2.4). (5) `logout::decode_id_token_hint` (also used by `/oauth2/authorize`)
+>   and `ciba::verify_id_token_hint` originally checked no `typ`; since the
+>   wave 1 review (Q-8/S-10) both accept only `JWT` or an absent `typ`. (6) Upgrade effect for SA-50: under the strict default
 >   every session re-authenticates or refreshes within one access-token
 >   lifetime (15 min).
 

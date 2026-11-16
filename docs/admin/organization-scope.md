@@ -115,7 +115,7 @@ meaning.
 | --- | --- |
 | Any tenant-scoped action | Allowed only in the named tenants; the authorization engine drops the assignment everywhere else |
 | Organization-level actions (create/update/delete a tenant or organization, mint or revoke the organization CA, set an mTLS trust anchor, organization email config, MDS refresh) | **Refused.** These name no tenant, so there is nothing for the engine to compare a scope against — the guard is explicit |
-| A tenant's signing CA (`…/tenants/{tenant}/signing-cas`) | Allowed when the reach covers *that* tenant. Organization-level, but what it produces belongs to one tenant |
+| A tenant's signing CA (`…/tenants/{tenant}/signing-cas`) | Allowed when the reach covers *that* tenant. Organization-level, but what it produces belongs to one tenant. The list (`GET`) is also open to an ordinary tenant's principal for its **own** tenant only (it needs its signing CAs' ids to issue under them); any other tenant's list is `403` (SA-02, S-5) |
 | `GET /organizations/{org}/tenants` | Returns only the tenants in reach |
 | `X-Axiam-Tenant` naming another tenant | `403` at the header, rather than a 403 on every request that follows |
 | `GET /auth/me` | `permissions` is computed for the tenant being acted on, and the `*` wildcard is **not** emitted |

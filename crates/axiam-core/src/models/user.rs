@@ -173,6 +173,21 @@ pub struct User {
     #[serde(default, skip_serializing)]
     #[schema(ignore = true)]
     pub credential_changed_at: Option<DateTime<Utc>>,
+    /// The credential version (SA-06, N7; review SR3-1): a per-user counter
+    /// bumped **in the same transaction** as every write that stamps
+    /// [`Self::credential_changed_at`]. It is read with the credential (the
+    /// same user row as the Argon2 hash) and embedded in the short-lived
+    /// artefacts a login issues; they are refused when it no longer equals the
+    /// user's current value. Unlike the timestamp it does not depend on
+    /// ordering two clocks, so an artefact built from a credential read that
+    /// raced a reset's transaction cannot slip past it.
+    ///
+    /// `0` for a user whose credential has not changed since schema v118 (the
+    /// column is absent and not backfilled). Server-internal bookkeeping, never
+    /// serialised or documented as API.
+    #[serde(default, skip_serializing)]
+    #[schema(ignore = true)]
+    pub credential_version: i64,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -215,6 +230,34 @@ impl User {
             Some(ns) => self.credential_changed_since(DateTime::from_timestamp_nanos(ns)),
             None => self.credential_changed_since_secs(iat_secs),
         }
+    }
+
+    /// Whether a short-lived artefact is stale against the credential: its
+    /// `version` (the credential version it was built from, `None` when a
+    /// release that predates the counter minted it) differs from the user's
+    /// current [`Self::credential_version`], or its issue time predates the
+    /// last credential change ([`Self::credential_changed_since_claims`]).
+    ///
+    /// An artefact with no version falls back to the timestamp check alone, so
+    /// an in-flight artefact survives a rolling upgrade.
+    #[must_use]
+    pub fn credential_superseded(
+        &self,
+        iat_secs: i64,
+        iat_ns: Option<i64>,
+        version: Option<i64>,
+    ) -> bool {
+        self.credential_version_stale(version)
+            || self.credential_changed_since_claims(iat_secs, iat_ns)
+    }
+
+    /// Whether an artefact built from credential version `version` is stale:
+    /// it carries one and it is not the user's current
+    /// [`Self::credential_version`]. `None` (a release that predates the
+    /// counter minted it) is never stale by this check.
+    #[must_use]
+    pub fn credential_version_stale(&self, version: Option<i64>) -> bool {
+        version.is_some_and(|v| v != self.credential_version)
     }
 
     /// Whether the tenant's directory, not AXIAM, holds this account's
@@ -536,6 +579,7 @@ mod tests {
             updated_at: Utc::now(),
             directory_external_id: None,
             credential_changed_at: None,
+            credential_version: 0,
         }
     }
 

@@ -209,12 +209,30 @@ pub const UNRESOLVED_TTL: Duration = Duration::from_secs(10);
 /// map stops accepting new entries until an expiry sweep frees room, which
 /// degrades to the uncached behaviour (one read per request) rather than to
 /// unbounded growth or to dropping an organization the datastore does know.
+///
+/// The sweep is a full scan under the map's lock, so a full map is swept at
+/// most once per half of its TTL (review QR3-4): a client looping invented ids
+/// fast enough to keep the map full of live entries would otherwise trigger a
+/// scan that frees nothing on every insert. Between sweeps an insert into a
+/// full map is simply dropped; an entry that expired meanwhile is still removed
+/// by the lookup that finds it.
 const MAX_ENTRIES: usize = 4_096;
 
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     organization_id: Option<Uuid>,
     inserted_at: Instant,
+}
+
+/// One of the two bounded maps.
+#[derive(Debug, Default)]
+struct Bucket {
+    entries: HashMap<PathScope, Entry>,
+    /// When `entries` was last swept for expired entries (QR3-4).
+    last_sweep: Option<Instant>,
+    /// Expiry sweeps run over `entries`; tests read it to bound the work.
+    #[cfg(test)]
+    sweeps: usize,
 }
 
 /// What a path id resolved to, remembered for [`RESOLVED_TTL`] when it named
@@ -224,8 +242,8 @@ struct Entry {
 pub struct SystemAuditOrgCache {
     resolved_ttl: Duration,
     unresolved_ttl: Duration,
-    resolved: Mutex<HashMap<PathScope, Entry>>,
-    unresolved: Mutex<HashMap<PathScope, Entry>>,
+    resolved: Mutex<Bucket>,
+    unresolved: Mutex<Bucket>,
 }
 
 impl Default for SystemAuditOrgCache {
@@ -240,8 +258,8 @@ impl SystemAuditOrgCache {
         Self {
             resolved_ttl,
             unresolved_ttl,
-            resolved: Mutex::new(HashMap::new()),
-            unresolved: Mutex::new(HashMap::new()),
+            resolved: Mutex::new(Bucket::default()),
+            unresolved: Mutex::new(Bucket::default()),
         }
     }
 
@@ -253,11 +271,11 @@ impl SystemAuditOrgCache {
             (&self.unresolved, self.unresolved_ttl),
         ] {
             let mut guard = lock(map);
-            if let Some(entry) = guard.get(&scope).copied() {
+            if let Some(entry) = guard.entries.get(&scope).copied() {
                 if entry.inserted_at.elapsed() < ttl {
                     return Some(entry.organization_id);
                 }
-                guard.remove(&scope);
+                guard.entries.remove(&scope);
             }
         }
         None
@@ -270,13 +288,22 @@ impl SystemAuditOrgCache {
             (&self.unresolved, self.unresolved_ttl)
         };
         let mut guard = lock(map);
-        if guard.len() >= MAX_ENTRIES && !guard.contains_key(&scope) {
-            guard.retain(|_, e| e.inserted_at.elapsed() < ttl);
-            if guard.len() >= MAX_ENTRIES {
+        if guard.entries.len() >= MAX_ENTRIES && !guard.entries.contains_key(&scope) {
+            let sweep_due = guard.last_sweep.is_none_or(|at| at.elapsed() >= ttl / 2);
+            if !sweep_due {
+                return;
+            }
+            guard.entries.retain(|_, e| e.inserted_at.elapsed() < ttl);
+            guard.last_sweep = Some(Instant::now());
+            #[cfg(test)]
+            {
+                guard.sweeps += 1;
+            }
+            if guard.entries.len() >= MAX_ENTRIES {
                 return;
             }
         }
-        guard.insert(
+        guard.entries.insert(
             scope,
             Entry {
                 organization_id,
@@ -288,7 +315,7 @@ impl SystemAuditOrgCache {
 
 /// A poisoned lock means another thread panicked holding a map of ids; there
 /// is no invariant to protect, and recovering beats panicking on every request.
-fn lock(map: &Mutex<HashMap<PathScope, Entry>>) -> MutexGuard<'_, HashMap<PathScope, Entry>> {
+fn lock(map: &Mutex<Bucket>) -> MutexGuard<'_, Bucket> {
     map.lock().unwrap_or_else(|p| p.into_inner())
 }
 
@@ -377,6 +404,62 @@ mod tests {
             "the second lookup of a known organization read the datastore \
              instead of the cache"
         );
+    }
+
+    /// Fill the unresolved map to the cap with distinct invented ids.
+    fn fill_unresolved(cache: &SystemAuditOrgCache) {
+        for _ in 0..MAX_ENTRIES {
+            cache.insert(PathScope::Organization(Uuid::new_v4()), None);
+        }
+        assert_eq!(lock(&cache.unresolved).entries.len(), MAX_ENTRIES);
+    }
+
+    /// QR3-4: with the map full of live entries, a stream of new invented ids
+    /// must not sweep the whole map under the global lock on every insert. A
+    /// sweep that freed nothing is not repeated until half the TTL has passed,
+    /// and the cap still holds.
+    #[test]
+    fn a_full_map_of_live_entries_is_not_swept_on_every_insert() {
+        let cache = SystemAuditOrgCache::new(Duration::from_secs(600), Duration::from_secs(600));
+        fill_unresolved(&cache);
+
+        for _ in 0..1_000 {
+            cache.insert(PathScope::Organization(Uuid::new_v4()), None);
+        }
+
+        let guard = lock(&cache.unresolved);
+        assert!(
+            guard.sweeps <= 1,
+            "1000 inserts into a full map of live entries ran {} full sweeps",
+            guard.sweeps
+        );
+        assert_eq!(guard.entries.len(), MAX_ENTRIES, "the cap no longer holds");
+    }
+
+    /// QR3-4, the other half: once half the TTL has passed, a full map is
+    /// swept again, so expired entries still make room for new ones.
+    #[test]
+    fn a_full_map_is_swept_again_once_half_the_ttl_has_passed() {
+        let ttl = Duration::from_millis(200);
+        let cache = SystemAuditOrgCache::new(ttl, ttl);
+        fill_unresolved(&cache);
+        // A sweep while every entry is live frees nothing; the id is dropped.
+        let early = PathScope::Organization(Uuid::new_v4());
+        cache.insert(early, None);
+        assert_eq!(cache.get(early), None);
+
+        std::thread::sleep(ttl + Duration::from_millis(20));
+        let late = PathScope::Organization(Uuid::new_v4());
+        cache.insert(late, None);
+
+        assert_eq!(
+            cache.get(late),
+            Some(None),
+            "an insert after the entries expired found no room"
+        );
+        let guard = lock(&cache.unresolved);
+        assert_eq!(guard.sweeps, 2);
+        assert_eq!(guard.entries.len(), 1);
     }
 
     #[test]

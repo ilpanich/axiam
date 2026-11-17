@@ -210,8 +210,21 @@ struct MfaChallengeClaims {
     /// token minted before it existed; the comparison then uses `iat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     iat_ns: Option<i64>,
+    /// The user's credential version when this token was issued, read in the
+    /// same row as the password hash the login verified (SA-06, SR3-1). Refused
+    /// once the user's version differs, which no ordering of two clocks can
+    /// defeat. Absent on a token minted before the claim existed; the
+    /// timestamp check alone then applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cv: Option<i64>,
     exp: i64,
 }
+
+/// The reason every refusal of an MFA challenge gives for a token that is not
+/// (or is no longer) a valid challenge: a forged or mistyped one, one that
+/// predates a credential change, and one for a user that is gone. A single
+/// text, so the client-visible answer reveals nothing about *why* (SR3-2).
+const NOT_AN_MFA_CHALLENGE: &str = "not an MFA challenge token";
 
 // -----------------------------------------------------------------------
 // AuthService
@@ -750,7 +763,12 @@ impl<
             // asked for step-up *after* seeing this login has, by definition,
             // seen that and asked anyway.
             if links.is_empty() || reactor_requires_mfa {
-                let setup_token = self.issue_mfa_setup_token(user.id, tenant_id, org_id)?;
+                let setup_token = self.issue_mfa_setup_token(
+                    user.id,
+                    tenant_id,
+                    org_id,
+                    user.credential_version,
+                )?;
                 return Ok(LoginResult::MfaSetupRequired(MfaSetupOutput {
                     setup_token,
                 }));
@@ -760,7 +778,8 @@ impl<
         // 6. Check MFA — trigger for any user with mfa_enabled, regardless
         //    of whether they use TOTP or WebAuthn.
         if user.mfa_enabled {
-            let challenge_token = self.issue_mfa_challenge(user.id, tenant_id, org_id)?;
+            let challenge_token =
+                self.issue_mfa_challenge(user.id, tenant_id, org_id, user.credential_version)?;
             return Ok(LoginResult::MfaRequired(MfaChallengeOutput {
                 challenge_token,
                 available_methods: Vec::new(), // populated by REST handler
@@ -969,14 +988,25 @@ impl<
             .map_err(|_| AuthError::TokenInvalid("bad org_id".into()))?;
 
         // 2. Fetch user and verify TOTP.
-        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| {
+                // The same answer as a forged challenge: a gone account must
+                // not be told apart from one that never existed (SR3-2).
+                tracing::debug!(target: "axiam::auth", "MFA challenge for an unreadable user");
+                AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into())
+            })?;
         // SA-06 (S-6): a challenge minted before the credential last changed
         // answers to the old password. Refused as any invalid challenge is.
-        if user.credential_changed_since_claims(claims.iat, claims.iat_ns) {
-            return Err(AuthError::TokenInvalid(
-                "MFA challenge predates a credential change".into(),
-            )
-            .into());
+        if user.credential_superseded(claims.iat, claims.iat_ns, claims.cv) {
+            tracing::debug!(
+                target: "axiam::auth",
+                user_id = %user_id,
+                "MFA challenge predates a credential change"
+            );
+            return Err(AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into()).into());
         }
         Self::check_user_status(
             &user.status,
@@ -1053,7 +1083,7 @@ impl<
     ) -> Result<(Uuid, Uuid, Uuid), AuthError> {
         self.decode_mfa_challenge_ids_at(token)
             .await
-            .map(|(user_id, tenant_id, org_id, _)| (user_id, tenant_id, org_id))
+            .map(|(user_id, tenant_id, org_id, _, _)| (user_id, tenant_id, org_id))
     }
 
     /// As [`Self::decode_mfa_challenge_ids`], and also the challenge's issue
@@ -1064,7 +1094,7 @@ impl<
     pub async fn decode_mfa_challenge_ids_at(
         &self,
         token: &str,
-    ) -> Result<(Uuid, Uuid, Uuid, DateTime<Utc>), AuthError> {
+    ) -> Result<(Uuid, Uuid, Uuid, DateTime<Utc>, Option<i64>), AuthError> {
         let claims = self.decode_mfa_challenge(token)?;
         let user_id: Uuid = claims
             .sub
@@ -1082,18 +1112,24 @@ impl<
             .user_repo
             .get_by_id(tenant_id, user_id)
             .await
-            .map_err(|_| AuthError::TokenInvalid("unknown user".into()))?;
-        if user.credential_changed_since_claims(claims.iat, claims.iat_ns) {
-            return Err(AuthError::TokenInvalid(
-                "MFA challenge predates a credential change".into(),
-            ));
+            .map_err(|_| {
+                tracing::debug!(target: "axiam::auth", "MFA challenge for an unreadable user");
+                AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into())
+            })?;
+        if user.credential_superseded(claims.iat, claims.iat_ns, claims.cv) {
+            tracing::debug!(
+                target: "axiam::auth",
+                user_id = %user_id,
+                "MFA challenge predates a credential change"
+            );
+            return Err(AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into()));
         }
         let issued_at = match claims.iat_ns {
             Some(ns) => DateTime::from_timestamp_nanos(ns),
             None => DateTime::from_timestamp(claims.iat, 0)
                 .ok_or_else(|| AuthError::TokenInvalid("bad iat".into()))?,
         };
-        Ok((user_id, tenant_id, org_id, issued_at))
+        Ok((user_id, tenant_id, org_id, issued_at, claims.cv))
     }
 
     /// The WebAuthn second-factor finish: refuse a ceremony whose challenge
@@ -1126,7 +1162,7 @@ impl<
             .get_by_id(tenant_id, user_id)
             .await
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
-        if user.credential_changed_since_claims(issued.iat, issued.iat_ns) {
+        if user.credential_superseded(issued.iat, issued.iat_ns, issued.credential_version) {
             return Err(AuthError::WebauthnStateInvalid.into());
         }
         webauthn
@@ -1984,6 +2020,7 @@ impl<
         user_id: Uuid,
         tenant_id: Uuid,
         org_id: Uuid,
+        credential_version: i64,
     ) -> Result<String, AuthError> {
         let issued_at = Utc::now();
         let now = issued_at.timestamp();
@@ -1995,6 +2032,7 @@ impl<
             iss: self.config.jwt_issuer.clone(),
             iat: now,
             iat_ns: issued_at.timestamp_nanos_opt(),
+            cv: Some(credential_version),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -2027,7 +2065,7 @@ impl<
             &self.config,
         ) || data.claims.purpose != "mfa_challenge"
         {
-            return Err(AuthError::TokenInvalid("not an MFA challenge token".into()));
+            return Err(AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into()));
         }
 
         Ok(data.claims)
@@ -2039,6 +2077,7 @@ impl<
         user_id: Uuid,
         tenant_id: Uuid,
         org_id: Uuid,
+        credential_version: i64,
     ) -> Result<String, AuthError> {
         let issued_at = Utc::now();
         let now = issued_at.timestamp();
@@ -2050,6 +2089,7 @@ impl<
             iss: self.config.jwt_issuer.clone(),
             iat: now,
             iat_ns: issued_at.timestamp_nanos_opt(),
+            cv: Some(credential_version),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -2116,7 +2156,7 @@ impl<
             .get_by_id(tenant_id, user_id)
             .await
             .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
-        if user.credential_changed_since_claims(data.claims.iat, data.claims.iat_ns) {
+        if user.credential_superseded(data.claims.iat, data.claims.iat_ns, data.claims.cv) {
             return Err(AuthError::MfaSetupTokenInvalid);
         }
 

@@ -164,7 +164,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
                  RETURN meta::id(id) AS record_id, *; \
-                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch, \
+                 credential_version = (credential_version ?? 0) + 1 \
                  WHERE tenant_id = $tenant_id; \
                  COMMIT TRANSACTION",
             )
@@ -214,7 +215,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  ksf_p = $ksf_p, \
                  record = $record \
                  RETURN meta::id(id) AS record_id, *; \
-                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch, \
+                 credential_version = (credential_version ?? 0) + 1 \
                  WHERE tenant_id = $tenant_id; \
                  COMMIT TRANSACTION",
             )
@@ -275,7 +277,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  DELETE FROM opaque_credential \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
                  RETURN BEFORE; \
-                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch, \
+                 credential_version = (credential_version ?? 0) + 1 \
                  WHERE tenant_id = $tenant_id; \
                  COMMIT TRANSACTION",
             )

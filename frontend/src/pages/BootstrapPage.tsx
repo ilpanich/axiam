@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 import { AlertCircle, Loader2, ShieldCheck } from "lucide-react";
 
@@ -46,8 +46,7 @@ export function BootstrapPage() {
   const [orgSlugTouched, setOrgSlugTouched] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
-  const [emailError, setEmailError] = useState<string | null>(null);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<ReactNode | null>(null);
   const [alreadyInitialized, setAlreadyInitialized] = useState(false);
 
   useEffect(() => {
@@ -65,7 +64,6 @@ export function BootstrapPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setEmailError(null);
     setFormError(null);
 
     const effectiveOrgSlug = orgSlug.trim() || slugify(orgName);
@@ -112,8 +110,18 @@ export function BootstrapPage() {
     } catch (err) {
       const status = getApiErrorStatus(err);
       if (status === 403) {
-        setEmailError(
-          "Bootstrap is not authorized. Check the email gate or paste a valid setup token.",
+        // The gate is the one-time setup token; the configured admin email is
+        // only an extra restriction. A deployment that is already initialised
+        // answers 403 as well (its token is consumed), so point at sign-in.
+        setFormError(
+          <>
+            Bootstrap was refused: the setup token is missing, invalid or
+            already used (if this deployment is already set up,{" "}
+            <Link to="/login" className="underline">
+              sign in
+            </Link>{" "}
+            instead), or the email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL.
+          </>,
         );
       } else if (status === 409) {
         setAlreadyInitialized(true);
@@ -228,19 +236,8 @@ export function BootstrapPage() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"
-              aria-invalid={emailError ? "true" : undefined}
-              aria-describedby={emailError ? "bootstrap-email-error" : undefined}
               required
             />
-            {emailError && (
-              <p
-                id="bootstrap-email-error"
-                role="alert"
-                className="text-sm text-destructive"
-              >
-                {emailError}
-              </p>
-            )}
           </div>
 
           <div className="space-y-2">

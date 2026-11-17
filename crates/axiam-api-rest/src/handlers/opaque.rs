@@ -168,18 +168,26 @@ pub async fn opaque_login_start<C: Connection + Clone>(
     // the table holds: its password belongs to the directory, OPAQUE login is
     // refused for it, and taking the decoy branch is what keeps "this is a
     // directory account" as invisible here as "this account exists".
+    //
+    // SA-06 (SR3-1): the user row is read **before** the record, and its
+    // credential version travels with the record into the sealed exchange. A
+    // reset that commits between the two reads leaves a version older than the
+    // user's by the time `login/finish` compares them, so the exchange is
+    // refused; reading in the other order would pair the old record with the
+    // new version.
     let credential = match lookup_user(&state, tenant_id, &b.username_or_email).await {
         Some(user) if !user.is_directory_account() => state
             .opaque_credential_repo
             .get_by_user(tenant_id, user.id)
             .await
-            .ok(),
+            .ok()
+            .map(|cred| (cred, user.credential_version)),
         _ => None,
     };
 
     let mut started = match credential {
-        Some(cred) => opaque
-            .login_start(&setup, &cred, org_id, &b.ke1)
+        Some((cred, credential_version)) => opaque
+            .login_start(&setup, &cred, org_id, &b.ke1, credential_version)
             .map_err(AxiamError::from)?,
         None => opaque
             .login_start_decoy(
@@ -315,7 +323,11 @@ pub async fn opaque_login_finish<C: Connection + Clone>(
     // the exchange was built from a verifier that no longer stands, and
     // finishing it would mint a session the change never saw. Refused with the
     // same 401 as every other failure here, and not counted: the KE3 was valid.
-    if user.credential_changed_since(verified.issued_at) {
+    // SR3-1: and when its credential version is no longer the user's, which
+    // needs no ordering of two clocks.
+    if user.credential_changed_since(verified.issued_at)
+        || user.credential_version_stale(verified.credential_version)
+    {
         return Err(AxiamApiError(AxiamError::AuthenticationFailed {
             reason: "invalid credentials".into(),
         }));

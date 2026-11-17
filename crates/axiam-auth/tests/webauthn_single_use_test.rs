@@ -642,6 +642,76 @@ async fn sr2_1_a_ceremony_started_before_a_reset_cannot_finish_after_it() {
     );
 }
 
+/// SR3-1: a ceremony descending from an MFA challenge built from the
+/// credential a reset replaced cannot finish, even though the challenge's issue
+/// time is after the epoch: the state token carries the challenge's credential
+/// version, and the user's has moved on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr3_1_a_ceremony_from_a_challenge_of_the_replaced_credential_cannot_finish() {
+    let w = world().await;
+    // The credential version the challenge was built under (a user nobody has
+    // changed: 0), then the reset moves it, and the epoch is put before the
+    // challenge's issue time, as the race leaves it.
+    reset_the_password(&w).await;
+    w.db.query("UPDATE type::record('user', $id) SET credential_changed_at = time::now() - 1h")
+        .bind(("id", w.user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (rcr, state_token) = w
+        .webauthn
+        .start_authentication_for_challenge(
+            w.tenant_id,
+            w.org_id,
+            w.user_id,
+            WebauthnUserVerification::Required,
+            Some(chrono::Utc::now()),
+            Some(0),
+        )
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let err = finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect_err("a ceremony of the replaced credential must not finish");
+    assert!(
+        matches!(
+            &err,
+            axiam_core::error::AxiamError::AuthenticationFailed { reason }
+                if *reason == axiam_auth::error::AuthError::WebauthnStateInvalid.to_string()
+        ),
+        "expected the invalid-state-token answer, got {err:?}"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was opened");
+
+    // Control: the same ceremony under the user's current version finishes.
+    let (rcr, state_token) = w
+        .webauthn
+        .start_authentication_for_challenge(
+            w.tenant_id,
+            w.org_id,
+            w.user_id,
+            WebauthnUserVerification::Required,
+            Some(chrono::Utc::now()),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect("a ceremony under the current credential version finishes");
+}
+
 /// SR2-1 control: with no reset in between, the same ceremony finishes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sr2_1_control_a_ceremony_with_no_reset_still_finishes() {

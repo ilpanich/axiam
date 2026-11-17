@@ -849,7 +849,7 @@ pub async fn start_authentication<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<StartAuthenticationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let (user_id, tenant_id, org_id, challenge_issued_at) = state
+    let (user_id, tenant_id, org_id, challenge_issued_at, credential_version) = state
         .auth_service
         .decode_mfa_challenge_ids_at(&body.challenge_token)
         .await
@@ -876,6 +876,7 @@ pub async fn start_authentication<C: Connection + Clone>(
             user_id,
             user_verification,
             Some(challenge_issued_at),
+            credential_version,
         )
         .await?;
 

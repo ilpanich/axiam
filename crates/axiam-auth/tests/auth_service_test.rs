@@ -3351,6 +3351,241 @@ async fn s6_an_mfa_challenge_token_issued_before_a_reset_is_refused_after_it() {
     );
 }
 
+/// SR3-1: put the user's credential epoch an hour in the past, leaving the
+/// credential version where the reset moved it. This is the state the race
+/// leaves behind: the epoch the reset stamped (bound before its transaction
+/// committed) is *older* than an artefact that was nonetheless built from the
+/// credential the reset replaced, so the timestamp comparison alone accepts it.
+async fn rewind_the_epoch_before_the_artefact(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    users: &SurrealUserRepository<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) {
+    db.query("UPDATE type::record('user', $id) SET credential_changed_at = time::now() - 1h")
+        .bind(("id", user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let epoch = users
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_changed_at
+        .expect("the reset stamped an epoch");
+    assert!(
+        epoch < Utc::now() - Duration::minutes(30),
+        "the timestamp check alone must now accept every artefact"
+    );
+}
+
+/// SR3-1: an MFA challenge built from the credential a reset replaced is
+/// refused even though its issue time is after the epoch — the case the
+/// timestamp comparison alone cannot see.
+#[tokio::test]
+async fn sr3_1_a_challenge_built_from_the_replaced_credential_is_refused() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    // The login reads the old credential and mints its challenge...
+    let challenge_token =
+        match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+            LoginResult::MfaRequired(c) => c.challenge_token,
+            other => panic!("expected MfaRequired, got {other:?}"),
+        };
+    // ...and the reset commits afterwards, its epoch stamped before the token.
+    reset_alices_password(&users, tenant_id, user_id).await;
+    rewind_the_epoch_before_the_artefact(&db, &users, tenant_id, user_id).await;
+
+    assert!(
+        svc.decode_mfa_challenge_ids(&challenge_token)
+            .await
+            .is_err(),
+        "the challenge entry for WebAuthn must refuse it"
+    );
+    let err = svc
+        .verify_mfa(VerifyMfaInput {
+            challenge_token,
+            totp_code: totp.generate_current().to_string(),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .expect_err("a challenge built from the replaced credential must not verify");
+    assert!(matches!(err, AxiamError::AuthenticationFailed { .. }));
+}
+
+/// SR3-1: the same for an MFA setup token.
+#[tokio::test]
+async fn sr3_1_a_setup_token_built_from_the_replaced_credential_is_refused() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    reset_alices_password(&users, tenant_id, user_id).await;
+    rewind_the_epoch_before_the_artefact(&db, &users, tenant_id, user_id).await;
+
+    assert!(svc.decode_setup_token(&setup_token).await.is_err());
+    assert!(
+        svc.enroll_mfa_with_setup_token(&setup_token).await.is_err(),
+        "no enrolment may start from a setup token of the replaced credential"
+    );
+}
+
+/// SR3-1 rolling upgrade: a challenge minted by a release that carried no
+/// credential version is judged by the timestamp alone, so it survives a
+/// credential change whose epoch predates it, as before.
+#[tokio::test]
+async fn sr3_1_a_challenge_without_a_version_falls_back_to_the_timestamp_check() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    reset_alices_password(&users, tenant_id, user_id).await;
+    rewind_the_epoch_before_the_artefact(&db, &users, tenant_id, user_id).await;
+    let now = Utc::now();
+    let claims = serde_json::json!({
+        "sub": user_id.to_string(),
+        "tenant_id": tenant_id.to_string(),
+        "org_id": org_id.to_string(),
+        "purpose": "mfa_challenge",
+        "iss": "axiam-test",
+        "iat": now.timestamp(),
+        "iat_ns": now.timestamp_nanos_opt().unwrap(),
+        "exp": now.timestamp() + 300,
+    });
+    let token = sign_with_typ(&claims, Some("axiam-mfa-challenge+jwt"));
+    assert!(
+        svc.decode_mfa_challenge_ids(&token).await.is_ok(),
+        "an unversioned challenge issued after the epoch is accepted"
+    );
+}
+
+/// SR3-2 / QR3-1: a stale MFA challenge, and one for an account that is gone,
+/// are refused with exactly the answer a challenge that is not one gets: the
+/// client-visible reason names no cause.
+#[tokio::test]
+async fn sr3_2_a_stale_challenge_is_refused_with_the_uniform_answer() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let challenge_token =
+        match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+            LoginResult::MfaRequired(c) => c.challenge_token,
+            other => panic!("expected MfaRequired, got {other:?}"),
+        };
+
+    // The answer a forged challenge gets: a signed token that is not a
+    // challenge (here, one with the wrong purpose).
+    let now = Utc::now();
+    let forged = sign_with_typ(
+        &serde_json::json!({
+            "sub": user_id.to_string(),
+            "tenant_id": tenant_id.to_string(),
+            "org_id": org_id.to_string(),
+            "purpose": "something_else",
+            "iss": "axiam-test",
+            "iat": now.timestamp(),
+            "exp": now.timestamp() + 300,
+        }),
+        Some("axiam-mfa-challenge+jwt"),
+    );
+    let reason_of = |e: AxiamError| match e {
+        AxiamError::AuthenticationFailed { reason } => reason,
+        other => panic!("expected AuthenticationFailed, got {other:?}"),
+    };
+    let verify = |token: String, code: String| {
+        svc.verify_mfa(VerifyMfaInput {
+            challenge_token: token,
+            totp_code: code,
+            ip_address: None,
+            user_agent: None,
+        })
+    };
+    let forged_reason = reason_of(verify(forged.clone(), "000000".into()).await.unwrap_err());
+    let forged_ids_reason = reason_of(
+        svc.decode_mfa_challenge_ids(&forged)
+            .await
+            .unwrap_err()
+            .into(),
+    );
+
+    reset_alices_password(&users, tenant_id, user_id).await;
+
+    let stale_verify = reason_of(
+        verify(challenge_token.clone(), totp.generate_current().to_string())
+            .await
+            .unwrap_err(),
+    );
+    let stale_ids = reason_of(
+        svc.decode_mfa_challenge_ids(&challenge_token)
+            .await
+            .unwrap_err()
+            .into(),
+    );
+    assert_eq!(stale_verify, forged_reason, "verify_mfa");
+    assert_eq!(stale_ids, forged_ids_reason, "decode_mfa_challenge_ids");
+
+    // An account that is gone answers the same, not "unknown user".
+    let ghost = sign_with_typ(
+        &serde_json::json!({
+            "sub": Uuid::new_v4().to_string(),
+            "tenant_id": tenant_id.to_string(),
+            "org_id": org_id.to_string(),
+            "purpose": "mfa_challenge",
+            "iss": "axiam-test",
+            "iat": now.timestamp(),
+            "iat_ns": now.timestamp_nanos_opt().unwrap(),
+            "exp": now.timestamp() + 300,
+        }),
+        Some("axiam-mfa-challenge+jwt"),
+    );
+    let ghost_ids = reason_of(
+        svc.decode_mfa_challenge_ids(&ghost)
+            .await
+            .unwrap_err()
+            .into(),
+    );
+    assert_eq!(ghost_ids, forged_ids_reason, "unknown user");
+}
+
 /// S-6 controls: a token issued after the change (a second later, so past the
 /// whole-second `iat`) is accepted, and so is a user who never had a change.
 #[tokio::test]

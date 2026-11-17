@@ -93,7 +93,8 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     "/api/v1/auth/reset",
     "/api/v1/auth/reset/confirm",
     // Bootstrap is a one-time endpoint called before any session exists.
-    // It is protected by the AXIAM_BOOTSTRAP_ADMIN_EMAIL env gate instead (D-10).
+    // It is protected by the one-time setup token from the first-boot log instead
+    // (SA-01, D-03a); AXIAM_BOOTSTRAP_ADMIN_EMAIL is only an additional restriction.
     "/api/v1/admin/bootstrap",
     // 28-05/CQ-B40: the four first-time-SSO public endpoints (D-22,
     // handlers/federation.rs) are unauthenticated by design — same model as

@@ -399,6 +399,7 @@ mod tests {
             address: None,
             directory_external_id: None,
             credential_changed_at: None,
+            credential_version: 0,
             metadata: json!({"scim": {"givenName": "Alice", "familyName": "Example", "formatted": "Alice Example"}}),
             created_at: Utc::now(),
             updated_at: Utc::now(),

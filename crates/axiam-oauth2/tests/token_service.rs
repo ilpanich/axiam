@@ -723,6 +723,7 @@ impl UserRepository for MockUserRepo {
             address: None,
             directory_external_id: None,
             credential_changed_at: None,
+            credential_version: 0,
             metadata: serde_json::Value::Null,
             created_at,
             updated_at: Utc::now(),

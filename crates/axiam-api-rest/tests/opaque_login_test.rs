@@ -1272,6 +1272,34 @@ async fn s1_a_login_in_flight_across_a_reset_is_refused() {
     );
 }
 
+/// SR3-1: an exchange built from the record a reset then replaces must not
+/// finish, even when the epoch the reset stamped is *older* than the exchange's
+/// issue time — the state the race between the record read and the reset's
+/// commit leaves behind, which the timestamp comparison alone accepts. The
+/// credential version sealed into the exchange is what refuses it.
+#[actix_web::test]
+async fn sr3_1_an_exchange_built_from_the_replaced_record_is_refused() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("sr3-1-inflight");
+
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    let status = confirm_reset(&app, &db, tenant_id, user_id, reset_password(), None).await;
+    assert_eq!(status, 200);
+    // Put the epoch before the exchange's issue time.
+    db.query("UPDATE type::record('user', $id) SET credential_changed_at = time::now() - 1h")
+        .bind(("id", user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (finish, session) = finish_held(&app, &held).await;
+    assert_eq!(
+        finish, 401,
+        "an exchange built from the replaced record must be refused"
+    );
+    assert!(!session, "no session cookie may be issued");
+}
+
 /// S-1 control: enrolment wrote a record and so stamped the credential epoch;
 /// a login started after it is not refused.
 #[actix_web::test]

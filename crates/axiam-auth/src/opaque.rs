@@ -212,6 +212,14 @@ struct SealedLogin {
     /// derived.
     #[serde(default)]
     issued_at: Option<DateTime<Utc>>,
+    /// The user's credential version when `login/start` read the record this
+    /// state was built from (SA-06, SR3-1). `login/finish` refuses the
+    /// exchange when the user's version is no longer this, which — unlike
+    /// `issued_at` — depends on no ordering of two clocks. `None` for a decoy
+    /// exchange, and for a blob sealed by a build that predates the field (the
+    /// timestamp check alone then applies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_version: Option<i64>,
     expires_at: DateTime<Utc>,
 }
 
@@ -283,6 +291,10 @@ pub struct OpaqueVerified {
     /// user's credential changed at or after this instant: the state was built
     /// from a record that no longer stands (SA-06, S-1).
     pub issued_at: DateTime<Utc>,
+    /// The credential version `login/start` read with the record (SA-06,
+    /// SR3-1); the caller refuses the exchange when the user's version
+    /// differs. `None` for an exchange sealed before the field existed.
+    pub credential_version: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +509,7 @@ impl OpaqueServer {
         credential: &OpaqueCredential,
         org_id: Uuid,
         ke1_hex: &str,
+        credential_version: i64,
     ) -> Result<OpaqueLoginStartResponse, AuthError> {
         let record_bytes = decode_stored_hex(&credential.record, "OPAQUE record")?;
         let record = ServerRegistration::<Ristretto255Sha512>::deserialize(&record_bytes)
@@ -513,6 +526,7 @@ impl OpaqueServer {
             org_id,
             Some(credential.user_id),
             ke1_hex,
+            Some(credential_version),
         )
     }
 
@@ -549,6 +563,7 @@ impl OpaqueServer {
             org_id,
             None,
             ke1_hex,
+            None,
         )
     }
 
@@ -602,6 +617,7 @@ impl OpaqueServer {
             org_id: sealed.org_id,
             user_id,
             issued_at: sealed.issued_at(),
+            credential_version: sealed.credential_version,
         })
     }
 
@@ -618,6 +634,7 @@ impl OpaqueServer {
         org_id: Uuid,
         user_id: Option<Uuid>,
         ke1_hex: &str,
+        credential_version: Option<i64>,
     ) -> Result<OpaqueLoginStartResponse, AuthError> {
         require_supported_suite(server_setup.suite)?;
         let setup = self.open_setup(server_setup)?;
@@ -646,6 +663,7 @@ impl OpaqueServer {
             user_id,
             ke2_state: hex::encode(started.state.serialize()),
             issued_at: Some(issued_at),
+            credential_version,
             expires_at: issued_at + Duration::seconds(SESSION_LIFETIME_SECS),
         };
 
@@ -982,7 +1000,7 @@ mod tests {
         let ke1 = hex::encode(start.message.serialize());
 
         let started = match credential {
-            Some(c) => srv.login_start(setup, c, org_id, &ke1).unwrap(),
+            Some(c) => srv.login_start(setup, c, org_id, &ke1, 0).unwrap(),
             None => srv
                 .login_start_decoy(setup, params(), identity, tenant_id, org_id, &ke1)
                 .unwrap(),
@@ -1351,6 +1369,7 @@ mod tests {
             user_id: Some(Uuid::new_v4()),
             ke2_state: hex::encode([0u8; 128]),
             issued_at: None,
+            credential_version: None,
             expires_at: Utc::now() - Duration::seconds(1),
         };
         let token = srv.seal_session(&sealed).unwrap();
@@ -1371,6 +1390,7 @@ mod tests {
             user_id: Some(Uuid::new_v4()),
             ke2_state: hex::encode([0u8; 128]),
             issued_at: None,
+            credential_version: None,
             expires_at: Utc::now() + Duration::seconds(60),
         };
         let token = srv.seal_session(&sealed).unwrap();
@@ -1518,11 +1538,11 @@ mod tests {
             .unwrap();
         let cred = enrol(&srv, &setup, Uuid::new_v4(), password("pw"));
         assert!(
-            srv.login_start(&setup, &cred, Uuid::new_v4(), "zz")
+            srv.login_start(&setup, &cred, Uuid::new_v4(), "zz", 0)
                 .is_err()
         );
         assert!(
-            srv.login_start(&setup, &cred, Uuid::new_v4(), &"00".repeat(10))
+            srv.login_start(&setup, &cred, Uuid::new_v4(), &"00".repeat(10), 0)
                 .is_err()
         );
     }
@@ -1544,7 +1564,8 @@ mod tests {
                 &setup,
                 &cred,
                 Uuid::new_v4(),
-                &hex::encode(start.message.serialize())
+                &hex::encode(start.message.serialize()),
+                0
             )
             .is_err()
         );
@@ -1613,6 +1634,7 @@ mod tests {
                 &cred,
                 Uuid::new_v4(),
                 &hex::encode(start.message.serialize()),
+                0,
             )
             .unwrap();
         let ke2 = CredentialResponse::<StretchingClient>::deserialize(

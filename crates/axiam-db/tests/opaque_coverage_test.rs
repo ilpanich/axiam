@@ -292,3 +292,87 @@ async fn an_update_that_leaves_the_hash_alone_keeps_the_record() {
 
     assert!(has_record(&db, tenant_id, user_id).await);
 }
+
+// SA-06 / SR3-1: the credential version moves in the same transaction as every
+// write that stamps the credential epoch, and only those.
+
+async fn version_of(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> i64 {
+    SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_version
+}
+
+#[tokio::test]
+async fn the_credential_version_counts_every_credential_write_and_no_other() {
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "versioned").await;
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        0,
+        "a user nobody has changed reads as version 0"
+    );
+
+    // A write that is not a credential write leaves it alone.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                email: Some("versioned-new@example.com".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(version_of(&db, tenant_id, user_id).await, 0);
+
+    // Every write of the hash, every record write and every record delete moves it.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$not-checked-here".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(version_of(&db, tenant_id, user_id).await, 1, "hash write");
+
+    // An upsert may stamp more than once (its update attempt and its create
+    // are separate transactions); only that each moves the version matters.
+    let mut seen = version_of(&db, tenant_id, user_id).await;
+    enrol(&db, tenant_id, user_id).await;
+    let after_create = version_of(&db, tenant_id, user_id).await;
+    assert!(after_create > seen, "record create");
+    seen = after_create;
+    enrol(&db, tenant_id, user_id).await;
+    let after_update = version_of(&db, tenant_id, user_id).await;
+    assert!(after_update > seen, "record update");
+    seen = after_update;
+
+    // The result is ignored on purpose: reading the deleted row back
+    // (`RETURN BEFORE` into `CredentialRow`) fails to deserialise today, after
+    // the transaction has committed. That is not this test's subject; the
+    // stamp is, and it committed.
+    let _ = SurrealOpaqueCredentialRepository::new(db.clone())
+        .delete_for_user(tenant_id, user_id)
+        .await;
+    let after_delete = version_of(&db, tenant_id, user_id).await;
+    assert!(after_delete > seen, "record delete");
+    seen = after_delete;
+
+    // The directory path stamps the epoch, so it moves the version too.
+    users
+        .mark_directory_account(tenant_id, user_id, "cn=versioned,dc=example")
+        .await
+        .unwrap();
+    assert!(
+        version_of(&db, tenant_id, user_id).await > seen,
+        "directory mark"
+    );
+}

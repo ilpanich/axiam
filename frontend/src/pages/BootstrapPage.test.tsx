@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { apiMock, res } from "@/test/apiMock";
 
@@ -171,18 +171,29 @@ describe("BootstrapPage", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalled());
   });
 
-  it("shows an authorization error on 403", async () => {
+  it("shows a form-level refusal on 403 matching the setup-token gate, with a sign-in link", async () => {
     apiMock.post.mockRejectedValue({ response: { status: 403 } });
     renderWithProviders(<BootstrapPage />);
     await fillValidForm();
     await userEvent.click(
       screen.getByRole("button", { name: "Create Organization & Admin" })
     );
-    expect(
-      await screen.findByText(
-        "Bootstrap is not authorized. Check the email gate or paste a valid setup token."
-      )
-    ).toBeInTheDocument();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Bootstrap was refused: the setup token is missing, invalid or already used"
+    );
+    expect(alert).toHaveTextContent(
+      "the email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL"
+    );
+    expect(alert).not.toHaveTextContent(/email gate/i);
+    expect(within(alert).getByRole("link", { name: "sign in" })).toHaveAttribute(
+      "href",
+      "/login"
+    );
+    // Form-level, not attached to the email field.
+    expect(screen.getByLabelText("Email address")).not.toHaveAttribute(
+      "aria-invalid"
+    );
     expect(navigate).not.toHaveBeenCalled();
   });
 

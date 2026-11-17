@@ -618,6 +618,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "user_credential_changed_at",
         sql: SCHEMA_V117,
     },
+    Migration {
+        version: 118,
+        name: "user_credential_version",
+        sql: SCHEMA_V118,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5908,9 +5913,43 @@ const SCHEMA_V117: &str = "\
 DEFINE FIELD IF NOT EXISTS credential_changed_at ON TABLE user TYPE option<datetime>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v118 — the credential version of a user (SA-06, N7; review SR3-1)
+// -----------------------------------------------------------------------
+//
+// `credential_version` is a counter bumped, in the same transaction, by every
+// write that stamps `credential_changed_at` (v117). It is read in the same row
+// as the Argon2 hash and embedded in the artefacts a login issues, which are
+// refused when it no longer equals the user's value. The timestamp compares two
+// application clocks and leaves a window of one datastore round trip; the
+// counter compares no clock at all.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a user whose
+// credential has not changed since this version reads `NONE`, which the
+// application treats as version 0.
+const SCHEMA_V118: &str = "\
+DEFINE FIELD IF NOT EXISTS credential_version ON TABLE user TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-06 (N7, SR3-1) — v118 is the one optional `credential_version`
+    /// column on `user`, additive, no `DEFAULT`, no backfill.
+    #[test]
+    fn v118_adds_only_the_optional_credential_version_column() {
+        let statements: Vec<&str> = SCHEMA_V118
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS credential_version ON TABLE user TYPE option<int>"],
+        );
+        assert!(is_additive(SCHEMA_V118));
+    }
 
     /// SA-06 (N7) — v117 is the one optional `credential_changed_at` column on
     /// `user`, and nothing else: no `DEFAULT`, no backfill, no index.
@@ -8131,8 +8170,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&117),
-            "v117 is the newest migration (SA-06, N7 — `user.credential_changed_at`, the \
+            Some(&118),
+            "v118 is the newest migration (SA-06, N7, SR3-1 — `user.credential_version`, the \
+             credential counter, optional, absent reading as 0); \
+             v117 was SA-06, N7 — `user.credential_changed_at`, the \
              credential epoch, optional, absent reading as no change on record); \
              v116 was SA-02, N1 — `audit_log.organization_id`, the \
              organization a system-partition row concerns, optional, absent reading as none); \

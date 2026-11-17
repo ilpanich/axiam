@@ -126,6 +126,7 @@ impl MemberRow {
             address: None,
             directory_external_id: None,
             credential_changed_at: None,
+            credential_version: 0,
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,

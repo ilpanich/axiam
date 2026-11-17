@@ -4569,6 +4569,7 @@ mod personal_data_export_tests {
             address: None,
             directory_external_id: None,
             credential_changed_at: None,
+            credential_version: 0,
         }
     }
 

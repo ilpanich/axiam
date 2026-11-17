@@ -154,6 +154,13 @@ struct WebauthnStateClaims {
     /// (SA-06, SR2-1). Absent on a token minted before it existed; `iat` is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     iat_ns: Option<i64>,
+    /// The credential version of the MFA challenge this ceremony descends from
+    /// (SA-06, SR3-1), carried through as `iat_ns` is: the finish refuses the
+    /// ceremony when the user's version differs. `None` for a ceremony not
+    /// started from a challenge, and for a token minted before the claim
+    /// existed; the timestamp check alone then applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cv: Option<i64>,
     exp: i64,
 }
 
@@ -167,6 +174,9 @@ pub struct StateIssue {
     pub iat: i64,
     /// Nanoseconds since the Unix epoch, when the token carries it.
     pub iat_ns: Option<i64>,
+    /// The credential version the ceremony's challenge was issued under, when
+    /// the token carries it.
+    pub credential_version: Option<i64>,
 }
 
 // -------------------------------------------------------------------
@@ -349,15 +359,24 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         user_id: Uuid,
         user_verification: WebauthnUserVerification,
     ) -> AxiamResult<(RequestChallengeResponse, String)> {
-        self.start_authentication_for_challenge(tenant_id, org_id, user_id, user_verification, None)
-            .await
+        self.start_authentication_for_challenge(
+            tenant_id,
+            org_id,
+            user_id,
+            user_verification,
+            None,
+            None,
+        )
+        .await
     }
 
     /// As [`Self::start_authentication`], for the ceremony that follows an MFA
     /// challenge: the state token carries `challenge_issued_at`, the issue time
     /// of that challenge, so the finish can refuse the ceremony if the
     /// credential changed after the challenge was issued (SA-06, SR2-1). With
-    /// `None` the token carries the moment it is minted.
+    /// `None` the token carries the moment it is minted. `credential_version`
+    /// is the challenge's credential version, carried through the same way
+    /// (SA-06, SR3-1).
     pub async fn start_authentication_for_challenge(
         &self,
         tenant_id: Uuid,
@@ -365,6 +384,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         user_id: Uuid,
         user_verification: WebauthnUserVerification,
         challenge_issued_at: Option<chrono::DateTime<chrono::Utc>>,
+        credential_version: Option<i64>,
     ) -> AxiamResult<(RequestChallengeResponse, String)> {
         let existing = self
             .credential_repo
@@ -403,6 +423,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             "webauthn_authenticate",
             state_json,
             challenge_issued_at,
+            credential_version,
         )?;
 
         Ok((rcr, state_token))
@@ -672,7 +693,15 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         purpose: &str,
         state_json_value: JsonValue,
     ) -> Result<String, AuthError> {
-        self.encode_state_token_json_at(user_id, tenant_id, org_id, purpose, state_json_value, None)
+        self.encode_state_token_json_at(
+            user_id,
+            tenant_id,
+            org_id,
+            purpose,
+            state_json_value,
+            None,
+            None,
+        )
     }
 
     /// [`Self::encode_state_token_json`] with the issue time the token's
@@ -687,6 +716,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         purpose: &str,
         state_json_value: JsonValue,
         issued_at: Option<chrono::DateTime<chrono::Utc>>,
+        credential_version: Option<i64>,
     ) -> Result<String, AuthError> {
         let encryption_key = self.require_encryption_key()?;
         let state_json = serde_json::to_string(&state_json_value)
@@ -705,6 +735,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             iss: self.config.jwt_issuer.clone(),
             iat: now,
             iat_ns: issued_at.unwrap_or(minted_at).timestamp_nanos_opt(),
+            cv: credential_version,
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -875,6 +906,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             StateIssue {
                 iat: data.claims.iat,
                 iat_ns: data.claims.iat_ns,
+                credential_version: data.claims.cv,
             },
         ))
     }
@@ -1883,6 +1915,7 @@ mod tests {
             iss: "axiam-test".into(),
             iat: past,
             iat_ns: None,
+            cv: None,
             exp: past + 300,
         };
         let stale = jsonwebtoken::encode(
@@ -1936,6 +1969,7 @@ mod tests {
                 iss: "axiam-test".into(),
                 iat: chrono::Utc::now().timestamp(),
                 iat_ns: None,
+                cv: None,
                 exp: chrono::Utc::now().timestamp() + 300,
             };
             let token = jsonwebtoken::encode(
@@ -2234,6 +2268,7 @@ mod tests {
             iss: "axiam-test".into(),
             iat: now,
             iat_ns: None,
+            cv: None,
             exp: now + 300,
         };
         let mut header = Header::new(Algorithm::EdDSA);

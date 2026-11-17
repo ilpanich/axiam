@@ -215,6 +215,7 @@ fn user_in(tenant_id: Uuid) -> User {
         address: None,
         directory_external_id: None,
         credential_changed_at: None,
+        credential_version: 0,
         metadata: serde_json::json!({
             OIDC_METADATA_KEY: {
                 "name": "Ada Lovelace",

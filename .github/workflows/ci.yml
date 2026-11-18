@@ -381,6 +381,11 @@ jobs:
           for attempt in 1 2 3; do
             if npm audit --audit-level=high --json \
                  --fetch-retries=1 --fetch-timeout=30000 >audit.json 2>audit.err; then
+              allowed=$(jq -r '.advisories[].id' npm-audit-allowlist.json)
+              if [ -n "$allowed" ]; then
+                echo "::error::npm audit is clean, so npm-audit-allowlist.json is stale; delete: $(echo $allowed)"
+                exit 1
+              fi
               echo "npm audit: no advisories at or above 'high'."
               exit 0
             fi
@@ -391,7 +396,22 @@ jobs:
             # as a real report, so an unfamiliar npm schema fails the job rather
             # than being waved through as an outage.
             if jq -e 'has("error") | not' audit.json >/dev/null 2>&1; then
-              echo "::error::npm audit found advisories at or above 'high' in frontend/."
+              # A real report. Fail only on advisories that npm-audit-allowlist.json
+              # does not accept; each accepted entry carries its reason and a review
+              # date there. An entry matching nothing is stale and fails too.
+              found=$(jq -r '[.vulnerabilities[]?.via[]? | objects
+                             | select(.severity == "high" or .severity == "critical")
+                             | .url | sub(".*/"; "")] | unique[]' audit.json)
+              allowed=$(jq -r '.advisories[].id' npm-audit-allowlist.json | sort -u)
+              unexpected=$(comm -23 <(printf '%s\n' "$found" | sed '/^$/d' | sort -u) <(printf '%s\n' "$allowed"))
+              stale=$(comm -13 <(printf '%s\n' "$found" | sed '/^$/d' | sort -u) <(printf '%s\n' "$allowed"))
+              if [ -z "$unexpected" ] && [ -z "$stale" ]; then
+                echo "npm audit: only allow-listed advisories at or above 'high':"
+                printf '  %s\n' $allowed
+                exit 0
+              fi
+              [ -z "$unexpected" ] || echo "::error::npm audit found advisories at or above 'high' in frontend/ that npm-audit-allowlist.json does not accept: $(echo $unexpected)"
+              [ -z "$stale" ] || echo "::error::npm-audit-allowlist.json accepts advisories npm audit no longer reports; delete them: $(echo $stale)"
               jq '.metadata.vulnerabilities // .' audit.json
               npm audit --audit-level=high || true
               exit 1

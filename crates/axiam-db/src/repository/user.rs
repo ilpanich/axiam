@@ -22,7 +22,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, classify_write_error, parse_uuid, search_bind, search_filter};
+use crate::helpers::{
+    CountRow, TxFail, classify_write_error, parse_uuid, search_bind, search_filter,
+};
 
 /// What both erasure paths remove besides the user row: the SAML single-logout
 /// state that names the person (T23.2.4, schema v76, D-37, T-381) — the
@@ -206,6 +208,28 @@ struct TotpStepCasRow {
 struct CollisionRow {
     record_id: String,
     by_username: bool,
+}
+
+/// What `update`'s credential transaction `THROW`s when the account is a
+/// directory account (QR6-1): its password belongs to the tenant's directory,
+/// so no local hash or OPAQUE record may be written for it. Read back as
+/// [`axiam_auth::error::AuthError::DirectoryAccountPassword`], the answer every
+/// caller that refuses first already gives.
+const DIRECTORY_ACCOUNT_CREDENTIAL: &str = "axiam:directory_account_credential";
+
+/// What `update`'s credential transaction `THROW`s when no user `id` exists in
+/// the tenant (QR6-4), so the OPAQUE DELETE/CREATE after it never run. Read
+/// back as `NotFound`, the answer a write to a missing user already gave.
+const CREDENTIAL_TARGET_MISSING: &str = "axiam:credential_target_missing";
+
+/// Whether `combined` carries `marker` exactly as the engine renders a `THROW`
+/// of it — `An error occurred: <marker>`, ended by the end of the text or `;` —
+/// rather than as a substring a stored value could echo.
+fn thrown(combined: &str, marker: &str) -> bool {
+    let head = format!("An error occurred: {marker}");
+    combined
+        .match_indices(&head)
+        .any(|(at, _)| matches!(combined[at + head.len()..].chars().next(), None | Some(';')))
 }
 
 /// The text of a transaction's failed statements, for `classify_write_error`.
@@ -837,6 +861,31 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                     );
                     slot += 1;
                 }
+                if rotates_hash {
+                    // QR6-1 (owner decision "Enforce in the repository"): a
+                    // directory account's password belongs to the tenant's
+                    // directory, so no writer may give it a local hash or an
+                    // OPAQUE record — refused here, whatever a caller forgets.
+                    //
+                    // QR6-4: and the follow-on DELETE/CREATE of the OPAQUE row
+                    // runs only for a user that exists in this tenant. Read in
+                    // the transaction, so the UPDATE below matches the row read
+                    // here (a concurrent removal conflicts and is retried), and
+                    // a `THROW` aborts every statement after it: nothing is
+                    // written on either refusal.
+                    q.push_str(
+                        "LET $credential_target = (SELECT directory_external_id \
+                             FROM type::record('user', $id) WHERE tenant_id = $tenant_id); ",
+                    );
+                    q.push_str(&format!(
+                        "IF array::len($credential_target) == 0 {{ THROW '{CREDENTIAL_TARGET_MISSING}'; }}; "
+                    ));
+                    q.push_str(&format!(
+                        "IF $credential_target[0].directory_external_id != NONE \
+                             {{ THROW '{DIRECTORY_ACCOUNT_CREDENTIAL}'; }}; "
+                    ));
+                    slot += 3;
+                }
                 q.push_str(&update);
                 q.push_str("; ");
                 if email_changes {
@@ -961,11 +1010,34 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             // UNIQUE violation on the address fires on the UPDATE's slot while
             // the others report "not executed due to a failed transaction",
             // which alone would read as a retryable conflict.
-            if let Some(text) = tx_error_text(result.take_errors()) {
+            let errors = result.take_errors();
+            if !errors.is_empty() {
+                // A `THROW` of this transaction is an answer, told apart before
+                // anything is wrapped: the statements after it report "not
+                // executed due to a failed transaction", a conflict marker, so
+                // left as a database error it would be retried.
+                let combined = errors
+                    .values()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if thrown(&combined, DIRECTORY_ACCOUNT_CREDENTIAL) {
+                    return Err(TxFail::Refused(
+                        axiam_auth::error::AuthError::DirectoryAccountPassword.into(),
+                    ));
+                }
+                if thrown(&combined, CREDENTIAL_TARGET_MISSING) {
+                    return Err(TxFail::Db(DbError::NotFound {
+                        entity: "user".into(),
+                        id: id_str,
+                    }));
+                }
+            }
+            if let Some(text) = tx_error_text(errors) {
                 // Kept a `DbError` inside the retried closure: its text carries
                 // the engine's conflict marker, which `retry_on_write_conflict`
                 // reads; `AxiamError::WriteContention` would not.
-                return Err(classify_write_error(text, "user"));
+                return Err(TxFail::Db(classify_write_error(text, "user")));
             }
 
             let rows: Vec<UserRow> = result.take(update_slot).map_err(DbError::from)?;
@@ -974,7 +1046,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 id: id_str,
             })?;
 
-            row.into_user(id)
+            Ok::<_, TxFail>(row.into_user(id)?)
         })
         .await?;
         if touches_provisioned_field {

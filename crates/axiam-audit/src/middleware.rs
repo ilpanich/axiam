@@ -74,10 +74,18 @@ pub struct AuditAttribution {
 /// For a request with neither a verified token nor an [`AuditAttribution`]:
 /// the row stays in the system partition, and records this organization as
 /// its `organization_id`, which is what lets `GET /api/v1/audit-logs/system`
-/// show it to that organization and to no other. Inserted into the request's
-/// extensions, after a lookup of the server's own, by
-/// `axiam_api_rest::audit_organization`, which says what counts as resolved;
-/// never from a client-supplied value. Ignored on a row attributed to a tenant.
+/// show it to that organization and to no other. Ignored on a row attributed
+/// to a tenant.
+///
+/// An **optional, handler-side override**, and no production code inserts it
+/// today (only tests do). The organization of such a row normally arrives
+/// through a [`PendingAuditOrganization`], which
+/// `axiam_api_rest::audit_organization` inserts after the handler has run and
+/// answers from a lookup of the server's own, off the response path (SR4-3);
+/// that module says what counts as resolved. A handler that already holds the
+/// organization, proven by the server and never taken from a client-supplied
+/// value, may insert this instead: the resolver then starts no lookup, and the
+/// middleware records this organization and ignores any pending one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuditOrganization {
     /// The organization the request concerns.

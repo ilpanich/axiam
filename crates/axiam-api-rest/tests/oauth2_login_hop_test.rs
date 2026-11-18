@@ -2846,3 +2846,61 @@ async fn sr5_1_a_client_minted_token_cannot_update_its_own_account() {
         "bob2@example.com"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SA-04 review SR6-1 — `DELETE /users/{own id}` is the person's own act
+// ---------------------------------------------------------------------------
+
+async fn delete_user(app: &impl TestApp, token: &str, target: Uuid) -> u16 {
+    let req = test::TestRequest::delete()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{target}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// **SR6-1.** A token AXIAM minted for relying party X must not delete the
+/// caller's own account through `DELETE /users/{own id}` (`POST /account/delete`
+/// takes a console sign-in). Refused `403`, the user still exists. An
+/// administrator deleting ANOTHER user with a client-minted token is unchanged.
+#[actix_rt::test]
+async fn sr6_1_a_client_minted_token_cannot_delete_its_own_account() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+
+    let other = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "carol".into(),
+            email: "carol@example.com".into(),
+            password: PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        delete_user(&app, &x_token, user_id).await,
+        403,
+        "client-minted self-delete"
+    );
+    let after = stored_user(&db, tenant_id, user_id).await;
+    assert_eq!(
+        after.status,
+        UserStatus::Active,
+        "the account was not deleted"
+    );
+
+    // Control: an admin's client-minted token on ANOTHER user is not refused
+    // for the token's origin.
+    assert_eq!(
+        delete_user(&app, &x_token, other.id).await,
+        204,
+        "admin on another user keeps a client-minted token"
+    );
+}

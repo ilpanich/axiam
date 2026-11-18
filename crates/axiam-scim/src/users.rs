@@ -723,6 +723,22 @@ pub async fn create<C: Connection + Clone>(
         .json(scim_user))
 }
 
+/// SR6-1 "Own-account guard": a token AXIAM minted for an OAuth2 client
+/// (`client_id` claim) must not rewrite or delete the caller's **own** record
+/// through SCIM — the password, e-mail and username are the person's own acts,
+/// and `PUT /users/{self}`, the password change and `POST /account/delete`
+/// already demand a first-party sign-in. Refused `403` before any read or
+/// write. A provisioning token and an administrator acting on another user are
+/// unaffected.
+fn require_first_party_for_own_record(user: &ScimPrincipal, id: Uuid) -> Result<(), ScimError> {
+    if let ScimPrincipal::Jwt(caller) = user
+        && caller.user_id == id
+    {
+        caller.require_console_sign_in()?;
+    }
+    Ok(())
+}
+
 /// `PUT /scim/v2/Users/{id}` — full replace (RFC 7644 §3.5.1).
 pub async fn replace<C: Connection + Clone>(
     http_req: HttpRequest,
@@ -734,6 +750,7 @@ pub async fn replace<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
+    require_first_party_for_own_record(&user, id)?;
     let current = state.user_repo.get_by_id(user.tenant_id(), id).await?;
     let req = body.into_inner();
     // PUT does not write the `password` it may carry (the hash is only ever
@@ -990,6 +1007,7 @@ pub async fn patch<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
+    require_first_party_for_own_record(&user, id)?;
     let current = state.user_repo.get_by_id(user.tenant_id(), id).await?;
     let delta = parse_user_patch(&body.into_inner())?;
 
@@ -1111,6 +1129,7 @@ pub async fn delete<C: Connection + Clone>(
 ) -> Result<HttpResponse, ScimError> {
     require_scim_provision(&user, authz.get_ref().as_ref()).await?;
     let id = path.into_inner();
+    require_first_party_for_own_record(&user, id)?;
     // G-5 (D-53 (2)): the subject of an `account-purged` is captured **before**
     // the write — afterwards the row holds no address. A user that cannot be
     // read is one the delete below refuses, so nothing is lost by `ok()`.

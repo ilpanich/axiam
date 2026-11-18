@@ -289,6 +289,19 @@ pub trait UserRepository: Send + Sync {
     /// writer of the hash inherits all of this (reset, self-service change,
     /// SCIM); a caller that cannot supply a record, such as SCIM, must not
     /// write a password for a tenant whose OPAQUE mode is `required`.
+    ///
+    /// A write that sets `password_hash` (with or without
+    /// [`UpdateUser::opaque_record`]) is **refused** for a directory account,
+    /// one whose [`User::directory_external_id`] is set: its password belongs
+    /// to the tenant's directory (G-3), and a local hash or OPAQUE record would
+    /// be a second credential the directory never sees. The refusal is a
+    /// `Validation` error with the message of the auth layer's
+    /// `DirectoryAccountPassword`, decided inside the write's transaction, and
+    /// nothing is written (SA-06, QR6-1). Callers that refuse a directory
+    /// account first keep doing so; this holds the rule for any that forgets.
+    ///
+    /// A credential write for a user that does not exist in `tenant_id` is
+    /// `NotFound` and writes nothing — in particular no OPAQUE record (QR6-4).
     fn update(
         &self,
         tenant_id: Uuid,

@@ -524,6 +524,9 @@ pub const AUDIT_USER_CERTIFICATES_REVOKED: &str = "user.certificates_revoked";
     responses(
         (status = 204, description = "User deleted; their sessions and `User` certificates \
                                       revoked"),
+        (status = 403, description = "A token minted for an OAuth2 client deleting the \
+                                      caller's own account (SR6-1: a first-party sign-in is \
+                                      required), or the caller lacks `users:delete`"),
         (status = 404, description = "User not found"),
     ),
     security(("bearer" = []))
@@ -539,6 +542,13 @@ pub async fn delete<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let target_id = path.into_inner();
+    // SR6-1 "Own-account guard": deleting one's own account is the person's own
+    // act (`POST /account/delete` takes a console sign-in), so a token minted
+    // for an OAuth2 client is refused `403` before anything is read or written.
+    // An administrator deleting ANOTHER user is unaffected.
+    if is_own_resource(&user, target_id) {
+        user.require_console_sign_in()?;
+    }
 
     // Kill every live session BEFORE the row is tombstoned.
     //

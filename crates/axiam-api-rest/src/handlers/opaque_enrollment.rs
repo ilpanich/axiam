@@ -166,10 +166,12 @@ pub(crate) async fn store_credential<C: Connection + Clone>(
     let Some(enrolled) = enrolled else {
         return Ok(());
     };
-    // G-3 (T23.3.2): never for a directory account. Every caller that can
-    // reach a directory account (change, reset) refuses it first; this is the
-    // one write of a record, so it holds the rule too, whatever a future
-    // caller forgets.
+    // G-3 (T23.3.2): never for a directory account. This function's only
+    // caller is admin user creation, which never meets one; the check stays so
+    // a future caller cannot use it to give a directory account a record. The
+    // password change and reset do not come here: they pass their record to
+    // `UserRepository::update`, which refuses a hash or record write for a
+    // directory account inside its own transaction (SA-06, QR6-1).
     let user = state.user_repo.get_by_id(tenant_id, user_id).await?;
     if user.is_directory_account() {
         return Err(axiam_auth::error::AuthError::DirectoryAccountPassword.into());

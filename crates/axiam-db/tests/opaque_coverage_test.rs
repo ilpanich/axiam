@@ -7,6 +7,7 @@
 //! reachable only through the settings handler, where a query error surfaces as
 //! a 500 with the reason swallowed.
 
+use axiam_core::error::AxiamError;
 use axiam_core::models::opaque::{CreateOpaqueCredential, OpaqueKsf, OpaqueKsfParams, OpaqueSuite};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -573,4 +574,105 @@ async fn a_record_without_a_hash_or_for_another_user_is_refused_and_writes_nothi
     assert_eq!(version_of(&db, tenant_id, user_id).await, before);
     assert_ne!(hash_of(&db, tenant_id, user_id).await, "$argon2id$hash-a");
     assert!(!has_record(&db, tenant_id, other).await);
+}
+
+// SA-06 / QR6-1 (owner decision "Enforce in the repository"): a directory
+// account's password belongs to the tenant's directory. `update` itself refuses
+// to write a local hash or an OPAQUE record for one, so no caller can give it a
+// second credential the directory never sees, whatever check it forgets.
+
+#[tokio::test]
+async fn a_directory_account_refuses_a_hash_write_with_or_without_a_record_and_nothing_changes() {
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "directory-backed").await;
+    users
+        .mark_directory_account(tenant_id, user_id, "uid=directory-backed,ou=people")
+        .await
+        .unwrap();
+    let hash_before = hash_of(&db, tenant_id, user_id).await;
+    let version_before = version_of(&db, tenant_id, user_id).await;
+    assert!(!has_record(&db, tenant_id, user_id).await);
+
+    let hash_only = users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$local-hash".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(hash_only, Err(AxiamError::Validation { .. })),
+        "a local hash for a directory account is refused, got {hash_only:?}"
+    );
+
+    let with_record = users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$local-hash".into()),
+                opaque_record: Some(record_for(tenant_id, user_id, "aa")),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(with_record, Err(AxiamError::Validation { .. })),
+        "a local hash and OPAQUE record for a directory account are refused, got {with_record:?}"
+    );
+
+    assert_eq!(hash_of(&db, tenant_id, user_id).await, hash_before);
+    assert_eq!(version_of(&db, tenant_id, user_id).await, version_before);
+    assert!(
+        !has_record(&db, tenant_id, user_id).await,
+        "no OPAQUE record may be written for a directory account"
+    );
+
+    // A write that touches no credential is unaffected.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                metadata: Some(serde_json::json!({"note": "still writable"})),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a non-credential write to a directory account still succeeds");
+}
+
+// SA-06 / QR6-4: the record a hash write carries is written only if the user
+// UPDATE matched a row. Before, the DELETE/CREATE ran regardless and committed,
+// so a write against a missing (or purged) user left an orphan record behind
+// its `NotFound`.
+
+#[tokio::test]
+async fn a_hash_write_with_a_record_for_a_missing_user_is_not_found_and_writes_no_record() {
+    let (db, tenant_id) = setup().await;
+    let missing = Uuid::new_v4();
+
+    let outcome = SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            missing,
+            UpdateUser {
+                password_hash: Some("$argon2id$hash-a".into()),
+                opaque_record: Some(record_for(tenant_id, missing, "aa")),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(outcome, Err(AxiamError::NotFound { .. })),
+        "a missing user is NotFound, got {outcome:?}"
+    );
+    assert!(
+        !has_record(&db, tenant_id, missing).await,
+        "no opaque_credential row may outlive a write that matched no user"
+    );
 }

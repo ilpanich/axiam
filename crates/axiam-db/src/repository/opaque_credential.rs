@@ -269,17 +269,25 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
     }
 
     async fn delete_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<bool> {
+        // The stamp and the version bump run only when a row was deleted, in
+        // the same transaction as the delete. The deleted rows are counted
+        // inside the query: `RETURN BEFORE` carries no `record_id`, so it
+        // cannot be read back as a `CredentialRow`.
         let result = self
             .db
             .current()
             .query(
                 "BEGIN TRANSACTION; \
-                 DELETE FROM opaque_credential \
-                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 RETURN BEFORE; \
-                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch, \
-                 credential_version = (credential_version ?? 0) + 1 \
-                 WHERE tenant_id = $tenant_id; \
+                 LET $gone = (DELETE FROM opaque_credential \
+                     WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                     RETURN BEFORE); \
+                 IF array::len($gone) > 0 { \
+                     UPDATE type::record('user', $user_id) \
+                     SET credential_changed_at = $credential_epoch, \
+                     credential_version = (credential_version ?? 0) + 1 \
+                     WHERE tenant_id = $tenant_id; \
+                 }; \
+                 RETURN array::len($gone); \
                  COMMIT TRANSACTION",
             )
             .bind(("tenant_id", tenant_id.to_string()))
@@ -291,9 +299,9 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        // BEGIN=0, DELETE=1, epoch=2.
-        let rows: Vec<CredentialRow> = result.take(1).map_err(DbError::from)?;
-        Ok(!rows.is_empty())
+        // BEGIN=0, LET=1, IF=2, RETURN=3.
+        let deleted: Option<i64> = result.take(3).map_err(DbError::from)?;
+        Ok(deleted.unwrap_or(0) > 0)
     }
 
     async fn count_active_users_without_credential(&self, tenant_id: Uuid) -> AxiamResult<u64> {

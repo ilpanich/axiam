@@ -448,8 +448,10 @@ impl actix_web::FromRequest for AuthenticatedUser {
 /// For an approval surface — the device verification page, the OIDC
 /// scope-consent grant and withdraw (`/account/consents/oidc-scopes`, S-3),
 /// and the GDPR export request, export download and erasure request
-/// (`/account/export`, `/account/export/{token}`, `/account/delete`, S-3b) —
-/// which is the person's own act. A token from the code, refresh, CIBA or device grant is
+/// (`/account/export`, `/account/export/{token}`, `/account/delete`, S-3b), and
+/// the credential-management routes (WebAuthn registration start and finish,
+/// MFA enroll and confirm, password change) — which is the person's own act.
+/// The full list is CONTRACT §34.11 (a). A token from the code, refresh, CIBA or device grant is
 /// refused `403 authorization_denied`, and refused **before** the session
 /// check: the refusal rests on [`AuthenticatedUser::minted_for_client`], which
 /// every such token answers, and not on whether the token happens to name a
@@ -783,6 +785,16 @@ impl actix_web::FromRequest for AuthenticatedServiceAccount {
 // ---------------------------------------------------------------------------
 // Shared token extraction
 // ---------------------------------------------------------------------------
+
+/// The refusal of a client-minted token where a console sign-in is required.
+fn console_sign_in_required() -> AxiamApiError {
+    AxiamError::AuthorizationDenied {
+        reason: "a console sign-in is required; this token was minted for an OAuth2 client".into(),
+        action: None,
+        resource_id: None,
+    }
+    .into()
+}
 
 /// The refusal a request carrying no credential at all gets: `401
 /// authentication_failed`, "missing authentication credentials".
@@ -1699,16 +1711,6 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
-
-/// The refusal of a client-minted token where a console sign-in is required.
-fn console_sign_in_required() -> AxiamApiError {
-    AxiamError::AuthorizationDenied {
-        reason: "a console sign-in is required; this token was minted for an OAuth2 client".into(),
-        action: None,
-        resource_id: None,
-    }
-    .into()
-}
 
 #[cfg(test)]
 mod tests {

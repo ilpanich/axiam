@@ -730,7 +730,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             || input.status.is_some()
             || input.metadata.is_some();
         if let Some(record) = &input.opaque_record {
-            if !input.password_hash.is_some() {
+            if input.password_hash.is_none() {
                 return Err(AxiamError::Validation {
                     message: "an OPAQUE record can only be written together with the \
                               password hash it answers to"

@@ -356,16 +356,25 @@ async fn the_credential_version_counts_every_credential_write_and_no_other() {
     assert!(after_update > seen, "record update");
     seen = after_update;
 
-    // The result is ignored on purpose: reading the deleted row back
-    // (`RETURN BEFORE` into `CredentialRow`) fails to deserialise today, after
-    // the transaction has committed. That is not this test's subject; the
-    // stamp is, and it committed.
-    let _ = SurrealOpaqueCredentialRepository::new(db.clone())
-        .delete_for_user(tenant_id, user_id)
-        .await;
+    // A delete that removes a row reports `true` and moves the version; a
+    // second one removes nothing, reports `false` and leaves the version alone.
+    let opaque = SurrealOpaqueCredentialRepository::new(db.clone());
+    assert!(
+        opaque.delete_for_user(tenant_id, user_id).await.unwrap(),
+        "delete of an existing record reports true"
+    );
     let after_delete = version_of(&db, tenant_id, user_id).await;
     assert!(after_delete > seen, "record delete");
     seen = after_delete;
+    assert!(
+        !opaque.delete_for_user(tenant_id, user_id).await.unwrap(),
+        "delete with no record reports false"
+    );
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        seen,
+        "a no-op delete must not bump the version"
+    );
 
     // The directory path stamps the epoch, so it moves the version too.
     users

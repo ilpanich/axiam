@@ -493,12 +493,22 @@ precision, as the OPAQUE exchange is: a token minted after the change, even in t
 accepted. A token minted without the claim (during a rolling upgrade) is compared by its
 whole-second `iat`, and one minted in the same second as a later change is refused.
 
-*Clock assumption.* The stamp is written from the application replica's clock, bound into the
+**The credential version (schema v118).** Next to the stamp, every user carries a counter,
+`credential_version`, bumped in the same transaction as every password-hash write and every
+OPAQUE record write or delete (a delete that removes no row bumps nothing). It is embedded in the
+MFA challenge and setup tokens (`cv`), the WebAuthn second-factor state token and the in-flight
+OPAQUE login (`SealedLogin`), and each is refused when its version differs from the user's
+current one. This compares no clock, so it holds whatever the replicas' skew; the stamp check
+below is the fallback only for artefacts that carry no version, which the previous release
+minted during a rolling upgrade.
+
+*Clock assumption (artefacts without a version).* The stamp is written from the application replica's clock, bound into the
 credential's own transaction, not from the datastore's, because the artefacts it is compared with
 are stamped by an application replica too. Run the replicas (and, for a remote cluster, the
 datastore) NTP-synchronised, as JWT `exp` handling already requires. A skew of delta shifts the
 refusal window by delta: if the replica that minted a token runs delta ahead of the one that wrote
-the stamp, a token minted up to delta before the change is still accepted; if it runs delta behind,
+the stamp, an artefact without a version minted up to delta before the change is still accepted
+(every artefact of this release carries one and is refused regardless); if it runs delta behind,
 one minted up to delta after the change is refused and the person signs in again. Normal NTP keeps
 delta in the milliseconds.
 

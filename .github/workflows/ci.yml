@@ -315,10 +315,14 @@ jobs:
       #     client-secret ES256 reachable from the public OIDC callback, now signs with ring
       #     (crates/axiam-federation/src/apple.rs). Every other use is public-key only. Full
       #     reachability note in deny.toml. Drop when elliptic-curve 0.13 leaves the graph.
+      #   RUSTSEC-2026-0542 / RUSTSEC-2026-0543 — humantime 2.4.0 and chrono 0.4.45 are
+      #     unmaintained (no CVE, no successor release). humantime is transitive via SurrealDB;
+      #     chrono is a direct dependency of every crate. cargo-audit only warns on these, but
+      #     cargo-deny fails, so both lists carry them. Reasons and review date: deny.toml.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387,RUSTSEC-2026-0542,RUSTSEC-2026-0543
 
       # axiam-opaque-wasm is outside the workspace and carries its own
       # lockfile, which the step above never reads. That lockfile is what
@@ -377,6 +381,11 @@ jobs:
           for attempt in 1 2 3; do
             if npm audit --audit-level=high --json \
                  --fetch-retries=1 --fetch-timeout=30000 >audit.json 2>audit.err; then
+              allowed=$(jq -r '.advisories[].id' npm-audit-allowlist.json)
+              if [ -n "$allowed" ]; then
+                echo "::error::npm audit is clean, so npm-audit-allowlist.json is stale; delete: $(echo $allowed)"
+                exit 1
+              fi
               echo "npm audit: no advisories at or above 'high'."
               exit 0
             fi
@@ -387,7 +396,22 @@ jobs:
             # as a real report, so an unfamiliar npm schema fails the job rather
             # than being waved through as an outage.
             if jq -e 'has("error") | not' audit.json >/dev/null 2>&1; then
-              echo "::error::npm audit found advisories at or above 'high' in frontend/."
+              # A real report. Fail only on advisories that npm-audit-allowlist.json
+              # does not accept; each accepted entry carries its reason and a review
+              # date there. An entry matching nothing is stale and fails too.
+              found=$(jq -r '[.vulnerabilities[]?.via[]? | objects
+                             | select(.severity == "high" or .severity == "critical")
+                             | .url | sub(".*/"; "")] | unique[]' audit.json)
+              allowed=$(jq -r '.advisories[].id' npm-audit-allowlist.json | sort -u)
+              unexpected=$(comm -23 <(printf '%s\n' "$found" | sed '/^$/d' | sort -u) <(printf '%s\n' "$allowed"))
+              stale=$(comm -13 <(printf '%s\n' "$found" | sed '/^$/d' | sort -u) <(printf '%s\n' "$allowed"))
+              if [ -z "$unexpected" ] && [ -z "$stale" ]; then
+                echo "npm audit: only allow-listed advisories at or above 'high':"
+                printf '  %s\n' $allowed
+                exit 0
+              fi
+              [ -z "$unexpected" ] || echo "::error::npm audit found advisories at or above 'high' in frontend/ that npm-audit-allowlist.json does not accept: $(echo $unexpected)"
+              [ -z "$stale" ] || echo "::error::npm-audit-allowlist.json accepts advisories npm audit no longer reports; delete them: $(echo $stale)"
               jq '.metadata.vulnerabilities // .' audit.json
               npm audit --audit-level=high || true
               exit 1

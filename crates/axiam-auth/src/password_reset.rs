@@ -385,17 +385,6 @@ where
             })
             .await?;
 
-        // Invalidate all active sessions for the user (D-16: password reset
-        // caller is unauthenticated, so there is no current session to preserve —
-        // ALL sessions die).  Both the session-flow tokens AND the OAuth2-flow
-        // refresh tokens must be revoked (RESEARCH §4 — D-18 "two chokepoints").
-        self.session_repo
-            .invalidate_user_sessions(tenant_id, user.id)
-            .await?;
-        self.refresh_token_repo
-            .revoke_all_for_user(tenant_id, user.id)
-            .await?;
-
         // Update user: new password hash + reset fail2ban counters.
         self.user_repo
             .update(
@@ -411,6 +400,31 @@ where
                 },
             )
             .await?;
+
+        // Invalidate all active sessions for the user (D-16: password reset
+        // caller is unauthenticated, so there is no current session to preserve —
+        // ALL sessions die).  Both the session-flow tokens AND the OAuth2-flow
+        // refresh tokens must be revoked (RESEARCH §4 — D-18 "two chokepoints").
+        //
+        // SA-06 (N7, SR11-1): AFTER the credential write above, never before.
+        // The write bumps `credential_version`, and the session write refuses a
+        // sign-in that carries the old one; a sign-in that verified the old
+        // password and reached its session write between a revoke-first and
+        // the credential write would pass that check and nothing would remove
+        // it afterwards. `change_password` and SCIM use this order too. A
+        // revocation failure now surfaces as an error with the password
+        // already changed (any sign-in that could still land is refused by the
+        // version check); both revocations are attempted either way.
+        let sessions = self
+            .session_repo
+            .invalidate_user_sessions(tenant_id, user.id)
+            .await;
+        let refresh_tokens = self
+            .refresh_token_repo
+            .revoke_all_for_user(tenant_id, user.id)
+            .await;
+        sessions?;
+        refresh_tokens?;
 
         // The caller needs this to attach an OPAQUE record for the password it
         // just set; the reset body carries a token, never a user id.

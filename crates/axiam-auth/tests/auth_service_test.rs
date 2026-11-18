@@ -3970,3 +3970,438 @@ async fn sr10_1_create_session_and_tokens_refuses_only_a_stale_version() {
         2
     );
 }
+
+// -----------------------------------------------------------------------
+// SA-06 (N7, SR11-1) — a reset writes the credential BEFORE it revokes
+// -----------------------------------------------------------------------
+
+/// A real session repository with two race hooks.
+///
+/// * `pending`: right after `invalidate_user_sessions`, lets one in-flight
+///   sign-in that verified the OLD password land its session write (carrying
+///   the version it read), as a concurrent login would between the reset's two
+///   steps. Its outcome is recorded in `landed`.
+/// * `bump_before_mint`: just before the next `create_if_credential_version`,
+///   writes a new password hash for the user (what a reset or change does), so
+///   the credential changes after the path's own check and before its session
+///   write (SR10-1 / QR11-2).
+#[derive(Clone)]
+struct HookedSessionRepo {
+    inner: SurrealSessionRepository<MemDb>,
+    bump_before_mint: Arc<std::sync::Mutex<Option<SurrealUserRepository<MemDb>>>>,
+    /// `(tenant_id, user_id, version read with the old credential)`.
+    pending: Arc<std::sync::Mutex<Option<(Uuid, Uuid, i64)>>>,
+    landed: Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+}
+
+impl SessionRepository for HookedSessionRepo {
+    async fn create(&self, input: CreateSession) -> AxiamResult<Session> {
+        self.inner.create(input).await
+    }
+    async fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> AxiamResult<Session> {
+        let users = self.bump_before_mint.lock().unwrap().take();
+        if let Some(users) = users {
+            users
+                .update(
+                    input.tenant_id,
+                    input.user_id,
+                    UpdateUser {
+                        password_hash: Some("$argon2id$raced".into()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+        self.inner
+            .create_if_credential_version(input, expected_credential_version)
+            .await
+    }
+    async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {
+        self.inner.get_by_id(tenant_id, id).await
+    }
+    async fn get_by_token_hash(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<Session> {
+        self.inner.get_by_token_hash(tenant_id, token_hash).await
+    }
+    async fn get_by_browser_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        self.inner
+            .get_by_browser_token_hash(tenant_id, token_hash)
+            .await
+    }
+    async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        self.inner.invalidate(tenant_id, id).await
+    }
+    async fn lineage_of(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> AxiamResult<Option<axiam_core::models::session::SessionLineage>> {
+        self.inner.lineage_of(tenant_id, session_id).await
+    }
+    async fn invalidate_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        user_id: Uuid,
+        except: Option<Uuid>,
+    ) -> AxiamResult<u64> {
+        self.inner
+            .invalidate_lineage(tenant_id, lineage_id, user_id, except)
+            .await
+    }
+    async fn consume(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<bool> {
+        self.inner.consume(tenant_id, id).await
+    }
+    async fn consume_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        self.inner
+            .consume_by_token_hash(tenant_id, token_hash)
+            .await
+    }
+    async fn invalidate_user_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        self.inner
+            .invalidate_user_sessions(tenant_id, user_id)
+            .await?;
+        let pending = self.pending.lock().unwrap().take();
+        if let Some((t, u, version)) = pending {
+            let outcome = self
+                .inner
+                .create_if_credential_version(
+                    CreateSession {
+                        tenant_id: t,
+                        user_id: u,
+                        token_hash: "interleaved-sign-in".into(),
+                        ip_address: None,
+                        user_agent: None,
+                        expires_at: Utc::now() + Duration::hours(1),
+                        authenticated_at: Utc::now(),
+                        amr: vec![axiam_core::models::session::Amr::Pwd],
+                        browser_token_hash: None,
+                        lineage_id: None,
+                    },
+                    version,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            *self.landed.lock().unwrap() = Some(outcome);
+        }
+        Ok(())
+    }
+    async fn invalidate_user_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        keep: Uuid,
+    ) -> AxiamResult<u64> {
+        self.inner
+            .invalidate_user_sessions_except(tenant_id, user_id, keep)
+            .await
+    }
+    async fn cleanup_expired(&self, tenant_id: Uuid) -> AxiamResult<u64> {
+        self.inner.cleanup_expired(tenant_id).await
+    }
+    async fn list_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Session>> {
+        self.inner.list_by_user(tenant_id, user_id).await
+    }
+    async fn mark_refresh_replay(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        accepted_under_grace: bool,
+    ) -> AxiamResult<()> {
+        self.inner
+            .mark_refresh_replay(tenant_id, session_id, accepted_under_grace)
+            .await
+    }
+}
+
+/// A sign-in that verified the old password and reaches its session write
+/// right after the reset's session revocation must not leave a live session:
+/// the reset writes the credential (bumping the version) BEFORE it revokes, so
+/// that write is refused; revoking first lets it through and nothing removes
+/// it afterwards.
+#[tokio::test]
+async fn sr11_1_a_sign_in_landing_during_a_reset_leaves_no_session() {
+    use axiam_auth::password_reset::PasswordResetService;
+    use axiam_core::models::settings::PasswordPolicy;
+    use axiam_db::repository::{
+        SurrealPasswordHistoryRepository, SurrealPasswordResetTokenRepository,
+    };
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, _org_id, tenant_id, user_id, db) =
+        setup().await;
+    let users = user_repo.clone();
+    let sessions = session_repo.clone();
+    let hook = HookedSessionRepo {
+        inner: session_repo,
+        bump_before_mint: Arc::new(std::sync::Mutex::new(None)),
+        pending: Arc::new(std::sync::Mutex::new(None)),
+        landed: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let svc = PasswordResetService::new(
+        user_repo,
+        SurrealPasswordResetTokenRepository::new(db.clone()),
+        fed_repo,
+        SurrealPasswordHistoryRepository::new(db.clone()),
+        hook.clone(),
+        refresh_token_repo,
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        5,
+    );
+
+    let email = users
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .email
+        .clone();
+    let (raw_token, _, _) = svc
+        .initiate_reset(tenant_id, &email, 1, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The sign-in has verified the old password and holds the version it read.
+    let old_version = users
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_version;
+    *hook.pending.lock().unwrap() = Some((tenant_id, user_id, old_version));
+
+    let policy = PasswordPolicy {
+        min_length: 8,
+        require_uppercase: true,
+        require_lowercase: true,
+        require_digits: true,
+        require_symbols: false,
+        password_history_count: 5,
+        hibp_check_enabled: false,
+    };
+    svc.confirm_reset(
+        tenant_id,
+        &raw_token,
+        "NewStr0ngPassword",
+        &policy,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        hook.landed.lock().unwrap().is_some(),
+        "the interleaving must have been exercised"
+    );
+    assert!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no session may outlive the reset: a sign-in on the old password landed after the \
+         revocation and survived (landed: {:?})",
+        hook.landed.lock().unwrap()
+    );
+}
+
+// -----------------------------------------------------------------------
+// SA-06 (N7, QR11-2) — each path's own wiring of the session-write check
+// -----------------------------------------------------------------------
+//
+// `sr10_1_a_credential_change_after_the_read_leaves_no_session` covers the
+// password path and the choke point. These cover the three second-factor
+// paths: the credential changes after the path's own check and before its
+// session write, which must be refused as a wrong password is, leaving no
+// session. A path that re-read the user just before the write, or passed
+// `None`, would make the check vacuous and fail these.
+
+/// A service whose session repository changes the user's password right
+/// before the first session write, plus the handles the tests need.
+struct RaceWorld {
+    /// The same database, with a plain session repository (for set-up).
+    plain: AuthService<
+        SurrealUserRepository<MemDb>,
+        SurrealSessionRepository<MemDb>,
+        SurrealFederationLinkRepository<MemDb>,
+        SurrealRefreshTokenRepository<MemDb>,
+    >,
+    /// The service under test.
+    raced: AuthService<
+        SurrealUserRepository<MemDb>,
+        HookedSessionRepo,
+        SurrealFederationLinkRepository<MemDb>,
+        SurrealRefreshTokenRepository<MemDb>,
+    >,
+    sessions: SurrealSessionRepository<MemDb>,
+    hook: HookedSessionRepo,
+    users: SurrealUserRepository<MemDb>,
+    org_id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+}
+
+impl RaceWorld {
+    async fn new() -> Self {
+        let (
+            user_repo,
+            session_repo,
+            fed_repo,
+            refresh_token_repo,
+            org_id,
+            tenant_id,
+            user_id,
+            _db,
+        ) = setup().await;
+        let sessions = session_repo.clone();
+        let users = user_repo.clone();
+        let hook = HookedSessionRepo {
+            inner: session_repo.clone(),
+            bump_before_mint: Arc::new(std::sync::Mutex::new(None)),
+            pending: Arc::new(std::sync::Mutex::new(None)),
+            landed: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let plain = AuthService::new(
+            user_repo.clone(),
+            session_repo,
+            fed_repo.clone(),
+            refresh_token_repo.clone(),
+            test_config(),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+        );
+        let raced = AuthService::new(
+            user_repo,
+            hook.clone(),
+            fed_repo,
+            refresh_token_repo,
+            test_config(),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+        );
+        Self {
+            plain,
+            raced,
+            sessions,
+            hook,
+            users,
+            org_id,
+            tenant_id,
+            user_id,
+        }
+    }
+
+    /// The next session write is preceded by a password change.
+    fn arm_the_race(&self) {
+        *self.hook.bump_before_mint.lock().unwrap() = Some(self.users.clone());
+    }
+
+    async fn assert_refused_as_a_wrong_password_with_no_session<T: std::fmt::Debug>(
+        &self,
+        outcome: AxiamResult<T>,
+    ) {
+        let err = outcome.expect_err("a superseded credential must not mint a session");
+        assert!(
+            matches!(err, AxiamError::AuthenticationFailed { ref reason } if reason == "invalid credentials"),
+            "answered exactly like a wrong password, got {err:?}"
+        );
+        assert!(
+            self.hook.bump_before_mint.lock().unwrap().is_none(),
+            "the race must have been exercised"
+        );
+        assert!(
+            self.sessions
+                .list_by_user(self.tenant_id, self.user_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no session (and so no refresh token) may exist"
+        );
+    }
+}
+
+/// TOTP second step (`verify_mfa`).
+#[tokio::test]
+async fn qr11_2_totp_verify_mfa_refuses_a_credential_change_after_its_check() {
+    let w = RaceWorld::new().await;
+    let totp = enable_mfa_for_alice(&w.plain, w.tenant_id, w.user_id).await;
+    let challenge_token = match w
+        .plain
+        .login(LoginInput {
+            tenant_id: w.tenant_id,
+            org_id: w.org_id,
+            username_or_email: "alice".into(),
+            password: test_password(),
+            ip_address: None,
+            user_agent: None,
+            mfa_policy: None,
+            lockout_policy: None,
+        })
+        .await
+        .unwrap()
+    {
+        LoginResult::MfaRequired(mfa) => mfa.challenge_token,
+        other => panic!("expected MfaRequired, got {other:?}"),
+    };
+
+    w.arm_the_race();
+    let outcome = w
+        .raced
+        .verify_mfa(VerifyMfaInput {
+            challenge_token,
+            totp_code: generate_next_step_code(&totp),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await;
+    w.assert_refused_as_a_wrong_password_with_no_session(outcome)
+        .await;
+}
+
+/// Setup-token completion (`complete_setup_token_login`).
+#[tokio::test]
+async fn qr11_2_setup_token_completion_refuses_a_credential_change_after_its_check() {
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+
+    let w = RaceWorld::new().await;
+    let setup_token = match w
+        .plain
+        .login(LoginInput {
+            tenant_id: w.tenant_id,
+            org_id: w.org_id,
+            username_or_email: "alice".into(),
+            password: test_password(),
+            ip_address: None,
+            user_agent: None,
+            mfa_policy: mfa_enforced_policy(),
+            lockout_policy: None,
+        })
+        .await
+        .unwrap()
+    {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+
+    w.arm_the_race();
+    let outcome = w
+        .raced
+        .complete_setup_token_login(
+            &setup_token,
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
+            None,
+            None,
+        )
+        .await;
+    w.assert_refused_as_a_wrong_password_with_no_session(outcome)
+        .await;
+}

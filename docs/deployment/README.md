@@ -502,6 +502,16 @@ current one. This compares no clock, so it holds whatever the replicas' skew; th
 below is the fallback only for artefacts that carry no version, which the previous release
 minted during a rolling upgrade.
 
+*The session write.* A sign-in that verified a credential (password with or without a second
+factor, OPAQUE finish, a WebAuthn or MFA second factor, MFA setup completion) carries the version
+it read together with that credential into the session write. The write compares it with the
+user's current version inside its own transaction and, when a reset or change committed in
+between, refuses as a wrong password is refused (invalid credentials), creating no session and
+no refresh token. A federated sign-in has no AXIAM credential behind it and carries no version.
+A password reset, a password change and a SCIM password write each write the credential first
+and revoke the user's sessions and refresh tokens afterwards, so no sign-in that read the old
+version can land a session between the two steps.
+
 *Clock assumption (artefacts without a version).* The stamp is written from the application replica's clock, bound into the
 credential's own transaction, not from the datastore's, because the artefacts it is compared with
 are stamped by an application replica too. Run the replicas (and, for a remote cluster, the

@@ -280,12 +280,13 @@ async fn start(w: &World) -> (String, String) {
     (challenge, state_token)
 }
 
-/// What `POST /auth/webauthn/authenticate/finish` does: the ceremony's finish,
-/// then — only if it succeeded — a session.
+/// What `POST /auth/webauthn/authenticate/finish` does: the ceremony's finish
+/// through `finish_webauthn_authentication`, then — only if it succeeded — a
+/// session carrying the credential version the finish returned (SR10-1).
 async fn finish(w: &World, state_token: &str, assertion: &PublicKeyCredential) -> bool {
-    let Ok((user_id, org_id)) = w
-        .webauthn
-        .finish_authentication(w.tenant_id, state_token, assertion)
+    let Ok((user_id, org_id, credential_version)) = w
+        .auth
+        .finish_webauthn_authentication(&w.webauthn, w.tenant_id, state_token, assertion)
         .await
     else {
         return false;
@@ -298,7 +299,7 @@ async fn finish(w: &World, state_token: &str, assertion: &PublicKeyCredential) -
             None,
             None,
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
-            None,
+            Some(credential_version),
         )
         .await
         .unwrap();
@@ -735,4 +736,60 @@ async fn sr2_1_control_a_ceremony_started_after_a_reset_finishes() {
     finish_like_the_handler(&w, &state_token, &assertion)
         .await
         .expect("started after the reset: the ceremony finishes");
+}
+
+/// SA-06 (N7, QR11-2): the version `finish_webauthn_authentication` returns is
+/// the one the ceremony was checked under, not one re-read afterwards, so a
+/// reset that lands between the finish and the session write — which the
+/// handler performs with exactly that value — leaves no session, and the
+/// sign-in is answered as a wrong password is. A finish with no reset between
+/// still opens its session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_finish() {
+    let w = world().await;
+    let (challenge, state_token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let (user_id, org_id, credential_version) = w
+        .auth
+        .finish_webauthn_authentication(&w.webauthn, w.tenant_id, &state_token, &assertion)
+        .await
+        .expect("the ceremony finishes");
+
+    // The reset lands after the ceremony's check, before the session write.
+    reset_the_password(&w).await;
+
+    let err = w
+        .auth
+        .create_session_and_tokens(
+            user_id,
+            w.tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            Some(credential_version),
+        )
+        .await
+        .expect_err("a sign-in checked under the replaced credential must not mint a session");
+    assert!(
+        matches!(
+            &err,
+            axiam_core::error::AxiamError::AuthenticationFailed { reason }
+                if reason == "invalid credentials"
+        ),
+        "answered exactly like a wrong password, got {err:?}"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was opened");
+
+    // Control: a ceremony started after the reset finishes and opens one.
+    let (challenge, state_token) = start(&w).await;
+    assert!(
+        finish(
+            &w,
+            &state_token,
+            &w.authenticator.assert(&challenge, 2, w.user_id)
+        )
+        .await
+    );
+    assert_eq!(sessions(&w).await, 1);
 }

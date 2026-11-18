@@ -10,32 +10,36 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
 import { formatDate } from "@/lib/utils";
-import { useCanActOnOrganization } from "@/lib/grantReach";
+import { organizationPrincipalReaches } from "@/lib/grantReach";
+import { useAuthStore } from "@/stores/auth";
 import { ForbiddenPage } from "@/components/ForbiddenPage";
 
 export function TenantDetailPage() {
   const { orgId, tenantId } = useParams<{ orgId: string; tenantId: string }>();
   const { can } = usePermissions();
-  // The server reads a tenant record only for an organization principal —
-  // `tenants::get` answers 403 to everybody else, a tenant's own administrator
-  // reading its own tenant included (SA-02, review QR8-1). Nothing is fetched
-  // for such a caller, and the page says "not permitted" instead of
-  // dead-ending on "Tenant not found.".
-  const canActOnOrganization = useCanActOnOrganization();
+  // `tenants::get` calls `require_organization_principal_for_tenant`: it serves
+  // the record to a principal whose own record lives in the organization scope
+  // and whose roles reach THIS tenant — every tenant for an unrestricted one,
+  // the listed ones for a restricted one — and answers 403 to everybody else, a
+  // tenant's own administrator reading its own tenant included (SA-02, reviews
+  // QR8-1 and QR9-2). Nothing is fetched for a refused caller, and the page
+  // says "not permitted" instead of dead-ending on "Tenant not found.".
+  const user = useAuthStore((s) => s.user);
+  const canReadTenant = !!tenantId && organizationPrincipalReaches(user, tenantId);
 
   const { data: org } = useQuery({
     queryKey: ["organizations", orgId],
     queryFn: () => orgService.get(orgId!),
-    enabled: canActOnOrganization && !!orgId,
+    enabled: canReadTenant && !!orgId,
   });
 
   const { data: tenant, isLoading } = useQuery({
     queryKey: ["tenants", orgId, tenantId],
     queryFn: () => tenantService.get(orgId!, tenantId!),
-    enabled: canActOnOrganization && !!orgId && !!tenantId,
+    enabled: canReadTenant && !!orgId,
   });
 
-  if (!canActOnOrganization) return <ForbiddenPage />;
+  if (!canReadTenant) return <ForbiddenPage />;
   if (!orgId || !tenantId) return null;
 
   return (

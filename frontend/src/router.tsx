@@ -108,8 +108,9 @@ export const router = createBrowserRouter([
           },
           {
             // Also refused (ForbiddenPage, no fetch) by the page itself unless
-            // `useCanActOnOrganization()` — the server's tenant read requires
-            // an organization principal (SA-02, review QR8-1).
+            // `organizationPrincipalReaches(user, tenantId)` — the server's
+            // tenant read requires an organization principal whose reach
+            // covers that tenant (SA-02, reviews QR8-1 and QR9-2).
             path: "organizations/:orgId/tenants/:tenantId",
             element: <TenantDetailPage />,
             handle: { crumb: "Tenant Details" },

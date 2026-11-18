@@ -56,10 +56,12 @@ function renderPage() {
 }
 
 /**
- * Sign in as the organization's own administrator — the only principal the
- * server lets read a tenant record (`tenants::get` requires an organization
- * principal, SA-02). `organization_level` with no `reachable_tenant_ids` is
- * what `useCanActOnOrganization` accepts.
+ * Sign in as the organization's own, unrestricted administrator.
+ *
+ * `tenants::get` calls `require_organization_principal_for_tenant` (SA-02): it
+ * serves the record to a principal whose own record lives in the organization
+ * scope (`organization_level`) and whose roles reach the named tenant — every
+ * tenant when `reachable_tenant_ids` is absent, as here.
  */
 function signInAsOrganizationAdmin() {
   useAuthStore.setState({
@@ -90,6 +92,28 @@ function signInAsTenantAdmin() {
       principal_tenant_id: "t1",
       org_id: "o1",
       organization_level: false,
+    },
+    isAuthenticated: true,
+    isInitializing: false,
+  });
+}
+
+/**
+ * An organization-level account whose roles are restricted to `reach` — what
+ * `/auth/me` reports as `reachable_tenant_ids`.
+ */
+function signInAsRestrictedOrganizationPrincipal(reach: string[]) {
+  useAuthStore.setState({
+    user: {
+      id: "u3",
+      username: "restricted",
+      email: "restricted@acme.test",
+      permissions: ["tenants:get"],
+      tenant_id: reach[0] ?? "org-tenant",
+      principal_tenant_id: "org-tenant",
+      org_id: "o1",
+      organization_level: true,
+      reachable_tenant_ids: reach,
     },
     isAuthenticated: true,
     isInitializing: false,
@@ -130,10 +154,11 @@ describe("TenantDetailPage", () => {
   });
 
   it("refuses a tenant administrator without fetching the tenant (QR8-1)", async () => {
-    // The server answers 403 to `GET /organizations/{org}/tenants/{tenant}` for
-    // any principal that cannot act on the organization — its own tenant
-    // included (SA-02). The page must say so instead of fetching, getting the
-    // 403 and dead-ending on "Tenant not found.".
+    // A tenant's own administrator does not live in the organization scope, so
+    // `require_organization_principal_for_tenant` answers 403 to
+    // `GET /organizations/{org}/tenants/{tenant}` — its own tenant included
+    // (SA-02). The page must say so instead of fetching, getting the 403 and
+    // dead-ending on "Tenant not found.".
     signInAsTenantAdmin();
     routeGet({ [URLS.org]: org, [URLS.tenant]: tenant });
     renderPage();
@@ -145,28 +170,28 @@ describe("TenantDetailPage", () => {
     expect(fetched).not.toContain(URLS.org);
   });
 
-  it("refuses an organization principal confined to particular tenants", async () => {
-    // `reachable_tenant_ids` present: the server's organization-principal
-    // guard refuses it, so the page does too.
-    useAuthStore.setState({
-      user: {
-        id: "u3",
-        username: "restricted",
-        email: "restricted@acme.test",
-        permissions: ["*"],
-        tenant_id: "org-tenant",
-        principal_tenant_id: "org-tenant",
-        org_id: "o1",
-        organization_level: true,
-        reachable_tenant_ids: ["t1"],
-      },
-      isAuthenticated: true,
-      isInitializing: false,
-    });
+  it("shows the tenant to an organization principal whose reach covers it (QR9-2)", async () => {
+    // `reachable_tenant_ids` names t1: the server's
+    // `require_organization_principal_for_tenant` admits this account for t1,
+    // so the page shows the record.
+    signInAsRestrictedOrganizationPrincipal(["t1"]);
+    routeGet({ [URLS.org]: org, [URLS.tenant]: tenant });
+    renderPage();
+    expect((await screen.findAllByText("Production")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Access Denied")).not.toBeInTheDocument();
+    expect(apiMock.get.mock.calls.map((c) => c[0])).toContain(URLS.tenant);
+  });
+
+  it("refuses an organization principal whose reach does not cover the tenant (QR9-2)", async () => {
+    // Its roles reach t9 only; the server answers 403 for t1 ("this account's
+    // roles do not reach the tenant this action names"), so nothing is fetched.
+    signInAsRestrictedOrganizationPrincipal(["t9"]);
     routeGet({ [URLS.org]: org, [URLS.tenant]: tenant });
     renderPage();
     expect(await screen.findByText("Access Denied")).toBeInTheDocument();
-    expect(apiMock.get.mock.calls.map((c) => c[0])).not.toContain(URLS.tenant);
+    const fetched = apiMock.get.mock.calls.map((c) => c[0]);
+    expect(fetched).not.toContain(URLS.tenant);
+    expect(fetched).not.toContain(URLS.org);
   });
 
   it("shows the organization administrator the tenant record", async () => {

@@ -264,8 +264,12 @@ of deleted tenants. Since SA-02 (security audit 2026-11-14, N1) it is read
 **per organization**:
 
 - `GET /api/v1/audit-logs/system` requires `audit_logs:list_system` **and** a
-  caller whose own record lives in the organization's scope tenant; a tenant
-  administrator is refused `403` whatever its role holds.
+  caller whose own record lives in the organization's scope tenant and whose
+  roles are not restricted to particular tenants of it (see
+  [organization scope](organization-scope.md#restricting-an-organization-user-to-some-tenants)).
+  A tenant administrator, and an organization account whose role assignments
+  name a `tenant_scope`, are refused `403` whatever their roles hold; the admin
+  console does not draw the System tab for either.
 - It returns only the entries whose recorded `organization_id` is the
   caller's organization. The server records it on a new entry only when it can
   resolve it with certainty: the deleted tenant's organization for

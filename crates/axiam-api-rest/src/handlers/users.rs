@@ -360,6 +360,7 @@ pub async fn get<C: Connection + Clone>(
     request_body = UpdateUserRequest,
     responses(
         (status = 200, description = "User updated", body = UserResponse),
+        (status = 403, description = "Missing `users:update` on another user, or `authorization_denied`: a console sign-in is required and the caller is updating their own account with a token minted for an OAuth2 client"),
         (status = 404, description = "User not found"),
     ),
     security(("bearer" = []))
@@ -377,6 +378,13 @@ pub async fn update<C: Connection + Clone>(
         RequirePermission::new("users:update", Uuid::nil())
             .check(&user, authz.get_ref().as_ref())
             .await?;
+    } else {
+        // SR5-1 "Guard all self-updates": the e-mail is the address a password
+        // reset mails to and the username is a sign-in identifier, so changing
+        // either is the person's own act. A token minted for an OAuth2 client
+        // is refused before anything is read or written, for any field. An
+        // administrator updating another user (the arm above) is not affected.
+        user.require_console_sign_in()?;
     }
     // Same rule as `get` above, and it matters more here: writing a
     // self-update into the *selected* tenant would not find the row to update

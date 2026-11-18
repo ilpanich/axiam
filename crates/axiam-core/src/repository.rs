@@ -268,19 +268,27 @@ pub trait UserRepository: Send + Sync {
     /// this — self-service, an administrator, SCIM — because it is decided
     /// here, against the stored value, and not by the caller.
     ///
-    /// A write that sets `password_hash` also, **in the same transaction**,
-    /// deletes the user's OPAQUE record (the verifier of the *previous*
-    /// password, which must not keep authenticating) and stamps the user's
-    /// credential epoch, `credential_changed_at`. A caller that supplies a new
-    /// OPAQUE record writes it afterwards through
-    /// [`OpaqueCredentialRepository::upsert`], which stamps the epoch again; if
-    /// that second write fails the user is left with no record, not with one
-    /// that answers to the old password. The epoch is what refuses the
-    /// short-lived artefacts of the old credential — an MFA challenge or setup
-    /// token, an in-flight OPAQUE login — that were issued at or before it.
-    /// Every writer of the hash inherits both effects (reset, self-service
-    /// change, SCIM); a caller that cannot supply a record, such as SCIM, must
-    /// not write a password for a tenant whose OPAQUE mode is `required`.
+    /// A write that sets `password_hash` also, **in the same transaction**
+    /// (SA-06, N7; SR4-2):
+    ///
+    /// - retires the user's OPAQUE record, the verifier of the *previous*
+    ///   password, which must not keep authenticating. With
+    ///   [`UpdateUser::opaque_record`] set, the new record replaces it; with
+    ///   none, the existing record is deleted;
+    /// - stamps the user's credential epoch, `credential_changed_at`;
+    /// - bumps the user's `credential_version`.
+    ///
+    /// A caller that has a new OPAQUE record for the new password passes it as
+    /// [`UpdateUser::opaque_record`]. It must **never** write the hash here and
+    /// then store the record separately (for example through
+    /// [`OpaqueCredentialRepository::upsert`]): a concurrent writer's hash could
+    /// commit between the two writes and end up beside this writer's record.
+    /// The epoch and the version are what refuse the short-lived artefacts of
+    /// the old credential — an MFA challenge or setup token, the WebAuthn state
+    /// token, an in-flight OPAQUE login — issued before the change. Every
+    /// writer of the hash inherits all of this (reset, self-service change,
+    /// SCIM); a caller that cannot supply a record, such as SCIM, must not
+    /// write a password for a tenant whose OPAQUE mode is `required`.
     fn update(
         &self,
         tenant_id: Uuid,

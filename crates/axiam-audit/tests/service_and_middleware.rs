@@ -1415,6 +1415,64 @@ async fn a_pending_organization_is_recorded_once_it_arrives() {
     assert_eq!(entries[2].organization_id, None);
 }
 
+/// QR5-2: the wait for a pending organization is bounded from when the row was
+/// queued, not from when the worker reaches it. Rows whose lookups all stall
+/// together are written within about one [`PENDING_ORGANIZATION_WAIT`] of
+/// being queued, not one wait after another — N stalled lookups must not hold
+/// the worker (and every row queued behind them) for N times the bound.
+///
+/// [`PENDING_ORGANIZATION_WAIT`]: axiam_audit::PENDING_ORGANIZATION_WAIT
+#[actix_web::test]
+async fn stalled_pending_organizations_cost_one_wait_not_one_each() {
+    // Virtual time: the waits elapse instantly, and are measured exactly.
+    tokio::time::pause();
+    const ROWS: usize = 5;
+    let wait = axiam_audit::PENDING_ORGANIZATION_WAIT;
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    // Held, never answered: every lookup stalls.
+    let answers: Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<Option<Uuid>>>>> =
+        Arc::default();
+    let route = {
+        let answers = Arc::clone(&answers);
+        move |req: actix_web::HttpRequest| {
+            let answers = Arc::clone(&answers);
+            async move {
+                let (tx, pending) = axiam_audit::PendingAuditOrganization::channel();
+                req.extensions_mut().insert(pending);
+                answers.lock().unwrap().push(tx);
+                HttpResponse::Unauthorized().finish()
+            }
+        }
+    };
+    let app = test::init_service(App::new().wrap(mw).route("/pending", web::get().to(route))).await;
+
+    let queued = tokio::time::Instant::now();
+    for _ in 0..ROWS {
+        let res =
+            test::call_service(&app, test::TestRequest::get().uri("/pending").to_request()).await;
+        assert_eq!(res.status(), 401);
+    }
+    // Poll in virtual time, giving up well past N waits so a regression fails
+    // on the assertion below rather than hanging.
+    let give_up = queued + wait * (ROWS as u32 + 2);
+    while repo.len() < ROWS && tokio::time::Instant::now() < give_up {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let elapsed = queued.elapsed();
+    assert_eq!(repo.len(), ROWS, "every stalled row is written in the end");
+    assert!(
+        elapsed <= wait + Duration::from_secs(1),
+        "{ROWS} rows with stalled lookups took {elapsed:?} to be written; \
+         the bound is about one wait ({wait:?}) from when they were queued"
+    );
+    assert!(
+        repo.snapshot().iter().all(|e| e.organization_id.is_none()),
+        "an unanswered lookup records no organization"
+    );
+    assert_eq!(answers.lock().unwrap().len(), ROWS);
+}
+
 #[actix_web::test]
 async fn every_recorded_entry_reaches_the_sink() {
     // The wiring the notification dispatcher depends on. Before this existed,

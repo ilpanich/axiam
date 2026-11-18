@@ -2728,3 +2728,121 @@ async fn sr4_1_control_a_first_party_token_still_enrols_totp() {
     let route = ("POST", "/api/v1/auth/mfa/enroll", serde_json::json!({}));
     assert_eq!(sr4_1_call(&app, &jwt, user_id, &route).await, 200);
 }
+
+// ---------------------------------------------------------------------------
+// SA-04 review SR5-1 — every self-update through `PUT /users/{id}` is the
+// person's own act
+// ---------------------------------------------------------------------------
+
+async fn put_user(
+    app: &impl TestApp,
+    token: &str,
+    target: Uuid,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let req = test::TestRequest::put()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri(&format!("/api/v1/users/{target}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let bytes = test::read_body(resp).await;
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+async fn stored_user(
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> axiam_core::models::user::User {
+    SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+}
+
+/// **SR5-1.** A token AXIAM minted for relying party X must not rewrite the
+/// caller's own account through `PUT /users/{own id}`: the e-mail is the
+/// recovery channel (password reset mails a link to it) and the username is a
+/// sign-in identifier. Refused `403`, nothing written, for any field. The
+/// user's first-party sign-in is not refused, and an administrator acting on
+/// ANOTHER user keeps accepting a client-minted token.
+#[actix_rt::test]
+async fn sr5_1_a_client_minted_token_cannot_update_its_own_account() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+
+    // Another account for the control.
+    let other = SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: "bob".into(),
+            email: "bob@example.com".into(),
+            password: PASSWORD.into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    // Email, and a non-email field (username), by a client-minted token.
+    let (status, _) = put_user(
+        &app,
+        &x_token,
+        user_id,
+        serde_json::json!({"email": "attacker@x.example"}),
+    )
+    .await;
+    assert_eq!(status, 403, "client-minted self-update of the email");
+    let (status, _) = put_user(
+        &app,
+        &x_token,
+        user_id,
+        serde_json::json!({"username": "renamed"}),
+    )
+    .await;
+    assert_eq!(status, 403, "client-minted self-update of the username");
+    let after = stored_user(&db, tenant_id, user_id).await;
+    assert_eq!(after.email, "alice@example.com", "nothing was written");
+    assert_eq!(after.username, "alice", "nothing was written");
+
+    // Control 1: the first-party sign-in still updates itself.
+    let (status, _) = put_user(
+        &app,
+        &jwt,
+        user_id,
+        serde_json::json!({"email": "alice2@example.com"}),
+    )
+    .await;
+    assert_eq!(status, 200, "first-party self-update");
+    assert_eq!(
+        stored_user(&db, tenant_id, user_id).await.email,
+        "alice2@example.com"
+    );
+
+    // Control 2: acting on ANOTHER user with a client-minted token is not
+    // refused for the token's origin (AllowAll authz stands for `users:update`).
+    let (status, _) = put_user(
+        &app,
+        &x_token,
+        other.id,
+        serde_json::json!({"email": "bob2@example.com"}),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "admin on another user keeps a client-minted token"
+    );
+    assert_eq!(
+        stored_user(&db, tenant_id, other.id).await.email,
+        "bob2@example.com"
+    );
+}

@@ -93,8 +93,9 @@ pub struct AuditOrganization {
 /// or tenant its path names exists. So the resolver inserts this instead,
 /// starts the lookup on a task of its own, and sends the answer through it.
 /// The middleware carries it beside the row on the channel, and the audit
-/// worker waits for the answer — at most [`PENDING_ORGANIZATION_WAIT`] —
-/// before it appends the row. No answer, or `None`, records no organization.
+/// worker waits for the answer — until [`PENDING_ORGANIZATION_WAIT`] after the
+/// row was queued — before it appends the row. No answer, or `None`, records
+/// no organization.
 ///
 /// Read only where [`AuditOrganization`] is: on a row neither a verified token
 /// nor an [`AuditAttribution`] places in a tenant's log, and only when no
@@ -111,16 +112,21 @@ impl PendingAuditOrganization {
         (tx, Self(rx))
     }
 
-    /// The answer, waiting at most `within`.
-    async fn wait(self, within: Duration) -> Option<Uuid> {
-        tokio::time::timeout(within, self.0).await.ok()?.ok()?
+    /// The answer, waiting no later than `deadline`.
+    async fn wait_until(self, deadline: tokio::time::Instant) -> Option<Uuid> {
+        tokio::time::timeout_at(deadline, self.0).await.ok()?.ok()?
     }
 }
 
-/// The longest the audit worker waits for a [`PendingAuditOrganization`]
-/// before it appends the row without one. One point read; a datastore that
-/// does not answer within this would not take the append either, and the
-/// worker must not stall behind it indefinitely.
+/// How long after a row is queued the audit worker may still wait for its
+/// [`PendingAuditOrganization`]; past that it appends the row without one. One
+/// point read; a datastore that does not answer within this would not take the
+/// append either, and the worker must not stall behind it indefinitely.
+///
+/// The bound runs from when the row was **queued**, not from when the worker
+/// reaches it (QR5-2): rows whose lookups stall together expire together, so N
+/// of them hold the worker about one wait in total, not N waits one after
+/// another while every row behind them backs up into the dead-letter file.
 pub const PENDING_ORGANIZATION_WAIT: Duration = Duration::from_secs(5);
 
 /// One audit entry plus the organization it belongs to.
@@ -208,8 +214,10 @@ enum Queued {
         event: AuditEvent,
         occurred_at: DateTime<Utc>,
         /// The organization of a system-partition row, when it was still being
-        /// looked up as the response left (SR4-3).
-        pending_organization: Option<PendingAuditOrganization>,
+        /// looked up as the response left (SR4-3), and the deadline for its
+        /// answer: [`PENDING_ORGANIZATION_WAIT`] after the row was queued
+        /// (QR5-2).
+        pending_organization: Option<(PendingAuditOrganization, tokio::time::Instant)>,
     },
     Barrier(oneshot::Sender<()>),
 }
@@ -475,8 +483,9 @@ async fn audit_worker<A: AuditLogRepository>(
                 // SR4-3: the organization the resolver was still looking up
                 // when the response left. Waited for here, off the response
                 // path; only a system-partition row that names none yet takes it.
-                if let Some(pending) = pending_organization {
-                    let organization = pending.wait(PENDING_ORGANIZATION_WAIT).await;
+                // The deadline was fixed when the row was queued (QR5-2).
+                if let Some((pending, deadline)) = pending_organization {
+                    let organization = pending.wait_until(deadline).await;
                     if event.entry.tenant_id.is_nil() && event.entry.organization_id.is_none() {
                         event.entry.organization_id = organization;
                     }
@@ -706,8 +715,16 @@ where
             // or, still being looked up, as the worker will receive it
             // through the `PendingAuditOrganization` (SR4-3).
             let system_partition = user_info.is_none() && attribution.is_none();
-            let pending_organization =
-                pending_org.filter(|_| system_partition && system_org.is_none());
+            // The wait for it is bounded from now, as the row is queued, not
+            // from whenever the worker reaches it (QR5-2).
+            let pending_organization = pending_org
+                .filter(|_| system_partition && system_org.is_none())
+                .map(|pending| {
+                    (
+                        pending,
+                        tokio::time::Instant::now() + PENDING_ORGANIZATION_WAIT,
+                    )
+                });
             let (actor_id, tenant_id, org_id, actor_type, organization_id) = match user_info {
                 Some((uid, tid, oid, kind)) => (uid, tid, oid, kind, None),
                 None => match attribution {

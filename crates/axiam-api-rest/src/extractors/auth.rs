@@ -414,6 +414,18 @@ impl AuthenticatedUser {
     pub fn minted_for_client(&self) -> bool {
         self.claims.0.client_id.is_some()
     }
+
+    /// Refuse a token AXIAM minted for an OAuth2 client, with the same `403`
+    /// [`ConsoleSignIn`] answers. For a handler whose first-party-sign-in
+    /// requirement depends on the target (SR4-1 "Own account only": the MFA
+    /// removal and reset routes demand it only when the caller acts on their
+    /// own account).
+    pub fn require_console_sign_in(&self) -> Result<(), AxiamApiError> {
+        if self.minted_for_client() {
+            return Err(console_sign_in_required());
+        }
+        Ok(())
+    }
 }
 
 impl actix_web::FromRequest for AuthenticatedUser {
@@ -596,15 +608,8 @@ async fn admit_credential(
     // T-447 / #681 — an approval surface refuses a client's token on what
     // it is, before the session store is asked about it: see
     // [`ConsoleSignIn`].
-    if admit == Admit::ConsoleSignInOnly && user.minted_for_client() {
-        return Err(AxiamError::AuthorizationDenied {
-            reason: "a console sign-in is required; this token was minted for an OAuth2 \
-                         client"
-                .into(),
-            action: None,
-            resource_id: None,
-        }
-        .into());
+    if admit == Admit::ConsoleSignInOnly {
+        user.require_console_sign_in()?;
     }
 
     // REQ-7 / D-15: reject access tokens whose session has been revoked
@@ -1694,6 +1699,16 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
+
+/// The refusal of a client-minted token where a console sign-in is required.
+fn console_sign_in_required() -> AxiamApiError {
+    AxiamError::AuthorizationDenied {
+        reason: "a console sign-in is required; this token was minted for an OAuth2 client".into(),
+        action: None,
+        resource_id: None,
+    }
+    .into()
+}
 
 #[cfg(test)]
 mod tests {

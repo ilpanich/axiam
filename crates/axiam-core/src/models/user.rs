@@ -347,6 +347,16 @@ pub struct UpdateUser {
     #[serde(skip)]
     #[schema(ignore = true)]
     pub password_hash: Option<String>,
+    /// SA-06 (N7, SR4-2): the OPAQUE record for the password in
+    /// `password_hash`. Written in the *same transaction* as the hash, the
+    /// credential epoch and the credential version, replacing any record the
+    /// user had; with no record here a hash write deletes the existing one.
+    /// Only meaningful alongside `password_hash` (the repository refuses it
+    /// otherwise), and its `tenant_id`/`user_id` must match the row updated.
+    /// Internal-only, like `password_hash`.
+    #[serde(skip)]
+    #[schema(ignore = true)]
+    pub opaque_record: Option<crate::models::opaque::CreateOpaqueCredential>,
     pub status: Option<UserStatus>,
     pub metadata: Option<serde_json::Value>,
     pub mfa_enabled: Option<bool>,

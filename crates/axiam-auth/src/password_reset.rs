@@ -243,6 +243,35 @@ where
         pepper: Option<&str>,
         http_client: Option<&reqwest::Client>,
     ) -> AxiamResult<Uuid> {
+        self.confirm_reset_with_opaque(
+            tenant_id,
+            raw_token,
+            new_password,
+            policy,
+            pepper,
+            http_client,
+            None,
+        )
+        .await
+    }
+
+    /// [`confirm_reset`](Self::confirm_reset) carrying the OPAQUE record for
+    /// the new password.
+    ///
+    /// SA-06 / N7 (SR4-2): the record is written in the same transaction as the
+    /// hash, the credential epoch and the credential version. `None` keeps the
+    /// behaviour of a plain reset: the hash write retires any existing record.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn confirm_reset_with_opaque(
+        &self,
+        tenant_id: Uuid,
+        raw_token: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        pepper: Option<&str>,
+        http_client: Option<&reqwest::Client>,
+        opaque: Option<crate::opaque::OpaqueEnrolled>,
+    ) -> AxiamResult<Uuid> {
         let token_hash = token::hash_refresh_token(raw_token);
 
         // Atomically consume the token.
@@ -374,6 +403,7 @@ where
                 user.id,
                 UpdateUser {
                     password_hash: Some(new_hash),
+                    opaque_record: opaque.map(|e| e.into_credential(user.id)),
                     failed_login_attempts: Some(0),
                     locked_until: Some(None),
                     last_failed_login_at: Some(None),

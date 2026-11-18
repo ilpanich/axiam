@@ -249,6 +249,24 @@ pub struct OpaqueEnrolled {
     pub record: String,
 }
 
+impl OpaqueEnrolled {
+    /// The storable record for `user_id`, bound to the tenant the enrolment
+    /// was scoped to.
+    pub fn into_credential(
+        self,
+        user_id: Uuid,
+    ) -> axiam_core::models::opaque::CreateOpaqueCredential {
+        axiam_core::models::opaque::CreateOpaqueCredential {
+            tenant_id: self.tenant_id,
+            user_id,
+            credential_identifier: self.credential_identifier,
+            suite: self.suite,
+            ksf_params: self.ksf_params,
+            record: self.record,
+        }
+    }
+}
+
 /// Why an OPAQUE login was refused.
 ///
 /// The split exists for exactly one reason: a failed `KE3` is a wrong password

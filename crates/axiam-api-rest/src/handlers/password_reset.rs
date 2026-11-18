@@ -344,23 +344,17 @@ pub async fn confirm_reset<C: Connection + Clone>(
         let user_id = state
             .mail
             .password_reset_service
-            .confirm_reset(
+            .confirm_reset_with_opaque(
                 req.tenant_id,
                 &req.token,
                 &req.new_password,
                 &settings.password,
                 state.auth_config.pepper.as_ref().map(|p| p.expose_secret()),
                 Some(&state.http_client),
+                // SA-06 / N7 (SR4-2): written by the same transaction as the hash.
+                enrolled,
             )
             .await?;
-
-        crate::handlers::opaque_enrollment::store_credential(
-            &state,
-            req.tenant_id,
-            user_id,
-            enrolled,
-        )
-        .await?;
 
         state
             .ssf

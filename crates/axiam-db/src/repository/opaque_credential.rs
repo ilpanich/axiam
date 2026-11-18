@@ -82,7 +82,7 @@ impl CredentialRow {
 /// Flatten KSF parameters into the six nullable columns the table carries.
 ///
 /// Returned in column order: `(memory_kib, iterations, parallelism, log_n, r, p)`.
-type KsfColumns = (
+pub(crate) type KsfColumns = (
     Option<u32>,
     Option<u32>,
     Option<u32>,
@@ -91,7 +91,7 @@ type KsfColumns = (
     Option<u32>,
 );
 
-fn ksf_columns(params: OpaqueKsfParams) -> KsfColumns {
+pub(crate) fn ksf_columns(params: OpaqueKsfParams) -> KsfColumns {
     match params {
         OpaqueKsfParams::Argon2id {
             memory_kib,

@@ -230,9 +230,10 @@ describe("AuditLogsPage", () => {
       ).toBe(true)
     );
     // The description follows the scope, so the page never claims the system
-    // trail is "performed in this tenant" — system entries carry no tenant.
+    // trail is "performed in this tenant" — system entries carry no tenant —
+    // and says it holds only the caller's organization's entries (SA-02).
     expect(
-      screen.getByText(/unauthenticated and system requests/)
+      screen.getByText(/system entries recorded for your organization, which carry no tenant/)
     ).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "Tenant" }));

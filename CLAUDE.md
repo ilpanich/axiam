@@ -191,8 +191,12 @@ This applies to every orchestrator run and every spawned executor, on **every wa
   cargo build -p axiam-server --no-default-features   # --no-default-features matches the drift workflow
   ./target/debug/axiam-server --dump-openapi > sdks/openapi.json
   python3 scripts/check-spec-digest.py                # the exporter already stamps the digest
+  python3 scripts/gen-management-registry.py          # the registry records the spec digest
+  python3 scripts/gen-management-registry.py --check  # what CI's Architecture Invariants job runs
   ```
   `docs/api/openapi.json` is a **symlink** to `sdks/openapi.json`; there is one file, not two.
+  `sdks/management-registry.json` is derived from the spec and records its digest, so every
+  spec regeneration changes it too, even when no operation moved; commit both together.
 - **Capture cargo's own exit code, not a pipeline's.** `cargo build … | tail -25` reports
   `tail`'s status, so a failed build reads as success. Redirect to a log and test `$?`.
 

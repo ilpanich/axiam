@@ -149,6 +149,12 @@ pub(crate) fn validate_enrollment<C: Connection + Clone>(
 
 /// Persist a validated record against `user_id`.
 ///
+/// Only for a user that has just been created, whose hash is not being
+/// rewritten (admin user creation). A password change or reset must not use it:
+/// those pass the record to the repository's `update` (`UpdateUser::opaque_record`)
+/// so the hash, the record, the epoch and the version are one transaction
+/// (SA-06 / N7, SR4-2).
+///
 /// `None` is a no-op, which is what the `disabled` and `optional`-without-a-
 /// record cases resolve to.
 pub(crate) async fn store_credential<C: Connection + Clone>(

@@ -1332,6 +1332,89 @@ async fn a_system_row_records_the_organization_resolved_for_it() {
     );
 }
 
+/// SR4-3: an organization still being looked up when the response leaves is
+/// waited for by the worker, not by the response, and recorded on the
+/// system-partition row once it arrives; a lookup that ends unanswered records
+/// none; beside an attribution it is ignored.
+#[actix_web::test]
+async fn a_pending_organization_is_recorded_once_it_arrives() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let org_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+    let answers: Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<Option<Uuid>>>>> =
+        Arc::default();
+
+    let pending_route = {
+        let answers = Arc::clone(&answers);
+        move |req: actix_web::HttpRequest| {
+            let answers = Arc::clone(&answers);
+            async move {
+                let (tx, pending) = axiam_audit::PendingAuditOrganization::channel();
+                req.extensions_mut().insert(pending);
+                answers.lock().unwrap().push(tx);
+                HttpResponse::Unauthorized().finish()
+            }
+        }
+    };
+    let app = test::init_service(
+        App::new()
+            .wrap(mw)
+            .route("/pending", web::get().to(pending_route.clone()))
+            .route(
+                "/attributed",
+                web::get().to(move |req: actix_web::HttpRequest| {
+                    let route = pending_route.clone();
+                    async move {
+                        req.extensions_mut()
+                            .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
+                        route(req).await
+                    }
+                }),
+            ),
+    )
+    .await;
+
+    // The response is served while the organization has not arrived.
+    let res = test::call_service(&app, test::TestRequest::get().uri("/pending").to_request()).await;
+    assert_eq!(res.status(), 401);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        repo.snapshot().is_empty(),
+        "the row was written before its pending organization arrived"
+    );
+    answers
+        .lock()
+        .unwrap()
+        .remove(0)
+        .send(Some(org_id))
+        .unwrap();
+    wait_for_entries(&repo, 1).await;
+
+    // A lookup dropped unanswered records no organization.
+    let _ = test::call_service(&app, test::TestRequest::get().uri("/pending").to_request()).await;
+    drop(answers.lock().unwrap().remove(0));
+    wait_for_entries(&repo, 2).await;
+
+    // Beside an attribution the row is the tenant's; the pending answer is not
+    // waited for and records nothing.
+    let _ = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/attributed").to_request(),
+    )
+    .await;
+    wait_for_entries(&repo, 3).await;
+    let _ = answers.lock().unwrap().remove(0).send(Some(org_id));
+
+    let entries = repo.snapshot();
+    assert_eq!(entries[0].tenant_id, Uuid::nil());
+    assert_eq!(entries[0].organization_id, Some(org_id));
+    assert_eq!(entries[1].tenant_id, Uuid::nil());
+    assert_eq!(entries[1].organization_id, None);
+    assert_eq!(entries[2].tenant_id, tenant_id);
+    assert_eq!(entries[2].organization_id, None);
+}
+
 #[actix_web::test]
 async fn every_recorded_entry_reaches_the_sink() {
     // The wiring the notification dispatcher depends on. Before this existed,

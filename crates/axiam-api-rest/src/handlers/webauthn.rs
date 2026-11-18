@@ -15,7 +15,7 @@ use webauthn_rs_proto::{
 };
 
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::ConsoleSignIn;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
     HEADER_CSRF, access_cookie, csrf_cookie, generate_csrf_token, refresh_cookie,
@@ -276,13 +276,14 @@ fn peek_tenant_id(state_token: &str) -> Result<Uuid, AxiamApiError> {
         (status = 200, description = "Registration challenge",
          body = StartRegistrationResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
         (status = 503, description = "Attestation policy requires attestation but no \
             FIDO metadata is available (W2-D3 fail-closed)"),
     ),
     security(("bearer" = []))
 )]
 pub async fn start_registration<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_name = user.user_id.to_string();
@@ -416,12 +417,14 @@ async fn enforce_mds_freshness<C: Connection + Clone>(
          body = CredentialResponse),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Denied by the tenant's attestation policy \
-            (this security key model is not permitted by your organization)"),
+            (this security key model is not permitted by your organization), or \
+            `authorization_denied`: a console sign-in is required and this token was \
+            minted for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn finish_registration<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<FinishRegistrationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {

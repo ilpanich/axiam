@@ -2579,3 +2579,152 @@ async fn s3b_control_a_first_party_token_still_exports_downloads_and_deletes() {
     assert_eq!(request_delete(&app, &jwt).await, 200);
     assert!(deletion_pending(&db, tenant_id, user_id).await);
 }
+
+// ---------------------------------------------------------------------------
+// SA-04 review SR4-1 — enrolling or removing a sign-in credential is the
+// person's own act
+// ---------------------------------------------------------------------------
+
+/// The routes SR4-1 closes, as `(method, path-template, body)`. `{u}` is the
+/// caller's own user id. Each is the person's own act on their own sign-in
+/// credentials: enrolling one (passkey, TOTP), removing one (a method, or all
+/// of them), and changing the password.
+fn sr4_1_routes() -> Vec<(&'static str, &'static str, serde_json::Value)> {
+    use serde_json::json;
+    vec![
+        ("POST", "/api/v1/auth/webauthn/register/start", json!({})),
+        ("POST", "/api/v1/auth/webauthn/register/finish", json!({})),
+        ("POST", "/api/v1/auth/mfa/enroll", json!({})),
+        (
+            "POST",
+            "/api/v1/auth/mfa/confirm",
+            json!({"code": "000000"}),
+        ),
+        ("DELETE", "/api/v1/users/{u}/mfa-methods/totp", json!(null)),
+        ("POST", "/api/v1/users/{u}/reset-mfa", json!({})),
+        (
+            "POST",
+            "/api/v1/auth/password/change",
+            json!({"current_password": "x", "new_password": "y"}),
+        ),
+    ]
+}
+
+async fn sr4_1_call(
+    app: &impl TestApp,
+    token: &str,
+    user_id: Uuid,
+    (method, path, body): &(&str, &str, serde_json::Value),
+) -> u16 {
+    let uri = path.replace("{u}", &user_id.to_string());
+    let req = match *method {
+        "DELETE" => test::TestRequest::delete(),
+        _ => test::TestRequest::post(),
+    }
+    .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+    .uri(&uri)
+    .insert_header(("Authorization", format!("Bearer {token}")));
+    let req = if body.is_null() {
+        req.to_request()
+    } else {
+        req.set_json(body).to_request()
+    };
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// **SR4-1.** A token AXIAM minted for relying party X must not enrol a
+/// passkey or a TOTP secret, remove a factor, or change the password: a
+/// credential it enrols signs X in as the user with no token at all, which
+/// reopens what the `/oauth2/authorize` closure (N6) shut. Refused `403` on
+/// every such route. The same user's first-party sign-in is not refused.
+#[actix_rt::test]
+async fn sr4_1_a_client_minted_token_cannot_enrol_remove_or_change_a_sign_in_credential() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+
+    let mut client_held = Vec::new();
+    let mut first_party = Vec::new();
+    for route in sr4_1_routes() {
+        client_held.push((
+            route.0,
+            route.1,
+            sr4_1_call(&app, &x_token, user_id, &route).await,
+        ));
+        first_party.push((
+            route.0,
+            route.1,
+            sr4_1_call(&app, &jwt, user_id, &route).await,
+        ));
+    }
+
+    let not_refused: Vec<_> = client_held.iter().filter(|(_, _, s)| *s != 403).collect();
+    assert!(
+        not_refused.is_empty(),
+        "a client-minted token must get 403 on every credential route; got {client_held:?}"
+    );
+    let wrongly_refused: Vec<_> = first_party.iter().filter(|(_, _, s)| *s == 403).collect();
+    assert!(
+        wrongly_refused.is_empty(),
+        "a first-party sign-in must not be refused 403; got {first_party:?}"
+    );
+}
+
+/// **SR4-1 scope ("Own account only").** On the two admin-reachable routes —
+/// removing an MFA method and resetting MFA — a client-minted token is refused
+/// `403` only when the caller acts on their OWN account. An administrator
+/// holding `users:admin` who acts on ANOTHER user is not refused for the
+/// token's origin (the route answers whatever it answers for that user — here
+/// `404`, the user does not exist — but never the console-sign-in `403`).
+#[actix_rt::test]
+async fn sr4_1_b_a_client_minted_token_is_refused_on_mfa_routes_only_for_the_own_account() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let (x_id, x_secret) = create_client_with_secret(&app, &jwt, plain_client(false)).await;
+    let x_token = access_token_minted_for(&app, &jwt, tenant_id, &x_id, &x_secret).await;
+    let someone_else = Uuid::new_v4();
+
+    let routes = [
+        (
+            "DELETE",
+            "/api/v1/users/{u}/mfa-methods/totp",
+            serde_json::json!(null),
+        ),
+        ("POST", "/api/v1/users/{u}/reset-mfa", serde_json::json!({})),
+    ];
+    let mut own = Vec::new();
+    let mut other = Vec::new();
+    for route in &routes {
+        own.push((route.1, sr4_1_call(&app, &x_token, user_id, route).await));
+        other.push((
+            route.1,
+            sr4_1_call(&app, &x_token, someone_else, route).await,
+        ));
+    }
+    assert!(
+        own.iter().all(|(_, s)| *s == 403),
+        "own account, client-minted token: 403 on both; got {own:?}"
+    );
+    assert!(
+        other.iter().all(|(_, s)| *s != 403),
+        "an admin acting on another user keeps a client-minted token; got {other:?}"
+    );
+}
+
+/// **SR4-1 control.** The first-party sign-in really enrols: `/mfa/enroll`
+/// hands back a TOTP secret.
+#[actix_rt::test]
+async fn sr4_1_control_a_first_party_token_still_enrols_totp() {
+    let (db, org_id, tenant_id, user_id) = setup_db().await;
+    let mut auth = test_auth_config();
+    auth.mfa_encryption_key = Some([9u8; 32]);
+    let app = test_app!(db, auth);
+    let jwt = admin_jwt(&auth, user_id, tenant_id, org_id);
+    let route = ("POST", "/api/v1/auth/mfa/enroll", serde_json::json!({}));
+    assert_eq!(sr4_1_call(&app, &jwt, user_id, &route).await, 200);
+}

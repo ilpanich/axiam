@@ -10,7 +10,12 @@
 //! [`system_audit_organization`] runs inside the audit middleware (the
 //! composition root wraps it there). After the request has been served, and
 //! only for a request the middleware will record in the system partition, it
-//! resolves the organization from something the server has verified, never
+//! starts the lookup of the organization **on a task of its own** and lets the
+//! response go (review SR4-3): the audit worker waits for the answer, through
+//! an [`axiam_audit::PendingAuditOrganization`], before it writes the row. No
+//! response waits on the datastore, so a response's latency says nothing about
+//! whether the id its path names exists, whatever the cache below holds. The
+//! organization is resolved from something the server has verified, never
 //! from a value the client merely sent:
 //!
 //! 1. a [`VerifiedAuditTenant`] an extractor inserted after verifying a
@@ -46,6 +51,13 @@
 //! indexed record-id read, limited only by the deployment's edge and
 //! unauthenticated rate limits. Do not add a lookup here that is dearer than
 //! that.
+//!
+//! The cache is an optimisation of the lookup's cost, not of any response's
+//! latency (review SR4-3): the lookup, cached or not, runs on its own task
+//! after the response has gone, so the two TTLs differing — a known id served
+//! from memory where an unknown one is read again — cannot be timed by the
+//! client. The response path does the same work for every id: it reads the
+//! path and spawns the task.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -55,7 +67,7 @@ use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceRequest, ServiceResponse};
 use actix_web::middleware::Next;
 use actix_web::{HttpMessage, HttpRequest, web};
-use axiam_audit::{AuditAttribution, AuditOrganization};
+use axiam_audit::{AuditAttribution, AuditOrganization, PendingAuditOrganization};
 use axiam_auth::token::CachedUserIdentity;
 use axiam_core::error::AxiamError;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
@@ -87,35 +99,85 @@ where
     B: MessageBody + 'static,
 {
     let res = next.call(req).await?;
-    if let Some(org_id) = resolve::<C>(res.request()).await {
-        res.request()
-            .extensions_mut()
-            .insert(AuditOrganization { org_id });
+    // SR4-3: what to look up is read here, synchronously; the lookup itself
+    // runs on a task of its own, and the response leaves without it.
+    if let Some(lookup) = Lookup::<C>::of(res.request()) {
+        let (answer, pending) = PendingAuditOrganization::channel();
+        res.request().extensions_mut().insert(pending);
+        actix_web::rt::spawn(async move {
+            // The worker may have stopped waiting; the answer is then unread.
+            let _ = answer.send(lookup.run().await);
+        });
     }
     Ok(res)
 }
 
-/// The organization of a request the audit middleware records with a nil
-/// tenant, or `None` — for a request it attributes to a tenant, too.
-async fn resolve<C: Connection + Clone + 'static>(req: &HttpRequest) -> Option<Uuid> {
-    let verified = {
-        let ext = req.extensions();
-        // A verified token, or a handler's attribution, puts the row in a
-        // tenant's log: nothing to resolve. An organization already named by
-        // a handler stands.
-        if ext.contains::<Arc<CachedUserIdentity>>()
-            || ext.contains::<AuditAttribution>()
-            || ext.contains::<AuditOrganization>()
-        {
-            return None;
-        }
-        ext.get::<VerifiedAuditTenant>().copied()
-    };
-    let state = req.app_data::<web::Data<AppState<C>>>()?;
-    if let Some(VerifiedAuditTenant(tenant_id)) = verified {
-        return organization_of_tenant(state, tenant_id).await;
+/// What a system-partition request row's organization is to be resolved
+/// from, read off the served request; resolved by [`Lookup::run`], off the
+/// response path.
+struct Lookup<C: Connection + Clone + 'static> {
+    state: web::Data<AppState<C>>,
+    target: Target,
+}
+
+enum Target {
+    /// A tenant an extractor verified: its organization.
+    VerifiedTenant(Uuid),
+    /// What the path names.
+    Path(PathScope),
+}
+
+impl<C: Connection + Clone + 'static> Lookup<C> {
+    /// `None` for a request the audit middleware attributes to a tenant, one
+    /// whose organization a handler already named, and one that names nothing
+    /// to resolve.
+    fn of(req: &HttpRequest) -> Option<Self> {
+        let verified = {
+            let ext = req.extensions();
+            // A verified token, or a handler's attribution, puts the row in a
+            // tenant's log: nothing to resolve. An organization already named
+            // by a handler stands.
+            if ext.contains::<Arc<CachedUserIdentity>>()
+                || ext.contains::<AuditAttribution>()
+                || ext.contains::<AuditOrganization>()
+            {
+                return None;
+            }
+            ext.get::<VerifiedAuditTenant>().copied()
+        };
+        let target = match verified {
+            Some(VerifiedAuditTenant(tenant_id)) => Target::VerifiedTenant(tenant_id),
+            None => Target::Path(path_scope(req.path())?),
+        };
+        let state = req.app_data::<web::Data<AppState<C>>>()?.clone();
+        Some(Self { state, target })
     }
-    let scope = path_scope(req.path())?;
+
+    /// The organization, or `None` when it cannot be resolved with certainty.
+    async fn run(self) -> Option<Uuid> {
+        #[cfg(test)]
+        tests::lookup_gate().await;
+        let state = self.state.get_ref();
+        match self.target {
+            Target::VerifiedTenant(tenant_id) => organization_of_tenant(state, tenant_id).await,
+            Target::Path(scope) => organization_of_path(state, scope).await,
+        }
+    }
+}
+
+/// What the resolver records for a served request, looked up inline: the
+/// tests' view of [`Lookup`].
+#[cfg(test)]
+async fn resolve<C: Connection + Clone + 'static>(req: &HttpRequest) -> Option<Uuid> {
+    Lookup::<C>::of(req)?.run().await
+}
+
+/// The organization an organization or tenant id in the path names, served
+/// from [`SystemAuditOrgCache`] when remembered.
+async fn organization_of_path<C: Connection + Clone>(
+    state: &AppState<C>,
+    scope: PathScope,
+) -> Option<Uuid> {
     if let Some(remembered) = state.system_audit_org_cache.get(scope) {
         return remembered;
     }
@@ -404,6 +466,89 @@ mod tests {
             "the second lookup of a known organization read the datastore \
              instead of the cache"
         );
+    }
+
+    thread_local! {
+        /// SR4-3: a gate every organization lookup on this thread waits on, so
+        /// a test can hold the datastore read open and see whether the
+        /// response waits for it.
+        static LOOKUP_GATE: std::cell::RefCell<Option<Arc<tokio::sync::Semaphore>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Wait at the gate, when a test on this thread installed one.
+    pub(super) async fn lookup_gate() {
+        let gate = LOOKUP_GATE.with(|g| g.borrow().clone());
+        if let Some(gate) = gate {
+            let _permit = gate.acquire().await.expect("the test gate is never closed");
+        }
+    }
+
+    /// SR4-3: the organization of a system-partition row is resolved off the
+    /// response path. A token-less request to an organization's routes whose
+    /// organization is not cached gets its response while the lookup is held
+    /// open; once the lookup is released, the row is written and records the
+    /// organization.
+    #[actix_rt::test]
+    async fn the_response_does_not_wait_for_the_organization_lookup() {
+        use actix_web::{App, HttpResponse, test as atest};
+        use axiam_audit::AuditMiddleware;
+        use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+        use axiam_db::SurrealAuditLogRepository;
+
+        let (db, state) = state().await;
+        let org = state
+            .org_repo
+            .create(CreateOrganization {
+                name: "uncached".into(),
+                slug: "uncached".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let audit = SurrealAuditLogRepository::new(db.clone());
+        let app = atest::init_service(
+            App::new()
+                .app_data(state.clone())
+                .wrap(actix_web::middleware::from_fn(
+                    system_audit_organization::<Db, _>,
+                ))
+                .wrap(AuditMiddleware::spawn(audit.clone()))
+                .default_service(web::to(|| async { HttpResponse::Unauthorized().finish() })),
+        )
+        .await;
+
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        LOOKUP_GATE.with(|g| *g.borrow_mut() = Some(Arc::clone(&gate)));
+        let req = atest::TestRequest::get()
+            .uri(&format!("/api/v1/organizations/{}/settings", org.id))
+            .to_request();
+        let served =
+            tokio::time::timeout(Duration::from_secs(2), atest::call_service(&app, req)).await;
+        assert!(
+            served.is_ok(),
+            "the response waited on the organization lookup (SR4-3)"
+        );
+        assert_eq!(served.unwrap().status(), 401);
+
+        gate.add_permits(1);
+        LOOKUP_GATE.with(|g| *g.borrow_mut() = None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let page = audit
+                .list_system(org.id, AuditLogFilter::default(), Pagination::default())
+                .await
+                .unwrap();
+            if let Some(row) = page.items.first() {
+                assert_eq!(row.organization_id, Some(org.id));
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the row never recorded the organization once the lookup was released"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Fill the unresolved map to the cap with distinct invented ids.

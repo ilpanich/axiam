@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_tenant};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::{AuthenticatedUser, ConsoleSignIn};
 use crate::extractors::cert_auth::CertificateAuthenticated;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
@@ -819,11 +819,12 @@ pub async fn refresh<C: Connection + Clone>(
     responses(
         (status = 200, description = "MFA enrollment initiated", body = MfaEnrollResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn enroll_mfa<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // The caller's OWN account, so the tenant is the one the caller lives in,
@@ -849,11 +850,12 @@ pub async fn enroll_mfa<C: Connection + Clone>(
     responses(
         (status = 200, description = "MFA confirmed", body = MfaConfirmResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn confirm_mfa<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<MfaConfirmRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -1374,6 +1376,10 @@ pub async fn me<C: Connection + Clone>(
 /// T-267): the reset is otherwise the one self-service path below the floor
 /// an administrator set. `users:admin` is unaffected — an administrator
 /// resetting a locked-out user is what the endpoint exists for.
+///
+/// **The person's own act (SR4-1).** On the caller's own account a token AXIAM
+/// minted for an OAuth2 client is refused `403`; an administrator acting on
+/// another user keeps accepting one.
 #[utoipa::path(
     post,
     path = "/api/v1/users/{user_id}/reset-mfa",
@@ -1386,10 +1392,12 @@ pub async fn me<C: Connection + Clone>(
         (status = 401, description = "Unauthorized"),
         (
             status = 403,
-            description = "Forbidden — cross-tenant access, or `mfa_enforced`: \
+            description = "Forbidden — cross-tenant access, `mfa_enforced`: \
                            the caller is resetting their own account and their \
                            tenant enforces MFA, so only an administrator may \
-                           reset it"
+                           reset it, or `authorization_denied`: the caller is \
+                           resetting their own account with a token minted for an \
+                           OAuth2 client (a console sign-in is required)"
         ),
         (status = 404, description = "User not found"),
         (status = 500, description = "The reset did not complete: a step (removing the \
@@ -1410,6 +1418,10 @@ pub async fn reset_mfa<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let target_user_id = path.into_inner();
     if is_own_resource(&caller, target_user_id) {
+        // SR4-1 "Own account only": resetting one's own factors is the person's
+        // own act, so a token minted for an OAuth2 client is refused; an
+        // administrator acting on another user (the `else` arm) is not.
+        caller.require_console_sign_in()?;
         // D-1 / T-267. The reset is the one self-service path that takes an
         // account *below* the floor its tenant sets: sessions are revoked, but
         // the next password login hands out a setup token and whoever holds
@@ -1523,6 +1535,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
     responses(
         (status = 204, description = "Password changed; other sessions revoked"),
         (status = 401, description = "Wrong current password or unauthenticated"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
         (status = 422, description = "New password violates policy"),
         (status = 429, description = "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"),
         (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
@@ -1531,7 +1544,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
 )]
 #[allow(clippy::too_many_arguments)] // Actix DI extractors
 pub async fn change_password<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -1579,9 +1592,12 @@ pub async fn change_password<C: Connection + Clone>(
     // G-5 (D-52): the password change revokes the account's other sessions; the
     // `credential-change` and those `session-revoked` events are one cause.
     with_cause(Some(InitiatingEntity::User), async {
+        // SA-06 / N7 (SR4-2): the new OPAQUE record, if any, is written by the
+        // same transaction as the hash, so a concurrent credential write cannot
+        // land between them.
         state
             .auth_service
-            .change_password(
+            .change_password_with_opaque(
                 tenant_id,
                 user.user_id,
                 user.session_id,
@@ -1590,16 +1606,9 @@ pub async fn change_password<C: Connection + Clone>(
                 &settings.password,
                 &state.password_history_repo,
                 Some(&state.http_client),
+                enrolled,
             )
             .await?;
-
-        crate::handlers::opaque_enrollment::store_credential(
-            &state,
-            tenant_id,
-            user.user_id,
-            enrolled,
-        )
-        .await?;
 
         state
             .ssf

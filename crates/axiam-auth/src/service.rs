@@ -1660,6 +1660,40 @@ impl<
         history_repo: &H,
         http_client: Option<&reqwest::Client>, // CQ-B35: pass through to HIBP check
     ) -> AxiamResult<()> {
+        self.change_password_with_opaque(
+            tenant_id,
+            user_id,
+            current_session_id,
+            current_password,
+            new_password,
+            policy,
+            history_repo,
+            http_client,
+            None,
+        )
+        .await
+    }
+
+    /// [`change_password`](Self::change_password) carrying the OPAQUE record
+    /// for the new password.
+    ///
+    /// SA-06 / N7 (SR4-2): the record is written in the same transaction as
+    /// the hash, the credential epoch and the credential version, so no other
+    /// credential write can commit between them. `None` keeps the behaviour of
+    /// a plain change: the hash write retires any existing record.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn change_password_with_opaque<H: PasswordHistoryRepository>(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+        current_password: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        history_repo: &H,
+        http_client: Option<&reqwest::Client>,
+        opaque: Option<crate::opaque::OpaqueEnrolled>,
+    ) -> AxiamResult<()> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
         // 0. G-3 (T23.3.2): a directory account's password belongs to its
@@ -1755,6 +1789,7 @@ impl<
                 user_id,
                 UpdateUser {
                     password_hash: Some(new_hash),
+                    opaque_record: opaque.map(|e| e.into_credential(user_id)),
                     ..Default::default()
                 },
             )

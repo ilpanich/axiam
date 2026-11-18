@@ -276,6 +276,13 @@ of deleted tenants. Since SA-02 (security audit 2026-11-14, N1) it is read
   names none (`/oauth2/token?tenant_id=…`, `/api/v1/users` without a token), one
   naming an organization or tenant that does not exist, an orphaned tenant's
   purge — records none and is returned to **nobody** through this endpoint.
+- The organization of a request entry is looked up **after** the response has
+  been sent, by the audit writer, never while the client waits (review SR4-3):
+  how long a response takes says nothing about whether the organization or
+  tenant its path names exists. An entry the writer could not take at all (its
+  queue full, so the entry went straight to the dead-letter file) is recorded
+  before that lookup and carries no organization; replayed, it is returned to
+  nobody.
 - Entries written **before** this change record no organization, so they are
   no longer returned by this endpoint. They are not modified or deleted (the
   audit log is append-only; nothing is backfilled) and stay in the datastore

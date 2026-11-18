@@ -84,6 +84,45 @@ pub struct AuditOrganization {
     pub org_id: Uuid,
 }
 
+/// The organization of a system-partition request row, **still being looked
+/// up** when the response leaves (SA-02 review SR4-3).
+///
+/// The lookup that decides a row's [`AuditOrganization`] may need a datastore
+/// read, and a response must not wait on one: it would hold token-less
+/// responses on the datastore and let a client time whether the organization
+/// or tenant its path names exists. So the resolver inserts this instead,
+/// starts the lookup on a task of its own, and sends the answer through it.
+/// The middleware carries it beside the row on the channel, and the audit
+/// worker waits for the answer — at most [`PENDING_ORGANIZATION_WAIT`] —
+/// before it appends the row. No answer, or `None`, records no organization.
+///
+/// Read only where [`AuditOrganization`] is: on a row neither a verified token
+/// nor an [`AuditAttribution`] places in a tenant's log, and only when no
+/// [`AuditOrganization`] was inserted. A row the channel refuses goes to the
+/// dead-letter file at once, without waiting, and so without an organization.
+#[derive(Debug)]
+pub struct PendingAuditOrganization(oneshot::Receiver<Option<Uuid>>);
+
+impl PendingAuditOrganization {
+    /// A pending answer, and the sender the lookup answers through. Dropping
+    /// the sender unanswered counts as "no organization".
+    pub fn channel() -> (oneshot::Sender<Option<Uuid>>, Self) {
+        let (tx, rx) = oneshot::channel();
+        (tx, Self(rx))
+    }
+
+    /// The answer, waiting at most `within`.
+    async fn wait(self, within: Duration) -> Option<Uuid> {
+        tokio::time::timeout(within, self.0).await.ok()?.ok()?
+    }
+}
+
+/// The longest the audit worker waits for a [`PendingAuditOrganization`]
+/// before it appends the row without one. One point read; a datastore that
+/// does not answer within this would not take the append either, and the
+/// worker must not stall behind it indefinitely.
+pub const PENDING_ORGANIZATION_WAIT: Duration = Duration::from_secs(5);
+
 /// One audit entry plus the organization it belongs to.
 ///
 /// `CreateAuditLogEntry` carries a tenant but no organization, and the
@@ -168,6 +207,9 @@ enum Queued {
     Event {
         event: AuditEvent,
         occurred_at: DateTime<Utc>,
+        /// The organization of a system-partition row, when it was still being
+        /// looked up as the response left (SR4-3).
+        pending_organization: Option<PendingAuditOrganization>,
     },
     Barrier(oneshot::Sender<()>),
 }
@@ -309,6 +351,7 @@ impl AuditMiddleware {
                     org_id: Uuid::nil(),
                 },
                 occurred_at: Utc::now(),
+                pending_organization: None,
             };
             // Another sender may have taken the last free slots since the
             // check; that refusal is shed like the others.
@@ -403,7 +446,10 @@ fn offer(tx: &mpsc::Sender<Queued>, loss: &RequestAuditLoss, queued: Queued) -> 
         TrySendError::Full(q) => (DeadLetterReason::ChannelFull, q),
         TrySendError::Closed(q) => (DeadLetterReason::ChannelClosed, q),
     };
-    if let Queued::Event { event, occurred_at } = queued {
+    if let Queued::Event {
+        event, occurred_at, ..
+    } = queued
+    {
         loss.record_dropped(event.entry, occurred_at, reason);
     }
     false
@@ -420,7 +466,23 @@ async fn audit_worker<A: AuditLogRepository>(
     let mut last_drop_report: Option<Instant> = None;
     while let Some(queued) = rx.recv().await {
         let (event, occurred_at) = match queued {
-            Queued::Event { event, occurred_at } => (event, occurred_at),
+            Queued::Event {
+                event,
+                occurred_at,
+                pending_organization,
+            } => {
+                let mut event = event;
+                // SR4-3: the organization the resolver was still looking up
+                // when the response left. Waited for here, off the response
+                // path; only a system-partition row that names none yet takes it.
+                if let Some(pending) = pending_organization {
+                    let organization = pending.wait(PENDING_ORGANIZATION_WAIT).await;
+                    if event.entry.tenant_id.is_nil() && event.entry.organization_id.is_none() {
+                        event.entry.organization_id = organization;
+                    }
+                }
+                (event, occurred_at)
+            }
             Queued::Barrier(reached) => {
                 // Everything queued before the barrier has been appended (or
                 // failed and been logged). The caller may have given up.
@@ -598,21 +660,22 @@ where
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let (status, result, attribution, verdict, system_org) = match fut.await {
+            let (status, result, attribution, verdict, system_org, pending_org) = match fut.await {
                 Ok(res) => {
                     let s = res.status().as_u16();
-                    let extensions = res.request().extensions();
+                    let mut extensions = res.request().extensions_mut();
                     let attribution = extensions.get::<AuditAttribution>().copied();
                     let verdict = extensions
                         .get::<axiam_auth::carrier::AuthVerdict>()
                         .copied();
                     let system_org = extensions.get::<AuditOrganization>().copied();
+                    let pending_org = extensions.remove::<PendingAuditOrganization>();
                     drop(extensions);
-                    (s, Ok(res), attribution, verdict, system_org)
+                    (s, Ok(res), attribution, verdict, system_org, pending_org)
                 }
                 Err(err) => {
                     let s = err.as_response_error().status_code().as_u16();
-                    (s, Err(err), None, None, None)
+                    (s, Err(err), None, None, None, None)
                 }
             };
 
@@ -639,7 +702,12 @@ where
                 user_info.is_some() && verdict != Some(axiam_auth::carrier::AuthVerdict::Refused);
             // The organization of a system-partition row (SA-02, N1): only a
             // row neither the token nor an attribution places in a tenant's
-            // log records one, and only as `AuditOrganization` resolved it.
+            // log records one, and only as `AuditOrganization` resolved it —
+            // or, still being looked up, as the worker will receive it
+            // through the `PendingAuditOrganization` (SR4-3).
+            let system_partition = user_info.is_none() && attribution.is_none();
+            let pending_organization =
+                pending_org.filter(|_| system_partition && system_org.is_none());
             let (actor_id, tenant_id, org_id, actor_type, organization_id) = match user_info {
                 Some((uid, tid, oid, kind)) => (uid, tid, oid, kind, None),
                 None => match attribution {
@@ -689,6 +757,7 @@ where
                 Queued::Event {
                     event: AuditEvent { entry, org_id },
                     occurred_at,
+                    pending_organization,
                 },
             );
 

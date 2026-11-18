@@ -83,16 +83,17 @@ export const auditService = {
       .then((r) => r.data),
 
   /**
-   * `GET /api/v1/audit-logs/system` — entries recorded for unauthenticated and
-   * system requests, which carry the nil tenant id and therefore never appear
-   * in the tenant-scoped list above.
+   * `GET /api/v1/audit-logs/system` — the system-partition entries (nil tenant
+   * id, so never in the tenant-scoped list above) that record the caller's
+   * organization (SA-02): SCIM provisioning calls, requests to the
+   * organization's own routes without a usable token, and its deleted and
+   * purged tenants.
    *
-   * This is where failed logins against a non-existent account, bootstrap, and
-   * anything else that happened before a tenant was known end up — so it is
-   * the half of the trail an operator investigating an intrusion actually
-   * wants. Gated on `audit_logs:list_system` and an organization-level caller,
-   * and limited to the entries that record the caller's organization (SA-02):
-   * entries written before that rule record none and are not returned.
+   * Gated on `audit_logs:list_system` and an organization-level caller. Entries
+   * written before that rule, and requests that name no organization (a
+   * bootstrap call, a login naming an unknown organization), record none and
+   * are returned to nobody. See `docs/admin/README.md`, "Who reads the system
+   * audit log".
    */
   listSystem: (filters: AuditFilters = {}): Promise<PaginatedAuditLogs> =>
     api

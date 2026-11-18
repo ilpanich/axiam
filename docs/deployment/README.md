@@ -2403,7 +2403,7 @@ source docker/.secrets/minimal-credentials.env   # the datastore credentials
 # a distroless image has no shell, so read the volume rather than the container:
 docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
 
-jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
+jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), organization_id = \($e.organization_id // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
     gdpr-audit-dlq.jsonl \
   | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
       --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
@@ -2435,7 +2435,12 @@ recoverable: the recipe carries the line's `occurred_at` and `reason` into the
 row's `metadata` as `occurred_at` and `dead_lettered_reason`, so the trail can
 be read in the order things happened (a line from before 1.0.1 has neither, and
 its replayed row carries neither; the `axiam.audit.dlq` log event then dates a
-GDPR record, so keep the log with the file). Like every audit row, it can
+GDPR record, so keep the log with the file). A system-partition line (nil
+`tenant_id`) may carry `organization_id` — a `tenants.deleted` or
+`tenants.purged` record, or a request row whose organization was resolved — and
+the recipe writes it back, so `GET /api/v1/audit-logs/system` returns the
+replayed row to that organization; a line without one replays with none and is
+returned to nobody, exactly as it would have been written. Like every audit row, it can
 neither be updated nor deleted afterwards, so **replay each line once**. Note how many lines you
 replayed (`wc -l gdpr-audit-dlq.jsonl`) and start the next replay after them
 (`tail -n +N`). Do not rename or delete the file while the server runs: the

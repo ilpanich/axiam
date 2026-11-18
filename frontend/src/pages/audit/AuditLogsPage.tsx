@@ -153,7 +153,7 @@ function ScopeSwitch({
     {
       id: "system",
       label: "System",
-      hint: "Unauthenticated and system requests — failed logins against unknown accounts, bootstrap, and anything else recorded before a tenant was known.",
+      hint: "System entries recorded for your organization — SCIM provisioning calls, requests to your organization's routes without a usable token, and deleted or purged tenants. Entries from before the upgrade, and requests that name no organization, are not shown.",
     },
   ];
 
@@ -503,7 +503,7 @@ export function AuditLogsPage() {
         title="Audit Logs"
         description={
           scope === "system"
-            ? "Append-only record of unauthenticated and system requests, which carry no tenant."
+            ? "Append-only record of the system entries recorded for your organization, which carry no tenant. Entries from before the upgrade and requests that name no organization are not shown."
             : "Append-only record of all actions performed in this tenant."
         }
       />

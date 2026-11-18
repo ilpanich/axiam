@@ -5,7 +5,7 @@
 //! secret) can be provided at construction time via `with_pepper`.
 
 use axiam_auth::password;
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::email_verification::EmailVerificationRedemption;
 use axiam_core::models::user::{
@@ -705,6 +705,20 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             || input.email.is_some()
             || input.status.is_some()
             || input.metadata.is_some();
+        if let Some(record) = &input.opaque_record {
+            if !input.password_hash.is_some() {
+                return Err(AxiamError::Validation {
+                    message: "an OPAQUE record can only be written together with the \
+                              password hash it answers to"
+                        .into(),
+                });
+            }
+            if record.tenant_id != tenant_id || record.user_id != id {
+                return Err(AxiamError::Validation {
+                    message: "the OPAQUE record belongs to a different user".into(),
+                });
+            }
+        }
         let updated = crate::helpers::retry_on_write_conflict(|| async {
             let input = input.clone();
             let id_str = id.to_string();
@@ -800,12 +814,17 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             // record in the same transaction. The record is a verifier for the
             // *previous* password; leaving it behind under `opaque_mode=optional`
             // lets that password keep authenticating on the OPAQUE endpoint after
-            // a reset or change that supplied no new record. A caller that does
-            // enrol a new record writes it afterwards (an `upsert`), so a fresh
-            // record is never the one deleted. Living here, it covers every
-            // writer of the hash — reset, self-service change, SCIM — rather than
-            // each handler remembering to.
+            // a reset or change that supplied no new record. Living here, it
+            // covers every writer of the hash — reset, self-service change,
+            // SCIM — rather than each handler remembering to.
+            //
+            // SR4-2: a writer that DOES supply a new record (`opaque_record`)
+            // has it replace the old one in this same transaction, so the hash,
+            // the record, the epoch and the version come from one write. Storing
+            // it afterwards let a concurrent writer's hash commit in between and
+            // sit next to this writer's record.
             let rotates_hash = input.password_hash.is_some();
+            let writes_record = input.opaque_record.is_some();
             let email_changes = input.email.is_some();
             let (query, update_slot) = if email_changes || rotates_hash {
                 let mut q = String::from("BEGIN TRANSACTION; ");
@@ -836,6 +855,23 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                          WHERE tenant_id = $tenant_id AND user_id = $id; ",
                     );
                 }
+                if writes_record {
+                    q.push_str(
+                        "CREATE type::record('opaque_credential', $opaque_row_id) SET \
+                         tenant_id = $tenant_id, \
+                         user_id = $id, \
+                         credential_identifier = $opaque_credential_identifier, \
+                         suite = $opaque_suite, \
+                         ksf = $opaque_ksf, \
+                         ksf_memory_kib = $opaque_ksf_memory_kib, \
+                         ksf_iterations = $opaque_ksf_iterations, \
+                         ksf_parallelism = $opaque_ksf_parallelism, \
+                         ksf_log_n = $opaque_ksf_log_n, \
+                         ksf_r = $opaque_ksf_r, \
+                         ksf_p = $opaque_ksf_p, \
+                         record = $opaque_record; ",
+                    );
+                }
                 q.push_str("COMMIT TRANSACTION");
                 (q, slot)
             } else {
@@ -858,6 +894,22 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 builder = builder
                     .bind(("password_hash", password_hash))
                     .bind(("credential_epoch", Utc::now()));
+            }
+            if let Some(record) = input.opaque_record {
+                let (memory_kib, iterations, parallelism, log_n, r, p) =
+                    crate::repository::opaque_credential::ksf_columns(record.ksf_params);
+                builder = builder
+                    .bind(("opaque_row_id", new_id().to_string()))
+                    .bind(("opaque_credential_identifier", record.credential_identifier))
+                    .bind(("opaque_suite", record.suite.to_string()))
+                    .bind(("opaque_ksf", record.ksf_params.ksf().to_string()))
+                    .bind(("opaque_ksf_memory_kib", memory_kib))
+                    .bind(("opaque_ksf_iterations", iterations))
+                    .bind(("opaque_ksf_parallelism", parallelism))
+                    .bind(("opaque_ksf_log_n", log_n))
+                    .bind(("opaque_ksf_r", r))
+                    .bind(("opaque_ksf_p", p))
+                    .bind(("opaque_record", record.record));
             }
             if let Some(ref status) = input.status {
                 builder = builder.bind(("status", status_to_string(status).to_string()));

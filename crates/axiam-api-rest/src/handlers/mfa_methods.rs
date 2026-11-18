@@ -87,6 +87,10 @@ pub async fn list_mfa_methods<C: Connection + Clone>(
 
 /// `DELETE /api/v1/users/{user_id}/mfa-methods/{method_id}`
 ///
+/// **The person's own act (SR4-1).** On the caller's OWN account a token AXIAM
+/// minted for an OAuth2 client is refused `403` (a console sign-in is required);
+/// an administrator with `users:admin` acting on another user is not.
+///
 /// Remove a specific MFA method. Returns 400 if it is the last
 /// method and MFA is enabled.
 #[utoipa::path(
@@ -103,7 +107,7 @@ pub async fn list_mfa_methods<C: Connection + Clone>(
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "Method not found"),
         (status = 400, description = "Cannot remove last MFA method"),
-        (status = 403, description = "Cannot delete another user's MFA methods"),
+        (status = 403, description = "Cannot delete another user's MFA methods, or `authorization_denied`: a console sign-in is required and the caller is acting on their own account with a token minted for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
@@ -115,7 +119,9 @@ pub async fn delete_mfa_method<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let (user_id, method_id) = path.into_inner();
 
-    if !is_own_resource(&caller, user_id) {
+    if is_own_resource(&caller, user_id) {
+        caller.require_console_sign_in()?;
+    } else {
         RequirePermission::new("users:admin", Uuid::nil())
             .check(&caller, authz.get_ref().as_ref())
             .await?;

@@ -315,10 +315,14 @@ jobs:
       #     client-secret ES256 reachable from the public OIDC callback, now signs with ring
       #     (crates/axiam-federation/src/apple.rs). Every other use is public-key only. Full
       #     reachability note in deny.toml. Drop when elliptic-curve 0.13 leaves the graph.
+      #   RUSTSEC-2026-0542 / RUSTSEC-2026-0543 — humantime 2.4.0 and chrono 0.4.45 are
+      #     unmaintained (no CVE, no successor release). humantime is transitive via SurrealDB;
+      #     chrono is a direct dependency of every crate. cargo-audit only warns on these, but
+      #     cargo-deny fails, so both lists carry them. Reasons and review date: deny.toml.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387,RUSTSEC-2026-0542,RUSTSEC-2026-0543
 
       # axiam-opaque-wasm is outside the workspace and carries its own
       # lockfile, which the step above never reads. That lockfile is what

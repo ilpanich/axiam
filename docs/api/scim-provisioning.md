@@ -166,6 +166,13 @@ carries no password (including a `POST` that omits it). In a `required` tenant
 the user sets a password through the self-service change or reset flow, which
 enrols a fresh record.
 
+**Own-account writes need a first-party sign-in.** A token minted for an OAuth2
+client (an access token carrying a `client_id` claim, such as the one a relying
+party holds for its user) gets `403` on `PUT`, `PATCH` or `DELETE` of the
+caller's own `/scim/v2/Users/{id}`, before anything is read or written; these
+are the person's own acts, as on `PUT /api/v1/users/{user_id}`. Provisioning
+tokens, and administrators acting on other users, are unaffected.
+
 **Deprovisioning is immediate.** A SCIM `password` write, an `active: false`
 (via `PUT` or `PATCH`), and `DELETE /scim/v2/Users/{id}` each revoke every
 live session **and** every OAuth2 refresh token the target holds, in addition

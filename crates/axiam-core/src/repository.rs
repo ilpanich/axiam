@@ -1240,6 +1240,28 @@ pub trait ServiceAccountRepository: Send + Sync {
 
 pub trait SessionRepository: Send + Sync {
     fn create(&self, input: CreateSession) -> impl Future<Output = AxiamResult<Session>> + Send;
+    /// SA-06 (N7, SR10-1): [`Self::create`] for a sign-in that has just
+    /// verified a credential, refused when that credential has since changed.
+    ///
+    /// `expected_credential_version` is the [`User::credential_version`] read
+    /// together with the credential that was verified. The user's stored
+    /// version (absent counts as 0) is compared with it **in the same
+    /// transaction as the write**, so a password reset or change that commits
+    /// between the verification and this call cannot be survived by the
+    /// session: nothing is created (and a session row is also the refresh
+    /// token, so no refresh token exists either).
+    ///
+    /// A mismatch is answered `AxiamError::AuthenticationFailed` with the
+    /// reason `"invalid credentials"`, exactly what a wrong password gets, so
+    /// the refusal discloses nothing new. No implementation may fall back to a
+    /// check-then-create: that is the race this method exists to close.
+    ///
+    /// [`User::credential_version`]: crate::models::user::User::credential_version
+    fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> impl Future<Output = AxiamResult<Session>> + Send;
     fn get_by_id(
         &self,
         tenant_id: Uuid,

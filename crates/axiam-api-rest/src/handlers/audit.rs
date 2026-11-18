@@ -58,8 +58,11 @@ pub async fn list<C: Connection + Clone>(
 /// written before the field existed among them, is returned to nobody.
 ///
 /// Organization-level: requires `audit_logs:list_system` and a caller whose
-/// own record lives in the organization's scope tenant; a tenant
-/// administrator is refused `403` whatever its role holds.
+/// own record lives in the organization's scope tenant and whose role
+/// assignments are not restricted to particular tenants. A tenant
+/// administrator is refused `403` whatever its role holds, and so is an
+/// organization-level principal whose roles name particular tenants: the
+/// partition belongs to the organization as a whole.
 #[utoipa::path(
     get,
     path = "/api/v1/audit-logs/system",
@@ -69,8 +72,9 @@ pub async fn list<C: Connection + Clone>(
         (status = 200, description = "Paginated system audit log entries of the caller's \
                                       organization",
          body = inline(PaginatedResult<AuditLogEntry>)),
-        (status = 403, description = "The caller is not an organization-level principal, or \
-                                      lacks `audit_logs:list_system`"),
+        (status = 403, description = "The caller is not an organization-level principal, is \
+                                      one whose role assignments are restricted to particular \
+                                      tenants, or lacks `audit_logs:list_system`"),
     ),
     security(("bearer" = []))
 )]

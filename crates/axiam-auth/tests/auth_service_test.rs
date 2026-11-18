@@ -480,6 +480,15 @@ impl SessionRepository for FlakySessionRepo {
     async fn create(&self, input: CreateSession) -> AxiamResult<Session> {
         self.inner.create(input).await
     }
+    async fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> AxiamResult<Session> {
+        self.inner
+            .create_if_credential_version(input, expected_credential_version)
+            .await
+    }
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {
         self.inner.get_by_id(tenant_id, id).await
     }
@@ -2938,6 +2947,7 @@ async fn d10_a_far_future_upstream_instant_is_stored_as_the_verification_instant
             None,
             None,
             AuthenticationEvidence::upstream(Some(far_future), verified_at, vec![Amr::Fed]),
+            None,
         )
         .await
         .unwrap();
@@ -2982,6 +2992,7 @@ async fn x7_2_create_session_and_tokens_stores_the_evidence_given_and_only_a_dig
             None,
             None,
             AuthenticationEvidence::upstream(Some(nine_hours_ago), Utc::now(), vec![Amr::Fed]),
+            None,
         )
         .await
         .unwrap();
@@ -3770,4 +3781,192 @@ async fn qr2_6_a_setup_token_issued_after_the_epoch_in_the_same_second_is_accept
     };
     set_alices_epoch(&db, user_id, before).await;
     assert!(svc.decode_setup_token(&setup_token).await.is_err());
+}
+
+// -----------------------------------------------------------------------
+// SA-06 (N7, SR10-1) — the session write checks the credential version
+// -----------------------------------------------------------------------
+//
+// A sign-in that verified the old credential and reaches the session write
+// after a reset or change must not leave a live session and refresh token
+// behind. The version read with the credential is carried into the session
+// write, which refuses inside its own transaction when it is no longer the
+// user's.
+
+/// A password write between the credential read and the session write
+/// (what a reset or change does) leaves no session behind, and the sign-in is
+/// answered as a wrong password is.
+#[tokio::test]
+async fn sr10_1_a_credential_change_after_the_read_leaves_no_session() {
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+
+    // The snapshot a login holds after it verified the (old) password.
+    let snapshot = users.get_by_id(tenant_id, user_id).await.unwrap();
+
+    // The reset lands: new hash, version bumped in the same write.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$replaced".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = svc
+        .complete_authenticated_login(snapshot, tenant_id, org_id, None, None, None)
+        .await
+        .expect_err("a sign-in built on a superseded credential must not mint a session");
+    assert!(
+        matches!(err, AxiamError::AuthenticationFailed { ref reason } if reason == "invalid credentials"),
+        "answered exactly like a wrong password, got {err:?}"
+    );
+    assert!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no session (and so no refresh token) may exist"
+    );
+}
+
+/// Control: an undisturbed sign-in still creates its session.
+#[tokio::test]
+async fn sr10_1_an_undisturbed_sign_in_still_creates_its_session() {
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    // A user whose version has moved before the read is still current.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$replaced".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let snapshot = users.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(snapshot.credential_version > 0);
+
+    let out = svc
+        .complete_authenticated_login(snapshot, tenant_id, org_id, None, None, None)
+        .await
+        .unwrap();
+    assert!(matches!(out, LoginResult::Success(_)));
+    assert_eq!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// The choke point itself: a stale carried version refuses, a current one (and
+/// `None`, for a federated sign-in) is admitted.
+#[tokio::test]
+async fn sr10_1_create_session_and_tokens_refuses_only_a_stale_version() {
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+    use axiam_core::repository::SessionRepository;
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let sessions = session_repo.clone();
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let stale = users
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_version;
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$replaced".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let current = users
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_version;
+    assert_ne!(stale, current);
+
+    let mint = |v: Option<i64>| {
+        svc.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::now(vec![Amr::Pwd]),
+            v,
+        )
+    };
+    let err = mint(Some(stale)).await.expect_err("stale version");
+    assert!(
+        matches!(err, AxiamError::AuthenticationFailed { ref reason } if reason == "invalid credentials"),
+        "{err:?}"
+    );
+    assert!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    mint(Some(current)).await.expect("current version");
+    mint(None).await.expect("no AXIAM credential carried");
+    assert_eq!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }

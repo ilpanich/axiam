@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.3.1",
-    "x-axiam-spec-digest": "sha256:aa8b58ca8024390fff676f730385d1bd69dd68dadad1ea870ce38d63e80a1794"
+    "x-axiam-spec-digest": "sha256:4bd36f1b498b848dea57991f766bc89871ea223edc9dd8a34bee2fbc275b0a55"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -750,7 +750,7 @@
           "audit"
         ],
         "summary": "`GET /api/v1/audit-logs/system`",
-        "description": "Returns audit entries for unauthenticated/system requests (nil tenant_id).\n\nOf the caller's organization only (SA-02, N1): the partition is\ndeployment-wide, and this returns the entries whose recorded\n`organization_id` is the caller's own. The server records one on a new\nentry only where it resolved it with certainty — a deleted tenant's\norganization, a verified SCIM token's tenant's, an organization or tenant\nthe request's path names and that exists. An entry with none, every entry\nwritten before the field existed among them, is returned to nobody.\n\nOrganization-level: requires `audit_logs:list_system` and a caller whose\nown record lives in the organization's scope tenant; a tenant\nadministrator is refused `403` whatever its role holds.",
+        "description": "Returns audit entries for unauthenticated/system requests (nil tenant_id).\n\nOf the caller's organization only (SA-02, N1): the partition is\ndeployment-wide, and this returns the entries whose recorded\n`organization_id` is the caller's own. The server records one on a new\nentry only where it resolved it with certainty — a deleted tenant's\norganization, a verified SCIM token's tenant's, an organization or tenant\nthe request's path names and that exists. An entry with none, every entry\nwritten before the field existed among them, is returned to nobody.\n\nOrganization-level: requires `audit_logs:list_system` and a caller whose\nown record lives in the organization's scope tenant and whose role\nassignments are not restricted to particular tenants. A tenant\nadministrator is refused `403` whatever its role holds, and so is an\norganization-level principal whose roles name particular tenants: the\npartition belongs to the organization as a whole.",
         "operationId": "list_system",
         "parameters": [
           {
@@ -961,7 +961,7 @@
             }
           },
           "403": {
-            "description": "The caller is not an organization-level principal, or lacks `audit_logs:list_system`"
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `audit_logs:list_system`"
           }
         },
         "security": [
@@ -7088,7 +7088,7 @@
             }
           },
           "403": {
-            "description": "The caller is not an organization-level principal, or lacks `email_config:read`"
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `email_config:read`"
           },
           "404": {
             "description": "No email configuration set for this organization"
@@ -7143,7 +7143,7 @@
             "description": "Validation error, or the outbound address policy refuses the provider's host"
           },
           "403": {
-            "description": "The caller is not an organization-level principal, or lacks `email_config:write`"
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `email_config:write`"
           }
         },
         "security": [
@@ -7175,7 +7175,7 @@
             "description": "Organization email configuration deleted"
           },
           "403": {
-            "description": "The caller is not an organization-level principal, or lacks `email_config:write`"
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `email_config:write`"
           }
         },
         "security": [
@@ -7263,7 +7263,7 @@
             }
           },
           "403": {
-            "description": "The caller is not an organization-level principal, or lacks `organizations:get_settings`"
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `organizations:get_settings`"
           }
         },
         "security": [
@@ -7315,7 +7315,7 @@
             "description": "Settings are internally inconsistent, enable OPAQUE on a server holding no OPAQUE keys, or turn ssf_enabled on while the deployment holds more than one tenant and serves no per-tenant issuers (D-55)"
           },
           "403": {
-            "description": "The caller is not an organization-level principal, or lacks `organizations:update_settings`"
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `organizations:update_settings`"
           },
           "409": {
             "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory); or a tenant's directory or opaque_mode changed after this request read them, so nothing was written — reload and retry"

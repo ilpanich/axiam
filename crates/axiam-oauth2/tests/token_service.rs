@@ -915,6 +915,13 @@ impl axiam_core::repository::SessionRepository for MockSessionRepo {
     ) -> AxiamResult<axiam_core::models::session::Session> {
         unimplemented!()
     }
+    async fn create_if_credential_version(
+        &self,
+        _input: axiam_core::models::session::CreateSession,
+        _expected_credential_version: i64,
+    ) -> AxiamResult<axiam_core::models::session::Session> {
+        unimplemented!()
+    }
     async fn get_by_id(
         &self,
         _tenant_id: Uuid,

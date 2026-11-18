@@ -2325,6 +2325,9 @@ pub(crate) async fn issue_sso_session<C: Connection + Clone>(
             // the only one a handoff redemption — a minute after the assertion
             // — would otherwise lack.
             AuthenticationEvidence::upstream(upstream_auth_time, Utc::now(), vec![Amr::Fed]),
+            // SR10-1: no AXIAM credential was verified here — the upstream
+            // provider's assertion was — so there is no version to carry.
+            None,
         )
         .await?;
 

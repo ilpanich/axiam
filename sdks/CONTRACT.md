@@ -8676,7 +8676,9 @@ operations admit
 ([§34.11](#§3411-contract-167--security-audit-2026-11-14-wave-1-status-changes-one-additive-response-member)): five
 `privacy` operations (`request_export`, `download_export`, `request_delete`,
 `grant_scope_consent`, `withdraw_scope_consent`) refuse a token minted for an OAuth2 client with
-`403`, as `users.delete_mfa_method` and `users.reset_mfa` do on the caller's own account;
+`403`, as `users.delete_mfa_method`, `users.reset_mfa`, `users.update` and `users.delete` do
+only on the caller's own account (an administrator acting on another user is unaffected), and as
+the SCIM user `PUT`, `PATCH` and `DELETE` do on the caller's own `/scim/v2/Users/{id}`;
 `audit.list_system`, `settings.get_org`, `settings.set_org`, `email_config.get_org`,
 `tenants.get`, `tenants.export_audit` and `ca_certificates.list_signing_cas` (another tenant's)
 refuse a tenant-level caller with `403`; and `audit.list_system` returns only the caller's
@@ -14469,7 +14471,10 @@ one's own id) check the session first: a token whose session has been revoked ge
   own record lives in the organization's scope tenant, §5.2.1), whatever permissions its roles
   grant; a tenant administrator holding the action is refused too:
   - `audit.list_system`, `settings.get_org`, `settings.set_org` and `email_config.get_org` (the
-    other three `email_config.*_org` operations already required it);
+    other three `email_config.*_org` operations already required it). These four also refuse
+    an organization-level principal whose role assignments are restricted to particular tenants
+    of the organization, since each acts on the organization as a whole: a status change for
+    that caller too, which before 1.67 got `200`;
   - `tenants.get` and `tenants.export_audit`, which also refuse an organization-level caller whose
     reach does not cover the tenant;
   - `ca_certificates.list_signing_cas` for a tenant other than the caller's own.

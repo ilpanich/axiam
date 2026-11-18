@@ -1105,6 +1105,9 @@ pub async fn finish_discoverable_authentication<C: Connection + Clone>(
             user_agent(&req),
             // X7.2 — see `discoverable_authentication_amr`.
             AuthenticationEvidence::now(discoverable_authentication_amr()),
+            // SR10-1: the version of the user row read after the assertion
+            // verified; the session write refuses if a reset moved it since.
+            Some(user.credential_version),
         )
         .await?;
 
@@ -1146,7 +1149,7 @@ pub async fn finish_authentication<C: Connection + Clone>(
 
     // SA-06 (SR2-1): refuses a ceremony whose challenge predates a credential
     // change, with the answer an invalid state token gets, then finishes it.
-    let (user_id, org_id) = state
+    let (user_id, org_id, credential_version) = state
         .auth_service
         .finish_webauthn_authentication(
             &state.webauthn.webauthn_service,
@@ -1166,6 +1169,8 @@ pub async fn finish_authentication<C: Connection + Clone>(
             user_agent(&req),
             // X7.2 — see `authentication_amr`.
             AuthenticationEvidence::now(authentication_amr()),
+            // SR10-1: the version the ceremony was bound to and checked.
+            Some(credential_version),
         )
         .await?;
 

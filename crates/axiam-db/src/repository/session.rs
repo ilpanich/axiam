@@ -1,6 +1,6 @@
 //! SurrealDB implementation of [`SessionRepository`].
 
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::session::{Amr, CreateSession, Session, SessionLineage};
 use axiam_core::models::ssf::SessionRevocationSink;
@@ -541,16 +541,24 @@ impl<C: Connection> SurrealSessionRepository<C> {
     }
 }
 
-impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
-    async fn create(&self, input: CreateSession) -> AxiamResult<Session> {
+/// Marker the version-checked session write throws with; matched on the
+/// error text because the datastore reports a `THROW` only as a message.
+const CREDENTIAL_VERSION_MOVED: &str = "credential version moved";
+
+impl<C: Connection> SurrealSessionRepository<C> {
+    /// The one session write. With `expected_credential_version` it runs as a
+    /// transaction that first compares the user's stored version (absent = 0)
+    /// with it and `THROW`s on a mismatch, so nothing is created; the refusal
+    /// is `invalid credentials`, the answer a wrong password gets (SR10-1).
+    async fn create_checked(
+        &self,
+        input: CreateSession,
+        expected_credential_version: Option<i64>,
+    ) -> AxiamResult<Session> {
         let id = new_id();
         let id_str = id.to_string();
 
-        let result = self
-            .db
-            .current()
-            .query(
-                "CREATE type::record('session', $id) SET \
+        const CREATE: &str = "CREATE type::record('session', $id) SET \
                  tenant_id = $tenant_id, \
                  user_id = $user_id, \
                  token_hash = $token_hash, \
@@ -560,8 +568,28 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
                  authenticated_at = $authenticated_at, \
                  amr = $amr, \
                  browser_token_hash = $browser_token_hash, \
-                 lineage_id = $lineage_id",
+                 lineage_id = $lineage_id";
+        // BEGIN=0, LET=1, IF/THROW=2, CREATE=3.
+        let (statement, slot) = if expected_credential_version.is_some() {
+            (
+                format!(
+                    "BEGIN TRANSACTION; \
+                     LET $stored_cv = (SELECT VALUE credential_version FROM \
+                         type::record('user', $user_id) \
+                         WHERE tenant_id = $tenant_id)[0] ?? 0; \
+                     IF $stored_cv != $expected_cv {{ THROW '{CREDENTIAL_VERSION_MOVED}'; }}; \
+                     {CREATE}; \
+                     COMMIT TRANSACTION"
+                ),
+                3,
             )
+        } else {
+            (CREATE.to_string(), 0)
+        };
+
+        let db = self.db.current();
+        let mut query = db
+            .query(statement)
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("user_id", input.user_id.to_string()))
@@ -586,18 +614,49 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .bind((
                 "lineage_id",
                 input.lineage_id.unwrap_or(id).to_string(),
-            ))
-            .await
-            .map_err(DbError::from)?;
+            ));
+        if let Some(expected) = expected_credential_version {
+            query = query.bind(("expected_cv", expected));
+        }
+        let mut result = query.await.map_err(DbError::from)?;
 
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
+        // A `THROW` is reported on its own statement; the ones after it say
+        // only "not executed due to a failed transaction", which is what
+        // `check()` would surface first. So every error is read.
+        let errors = result.take_errors();
+        if !errors.is_empty() {
+            let combined = errors
+                .into_values()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if combined.contains(CREDENTIAL_VERSION_MOVED) {
+                return Err(AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                });
+            }
+            return Err(DbError::Migration(combined).into());
+        }
 
-        let rows: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        let rows: Vec<SessionRow> = result.take(slot).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "session", &id_str)?;
 
         row_to_session(row, id).map_err(Into::into)
+    }
+}
+
+impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
+    async fn create(&self, input: CreateSession) -> AxiamResult<Session> {
+        self.create_checked(input, None).await
+    }
+
+    async fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> AxiamResult<Session> {
+        self.create_checked(input, Some(expected_credential_version))
+            .await
     }
 
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {

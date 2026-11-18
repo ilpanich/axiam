@@ -797,6 +797,9 @@ impl<
                 // A password and nothing else: this branch is reached only
                 // when no second factor was required (RFC 8176 `pwd`).
                 AuthenticationEvidence::now(vec![Amr::Pwd]),
+                // SR10-1: the version read with the credential that was just
+                // verified (the `user` snapshot), checked by the session write.
+                Some(user.credential_version),
             )
             .await?;
 
@@ -1064,6 +1067,9 @@ impl<
             // `mfa` is recorded alongside the two factors, as RFC 8176 §2
             // intends, rather than instead of them.
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
+            // SR10-1: the version of the user row read above, which the
+            // challenge was just checked against.
+            Some(user.credential_version),
         )
         .await
     }
@@ -1135,7 +1141,8 @@ impl<
     /// The WebAuthn second-factor finish: refuse a ceremony whose challenge
     /// predates the user's last credential change, then verify the assertion
     /// ([`WebauthnService::finish_authentication`]). Returns the
-    /// authenticated `(user_id, org_id)`.
+    /// authenticated `(user_id, org_id, credential_version)`; the version is
+    /// the one [`Self::create_session_and_tokens`] must be given (SR10-1).
     ///
     /// `start_authentication` checks the credential epoch when the ceremony
     /// starts; the state token it mints lives
@@ -1151,7 +1158,7 @@ impl<
         tenant_id: Uuid,
         state_token: &str,
         response: &PublicKeyCredential,
-    ) -> AxiamResult<(Uuid, Uuid)> {
+    ) -> AxiamResult<(Uuid, Uuid, i64)> {
         let (user_id, state_tenant_id, issued) =
             webauthn.authentication_state_issue(state_token)?;
         if state_tenant_id != tenant_id {
@@ -1165,9 +1172,14 @@ impl<
         if user.credential_superseded(issued.iat, issued.iat_ns, issued.credential_version) {
             return Err(AuthError::WebauthnStateInvalid.into());
         }
-        webauthn
+        // SR10-1: the version the ceremony was bound to when the state token
+        // carries one, else the one just read (equal when both exist: the
+        // check above refused any other). Handed to the session write.
+        let credential_version = issued.credential_version.unwrap_or(user.credential_version);
+        let (user_id, org_id) = webauthn
             .finish_authentication(tenant_id, state_token, response)
-            .await
+            .await?;
+        Ok((user_id, org_id, credential_version))
     }
 
     /// Start MFA enrollment for a user (step 1 of 2).
@@ -1819,7 +1831,7 @@ impl<
         &self,
         setup_token: &str,
     ) -> AxiamResult<EnrollMfaOutput> {
-        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token).await?;
+        let (user_id, tenant_id, _org_id, _cv) = self.decode_mfa_setup_token(setup_token).await?;
 
         // Guard: if MFA is already configured, reject.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
@@ -1842,7 +1854,7 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token).await?;
+        let (user_id, tenant_id, _org_id, _cv) = self.decode_mfa_setup_token(setup_token).await?;
 
         // Confirm MFA (validates code, flips mfa_enabled to true).
         self.confirm_mfa(tenant_id, user_id, totp_code).await?;
@@ -1894,9 +1906,20 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, org_id) = self.decode_mfa_setup_token(setup_token).await?;
-        self.create_session_and_tokens(user_id, tenant_id, org_id, ip_address, user_agent, evidence)
-            .await
+        let (user_id, tenant_id, org_id, credential_version) =
+            self.decode_mfa_setup_token(setup_token).await?;
+        // SR10-1: the version of the user row read while the setup token was
+        // checked, so a credential change after that read refuses the session.
+        self.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            ip_address,
+            user_agent,
+            evidence,
+            Some(credential_version),
+        )
+        .await
     }
 
     /// Decode a setup token for a caller that is about to enrol the account's
@@ -1916,6 +1939,7 @@ impl<
     pub async fn decode_setup_token(&self, setup_token: &str) -> AxiamResult<(Uuid, Uuid, Uuid)> {
         self.decode_mfa_setup_token(setup_token)
             .await
+            .map(|(user_id, tenant_id, org_id, _)| (user_id, tenant_id, org_id))
             .map_err(Into::into)
     }
 
@@ -1986,6 +2010,17 @@ impl<
     /// upstream identity provider may be replaying an SSO session it
     /// established hours ago, and dating that login "now" would tell a
     /// relying party the user just authenticated when they did not.
+    ///
+    /// # The credential version (SA-06, SR10-1)
+    ///
+    /// `credential_version` is the [`User::credential_version`] read together
+    /// with the credential (or second factor, or setup/challenge artefact) the
+    /// caller just verified. `Some` makes the session write refuse, inside its
+    /// own transaction, when the user's version has moved — answered
+    /// `invalid credentials`, with no session and no refresh token created. It
+    /// is `None` only where AXIAM verified no credential of its own: a
+    /// federated sign-in, whose upstream assertion has no AXIAM password
+    /// behind it to be reset.
     pub async fn create_session_and_tokens(
         &self,
         user_id: Uuid,
@@ -1994,6 +2029,7 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
         evidence: AuthenticationEvidence,
+        credential_version: Option<i64>,
     ) -> AxiamResult<LoginOutput> {
         let raw_refresh = token::generate_refresh_token();
         let token_hash = token::hash_refresh_token(&raw_refresh);
@@ -2014,21 +2050,31 @@ impl<
         let raw_browser_session = token::generate_browser_session_token();
         let browser_token_hash = token::hash_browser_session_token(&raw_browser_session);
 
-        let session = self
-            .session_repo
-            .create(CreateSession {
-                tenant_id,
-                user_id,
-                token_hash,
-                ip_address,
-                user_agent,
-                expires_at,
-                authenticated_at: evidence.authenticated_at,
-                amr: evidence.amr,
-                browser_token_hash: Some(browser_token_hash),
-                lineage_id: None,
-            })
-            .await?;
+        let new_session = CreateSession {
+            tenant_id,
+            user_id,
+            token_hash,
+            ip_address,
+            user_agent,
+            expires_at,
+            authenticated_at: evidence.authenticated_at,
+            amr: evidence.amr,
+            browser_token_hash: Some(browser_token_hash),
+            lineage_id: None,
+        };
+        // SR10-1: a sign-in that verified a credential carries the version it
+        // read with it, and the session row — which is also the refresh token
+        // — is written only if that is still the user's, inside the same
+        // transaction. A reset or change that committed in between refuses the
+        // sign-in as a wrong password is, and leaves nothing behind.
+        let session = match credential_version {
+            Some(version) => {
+                self.session_repo
+                    .create_if_credential_version(new_session, version)
+                    .await?
+            }
+            None => self.session_repo.create(new_session).await?,
+        };
 
         // jti = session.id per D-15 (session-based revocation).
         let access_token = token::issue_access_token(
@@ -2138,7 +2184,10 @@ impl<
     /// A token minted before the user's credential last changed is refused
     /// with the same [`AuthError::MfaSetupTokenInvalid`] an expired or forged
     /// one gets (SA-06, S-6).
-    async fn decode_mfa_setup_token(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+    async fn decode_mfa_setup_token(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, Uuid, i64), AuthError> {
         use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 
         let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
@@ -2195,7 +2244,7 @@ impl<
             return Err(AuthError::MfaSetupTokenInvalid);
         }
 
-        Ok((user_id, tenant_id, org_id))
+        Ok((user_id, tenant_id, org_id, user.credential_version))
     }
 
     /// Record one failed authentication attempt against `user_id`, for the

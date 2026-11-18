@@ -298,6 +298,7 @@ async fn finish(w: &World, state_token: &str, assertion: &PublicKeyCredential) -
             None,
             None,
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            None,
         )
         .await
         .unwrap();
@@ -595,6 +596,7 @@ async fn finish_like_the_handler(
     w.auth
         .finish_webauthn_authentication(&w.webauthn, w.tenant_id, state_token, assertion)
         .await
+        .map(|(user_id, org_id, _credential_version)| (user_id, org_id))
 }
 
 /// A password reset, as the reset handler writes it: a new hash.

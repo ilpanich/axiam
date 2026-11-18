@@ -10,23 +10,32 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
 import { formatDate } from "@/lib/utils";
+import { useCanActOnOrganization } from "@/lib/grantReach";
+import { ForbiddenPage } from "@/components/ForbiddenPage";
 
 export function TenantDetailPage() {
   const { orgId, tenantId } = useParams<{ orgId: string; tenantId: string }>();
   const { can } = usePermissions();
+  // The server reads a tenant record only for an organization principal —
+  // `tenants::get` answers 403 to everybody else, a tenant's own administrator
+  // reading its own tenant included (SA-02, review QR8-1). Nothing is fetched
+  // for such a caller, and the page says "not permitted" instead of
+  // dead-ending on "Tenant not found.".
+  const canActOnOrganization = useCanActOnOrganization();
 
   const { data: org } = useQuery({
     queryKey: ["organizations", orgId],
     queryFn: () => orgService.get(orgId!),
-    enabled: !!orgId,
+    enabled: canActOnOrganization && !!orgId,
   });
 
   const { data: tenant, isLoading } = useQuery({
     queryKey: ["tenants", orgId, tenantId],
     queryFn: () => tenantService.get(orgId!, tenantId!),
-    enabled: !!orgId && !!tenantId,
+    enabled: canActOnOrganization && !!orgId && !!tenantId,
   });
 
+  if (!canActOnOrganization) return <ForbiddenPage />;
   if (!orgId || !tenantId) return null;
 
   return (

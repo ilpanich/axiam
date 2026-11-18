@@ -150,7 +150,7 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
             .current()
             .query(
                 "BEGIN TRANSACTION; \
-                 UPDATE opaque_credential SET \
+                 LET $updated = (UPDATE opaque_credential SET \
                  credential_identifier = $credential_identifier, \
                  suite = $suite, \
                  ksf = $ksf, \
@@ -163,10 +163,13 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  record = $record, \
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 RETURN meta::id(id) AS record_id, *; \
+                 RETURN meta::id(id) AS record_id, *); \
+                 IF array::len($updated) > 0 { \
                  UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch, \
                  credential_version = (credential_version ?? 0) + 1 \
                  WHERE tenant_id = $tenant_id; \
+                 }; \
+                 RETURN $updated; \
                  COMMIT TRANSACTION",
             )
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -188,8 +191,11 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        // BEGIN=0, UPDATE=1, epoch=2.
-        let updated: Vec<CredentialRow> = result.take(1).map_err(DbError::from)?;
+        // BEGIN=0, LET=1, IF=2, RETURN=3. The user bump runs only when the
+        // UPDATE matched a row, so a first enrolment is bumped once, by the
+        // CREATE transaction below (QR8-2). A failed CREATE aborts that whole
+        // transaction, so the bump never lands without a credential row.
+        let updated: Vec<CredentialRow> = result.take(3).map_err(DbError::from)?;
         if let Some(row) = updated.into_iter().next() {
             return Ok(row.try_into_credential()?);
         }

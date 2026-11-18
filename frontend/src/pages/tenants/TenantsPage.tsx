@@ -461,15 +461,21 @@ export function TenantsPage() {
               <Pencil size={14} />
             </button>
           )}
-          <button
-            aria-label={`View ${row.name}`}
-            onClick={() =>
-              navigate(`/organizations/${row.organization_id}/tenants/${row.id}`)
-            }
-            className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Eye size={14} />
-          </button>
+          {/* The tenant record is the organization's, like the roster: the
+              server answers 403 to `GET /organizations/{org}/tenants/{tenant}`
+              for any principal that cannot act on the organization, its own
+              tenant included (SA-02, review QR8-1). */}
+          {canActOnOrganization && (
+            <button
+              aria-label={`View ${row.name}`}
+              onClick={() =>
+                navigate(`/organizations/${row.organization_id}/tenants/${row.id}`)
+              }
+              className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Eye size={14} />
+            </button>
+          )}
           {canActOnOrganization && (
             <button
               aria-label={`Delete ${row.name}`}

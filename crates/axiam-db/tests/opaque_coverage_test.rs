@@ -344,16 +344,16 @@ async fn the_credential_version_counts_every_credential_write_and_no_other() {
         .unwrap();
     assert_eq!(version_of(&db, tenant_id, user_id).await, 1, "hash write");
 
-    // An upsert may stamp more than once (its update attempt and its create
-    // are separate transactions); only that each moves the version matters.
+    // An upsert stamps exactly once per row written (QR8-2): the create of a
+    // first enrolment and the update of a later one each move it by one.
     let mut seen = version_of(&db, tenant_id, user_id).await;
     enrol(&db, tenant_id, user_id).await;
     let after_create = version_of(&db, tenant_id, user_id).await;
-    assert!(after_create > seen, "record create");
+    assert_eq!(after_create, seen + 1, "record create");
     seen = after_create;
     enrol(&db, tenant_id, user_id).await;
     let after_update = version_of(&db, tenant_id, user_id).await;
-    assert!(after_update > seen, "record update");
+    assert_eq!(after_update, seen + 1, "record update");
     seen = after_update;
 
     // A delete that removes a row reports `true` and moves the version; a
@@ -683,5 +683,29 @@ async fn a_hash_write_with_a_record_for_a_missing_user_is_not_found_and_writes_n
     assert!(
         !has_record(&db, tenant_id, missing).await,
         "no opaque_credential row may outlive a write that matched no user"
+    );
+}
+
+// QR8-2: `upsert` bumps the credential version only when a row was written, and
+// a first enrolment bumps exactly once (the UPDATE attempt that matched nothing
+// used to bump too, and the CREATE then bumped again).
+#[tokio::test]
+async fn an_upsert_bumps_the_credential_version_exactly_once_per_row_written() {
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "upserted").await;
+    assert_eq!(version_of(&db, tenant_id, user_id).await, 0);
+
+    enrol(&db, tenant_id, user_id).await;
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        1,
+        "a first enrolment moves the version by exactly 1"
+    );
+
+    enrol(&db, tenant_id, user_id).await;
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        2,
+        "replacing the record moves the version by exactly 1 more"
     );
 }

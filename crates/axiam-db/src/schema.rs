@@ -623,6 +623,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "user_credential_version",
         sql: SCHEMA_V118,
     },
+    Migration {
+        version: 119,
+        name: "session_credential_version",
+        sql: SCHEMA_V119,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5931,9 +5936,38 @@ const SCHEMA_V118: &str = "\
 DEFINE FIELD IF NOT EXISTS credential_version ON TABLE user TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v119 — the credential version a session was written under (SA-06,
+// N7; review SR16-1)
+// -----------------------------------------------------------------------
+//
+// One optional column, **no `DEFAULT` and no backfill**: a session written
+// before this version reads `NONE`, and refresh rotation handles that as a
+// legacy row (it compares the user's `credential_changed_at` with the row's
+// `created_at` instead) so an upgrade logs nobody out.
+const SCHEMA_V119: &str = "\
+DEFINE FIELD IF NOT EXISTS credential_version ON TABLE session TYPE option<int>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-06 (N7, SR16-1) — v119 is the one optional `credential_version`
+    /// column on `session`, additive, no `DEFAULT`, no backfill.
+    #[test]
+    fn v119_adds_only_the_optional_session_credential_version_column() {
+        let statements: Vec<&str> = SCHEMA_V119
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS credential_version ON TABLE session TYPE option<int>"],
+        );
+        assert!(is_additive(SCHEMA_V119));
+    }
 
     /// SA-06 (N7, SR3-1) — v118 is the one optional `credential_version`
     /// column on `user`, additive, no `DEFAULT`, no backfill.
@@ -8170,8 +8204,11 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&118),
-            "v118 is the newest migration (SA-06, N7, SR3-1 — `user.credential_version`, the \
+            Some(&119),
+            "v119 is the newest migration (SA-06, N7, SR16-1 — `session.credential_version`, \
+             the credential version a session was written under, optional, absent reading as a \
+             legacy row); \
+             v118 was SA-06, N7, SR3-1 — `user.credential_version`, the \
              credential counter, optional, absent reading as 0); \
              v117 was SA-06, N7 — `user.credential_changed_at`, the \
              credential epoch, optional, absent reading as no change on record); \

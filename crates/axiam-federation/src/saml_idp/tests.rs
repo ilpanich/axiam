@@ -249,6 +249,7 @@ fn session_for(user: &User) -> Session {
         refresh_replay_grace_accepted: 0,
         refresh_replay_refused: 0,
         lineage_id: Uuid::nil(),
+        credential_version: None,
     }
 }
 

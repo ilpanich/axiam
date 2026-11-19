@@ -57,20 +57,25 @@
 //! Since SR4-3 nothing makes the client wait for its lookup, so the cache alone
 //! would leave a client sending a fresh invented id per request free to pile
 //! up detached reads, each outliving the audit worker's wait for it. The
-//! lookups are therefore bounded process-wide: a lookup takes one of
-//! [`MAX_CONCURRENT_LOOKUPS`] permits of a semaphore held beside the cache
-//! (`try_acquire_owned`, which never waits) and keeps it until its read has
-//! finished. A request served while every permit is taken starts no lookup
-//! and its row is written with no organization — returned by the system
-//! endpoint to nobody, the same fail-safe answer as an id that names nothing —
-//! and its response is served exactly as any other.
+//! datastore reads are therefore bounded process-wide: a lookup that misses
+//! the caches takes one of [`MAX_CONCURRENT_LOOKUPS`] permits of a semaphore
+//! held beside the cache (`try_acquire_owned`, which never waits) immediately
+//! before its read, and keeps it until the read has finished. A lookup the
+//! caches answer — this module's own, or [`crate::tenant_org_cache`] — reads
+//! nothing and takes no permit (review QR16-2), so a known organization's rows
+//! keep recording it however many invented ids hold the permits. A lookup that
+//! must read while every permit is taken reads nothing and answers no
+//! organization: its row is written without one — returned by the system
+//! endpoint to nobody, the same fail-safe answer as an id that names nothing.
+//! Either way its response was served exactly as any other.
 //!
 //! The cache is an optimisation of the lookup's cost, not of any response's
 //! latency (review SR4-3): the lookup, cached or not, runs on its own task
 //! after the response has gone, so the two TTLs differing — a known id served
 //! from memory where an unknown one is read again — cannot be timed by the
 //! client. The response path does the same work for every id: it reads the
-//! path, takes a permit when one is free and spawns the task.
+//! path and spawns the task. Whether a permit is free is decided inside the
+//! task, after the caches, so it cannot change the response either.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -115,19 +120,15 @@ where
     let res = next.call(req).await?;
     // SR4-3: what to look up is read here, synchronously; the lookup itself
     // runs on a task of its own, and the response leaves without it.
-    // SR15-1: at most `MAX_CONCURRENT_LOOKUPS` lookups run at once. With no
-    // permit free, nothing is spawned and no pending answer is inserted, so
-    // the row is written at once with no organization, as for an id that
-    // resolves to nothing. Taking the permit never waits.
-    if let Some(lookup) = Lookup::<C>::of(res.request())
-        && let Some(permit) = lookup.state.system_audit_org_cache.try_lookup_permit()
-    {
+    // QR16-2: the response path does the same for every id — it inserts the
+    // pending answer and spawns — whether or not the task will need a
+    // datastore read. The SR15-1 permit is taken inside the task, only for
+    // that read (see `bounded_read`).
+    if let Some(lookup) = Lookup::<C>::of(res.request()) {
         let (answer, pending) = PendingAuditOrganization::channel();
         res.request().extensions_mut().insert(pending);
         actix_web::rt::spawn(async move {
             let organization = lookup.run().await;
-            // Held until the read has finished, answered or not.
-            drop(permit);
             // The worker may have stopped waiting; the answer is then unread.
             let _ = answer.send(organization);
         });
@@ -178,8 +179,6 @@ impl<C: Connection + Clone + 'static> Lookup<C> {
 
     /// The organization, or `None` when it cannot be resolved with certainty.
     async fn run(self) -> Option<Uuid> {
-        #[cfg(test)]
-        tests::lookup_gate().await;
         let state = self.state.get_ref();
         match self.target {
             Target::VerifiedTenant(tenant_id) => organization_of_tenant(state, tenant_id).await,
@@ -201,18 +200,31 @@ async fn organization_of_path<C: Connection + Clone>(
     state: &AppState<C>,
     scope: PathScope,
 ) -> Option<Uuid> {
-    if let Some(remembered) = state.system_audit_org_cache.get(scope) {
+    let cache = &state.system_audit_org_cache;
+    if let Some(remembered) = cache.get(scope) {
         return remembered;
     }
-    let looked_up = match scope {
-        PathScope::Organization(org_id) => state.org_repo.get_by_id(org_id).await.map(|o| o.id),
-        PathScope::Tenant(tenant_id) => match state.tenant_org_cache.get(tenant_id) {
-            Some(org_id) => Ok(org_id),
-            None => state.tenant_repo.get_by_id(tenant_id).await.map(|t| {
-                state.tenant_org_cache.insert(tenant_id, t.organization_id);
-                t.organization_id
-            }),
-        },
+    let tenant_cached = match scope {
+        PathScope::Tenant(tenant_id) => state.tenant_org_cache.get(tenant_id),
+        PathScope::Organization(_) => None,
+    };
+    let looked_up = match (scope, tenant_cached) {
+        // Answered from memory: no read, no permit (QR16-2).
+        (PathScope::Tenant(_), Some(org_id)) => Ok(org_id),
+        (PathScope::Organization(org_id), _) => {
+            // No permit free: unresolved for this row, and not remembered.
+            bounded_read(cache, state.org_repo.get_by_id(org_id))
+                .await?
+                .map(|o| o.id)
+        }
+        (PathScope::Tenant(tenant_id), None) => {
+            bounded_read(cache, state.tenant_repo.get_by_id(tenant_id))
+                .await?
+                .map(|t| {
+                    state.tenant_org_cache.insert(tenant_id, t.organization_id);
+                    t.organization_id
+                })
+        }
     };
     match looked_up {
         Ok(org_id) => {
@@ -263,11 +275,34 @@ async fn organization_of_tenant<C: Connection + Clone>(
     if let Some(org_id) = state.tenant_org_cache.get(tenant_id) {
         return Some(org_id);
     }
-    let tenant = state.tenant_repo.get_by_id(tenant_id).await.ok()?;
+    let tenant = bounded_read(
+        &state.system_audit_org_cache,
+        state.tenant_repo.get_by_id(tenant_id),
+    )
+    .await?
+    .ok()?;
     state
         .tenant_org_cache
         .insert(tenant_id, tenant.organization_id);
     Some(tenant.organization_id)
+}
+
+/// Run one datastore `read` of the lookup under a [`MAX_CONCURRENT_LOOKUPS`]
+/// permit (review SR15-1), taken only now — after the caches missed, so a
+/// lookup answered from memory never takes one (review QR16-2) — and held
+/// until the read has finished, answered or not. `None` when every permit is
+/// taken: the read does not start, and the caller records no organization.
+/// Taking the permit never waits.
+async fn bounded_read<F: std::future::Future>(
+    cache: &SystemAuditOrgCache,
+    read: F,
+) -> Option<F::Output> {
+    let permit = cache.try_lookup_permit()?;
+    #[cfg(test)]
+    tests::lookup_gate().await;
+    let answer = read.await;
+    drop(permit);
+    Some(answer)
 }
 
 /// How long an organization or tenant the path names, once found, is served
@@ -306,11 +341,12 @@ const MAX_ENTRIES: usize = 4_096;
 /// How many organization lookups may be in flight at once, process-wide
 /// (review SR15-1).
 ///
-/// Each lookup is a detached task holding one datastore read, and since SR4-3
-/// nothing makes the client wait for it; a client sending a fresh invented id
-/// per request would otherwise pile reads up with nothing but the edge rate
-/// limit to stop it. A request served while every permit is taken starts no
-/// lookup, and its row records no organization.
+/// Each lookup is a detached task, and since SR4-3 nothing makes the client
+/// wait for it; a client sending a fresh invented id per request would
+/// otherwise pile datastore reads up with nothing but the edge rate limit to
+/// stop it. A permit is held only for the read itself (review QR16-2): a lookup
+/// answered from a cache takes none, and one that must read while every permit
+/// is taken reads nothing, and its row records no organization.
 pub const MAX_CONCURRENT_LOOKUPS: usize = 128;
 
 #[derive(Debug, Clone, Copy)]
@@ -339,7 +375,8 @@ pub struct SystemAuditOrgCache {
     unresolved_ttl: Duration,
     resolved: Mutex<Bucket>,
     unresolved: Mutex<Bucket>,
-    /// The permits a lookup holds while it runs ([`MAX_CONCURRENT_LOOKUPS`]).
+    /// The permits a lookup holds while its datastore read runs
+    /// ([`MAX_CONCURRENT_LOOKUPS`]).
     lookups: Arc<Semaphore>,
 }
 
@@ -361,8 +398,8 @@ impl SystemAuditOrgCache {
         }
     }
 
-    /// A permit for one lookup, or `None` when [`MAX_CONCURRENT_LOOKUPS`] are
-    /// already in flight. Never waits.
+    /// A permit for one lookup's datastore read, or `None` when
+    /// [`MAX_CONCURRENT_LOOKUPS`] are already in flight. Never waits.
     fn try_lookup_permit(&self) -> Option<OwnedSemaphorePermit> {
         Arc::clone(&self.lookups).try_acquire_owned().ok()
     }
@@ -511,15 +548,16 @@ mod tests {
     }
 
     thread_local! {
-        /// SR4-3: a gate every organization lookup on this thread waits on, so
-        /// a test can hold the datastore read open and see whether the
-        /// response waits for it.
+        /// SR4-3: a gate every organization lookup's datastore read on this
+        /// thread waits on (under its permit), so a test can hold the read
+        /// open and see whether the response waits for it.
         static LOOKUP_GATE: std::cell::RefCell<Option<Arc<tokio::sync::Semaphore>>> =
             const { std::cell::RefCell::new(None) };
     }
 
     thread_local! {
-        /// SR15-1: how many organization lookups have started on this thread.
+        /// SR15-1 / QR16-2: how many lookup datastore reads have started on
+        /// this thread (a lookup answered from a cache starts none).
         static LOOKUPS_STARTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
@@ -666,12 +704,20 @@ mod tests {
     /// organization that exists but is not cached starts no lookup — no
     /// datastore read — and its row is still written, recording no
     /// organization (visible to nobody).
+    ///
+    /// QR16-2: the permit bounds datastore reads only. A request naming an
+    /// organization already in the cache needs no read, so with every permit
+    /// taken its row still records that organization.
     #[actix_rt::test]
     async fn with_every_lookup_permit_taken_no_lookup_starts_and_the_row_records_no_organization() {
         use axiam_db::SurrealAuditLogRepository;
 
         let (db, state) = state().await;
         let org_id = organization(&state, "busy").await;
+        let cached_org_id = organization(&state, "cached").await;
+        state
+            .system_audit_org_cache
+            .insert(PathScope::Organization(cached_org_id), Some(cached_org_id));
         let audit = SurrealAuditLogRepository::new(db.clone());
         let app = system_audit_app!(state, audit);
 
@@ -686,20 +732,39 @@ mod tests {
         assert!(state.system_audit_org_cache.try_lookup_permit().is_none());
         LOOKUPS_STARTED.with(|n| n.set(0));
 
+        // QR16-2: the cached organization is recorded without a permit.
+        let req = actix_web::test::TestRequest::get()
+            .uri(&format!("/api/v1/organizations/{cached_org_id}/settings"))
+            .to_request();
+        let res = actix_web::test::call_service(&app, req).await;
+        assert_eq!(res.status(), 401);
+        let rows = system_rows(&audit, 1).await;
+        let cached_row_id = rows[0].id;
+        assert_eq!(
+            rows[0].organization_id,
+            Some(cached_org_id),
+            "a cached organization's row recorded no organization with every \
+             permit taken (QR16-2)"
+        );
+
         let req = actix_web::test::TestRequest::get()
             .uri(&format!("/api/v1/organizations/{org_id}/settings"))
             .to_request();
         let res = actix_web::test::call_service(&app, req).await;
         assert_eq!(res.status(), 401);
 
-        let rows = system_rows(&audit, 1).await;
+        let rows = system_rows(&audit, 2).await;
+        let row = rows
+            .iter()
+            .find(|r| r.id != cached_row_id)
+            .expect("the uncached organization's row");
         assert_eq!(
             LOOKUPS_STARTED.with(|n| n.get()),
             0,
-            "a lookup started with every permit taken (SR15-1)"
+            "a datastore read started with every permit taken (SR15-1)"
         );
         assert_eq!(
-            rows[0].organization_id, None,
+            row.organization_id, None,
             "the row recorded an organization looked up with every permit taken (SR15-1)"
         );
         drop(held);
@@ -720,11 +785,19 @@ mod tests {
 
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         LOOKUP_GATE.with(|g| *g.borrow_mut() = Some(Arc::clone(&gate)));
+        LOOKUPS_STARTED.with(|n| n.set(0));
         let req = actix_web::test::TestRequest::get()
             .uri(&format!("/api/v1/organizations/{org_id}/settings"))
             .to_request();
         let res = actix_web::test::call_service(&app, req).await;
         assert_eq!(res.status(), 401);
+        // QR16-2: the permit is taken inside the spawned task, just before its
+        // read, so wait for the task to reach the gated read.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while LOOKUPS_STARTED.with(|n| n.get()) == 0 {
+            assert!(Instant::now() < deadline, "the lookup's read never started");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(
             permits(),
             MAX_CONCURRENT_LOOKUPS - 1,

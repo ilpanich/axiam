@@ -4616,3 +4616,456 @@ async fn qr11_2_setup_token_completion_refuses_a_credential_change_after_its_che
     w.assert_refused_as_a_wrong_password_with_no_session(outcome)
         .await;
 }
+
+// -----------------------------------------------------------------------
+// SA-06 (N7, SR16-1) — refresh rotation is a session mint
+// -----------------------------------------------------------------------
+//
+// The rotation consumes the presented session, re-reads the user, and then
+// creates the successor. A reset or password change whose session revocation
+// lands BETWEEN the consume and the create finds nothing to delete (the old row
+// is already gone and the new one does not exist yet), and an unchecked create
+// would leave a live session behind a credential change. These tests run the
+// whole credential change inside that window.
+
+type RotationHook =
+    Box<dyn FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send>;
+
+/// A real session repository that runs a one-shot hook right after the
+/// rotation's `consume_by_token_hash` returns (the row is gone, the successor
+/// is not written yet).
+#[derive(Clone)]
+struct ConsumeHookedSessionRepo {
+    inner: SurrealSessionRepository<MemDb>,
+    after_consume: Arc<std::sync::Mutex<Option<RotationHook>>>,
+}
+
+impl SessionRepository for ConsumeHookedSessionRepo {
+    async fn create(&self, input: CreateSession) -> AxiamResult<Session> {
+        self.inner.create(input).await
+    }
+    async fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> AxiamResult<Session> {
+        self.inner
+            .create_if_credential_version(input, expected_credential_version)
+            .await
+    }
+    async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {
+        self.inner.get_by_id(tenant_id, id).await
+    }
+    async fn get_by_token_hash(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<Session> {
+        self.inner.get_by_token_hash(tenant_id, token_hash).await
+    }
+    async fn get_by_browser_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        self.inner
+            .get_by_browser_token_hash(tenant_id, token_hash)
+            .await
+    }
+    async fn invalidate(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        self.inner.invalidate(tenant_id, id).await
+    }
+    async fn lineage_of(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> AxiamResult<Option<axiam_core::models::session::SessionLineage>> {
+        self.inner.lineage_of(tenant_id, session_id).await
+    }
+    async fn invalidate_lineage(
+        &self,
+        tenant_id: Uuid,
+        lineage_id: Uuid,
+        user_id: Uuid,
+        except: Option<Uuid>,
+    ) -> AxiamResult<u64> {
+        self.inner
+            .invalidate_lineage(tenant_id, lineage_id, user_id, except)
+            .await
+    }
+    async fn consume(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<bool> {
+        self.inner.consume(tenant_id, id).await
+    }
+    async fn consume_by_token_hash(
+        &self,
+        tenant_id: Uuid,
+        token_hash: &str,
+    ) -> AxiamResult<Option<Session>> {
+        let consumed = self
+            .inner
+            .consume_by_token_hash(tenant_id, token_hash)
+            .await?;
+        let hook = self.after_consume.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
+        Ok(consumed)
+    }
+    async fn invalidate_user_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        self.inner
+            .invalidate_user_sessions(tenant_id, user_id)
+            .await
+    }
+    async fn invalidate_user_sessions_except(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        keep: Uuid,
+    ) -> AxiamResult<u64> {
+        self.inner
+            .invalidate_user_sessions_except(tenant_id, user_id, keep)
+            .await
+    }
+    async fn cleanup_expired(&self, tenant_id: Uuid) -> AxiamResult<u64> {
+        self.inner.cleanup_expired(tenant_id).await
+    }
+    async fn list_by_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<Vec<Session>> {
+        self.inner.list_by_user(tenant_id, user_id).await
+    }
+    async fn mark_refresh_replay(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        accepted_under_grace: bool,
+    ) -> AxiamResult<()> {
+        self.inner
+            .mark_refresh_replay(tenant_id, session_id, accepted_under_grace)
+            .await
+    }
+}
+
+fn sr16_policy() -> axiam_core::models::settings::PasswordPolicy {
+    axiam_core::models::settings::PasswordPolicy {
+        min_length: 8,
+        require_uppercase: true,
+        require_lowercase: true,
+        require_digits: true,
+        require_symbols: false,
+        password_history_count: 5,
+        hibp_check_enabled: false,
+    }
+}
+
+type PlainAuth = AuthService<
+    SurrealUserRepository<MemDb>,
+    SurrealSessionRepository<MemDb>,
+    SurrealFederationLinkRepository<MemDb>,
+    SurrealRefreshTokenRepository<MemDb>,
+>;
+
+type HookedAuth = AuthService<
+    SurrealUserRepository<MemDb>,
+    ConsumeHookedSessionRepo,
+    SurrealFederationLinkRepository<MemDb>,
+    SurrealRefreshTokenRepository<MemDb>,
+>;
+
+struct RotationWorld {
+    plain: Arc<PlainAuth>,
+    hooked: HookedAuth,
+    hook: Arc<std::sync::Mutex<Option<RotationHook>>>,
+    users: SurrealUserRepository<MemDb>,
+    sessions: SurrealSessionRepository<MemDb>,
+    db: Surreal<MemDb>,
+    refresh_tokens: SurrealRefreshTokenRepository<MemDb>,
+    fed: SurrealFederationLinkRepository<MemDb>,
+    org_id: Uuid,
+    tenant_id: Uuid,
+    user_id: Uuid,
+}
+
+impl RotationWorld {
+    async fn new() -> Self {
+        let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+            setup().await;
+        let hook = Arc::new(std::sync::Mutex::new(None));
+        let hooked = AuthService::new(
+            user_repo.clone(),
+            ConsumeHookedSessionRepo {
+                inner: session_repo.clone(),
+                after_consume: hook.clone(),
+            },
+            fed_repo.clone(),
+            refresh_token_repo.clone(),
+            test_config(),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+        );
+        let plain = Arc::new(AuthService::new(
+            user_repo.clone(),
+            session_repo.clone(),
+            fed_repo.clone(),
+            refresh_token_repo.clone(),
+            test_config(),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+        ));
+        Self {
+            plain,
+            hooked,
+            hook,
+            users: user_repo,
+            sessions: session_repo,
+            db,
+            refresh_tokens: refresh_token_repo,
+            fed: fed_repo,
+            org_id,
+            tenant_id,
+            user_id,
+        }
+    }
+
+    fn rotate_input(&self, raw: &str) -> RefreshInput {
+        RefreshInput {
+            tenant_id: self.tenant_id,
+            org_id: self.org_id,
+            raw_refresh_token: raw.to_string(),
+            ip_address: None,
+            user_agent: None,
+        }
+    }
+
+    fn arm(&self, hook: RotationHook) {
+        *self.hook.lock().unwrap() = Some(hook);
+    }
+}
+
+/// A password reset (credential write, then `invalidate_user_sessions`, then
+/// `revoke_all_for_user`) that lands between the rotation's consume and its
+/// create must leave no session: the rotation is refused with the uniform
+/// invalid-token answer.
+#[tokio::test]
+async fn sr16_1_a_reset_between_the_rotations_consume_and_create_leaves_no_session() {
+    use axiam_auth::password_reset::PasswordResetService;
+    use axiam_db::repository::{
+        SurrealPasswordHistoryRepository, SurrealPasswordResetTokenRepository,
+    };
+
+    let w = RotationWorld::new().await;
+    let out = login_alice(&w.plain, w.tenant_id, w.org_id).await;
+
+    let reset = PasswordResetService::new(
+        w.users.clone(),
+        SurrealPasswordResetTokenRepository::new(w.db.clone()),
+        w.fed.clone(),
+        SurrealPasswordHistoryRepository::new(w.db.clone()),
+        w.sessions.clone(),
+        w.refresh_tokens.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        5,
+    );
+    let email = w
+        .users
+        .get_by_id(w.tenant_id, w.user_id)
+        .await
+        .unwrap()
+        .email;
+    let (raw_reset, _, _) = reset
+        .initiate_reset(w.tenant_id, &email, 1, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let tenant_id = w.tenant_id;
+    w.arm(Box::new(move || {
+        Box::pin(async move {
+            reset
+                .confirm_reset(
+                    tenant_id,
+                    &raw_reset,
+                    "NewStr0ngPassword",
+                    &sr16_policy(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("the reset completes inside the rotation's window");
+        })
+    }));
+
+    let err = w
+        .hooked
+        .refresh(w.rotate_input(&out.refresh_token))
+        .await
+        .expect_err("a rotation overtaken by a reset must be refused");
+    assert!(
+        matches!(err, AxiamError::AuthenticationFailed { .. }),
+        "the uniform refusal, got {err:?}"
+    );
+    assert!(
+        w.sessions
+            .list_by_user(w.tenant_id, w.user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no session may outlive the reset: the rotation's successor was created after the \
+         reset's revocation and survived"
+    );
+}
+
+/// A password change whose revocation runs inside another session's rotation
+/// window: that rotation is refused and leaves nothing; the session the change
+/// deliberately kept still rotates afterwards (it was re-stamped with the new
+/// credential version), and no other session survives.
+#[tokio::test]
+async fn sr16_1_a_password_change_between_consume_and_create_keeps_only_the_kept_session() {
+    use axiam_db::repository::SurrealPasswordHistoryRepository;
+
+    let w = RotationWorld::new().await;
+    let kept = login_alice(&w.plain, w.tenant_id, w.org_id).await;
+    let other = login_alice(&w.plain, w.tenant_id, w.org_id).await;
+
+    let plain = w.plain.clone();
+    let history = SurrealPasswordHistoryRepository::new(w.db.clone());
+    let (tenant_id, user_id, kept_id) = (w.tenant_id, w.user_id, kept.session_id);
+    w.arm(Box::new(move || {
+        Box::pin(async move {
+            plain
+                .change_password(
+                    tenant_id,
+                    user_id,
+                    kept_id,
+                    &test_password(),
+                    &other_password(),
+                    &axiam_core::models::settings::PasswordPolicy {
+                        min_length: 12,
+                        require_uppercase: false,
+                        require_lowercase: false,
+                        require_digits: false,
+                        require_symbols: false,
+                        password_history_count: 0,
+                        hibp_check_enabled: false,
+                    },
+                    &history,
+                    None,
+                )
+                .await
+                .expect("the change completes inside the rotation's window");
+        })
+    }));
+
+    let err = w
+        .hooked
+        .refresh(w.rotate_input(&other.refresh_token))
+        .await
+        .expect_err("the other session's rotation, overtaken by the change, is refused");
+    assert!(
+        matches!(err, AxiamError::AuthenticationFailed { .. }),
+        "{err:?}"
+    );
+    let live = w
+        .sessions
+        .list_by_user(w.tenant_id, w.user_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        live.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![kept.session_id],
+        "only the session the change deliberately kept may remain"
+    );
+
+    // The kept session can still rotate: its stored version was moved forward
+    // with the credential write.
+    let rotated = w
+        .hooked
+        .refresh(w.rotate_input(&kept.refresh_token))
+        .await
+        .expect("the kept session still rotates after the password change");
+    let live = w
+        .sessions
+        .list_by_user(w.tenant_id, w.user_id)
+        .await
+        .unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].id, rotated.session_id);
+    let current = w
+        .users
+        .get_by_id(w.tenant_id, w.user_id)
+        .await
+        .unwrap()
+        .credential_version;
+    assert_eq!(live[0].credential_version, Some(current));
+}
+
+/// A row with no stored version (written before schema v119): it rotates when
+/// it was created after the user's last credential change (an upgrade must not
+/// log everyone out), and is refused when it predates it.
+#[tokio::test]
+async fn sr16_1_a_legacy_session_rotates_only_if_created_after_the_last_credential_change() {
+    let w = RotationWorld::new().await;
+    let legacy = |hash: &str| CreateSession {
+        tenant_id: w.tenant_id,
+        user_id: w.user_id,
+        token_hash: token::hash_refresh_token(hash),
+        ip_address: None,
+        user_agent: None,
+        expires_at: Utc::now() + Duration::hours(1),
+        authenticated_at: Utc::now(),
+        amr: vec![axiam_core::models::session::Amr::Pwd],
+        browser_token_hash: None,
+        lineage_id: None,
+    };
+    let change_credential = || async {
+        w.users
+            .update(
+                w.tenant_id,
+                w.user_id,
+                UpdateUser {
+                    password_hash: Some("$argon2id$changed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    };
+
+    // Created BEFORE the credential change: refused.
+    let old = w.sessions.create(legacy("legacy-before")).await.unwrap();
+    assert_eq!(
+        old.credential_version, None,
+        "an unchecked write stores none"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    change_credential().await;
+    let err = w
+        .hooked
+        .refresh(w.rotate_input("legacy-before"))
+        .await
+        .expect_err("a legacy row that predates the credential change must be refused");
+    assert!(
+        matches!(err, AxiamError::AuthenticationFailed { .. }),
+        "{err:?}"
+    );
+    assert!(
+        w.sessions
+            .list_by_user(w.tenant_id, w.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Created AFTER the credential change: rotates, and the successor carries
+    // the user's current version.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    w.sessions.create(legacy("legacy-after")).await.unwrap();
+    let rotated = w
+        .hooked
+        .refresh(w.rotate_input("legacy-after"))
+        .await
+        .expect("a legacy row created after the last credential change still rotates");
+    let current = w
+        .users
+        .get_by_id(w.tenant_id, w.user_id)
+        .await
+        .unwrap()
+        .credential_version;
+    let live = w
+        .sessions
+        .get_by_id(w.tenant_id, rotated.session_id)
+        .await
+        .unwrap();
+    assert_eq!(live.credential_version, Some(current));
+}

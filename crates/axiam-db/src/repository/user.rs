@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
-    CountRow, TxFail, classify_write_error, parse_uuid, search_bind, search_filter,
+    CountRow, TxFail, classify_write_error, parse_uuid, search_bind, search_filter, thrown,
 };
 
 /// What both erasure paths remove besides the user row: the SAML single-logout
@@ -221,16 +221,6 @@ const DIRECTORY_ACCOUNT_CREDENTIAL: &str = "axiam:directory_account_credential";
 /// the tenant (QR6-4), so the OPAQUE DELETE/CREATE after it never run. Read
 /// back as `NotFound`, the answer a write to a missing user already gave.
 const CREDENTIAL_TARGET_MISSING: &str = "axiam:credential_target_missing";
-
-/// Whether `combined` carries `marker` exactly as the engine renders a `THROW`
-/// of it — `An error occurred: <marker>`, ended by the end of the text or `;` —
-/// rather than as a substring a stored value could echo.
-fn thrown(combined: &str, marker: &str) -> bool {
-    let head = format!("An error occurred: {marker}");
-    combined
-        .match_indices(&head)
-        .any(|(at, _)| matches!(combined[at + head.len()..].chars().next(), None | Some(';')))
-}
 
 /// The text of a transaction's failed statements, for `classify_write_error`.
 ///

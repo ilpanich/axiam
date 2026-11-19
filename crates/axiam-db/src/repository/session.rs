@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, take_first_or_not_found};
+use crate::helpers::{CountRow, take_first_or_not_found, thrown};
 use crate::session_validation_cache::SessionValidationCache;
 
 #[derive(Debug, SurrealValue)]
@@ -48,6 +48,10 @@ struct SessionRow {
     /// nothing. [`decode_lineage`] says what absence means.
     #[surreal(default)]
     lineage_id: Option<String>,
+    /// SA-06 (N7, SR16-1) — `#[surreal(default)]`: schema v119 is additive and
+    /// backfills nothing, so a row written before it carries none.
+    #[surreal(default)]
+    credential_version: Option<i64>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -78,6 +82,10 @@ struct SessionRowWithId {
     /// nothing. [`decode_lineage`] says what absence means.
     #[surreal(default)]
     lineage_id: Option<String>,
+    /// SA-06 (N7, SR16-1) — `#[surreal(default)]`: schema v119 is additive and
+    /// backfills nothing, so a row written before it carries none.
+    #[surreal(default)]
+    credential_version: Option<i64>,
 }
 
 /// The pre-v55 decode path, specified once (plan §4.3).
@@ -152,6 +160,7 @@ fn row_to_session(row: SessionRow, id: Uuid) -> Result<Session, DbError> {
         refresh_replay_grace_accepted: decode_replay(row.refresh_replay_grace_accepted),
         refresh_replay_refused: decode_replay(row.refresh_replay_refused),
         lineage_id: decode_lineage(row.lineage_id.as_deref(), id)?,
+        credential_version: row.credential_version,
     })
 }
 
@@ -181,6 +190,7 @@ impl SessionRowWithId {
             refresh_replay_grace_accepted: decode_replay(self.refresh_replay_grace_accepted),
             refresh_replay_refused: decode_replay(self.refresh_replay_refused),
             lineage_id: decode_lineage(self.lineage_id.as_deref(), id)?,
+            credential_version: self.credential_version,
         })
     }
 }
@@ -542,8 +552,10 @@ impl<C: Connection> SurrealSessionRepository<C> {
 }
 
 /// Marker the version-checked session write throws with; matched on the
-/// error text because the datastore reports a `THROW` only as a message.
-const CREDENTIAL_VERSION_MOVED: &str = "credential version moved";
+/// error text because the datastore reports a `THROW` only as a message, and
+/// only through [`thrown`], so a stored value echoed in some other error cannot
+/// pass for it (QR16-3).
+const CREDENTIAL_VERSION_MOVED: &str = "axiam:credential_version_moved";
 
 impl<C: Connection> SurrealSessionRepository<C> {
     /// The one session write. With `expected_credential_version` it runs as a
@@ -558,6 +570,16 @@ impl<C: Connection> SurrealSessionRepository<C> {
         let id = new_id();
         let id_str = id.to_string();
 
+        // SR16-1: a version-checked write also STORES the version it checked,
+        // so a later refresh rotation can carry it forward and be refused when
+        // the user's credential has moved since. An unchecked write stores
+        // none (it reads as absent: a legacy row).
+        let create = if expected_credential_version.is_some() {
+            format!("{CREATE}, credential_version = $expected_cv")
+        } else {
+            CREATE.to_string()
+        };
+        let create = create.as_str();
         const CREATE: &str = "CREATE type::record('session', $id) SET \
                  tenant_id = $tenant_id, \
                  user_id = $user_id, \
@@ -578,13 +600,13 @@ impl<C: Connection> SurrealSessionRepository<C> {
                          type::record('user', $user_id) \
                          WHERE tenant_id = $tenant_id)[0] ?? 0; \
                      IF $stored_cv != $expected_cv {{ THROW '{CREDENTIAL_VERSION_MOVED}'; }}; \
-                     {CREATE}; \
+                     {create}; \
                      COMMIT TRANSACTION"
                 ),
                 3,
             )
         } else {
-            (CREATE.to_string(), 0)
+            (create.to_string(), 0)
         };
 
         let db = self.db.current();
@@ -630,7 +652,7 @@ impl<C: Connection> SurrealSessionRepository<C> {
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("; ");
-            if combined.contains(CREDENTIAL_VERSION_MOVED) {
+            if thrown(&combined, CREDENTIAL_VERSION_MOVED) {
                 return Err(AxiamError::AuthenticationFailed {
                     reason: "invalid credentials".into(),
                 });
@@ -1098,11 +1120,29 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .db
             .current()
             .query(
-                "DELETE session \
+                // SR16-1: the kept session is the one the caller deliberately
+                // continues with after a credential change, and it must still
+                // be able to rotate its refresh token. It therefore takes the
+                // user's CURRENT credential version (the change already
+                // committed it) in the same transaction as the DELETE of the
+                // others: the rotation compares the version its row carries
+                // with the user's, and a row stamped before the change would
+                // be refused. Stamped only if the row exists; any LATER
+                // credential change moves the user's version past this stamp
+                // (and a reset deletes the row), so the stamp never outlives
+                // the credential it vouches for.
+                "BEGIN TRANSACTION; \
+                 UPDATE type::record('session', $current_session_id) \
+                   SET credential_version = (SELECT VALUE credential_version FROM \
+                         type::record('user', $user_id) \
+                         WHERE tenant_id = $tenant_id)[0] ?? 0 \
+                   WHERE tenant_id = $tenant_id AND user_id = $user_id; \
+                 DELETE session \
                  WHERE tenant_id = $tenant_id \
                    AND user_id = $user_id \
                    AND id != type::record('session', $current_session_id) \
-                 RETURN BEFORE",
+                 RETURN BEFORE; \
+                 COMMIT TRANSACTION",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
@@ -1127,7 +1167,8 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        let deleted: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        // BEGIN=0, UPDATE=1, DELETE=2.
+        let deleted: Vec<SessionRow> = result.take(2).map_err(DbError::from)?;
         self.publish_revocations(&to_publish).await;
         self.notify_sink(tenant_id, user_id, &to_publish).await;
         Ok(deleted.len() as u64)
@@ -2139,5 +2180,145 @@ mod tests {
 
         // `cleanup_expired` over an empty/all-fresh table still succeeds.
         assert_eq!(repo.cleanup_expired(tenant_id).await.unwrap(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // SA-06 (N7, SR16-1) — the credential version a session is written under
+    // ------------------------------------------------------------------
+
+    async fn seed_user(db: &Surreal<surrealdb::engine::local::Db>, tenant_id: Uuid) -> Uuid {
+        use axiam_core::models::user::CreateUser;
+        use axiam_core::repository::UserRepository;
+        crate::repository::user::SurrealUserRepository::new(db.clone())
+            .create(CreateUser {
+                tenant_id,
+                username: "alice".into(),
+                email: "alice@example.com".into(),
+                password: axiam_test_support::test_password(),
+                metadata: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    async fn change_credential(db: &Surreal<surrealdb::engine::local::Db>, t: Uuid, u: Uuid) {
+        use axiam_core::models::user::UpdateUser;
+        use axiam_core::repository::UserRepository;
+        crate::repository::user::SurrealUserRepository::new(db.clone())
+            .update(
+                t,
+                u,
+                UpdateUser {
+                    password_hash: Some("$argon2id$changed".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    fn input(tenant_id: Uuid, user_id: Uuid, suffix: &str) -> CreateSession {
+        CreateSession {
+            tenant_id,
+            user_id,
+            token_hash: format!("hash-{suffix}"),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: vec![],
+            browser_token_hash: None,
+            lineage_id: None,
+        }
+    }
+
+    /// A version-checked write stores the version it checked, an unchecked one
+    /// stores none, and a moved version is refused as invalid credentials with
+    /// nothing written (the marker is recognised through `thrown`, QR16-3).
+    #[tokio::test]
+    async fn a_version_checked_session_stores_its_version_and_a_moved_one_is_refused() {
+        let tenant_id = Uuid::new_v4();
+        let db = setup_db().await;
+        let user_id = seed_user(&db, tenant_id).await;
+        let repo = SurrealSessionRepository::new(db.clone());
+
+        let legacy = repo
+            .create(input(tenant_id, user_id, "unchecked"))
+            .await
+            .unwrap();
+        assert_eq!(legacy.credential_version, None);
+
+        let first = repo
+            .create_if_credential_version(input(tenant_id, user_id, "v0"), 0)
+            .await
+            .unwrap();
+        assert_eq!(first.credential_version, Some(0));
+        let read_back = repo.get_by_id(tenant_id, first.id).await.unwrap();
+        assert_eq!(read_back.credential_version, Some(0));
+
+        change_credential(&db, tenant_id, user_id).await;
+        let err = repo
+            .create_if_credential_version(input(tenant_id, user_id, "stale"), 0)
+            .await
+            .expect_err("the user's version moved");
+        assert!(
+            matches!(&err, AxiamError::AuthenticationFailed { reason } if reason == "invalid credentials"),
+            "{err:?}"
+        );
+        assert!(
+            repo.get_by_token_hash(tenant_id, "hash-stale")
+                .await
+                .is_err(),
+            "nothing may be written for a refused version"
+        );
+        let second = repo
+            .create_if_credential_version(input(tenant_id, user_id, "v1"), 1)
+            .await
+            .unwrap();
+        assert_eq!(second.credential_version, Some(1));
+    }
+
+    /// The session a password change deliberately keeps takes the user's
+    /// current version, in the same transaction that deletes the others, so it
+    /// can still rotate; the others are gone.
+    #[tokio::test]
+    async fn invalidate_user_sessions_except_re_stamps_the_kept_session() {
+        let tenant_id = Uuid::new_v4();
+        let db = setup_db().await;
+        let user_id = seed_user(&db, tenant_id).await;
+        let repo = SurrealSessionRepository::new(db.clone());
+
+        let kept = repo
+            .create_if_credential_version(input(tenant_id, user_id, "kept"), 0)
+            .await
+            .unwrap();
+        repo.create_if_credential_version(input(tenant_id, user_id, "other"), 0)
+            .await
+            .unwrap();
+        change_credential(&db, tenant_id, user_id).await;
+
+        let deleted = repo
+            .invalidate_user_sessions_except(tenant_id, user_id, kept.id)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let live = repo.list_by_user(tenant_id, user_id).await.unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, kept.id);
+        assert_eq!(live[0].credential_version, Some(1));
+    }
+
+    /// QR16-3: a stored value echoed in an error must not read as the marker.
+    #[test]
+    fn the_credential_version_marker_is_matched_only_as_a_throw() {
+        assert!(thrown(
+            &format!("An error occurred: {CREDENTIAL_VERSION_MOVED}"),
+            CREDENTIAL_VERSION_MOVED
+        ));
+        assert!(!thrown(
+            &format!("Database index `x` already contains [{CREDENTIAL_VERSION_MOVED}]"),
+            CREDENTIAL_VERSION_MOVED
+        ));
     }
 }

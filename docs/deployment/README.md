@@ -519,6 +519,28 @@ re-read. If deleting the refused row fails, the sign-in still answers invalid cr
 token is returned; the row is left to expire. The refused row is removed through the logout path
 (`session_repo.invalidate`), so its id appears on the revocation feed and, with an SSF sink
 configured, on the `session-revoked` stream, for a session that no client ever held.
+*Refresh rotation.* A refresh is a session mint and has the same protection. Sessions written by
+a sign-in that carried a credential version store it (`session.credential_version`, schema v119,
+optional, no backfill). The rotation consumes the presented session, then writes its successor
+under the version the consumed row carries: the write is refused when the user's version has
+moved, and the successor takes the same stored version. After the successor commits, the rotation
+re-reads the user's version exactly as a sign-in does; if it moved, the successor is deleted
+through the logout path and the rotation is refused with the answer an unknown or already-used
+refresh token gets. A reset, a password change or a SCIM password write that revokes sessions
+between the rotation's consume and its create therefore cannot leave a session behind. The session
+a password change deliberately keeps (including a change that carries a new OPAQUE record, which is
+written in the credential's own transaction) is stamped with the user's new version inside
+`invalidate_user_sessions_except`, in the same transaction that deletes the user's other sessions,
+so it can still rotate; this stamp is not part of the credential write itself. A session row written
+before schema v119 has no stored version: it rotates only if the user's `credential_changed_at`
+is not later than the row's `created_at` (so an upgrade logs nobody out, and a legacy row that
+predates a reset is refused), and its successor stores the user's current version. A
+credential write that does not revoke sessions would make the user's existing sessions unable to
+rotate (they must sign in again); today no route writes an OPAQUE record or removes one for an
+existing user other than a password change or reset, so none does. An OAuth2
+`refresh_token` grant has no stored version; after writing the successor it re-reads the user and
+refuses, deleting the successor, when the user's `credential_changed_at` is later than the
+presented refresh token's `created_at`.
 If revoking the sessions fails after a password reset or a self-service password change has
 written the new password, it still emits the SSF `credential-change` event (the password has
 changed, so receivers must be told) and then answers the error (500); both revocations are

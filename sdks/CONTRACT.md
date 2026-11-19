@@ -14488,8 +14488,11 @@ one's own id) check the session first: a token whose session has been revoked ge
   entry only where it can resolve it with certainty (a deleted or purged tenant's records; a SCIM
   provisioning call; a request whose path names one of the organization's routes or tenants);
   entries written before 1.67's server, and requests that name no organization (a bootstrap call,
-  a login against an unknown organization), are returned to nobody. An empty or short page is a
-  correct answer, not an error, and an SDK MUST NOT retry or widen the call to find more.
+  a login against an unknown organization), are returned to nobody. So is an entry whose
+  organization lookup the server could not run or finish: the lookup is bounded (128 datastore
+  reads at once, 5 s each), so under load a missing entry does not prove no request arrived. An
+  empty or short page is a correct answer, not an error, and an SDK MUST NOT retry or widen the
+  call to find more.
 
   **One additive response member.** The audit entry (`AuditLogEntry`) gains an optional
   `organization_id` (a UUID): the organization a system-partition entry records. It is present

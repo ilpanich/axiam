@@ -287,6 +287,12 @@ of deleted tenants. Since SA-02 (security audit 2026-11-14, N1) it is read
   queue full, so the entry went straight to the dead-letter file) is recorded
   before that lookup and carries no organization; replayed, it is returned to
   nobody.
+- The lookup is bounded: at most 128 datastore reads run at once, and the
+  writer waits at most 5 seconds for each answer. An entry served while all 128
+  are in flight (one already in the writer's memory still records its
+  organization), or whose lookup did not answer within 5 seconds, records no
+  organization and is returned to nobody. Under load, then, an entry missing
+  from this endpoint does not prove that no such request arrived.
 - Entries written **before** this change record no organization, so they are
   no longer returned by this endpoint. They are not modified or deleted (the
   audit log is append-only; nothing is backfilled) and stay in the datastore

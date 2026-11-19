@@ -3409,6 +3409,57 @@ where
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
+        // SA-06 (N7, SR16-1) — a rotation is a mint, and a credential change
+        // revokes every refresh token of the user: `revoke_all_for_user` after
+        // a reset, a password change or a SCIM password write. That revocation
+        // can land between this request's read of the token and the `create`
+        // above, finding nothing of ours to remove, and the successor would
+        // then outlive the credential change.
+        //
+        // The check is a re-read AFTER the successor is written, against the
+        // predecessor's own `created_at`: a credential write commits BEFORE its
+        // revocation, so either the write is already visible here (and the
+        // successor is removed below), or it commits later and its revocation
+        // runs after the `create` and removes the successor itself. A
+        // predecessor written after the last credential change always passes,
+        // so a refresh token issued under the current credential is never
+        // affected; every token a credential change would have revoked
+        // predates it.
+        //
+        // No stored credential version is used: unlike a session, a refresh
+        // token has no column for one, and the comparison needs none, because
+        // `credential_changed_at` is stamped in the same transaction as every
+        // credential write.
+        if let Some(user_id) = stored.user_id {
+            let moved = match self.user_repo.get_by_id(tenant_id, user_id).await {
+                Ok(user) => Ok(user
+                    .credential_changed_at
+                    .is_some_and(|changed| changed > stored.created_at)),
+                Err(AxiamError::NotFound { .. }) => Ok(true),
+                Err(e) => Err(e),
+            };
+            if !matches!(moved, Ok(false)) {
+                // Never leave the successor behind, whatever the cause.
+                if let Err(cleanup_err) = self
+                    .refresh_token_repo
+                    .revoke(tenant_id, &new_refresh_hash)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %cleanup_err,
+                        "token: failed to revoke a successor refused by the credential re-check; \
+                         token may linger"
+                    );
+                }
+                return match moved {
+                    Err(e) => Err(OAuth2Error::ServerError(e.to_string())),
+                    _ => Err(OAuth2Error::InvalidGrant(
+                        "refresh token is invalid, expired, or revoked".into(),
+                    )),
+                };
+            }
+        }
+
         // Now retire the old refresh token — on one of two lanes, chosen by
         // the client's registration and by nothing else (T-254).
         //

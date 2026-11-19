@@ -528,6 +528,9 @@ struct MockRefreshRepo {
     /// G-C — make `revoke_all_for_session` fail, to pin that a failed
     /// revocation does not change the client's answer.
     session_revocation_fails: bool,
+    /// SR16-1 — the hash every `revoke` call was made with, when a test asks
+    /// for the log (`with_revocation_log`).
+    revoked_hashes: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl MockRefreshRepo {
@@ -541,7 +544,13 @@ impl MockRefreshRepo {
             created: Arc::new(Mutex::new(Vec::new())),
             session_revocations: Arc::new(Mutex::new(Vec::new())),
             session_revocation_fails: false,
+            revoked_hashes: None,
         }
+    }
+    /// SR16-1 — record the hash of every `revoke` call into `log`.
+    fn with_revocation_log(mut self, log: Arc<Mutex<Vec<String>>>) -> Self {
+        self.revoked_hashes = Some(log);
+        self
     }
     /// G-C — a handle on [`Self::session_revocations`], taken before the repo
     /// is moved into the service.
@@ -599,7 +608,10 @@ impl RefreshTokenRepository for MockRefreshRepo {
             Get::NotFound => Err(not_found()),
         }
     }
-    async fn revoke(&self, _t: Uuid, _h: &str) -> AxiamResult<()> {
+    async fn revoke(&self, _t: Uuid, h: &str) -> AxiamResult<()> {
+        if let Some(log) = &self.revoked_hashes {
+            log.lock().unwrap().push(h.to_string());
+        }
         match self.revoke {
             RevokeMode::Ok => Ok(()),
             RevokeMode::NotFound => Err(not_found()),
@@ -682,6 +694,10 @@ const INACTIVE_USER: Uuid = Uuid::from_u128(0x0f4_0002);
 const DELETED_USER: Uuid = Uuid::from_u128(0x0f4_0003);
 const LAPSED_PENDING_USER: Uuid = Uuid::from_u128(0x0f4_0004);
 const REMOVED_USER: Uuid = Uuid::from_u128(0x0f4_0005);
+/// SA-06 (SR16-1) — users whose credential changed an hour AFTER (so after any
+/// refresh token a test stages) and an hour BEFORE it.
+const CREDENTIAL_MOVED_USER: Uuid = Uuid::from_u128(0x5a06_0001);
+const CREDENTIAL_OLD_USER: Uuid = Uuid::from_u128(0x5a06_0002);
 
 impl UserRepository for MockUserRepo {
     async fn create(&self, _i: CreateUser) -> AxiamResult<User> {
@@ -722,7 +738,11 @@ impl UserRepository for MockUserRepo {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
-            credential_changed_at: None,
+            credential_changed_at: match id {
+                CREDENTIAL_MOVED_USER => Some(Utc::now() + chrono::Duration::hours(1)),
+                CREDENTIAL_OLD_USER => Some(Utc::now() - chrono::Duration::hours(1)),
+                _ => None,
+            },
             credential_version: 0,
             metadata: serde_json::Value::Null,
             created_at,
@@ -6017,6 +6037,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
         refresh_replay_grace_accepted: 0,
         refresh_replay_refused: 0,
         lineage_id: Uuid::nil(),
+        credential_version: None,
     };
 
     // The hand-built pre-migration row: the columns are simply absent.
@@ -6133,6 +6154,69 @@ async fn p23w1_01_a_refresh_grant_for_an_active_account_or_no_account_still_rota
             .await
             .unwrap();
         assert!(resp.refresh_token.is_some(), "{case}");
+    }
+}
+
+/// SA-06 (N7, SR16-1): a credential change revokes every refresh token of the
+/// user, and that revocation can land between the rotation's read of the token
+/// and its `create`. The successor, written after the change, must not
+/// survive: the rotation re-reads the user after the write and refuses a
+/// predecessor older than the last credential change, removing the successor.
+/// The control: a predecessor written after the last credential change, and a
+/// user with no change on record, rotate as before.
+#[tokio::test]
+async fn sr16_1_a_refresh_token_older_than_the_credential_change_leaves_no_successor() {
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(CREDENTIAL_MOVED_USER),
+        "client-1",
+        &["openid"],
+    ));
+    let created = refresh.created.clone();
+    let revoked_successors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let refresh = refresh.with_revocation_log(revoked_successors.clone());
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .expect_err("a token older than the credential change must be refused");
+    assert_eq!(err.error_code(), "invalid_grant", "{err}");
+    let created = created.lock().unwrap();
+    assert_eq!(
+        created.len(),
+        1,
+        "the successor was written before the re-check"
+    );
+    assert_eq!(
+        revoked_successors.lock().unwrap().as_slice(),
+        [created[0].token_hash.clone()],
+        "and the re-check removes exactly that successor"
+    );
+}
+
+#[tokio::test]
+async fn sr16_1_a_refresh_token_newer_than_the_credential_change_still_rotates() {
+    for user in [CREDENTIAL_OLD_USER, Uuid::new_v4()] {
+        let refresh =
+            MockRefreshRepo::new().with_get(make_refresh(Some(user), "client-1", &["openid"]));
+        let revoked_successors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let refresh = refresh.with_revocation_log(revoked_successors.clone());
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .unwrap();
+        assert!(resp.refresh_token.is_some());
+        assert!(revoked_successors.lock().unwrap().is_empty());
     }
 }
 

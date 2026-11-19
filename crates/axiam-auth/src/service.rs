@@ -1424,42 +1424,109 @@ impl<
         let expires_at =
             Utc::now() + Duration::seconds(self.config.refresh_token_lifetime_secs as i64);
 
-        let new_session = self
+        // SR16-1: a rotation is a session mint and gets the protection a
+        // sign-in has. The version the consumed row carries is the credential
+        // it was minted under; the new row is written only if the user's is
+        // still that, inside the write's own transaction. A row with no stored
+        // version (written before schema v119, or by a path that checked no
+        // credential) is trusted only if the credential has not changed since
+        // it was created, and then takes the user's current version — so an
+        // upgrade logs nobody out, and a legacy row that predates a reset is
+        // refused like any other.
+        let rotation_version = match session.credential_version {
+            Some(version) => version,
+            None => {
+                if user
+                    .credential_changed_at
+                    .is_some_and(|changed| changed > session.created_at)
+                {
+                    return Err(AuthError::TokenInvalid(
+                        "refresh token predates the user's last credential change".into(),
+                    )
+                    .into());
+                }
+                user.credential_version
+            }
+        };
+
+        let new_session = CreateSession {
+            tenant_id: input.tenant_id,
+            user_id: user.id,
+            token_hash: new_hash,
+            ip_address: input.ip_address,
+            user_agent: input.user_agent,
+            expires_at,
+            // X7.2 (plan §4.3): **copied**, never re-stamped. A refresh is
+            // not an authentication event — nobody proved anything to
+            // AXIAM here — and a session whose `authenticated_at` reset on
+            // every refresh would report a freshness that grows younger
+            // the longer the user stays signed in. OIDC Core §12.2 says
+            // the same thing about the `auth_time` of a refreshed ID
+            // token: it must equal the original.
+            authenticated_at: session.authenticated_at,
+            amr: session.amr,
+            // W3: **copied**, for a reason adjacent to the one above. A
+            // refresh response never reaches `/oauth2/authorize`'s cookie
+            // path, so the `axiam_op_session` value in the browser is not
+            // reissued here and cannot be. A rotation that dropped the
+            // digest would leave a live cookie pointing at a row that no
+            // longer exists, and the user would be signed out of the
+            // authorization endpoint alone — invisibly, at a moment nothing
+            // in the interface corresponds to.
+            browser_token_hash: session.browser_token_hash,
+            // #844 (D-N43): **copied**, and for the reason this whole
+            // field exists. The new row has a new id; every OAuth2 grant
+            // and session participant recorded under the old one still
+            // names that id, and the lineage is how a logout of this row
+            // reaches them. A rotation that started a new lineage would be
+            // exactly the bug it fixes.
+            lineage_id: Some(session.lineage_id),
+        };
+        let new_session = match self
             .session_repo
-            .create(CreateSession {
-                tenant_id: input.tenant_id,
-                user_id: user.id,
-                token_hash: new_hash,
-                ip_address: input.ip_address,
-                user_agent: input.user_agent,
-                expires_at,
-                // X7.2 (plan §4.3): **copied**, never re-stamped. A refresh is
-                // not an authentication event — nobody proved anything to
-                // AXIAM here — and a session whose `authenticated_at` reset on
-                // every refresh would report a freshness that grows younger
-                // the longer the user stays signed in. OIDC Core §12.2 says
-                // the same thing about the `auth_time` of a refreshed ID
-                // token: it must equal the original.
-                authenticated_at: session.authenticated_at,
-                amr: session.amr,
-                // W3: **copied**, for a reason adjacent to the one above. A
-                // refresh response never reaches `/oauth2/authorize`'s cookie
-                // path, so the `axiam_op_session` value in the browser is not
-                // reissued here and cannot be. A rotation that dropped the
-                // digest would leave a live cookie pointing at a row that no
-                // longer exists, and the user would be signed out of the
-                // authorization endpoint alone — invisibly, at a moment nothing
-                // in the interface corresponds to.
-                browser_token_hash: session.browser_token_hash,
-                // #844 (D-N43): **copied**, and for the reason this whole
-                // field exists. The new row has a new id; every OAuth2 grant
-                // and session participant recorded under the old one still
-                // names that id, and the lineage is how a logout of this row
-                // reaches them. A rotation that started a new lineage would be
-                // exactly the bug it fixes.
-                lineage_id: Some(session.lineage_id),
-            })
-            .await?;
+            .create_if_credential_version(new_session, rotation_version)
+            .await
+        {
+            Ok(created) => created,
+            // The version-checked write's refusal is a wrong-password answer;
+            // for a rotation the uniform refusal is the one a consumed or
+            // unknown token gets.
+            Err(AxiamError::AuthenticationFailed { .. }) => {
+                return Err(AuthError::TokenInvalid(
+                    "refresh token not found or already used".into(),
+                )
+                .into());
+            }
+            Err(e) => return Err(e),
+        };
+
+        // SR13-1 for rotation (SR16-1): the in-transaction check is not
+        // sufficient under snapshot isolation. A reset commits its credential
+        // BEFORE it revokes, so a rotation row committed before the revocation
+        // is removed by it, and one committed after is caught by this re-read.
+        // Removed through the logout path, like the sign-in re-check, so the
+        // row's id reaches the revocation feed for a session no client held.
+        let stored_version = self
+            .user_repo
+            .get_by_id(input.tenant_id, session.user_id)
+            .await
+            .map(|u| u.credential_version);
+        if stored_version.as_ref().ok() != Some(&rotation_version) {
+            if let Err(e) = self
+                .session_repo
+                .invalidate(input.tenant_id, new_session.id)
+                .await
+            {
+                tracing::error!(
+                    session_id = %new_session.id,
+                    error = %e,
+                    "could not delete a rotated session refused by the post-commit credential re-check"
+                );
+            }
+            return Err(
+                AuthError::TokenInvalid("refresh token not found or already used".into()).into(),
+            );
+        }
         let session_create_us = t_create.elapsed().as_micros() as u64;
 
         // 5. Issue new access token (jti = new session.id per D-15).

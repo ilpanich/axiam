@@ -551,11 +551,6 @@ mod tests {
                 NotificationEventType::PasswordChanged,
             ),
             (
-                "POST /api/v1/auth/password/change",
-                "Success",
-                NotificationEventType::PasswordChanged,
-            ),
-            (
                 "POST /api/v1/auth/mfa/enroll",
                 "Success",
                 NotificationEventType::MfaEnrollmentChanged,
@@ -595,6 +590,20 @@ mod tests {
         assert!(
             NotificationEventType::from_audit_action("POST /api/v1/auth/reset/confirm", "Failure")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_self_service_password_change_is_a_password_changed_event_only_as_a_success() {
+        // QR14-1: unlike the five unauthenticated routes above, this one needs
+        // a sign-in. A successful change notifies, as a reset does; the
+        // request row of a refused change (a `Failure`) maps to nothing.
+        assert_eq!(
+            NotificationEventType::from_audit_action(
+                "POST /api/v1/auth/password/change",
+                "Success"
+            ),
+            vec![NotificationEventType::PasswordChanged]
         );
         assert!(
             NotificationEventType::from_audit_action(

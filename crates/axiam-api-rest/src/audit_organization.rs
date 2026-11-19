@@ -48,16 +48,29 @@
 //! [`UNRESOLVED_TTL`], so a repeated id costs one read per TTL, not per
 //! request. A datastore failure is not remembered. What it cannot bound is a
 //! client sending a *different* invented id every time: each still costs one
-//! indexed record-id read, limited only by the deployment's edge and
-//! unauthenticated rate limits. Do not add a lookup here that is dearer than
-//! that.
+//! indexed record-id read, limited by the deployment's edge and
+//! unauthenticated rate limits and, in how many run at once, by the bound
+//! below. Do not add a lookup here that is dearer than that.
+//!
+//! # How many lookups run at once (review SR15-1)
+//!
+//! Since SR4-3 nothing makes the client wait for its lookup, so the cache alone
+//! would leave a client sending a fresh invented id per request free to pile
+//! up detached reads, each outliving the audit worker's wait for it. The
+//! lookups are therefore bounded process-wide: a lookup takes one of
+//! [`MAX_CONCURRENT_LOOKUPS`] permits of a semaphore held beside the cache
+//! (`try_acquire_owned`, which never waits) and keeps it until its read has
+//! finished. A request served while every permit is taken starts no lookup
+//! and its row is written with no organization — returned by the system
+//! endpoint to nobody, the same fail-safe answer as an id that names nothing —
+//! and its response is served exactly as any other.
 //!
 //! The cache is an optimisation of the lookup's cost, not of any response's
 //! latency (review SR4-3): the lookup, cached or not, runs on its own task
 //! after the response has gone, so the two TTLs differing — a known id served
 //! from memory where an unknown one is read again — cannot be timed by the
 //! client. The response path does the same work for every id: it reads the
-//! path and spawns the task.
+//! path, takes a permit when one is free and spawns the task.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -72,6 +85,7 @@ use axiam_auth::token::CachedUserIdentity;
 use axiam_core::error::AxiamError;
 use axiam_core::repository::{OrganizationRepository, TenantRepository};
 use surrealdb::Connection;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -101,12 +115,21 @@ where
     let res = next.call(req).await?;
     // SR4-3: what to look up is read here, synchronously; the lookup itself
     // runs on a task of its own, and the response leaves without it.
-    if let Some(lookup) = Lookup::<C>::of(res.request()) {
+    // SR15-1: at most `MAX_CONCURRENT_LOOKUPS` lookups run at once. With no
+    // permit free, nothing is spawned and no pending answer is inserted, so
+    // the row is written at once with no organization, as for an id that
+    // resolves to nothing. Taking the permit never waits.
+    if let Some(lookup) = Lookup::<C>::of(res.request())
+        && let Some(permit) = lookup.state.system_audit_org_cache.try_lookup_permit()
+    {
         let (answer, pending) = PendingAuditOrganization::channel();
         res.request().extensions_mut().insert(pending);
         actix_web::rt::spawn(async move {
+            let organization = lookup.run().await;
+            // Held until the read has finished, answered or not.
+            drop(permit);
             // The worker may have stopped waiting; the answer is then unread.
-            let _ = answer.send(lookup.run().await);
+            let _ = answer.send(organization);
         });
     }
     Ok(res)
@@ -280,6 +303,16 @@ pub const UNRESOLVED_TTL: Duration = Duration::from_secs(10);
 /// by the lookup that finds it.
 const MAX_ENTRIES: usize = 4_096;
 
+/// How many organization lookups may be in flight at once, process-wide
+/// (review SR15-1).
+///
+/// Each lookup is a detached task holding one datastore read, and since SR4-3
+/// nothing makes the client wait for it; a client sending a fresh invented id
+/// per request would otherwise pile reads up with nothing but the edge rate
+/// limit to stop it. A request served while every permit is taken starts no
+/// lookup, and its row records no organization.
+pub const MAX_CONCURRENT_LOOKUPS: usize = 128;
+
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     organization_id: Option<Uuid>,
@@ -306,6 +339,8 @@ pub struct SystemAuditOrgCache {
     unresolved_ttl: Duration,
     resolved: Mutex<Bucket>,
     unresolved: Mutex<Bucket>,
+    /// The permits a lookup holds while it runs ([`MAX_CONCURRENT_LOOKUPS`]).
+    lookups: Arc<Semaphore>,
 }
 
 impl Default for SystemAuditOrgCache {
@@ -322,7 +357,14 @@ impl SystemAuditOrgCache {
             unresolved_ttl,
             resolved: Mutex::new(Bucket::default()),
             unresolved: Mutex::new(Bucket::default()),
+            lookups: Arc::new(Semaphore::new(MAX_CONCURRENT_LOOKUPS)),
         }
+    }
+
+    /// A permit for one lookup, or `None` when [`MAX_CONCURRENT_LOOKUPS`] are
+    /// already in flight. Never waits.
+    fn try_lookup_permit(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.lookups).try_acquire_owned().ok()
     }
 
     /// `Some(answer)` when `scope` is remembered and not expired — `answer`
@@ -476,8 +518,14 @@ mod tests {
             const { std::cell::RefCell::new(None) };
     }
 
+    thread_local! {
+        /// SR15-1: how many organization lookups have started on this thread.
+        static LOOKUPS_STARTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     /// Wait at the gate, when a test on this thread installed one.
     pub(super) async fn lookup_gate() {
+        LOOKUPS_STARTED.with(|n| n.set(n.get() + 1));
         let gate = LOOKUP_GATE.with(|g| g.borrow().clone());
         if let Some(gate) = gate {
             let _permit = gate.acquire().await.expect("the test gate is never closed");
@@ -548,6 +596,152 @@ mod tests {
                 "the row never recorded the organization once the lookup was released"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The audit middleware wrapping the resolver around a handler that
+    /// answers `401`, as the scope's authorization middleware does to a
+    /// token-less request.
+    macro_rules! system_audit_app {
+        ($state:expr, $audit:expr) => {
+            actix_web::test::init_service(
+                actix_web::App::new()
+                    .app_data($state.clone())
+                    .wrap(actix_web::middleware::from_fn(
+                        system_audit_organization::<Db, _>,
+                    ))
+                    .wrap(axiam_audit::AuditMiddleware::spawn($audit.clone()))
+                    .default_service(web::to(|| async {
+                        actix_web::HttpResponse::Unauthorized().finish()
+                    })),
+            )
+            .await
+        };
+    }
+
+    /// The system-partition rows written so far, waiting until there are
+    /// `count` of them.
+    async fn system_rows(
+        audit: &axiam_db::SurrealAuditLogRepository<Db>,
+        count: usize,
+    ) -> Vec<axiam_core::models::audit::AuditLogEntry> {
+        use axiam_core::repository::{AuditLogFilter, AuditLogRepository, Pagination};
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let page = audit
+                .list(
+                    Uuid::nil(),
+                    AuditLogFilter::default(),
+                    Pagination::default(),
+                )
+                .await
+                .unwrap();
+            if page.items.len() >= count {
+                return page.items;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {} of {count} system-partition rows were written",
+                page.items.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn organization(state: &web::Data<AppState<Db>>, slug: &str) -> Uuid {
+        state
+            .org_repo
+            .create(CreateOrganization {
+                name: slug.into(),
+                slug: slug.into(),
+                metadata: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// SR15-1: the detached lookups are bounded. With every one of the
+    /// [`MAX_CONCURRENT_LOOKUPS`] permits taken, a token-less request naming an
+    /// organization that exists but is not cached starts no lookup — no
+    /// datastore read — and its row is still written, recording no
+    /// organization (visible to nobody).
+    #[actix_rt::test]
+    async fn with_every_lookup_permit_taken_no_lookup_starts_and_the_row_records_no_organization() {
+        use axiam_db::SurrealAuditLogRepository;
+
+        let (db, state) = state().await;
+        let org_id = organization(&state, "busy").await;
+        let audit = SurrealAuditLogRepository::new(db.clone());
+        let app = system_audit_app!(state, audit);
+
+        let held: Vec<_> = (0..MAX_CONCURRENT_LOOKUPS)
+            .map(|_| {
+                state
+                    .system_audit_org_cache
+                    .try_lookup_permit()
+                    .expect("a free permit")
+            })
+            .collect();
+        assert!(state.system_audit_org_cache.try_lookup_permit().is_none());
+        LOOKUPS_STARTED.with(|n| n.set(0));
+
+        let req = actix_web::test::TestRequest::get()
+            .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+            .to_request();
+        let res = actix_web::test::call_service(&app, req).await;
+        assert_eq!(res.status(), 401);
+
+        let rows = system_rows(&audit, 1).await;
+        assert_eq!(
+            LOOKUPS_STARTED.with(|n| n.get()),
+            0,
+            "a lookup started with every permit taken (SR15-1)"
+        );
+        assert_eq!(
+            rows[0].organization_id, None,
+            "the row recorded an organization looked up with every permit taken (SR15-1)"
+        );
+        drop(held);
+    }
+
+    /// SR15-1, the control: with a permit free, the lookup runs and holds its
+    /// permit until its read has finished; the row records the organization,
+    /// and the permit is returned.
+    #[actix_rt::test]
+    async fn a_lookup_holds_its_permit_until_its_read_finishes() {
+        use axiam_db::SurrealAuditLogRepository;
+
+        let (db, state) = state().await;
+        let org_id = organization(&state, "free").await;
+        let audit = SurrealAuditLogRepository::new(db.clone());
+        let app = system_audit_app!(state, audit);
+        let permits = || state.system_audit_org_cache.lookups.available_permits();
+
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        LOOKUP_GATE.with(|g| *g.borrow_mut() = Some(Arc::clone(&gate)));
+        let req = actix_web::test::TestRequest::get()
+            .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+            .to_request();
+        let res = actix_web::test::call_service(&app, req).await;
+        assert_eq!(res.status(), 401);
+        assert_eq!(
+            permits(),
+            MAX_CONCURRENT_LOOKUPS - 1,
+            "the lookup in flight holds no permit"
+        );
+
+        gate.add_permits(1);
+        LOOKUP_GATE.with(|g| *g.borrow_mut() = None);
+        let rows = system_rows(&audit, 1).await;
+        assert_eq!(rows[0].organization_id, Some(org_id));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while permits() != MAX_CONCURRENT_LOOKUPS {
+            assert!(
+                Instant::now() < deadline,
+                "the finished lookup kept its permit"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 

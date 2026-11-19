@@ -4100,7 +4100,7 @@ struct HookedSessionRepo {
     landed: Arc<std::sync::Mutex<Option<Result<(), String>>>>,
     /// SR13-1: models a SNAPSHOT read. When set, the next
     /// `create_if_credential_version` first lets a full reset commit (the
-    /// credential write, then both revocations, which find nothing), and then
+    /// credential write, then the session revocation, which finds nothing), and then
     /// writes the row with the unchecked `create`, which is what a transaction
     /// that read the old version would commit.
     snapshot_commit: Arc<std::sync::atomic::AtomicBool>,
@@ -4341,7 +4341,7 @@ async fn sr11_1_a_sign_in_landing_during_a_reset_leaves_no_session() {
 /// SR13-1: SurrealDB's transaction is SNAPSHOT isolation, so the in-transaction
 /// version check does not abort against a concurrent credential write. Model
 /// the interleaving: the sign-in read version N, a full reset (credential
-/// write, then both revocations, which find no session yet) commits, and only
+/// write, then the session revocation, which finds no session yet) commits, and only
 /// then does the session row commit. The re-check after the commit must
 /// delete the row and answer as a wrong password, before any token is
 /// returned; an undisturbed sign-in still gets its session.

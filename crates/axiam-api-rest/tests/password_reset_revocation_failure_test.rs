@@ -307,6 +307,14 @@ async fn change_emits_credential_change_when_revocation_succeeds() {
     assert_eq!(status, 204);
     assert_eq!(password_credential_changes(&w), 1);
     assert!(!rows.iter().any(|r| r.metadata["revocation"] == "failed"));
+    // QR14-1: a successful change notifies, as a successful reset does: the
+    // request row (`POST /api/v1/auth/password/change`, Success) is the one
+    // `PasswordChanged` notification.
+    assert_eq!(
+        offered_password_changed(&sink, &w).len(),
+        1,
+        "one PasswordChanged notification, the request row's"
+    );
 }
 
 #[actix_rt::test]
@@ -338,5 +346,12 @@ async fn qr13_2_change_emits_credential_change_even_when_revocation_fails() {
             .as_ref()
             .is_some_and(|m| m["revocation"] == "failed")),
         "the PasswordChanged notification fires on the revocation-failure path"
+    );
+    // QR14-1: the request row is a `Failure` (maps to nothing), so the
+    // supplemental row is the only one: exactly one notification.
+    assert_eq!(
+        offered_password_changed(&sink, &w).len(),
+        1,
+        "exactly one PasswordChanged notification, the supplemental row's"
     );
 }

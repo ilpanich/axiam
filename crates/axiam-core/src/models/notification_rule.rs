@@ -130,6 +130,11 @@ impl NotificationEventType {
             ("POST /api/v1/auth/reset/confirm", "Success") => {
                 vec![Self::PasswordChanged]
             }
+            // QR14-1: a successful self-service password change notifies as a
+            // reset does. The failed-revocation case is the row below.
+            ("POST /api/v1/auth/password/change", "Success") => {
+                vec![Self::PasswordChanged]
+            }
             // QR13-1: the row a password reset or change writes when the
             // credential committed but the session revocation failed (the
             // request row of that response is a `Failure`).
@@ -546,6 +551,11 @@ mod tests {
                 NotificationEventType::PasswordChanged,
             ),
             (
+                "POST /api/v1/auth/password/change",
+                "Success",
+                NotificationEventType::PasswordChanged,
+            ),
+            (
                 "POST /api/v1/auth/mfa/enroll",
                 "Success",
                 NotificationEventType::MfaEnrollmentChanged,
@@ -585,6 +595,13 @@ mod tests {
         assert!(
             NotificationEventType::from_audit_action("POST /api/v1/auth/reset/confirm", "Failure")
                 .is_empty()
+        );
+        assert!(
+            NotificationEventType::from_audit_action(
+                "POST /api/v1/auth/password/change",
+                "Failure"
+            )
+            .is_empty()
         );
     }
 

@@ -516,16 +516,19 @@ credentials. A password reset, a password change and a SCIM password write each 
 credential first and revoke the user's sessions and refresh tokens afterwards, so a session that
 committed before the revocation is removed by it, and one that commits after it is caught by the
 re-read. If deleting the refused row fails, the sign-in still answers invalid credentials and no
-token is returned; the row is left to expire.
+token is returned; the row is left to expire. The refused row is removed through the logout path
+(`session_repo.invalidate`), so its id appears on the revocation feed and, with an SSF sink
+configured, on the `session-revoked` stream, for a session that no client ever held.
 If revoking the sessions fails after a password reset or a self-service password change has
 written the new password, it still emits the SSF `credential-change` event (the password has
-changed, so receivers must be told) and then answers the error (500); a reset attempts both
-revocations either way. The request's own audit row records that 500 as a `Failure`, so the
+changed, so receivers must be told) and then answers the error (500); both revocations are
+attempted either way, for a reset and a change alike. The request's own audit row records that 500 as a `Failure`, so the
 server also records, beside it and in the tenant's own audit log, a row with action
 `auth.password_changed_revocation_failed`, outcome `Success` and metadata
 `{"credential_written": true, "revocation": "failed"}`; the `password_changed` notification rule
-matches that row, as it matches a successful reset's request row. A successful reset or change
-writes no such row.
+matches that row, as it matches a successful reset's request row and a successful change's
+request row (`POST /api/v1/auth/password/change`). A successful reset or change writes no such
+row.
 
 *Clock assumption (artefacts without a version).* The stamp is written from the application replica's clock, bound into the
 credential's own transaction, not from the datastore's, because the artefacts it is compared with

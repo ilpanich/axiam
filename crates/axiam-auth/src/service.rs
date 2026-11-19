@@ -2182,6 +2182,10 @@ impl<
             if stored.as_ref().ok() != Some(&version) {
                 // The row is also the refresh token. Whatever the cause (moved
                 // version, or an unreadable user), never return tokens for it.
+                // The row is removed through the logout path
+                // (`session_repo.invalidate`), so its id is published on the
+                // revocation feed and, with an SSF sink, emitted as
+                // `session-revoked`, for a session no client ever held.
                 if let Err(e) = self.session_repo.invalidate(tenant_id, session.id).await {
                     // Left behind: an unreturned session row whose secret was
                     // never disclosed; it expires on its own and

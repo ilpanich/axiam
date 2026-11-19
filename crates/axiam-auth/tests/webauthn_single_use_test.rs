@@ -14,6 +14,10 @@
 //! (`create_session_and_tokens`), so "one session" is counted, not assumed.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[path = "read_then_bump_support/mod.rs"]
+mod read_then_bump_support;
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::AuthService;
@@ -281,29 +285,20 @@ async fn start(w: &World) -> (String, String) {
 }
 
 /// What `POST /auth/webauthn/authenticate/finish` does: the ceremony's finish
-/// through `finish_webauthn_authentication`, then — only if it succeeded — a
-/// session carrying the credential version the finish returned (SR10-1).
+/// and, only if it succeeded, the session, as one `AuthService` call.
 async fn finish(w: &World, state_token: &str, assertion: &PublicKeyCredential) -> bool {
-    let Ok((user_id, org_id, credential_version)) = w
-        .auth
-        .finish_webauthn_authentication(&w.webauthn, w.tenant_id, state_token, assertion)
-        .await
-    else {
-        return false;
-    };
     w.auth
-        .create_session_and_tokens(
-            user_id,
+        .complete_webauthn_second_factor(
+            &w.webauthn,
             w.tenant_id,
-            org_id,
-            None,
-            None,
+            state_token,
+            assertion,
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
-            Some(credential_version),
+            None,
+            None,
         )
         .await
-        .unwrap();
-    true
+        .is_ok()
 }
 
 async fn sessions(w: &World) -> usize {
@@ -738,36 +733,42 @@ async fn sr2_1_control_a_ceremony_started_after_a_reset_finishes() {
         .expect("started after the reset: the ceremony finishes");
 }
 
-/// SA-06 (N7, QR11-2): the version `finish_webauthn_authentication` returns is
-/// the one the ceremony was checked under, not one re-read afterwards, so a
-/// reset that lands between the finish and the session write — which the
-/// handler performs with exactly that value — leaves no session, and the
-/// sign-in is answered as a wrong password is. A finish with no reset between
-/// still opens its session.
+/// SA-06 (N7, QR11-2 / QR12-1): `complete_webauthn_second_factor` — the call
+/// `POST /auth/webauthn/authenticate/finish` makes — carries the version the
+/// ceremony was checked under into the session write. The password is replaced
+/// right after the finish's own read of the user (in the user repository), so a
+/// path that re-read the user before the session write would see the new
+/// version, pass it, and open a session; this must not. A ceremony started
+/// after the reset finishes and opens one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_finish() {
     let w = world().await;
     let (challenge, state_token) = start(&w).await;
     let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
-    let (user_id, org_id, credential_version) = w
-        .auth
-        .finish_webauthn_authentication(&w.webauthn, w.tenant_id, &state_token, &assertion)
-        .await
-        .expect("the ceremony finishes");
 
-    // The reset lands after the ceremony's check, before the session write.
-    reset_the_password(&w).await;
+    let armed = Arc::new(AtomicBool::new(false));
+    let raced: AuthService<_, _, _, _> = AuthService::new(
+        read_then_bump_support::ReadThenBumpUserRepo {
+            inner: SurrealUserRepository::new(w.db.clone()),
+            armed: armed.clone(),
+        },
+        SurrealSessionRepository::new(w.db.clone()),
+        SurrealFederationLinkRepository::new(w.db.clone()),
+        SurrealRefreshTokenRepository::new(w.db.clone()),
+        config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    armed.store(true, Ordering::SeqCst);
 
-    let err = w
-        .auth
-        .create_session_and_tokens(
-            user_id,
+    let err = raced
+        .complete_webauthn_second_factor(
+            &w.webauthn,
             w.tenant_id,
-            org_id,
-            None,
-            None,
+            &state_token,
+            &assertion,
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
-            Some(credential_version),
+            None,
+            None,
         )
         .await
         .expect_err("a sign-in checked under the replaced credential must not mint a session");
@@ -778,6 +779,10 @@ async fn qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_fin
                 if reason == "invalid credentials"
         ),
         "answered exactly like a wrong password, got {err:?}"
+    );
+    assert!(
+        !armed.load(Ordering::SeqCst),
+        "the race must have been exercised"
     );
     assert_eq!(sessions(&w).await, 0, "no session was opened");
 

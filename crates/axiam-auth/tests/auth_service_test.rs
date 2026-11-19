@@ -26,6 +26,10 @@ use axiam_db::repository::{
 };
 use axiam_test_support::{other_password, test_password};
 use chrono::{Duration, Utc};
+#[path = "read_then_bump_support/mod.rs"]
+mod read_then_bump_support;
+use read_then_bump_support::ReadThenBumpUserRepo;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use surrealdb::Surreal;
@@ -1346,6 +1350,108 @@ async fn validate_access_token_works() {
 
     let tampered = format!("{jwt}x");
     assert!(token::validate_access_token(&tampered, &config).is_err());
+}
+
+/// QR12-3: a failed session delete must not leave the OAuth2 refresh tokens
+/// live. Both revocations are attempted, then the first error is reported.
+async fn session_delete_failure_world() -> (
+    AuthService<
+        SurrealUserRepository<MemDb>,
+        SurrealSessionRepository<MemDb>,
+        SurrealFederationLinkRepository<MemDb>,
+        SurrealRefreshTokenRepository<MemDb>,
+    >,
+    SurrealRefreshTokenRepository<MemDb>,
+    Uuid,
+    Uuid,
+    String,
+    Uuid,
+) {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let oauth2_tokens = refresh_token_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let kept = login_alice(&svc, tenant_id, org_id).await;
+    let token_hash = token::hash_refresh_token(&token::generate_refresh_token());
+    oauth2_tokens
+        .create(CreateRefreshToken {
+            tenant_id,
+            token_hash: token_hash.clone(),
+            client_id: "native-app".into(),
+            user_id: Some(user_id),
+            scopes: vec!["openid".into()],
+            session_id: None,
+            requested_userinfo_claims: vec![],
+            resource: None,
+            auth_time: None,
+            acr: None,
+            amr: vec![],
+            dpop_jkt: None,
+            expires_at: Utc::now() + Duration::days(30),
+            lineage_id: None,
+        })
+        .await
+        .unwrap();
+    login_alice(&svc, tenant_id, org_id).await;
+    db.query(
+        "DEFINE EVENT session_delete_poison ON TABLE session \
+         WHEN $event = 'DELETE' THEN { THROW 'poisoned delete' }",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    (
+        svc,
+        oauth2_tokens,
+        tenant_id,
+        user_id,
+        token_hash,
+        kept.session_id,
+    )
+}
+
+#[tokio::test]
+async fn qr12_3_revoke_all_sessions_revokes_oauth2_tokens_when_the_session_delete_fails() {
+    let (svc, oauth2_tokens, tenant_id, user_id, token_hash, _kept) =
+        session_delete_failure_world().await;
+    svc.revoke_all_sessions(tenant_id, user_id)
+        .await
+        .expect_err("the failed session delete is reported");
+    assert!(
+        matches!(
+            oauth2_tokens
+                .get_by_token_hash(tenant_id, &token_hash)
+                .await,
+            Err(AxiamError::NotFound { .. })
+        ),
+        "the OAuth2 refresh token must be revoked although the session delete failed"
+    );
+}
+
+#[tokio::test]
+async fn qr12_3_revoke_all_sessions_except_revokes_oauth2_tokens_when_the_session_delete_fails() {
+    let (svc, oauth2_tokens, tenant_id, user_id, token_hash, kept) =
+        session_delete_failure_world().await;
+    svc.revoke_all_sessions_except(tenant_id, user_id, kept)
+        .await
+        .expect_err("the failed session delete is reported");
+    assert!(
+        matches!(
+            oauth2_tokens
+                .get_by_token_hash(tenant_id, &token_hash)
+                .await,
+            Err(AxiamError::NotFound { .. })
+        ),
+        "the OAuth2 refresh token must be revoked although the session delete failed"
+    );
 }
 
 #[tokio::test]
@@ -4217,20 +4323,37 @@ async fn sr11_1_a_sign_in_landing_during_a_reset_leaves_no_session() {
 }
 
 // -----------------------------------------------------------------------
-// SA-06 (N7, QR11-2) — each path's own wiring of the session-write check
+// SA-06 (N7, QR11-2 / QR12-1) — each path's own wiring of the session-write check
 // -----------------------------------------------------------------------
 //
 // `sr10_1_a_credential_change_after_the_read_leaves_no_session` covers the
-// password path and the choke point. These cover the three second-factor
-// paths: the credential changes after the path's own check and before its
-// session write, which must be refused as a wrong password is, leaving no
-// session. A path that re-read the user just before the write, or passed
-// `None`, would make the check vacuous and fail these.
+// password path and the choke point. These cover the two second-factor paths
+// this service owns (TOTP `verify_mfa`, setup-token completion): the
+// credential changes right after the path's OWN check read of the user and
+// before its session write, which must be refused as a wrong password is,
+// leaving no session.
+//
+// The race is armed in the USER repository: the password is replaced right
+// after the first `get_by_id` returns (the old row is what the path holds).
+// A path that re-read the user just before the session write would then see
+// the NEW version and pass `Some(new)`, minting a session, and fail these; a
+// path that passed `None` would do the same. (The previous version bumped the
+// password inside the session write, which a re-read would not have noticed.)
+//
+// WebAuthn second factor: its ceremony finishes in the REST handler
+// (`handlers/webauthn.rs`), which calls `finish_webauthn_authentication` and
+// then `create_session_and_tokens` with the version the finish returned. That
+// pair cannot be driven from this crate and the finish cannot be driven over
+// REST (a ceremony needs an authenticator); `webauthn_single_use_test.rs::
+// qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_finish`
+// therefore covers only the contract the handler relies on: the finish returns
+// the version it checked under, and a session write carrying it is refused
+// after a reset. It does not run the handler.
 
-/// A service whose session repository changes the user's password right
-/// before the first session write, plus the handles the tests need.
+/// A service whose user repository changes the user's password right after
+/// the path's own check read, plus the handles the tests need.
 struct RaceWorld {
-    /// The same database, with a plain session repository (for set-up).
+    /// The same database, with plain repositories (for set-up).
     plain: AuthService<
         SurrealUserRepository<MemDb>,
         SurrealSessionRepository<MemDb>,
@@ -4239,14 +4362,13 @@ struct RaceWorld {
     >,
     /// The service under test.
     raced: AuthService<
-        SurrealUserRepository<MemDb>,
-        HookedSessionRepo,
+        ReadThenBumpUserRepo<SurrealUserRepository<MemDb>>,
+        SurrealSessionRepository<MemDb>,
         SurrealFederationLinkRepository<MemDb>,
         SurrealRefreshTokenRepository<MemDb>,
     >,
     sessions: SurrealSessionRepository<MemDb>,
-    hook: HookedSessionRepo,
-    users: SurrealUserRepository<MemDb>,
+    armed: Arc<AtomicBool>,
     org_id: Uuid,
     tenant_id: Uuid,
     user_id: Uuid,
@@ -4265,24 +4387,21 @@ impl RaceWorld {
             _db,
         ) = setup().await;
         let sessions = session_repo.clone();
-        let users = user_repo.clone();
-        let hook = HookedSessionRepo {
-            inner: session_repo.clone(),
-            bump_before_mint: Arc::new(std::sync::Mutex::new(None)),
-            pending: Arc::new(std::sync::Mutex::new(None)),
-            landed: Arc::new(std::sync::Mutex::new(None)),
-        };
+        let armed = Arc::new(AtomicBool::new(false));
         let plain = AuthService::new(
             user_repo.clone(),
-            session_repo,
+            session_repo.clone(),
             fed_repo.clone(),
             refresh_token_repo.clone(),
             test_config(),
             Arc::new(tokio::sync::Semaphore::new(4)),
         );
         let raced = AuthService::new(
-            user_repo,
-            hook.clone(),
+            ReadThenBumpUserRepo {
+                inner: user_repo,
+                armed: armed.clone(),
+            },
+            session_repo,
             fed_repo,
             refresh_token_repo,
             test_config(),
@@ -4292,17 +4411,16 @@ impl RaceWorld {
             plain,
             raced,
             sessions,
-            hook,
-            users,
+            armed,
             org_id,
             tenant_id,
             user_id,
         }
     }
 
-    /// The next session write is preceded by a password change.
+    /// The password is replaced right after the next user read.
     fn arm_the_race(&self) {
-        *self.hook.bump_before_mint.lock().unwrap() = Some(self.users.clone());
+        self.armed.store(true, Ordering::SeqCst);
     }
 
     async fn assert_refused_as_a_wrong_password_with_no_session<T: std::fmt::Debug>(
@@ -4315,7 +4433,7 @@ impl RaceWorld {
             "answered exactly like a wrong password, got {err:?}"
         );
         assert!(
-            self.hook.bump_before_mint.lock().unwrap().is_none(),
+            !self.armed.load(Ordering::SeqCst),
             "the race must have been exercised"
         );
         assert!(

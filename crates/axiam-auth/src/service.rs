@@ -1138,6 +1138,39 @@ impl<
         Ok((user_id, tenant_id, org_id, issued_at, claims.cv))
     }
 
+    /// The whole WebAuthn second-factor completion: the ceremony's finish
+    /// ([`Self::finish_webauthn_authentication`]) and, only if it succeeded,
+    /// the session ([`Self::create_session_and_tokens`]) carrying the
+    /// credential version the finish checked the ceremony under (SR10-1).
+    ///
+    /// One method so the pair cannot drift apart: a handler that re-read the
+    /// user between the two would make the session-write check vacuous
+    /// (QR12-1). `POST /auth/webauthn/authenticate/finish` calls this.
+    pub async fn complete_webauthn_second_factor<W: WebauthnCredentialRepository>(
+        &self,
+        webauthn: &WebauthnService<W>,
+        tenant_id: Uuid,
+        state_token: &str,
+        response: &PublicKeyCredential,
+        evidence: AuthenticationEvidence,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AxiamResult<LoginOutput> {
+        let (user_id, org_id, credential_version) = self
+            .finish_webauthn_authentication(webauthn, tenant_id, state_token, response)
+            .await?;
+        self.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            ip_address,
+            user_agent,
+            evidence,
+            Some(credential_version),
+        )
+        .await
+    }
+
     /// The WebAuthn second-factor finish: refuse a ceremony whose challenge
     /// predates the user's last credential change, then verify the assertion
     /// ([`WebauthnService::finish_authentication`]). Returns the
@@ -1593,17 +1626,22 @@ impl<
     /// the OAuth2-flow refresh tokens (via `refresh_token_repo`). RESEARCH §4
     /// confirmed these are two separate tables; both must be hit.
     pub async fn revoke_all_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
-        self.session_repo
+        let sessions = self
+            .session_repo
             .invalidate_user_sessions(tenant_id, user_id)
-            .await?;
+            .await;
 
         // Also revoke OAuth2 refresh tokens for this user (the second
         // chokepoint identified in RESEARCH §4). Tolerate 0 revocations —
-        // user may not have any OAuth2 tokens.
-        let oauth2_revoked = self
+        // user may not have any OAuth2 tokens. Attempted even when the session
+        // delete failed (QR12-3): one failure must not leave the other
+        // chokepoint's tokens live. The first error is reported.
+        let oauth2 = self
             .refresh_token_repo
             .revoke_all_for_user(tenant_id, user_id)
-            .await?;
+            .await;
+        sessions?;
+        let oauth2_revoked = oauth2?;
         tracing::debug!(
             %tenant_id, %user_id, %oauth2_revoked,
             "revoke_all_sessions: session-flow and OAuth2 refresh tokens revoked"
@@ -1627,19 +1665,22 @@ impl<
         user_id: Uuid,
         current_session_id: Uuid,
     ) -> AxiamResult<()> {
-        let sessions_deleted = self
+        let sessions = self
             .session_repo
             .invalidate_user_sessions_except(tenant_id, user_id, current_session_id)
-            .await?;
+            .await;
 
         // Revoke all OAuth2 refresh tokens for the user. OAuth2 tokens are not
         // session-scoped, so we must revoke all of them even on a "keep current
         // session" path — the caller's browser session continues but any OAuth2
-        // app must re-authenticate. Tolerate 0 revocations.
-        let oauth2_revoked = self
+        // app must re-authenticate. Tolerate 0 revocations. Attempted even when
+        // the session delete failed (QR12-3); the first error is reported.
+        let oauth2 = self
             .refresh_token_repo
             .revoke_all_for_user(tenant_id, user_id)
-            .await?;
+            .await;
+        let sessions_deleted = sessions?;
+        let oauth2_revoked = oauth2?;
         tracing::debug!(
             %tenant_id, %user_id, %sessions_deleted, %oauth2_revoked,
             event_type = "sessions_revoked_except_current",

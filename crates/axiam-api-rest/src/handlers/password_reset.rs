@@ -341,10 +341,10 @@ pub async fn confirm_reset<C: Connection + Clone>(
     // holder of the reset token is the user).
     with_cause(Some(InitiatingEntity::User), async {
         // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
-        let user_id = state
+        let confirmed = state
             .mail
             .password_reset_service
-            .confirm_reset_with_opaque(
+            .confirm_reset_reporting_revocation(
                 req.tenant_id,
                 &req.token,
                 &req.new_password,
@@ -356,19 +356,25 @@ pub async fn confirm_reset<C: Connection + Clone>(
             )
             .await?;
 
+        // QR12-2: the password is already stored, so the credential-change
+        // event goes out even when revoking the sessions failed; the error is
+        // answered after it.
         state
             .ssf
             .emitter
             .credential_changed(
                 req.tenant_id,
-                user_id,
+                confirmed.user_id,
                 CredentialType::Password,
                 ChangeType::Update,
                 InitiatingEntity::User,
                 CredentialDetail::default(),
             )
             .await;
-        Ok::<(), AxiamApiError>(())
+        match confirmed.revocation {
+            Some(error) => Err(AxiamApiError::from(error)),
+            None => Ok::<(), AxiamApiError>(()),
+        }
     })
     .await?;
 

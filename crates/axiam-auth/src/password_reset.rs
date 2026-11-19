@@ -24,6 +24,21 @@ use crate::token;
 /// Maximum password reset requests per user per day.
 const MAX_RESETS_PER_DAY: u64 = 3;
 
+/// What a reset that reached the credential write reports (QR12-2).
+///
+/// Once the new password is stored the reset has happened, whatever the
+/// revocation that follows does. A caller that must act on the change (the SSF
+/// `credential-change` event) needs `user_id` even when `revocation` failed,
+/// so the failure travels beside it instead of replacing it.
+#[derive(Debug)]
+pub struct ConfirmedReset {
+    /// The account whose password was just written.
+    pub user_id: Uuid,
+    /// The first error of revoking the account's sessions and OAuth2 refresh
+    /// tokens (both are attempted), or `None` when both succeeded.
+    pub revocation: Option<AxiamError>,
+}
+
 /// Password reset service.
 ///
 /// Handles reset token generation with rate limiting and prior-token
@@ -272,6 +287,38 @@ where
         http_client: Option<&reqwest::Client>,
         opaque: Option<crate::opaque::OpaqueEnrolled>,
     ) -> AxiamResult<Uuid> {
+        let confirmed = self
+            .confirm_reset_reporting_revocation(
+                tenant_id,
+                raw_token,
+                new_password,
+                policy,
+                pepper,
+                http_client,
+                opaque,
+            )
+            .await?;
+        match confirmed.revocation {
+            Some(error) => Err(error),
+            None => Ok(confirmed.user_id),
+        }
+    }
+
+    /// [`confirm_reset_with_opaque`](Self::confirm_reset_with_opaque), but a
+    /// revocation failure AFTER the credential write is reported beside the
+    /// user id ([`ConfirmedReset::revocation`]) instead of replacing it
+    /// (QR12-2). `Err` means the credential was NOT written.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn confirm_reset_reporting_revocation(
+        &self,
+        tenant_id: Uuid,
+        raw_token: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        pepper: Option<&str>,
+        http_client: Option<&reqwest::Client>,
+        opaque: Option<crate::opaque::OpaqueEnrolled>,
+    ) -> AxiamResult<ConfirmedReset> {
         let token_hash = token::hash_refresh_token(raw_token);
 
         // Atomically consume the token.
@@ -412,9 +459,11 @@ where
         // password and reached its session write between a revoke-first and
         // the credential write would pass that check and nothing would remove
         // it afterwards. `change_password` and SCIM use this order too. A
-        // revocation failure now surfaces as an error with the password
-        // already changed (any sign-in that could still land is refused by the
-        // version check); both revocations are attempted either way.
+        // revocation failure surfaces as an error with the password already
+        // changed (any sign-in that could still land is refused by the
+        // version check); both revocations are attempted either way, and the
+        // failure is returned beside the user id so the caller can still
+        // announce the credential change (QR12-2).
         let sessions = self
             .session_repo
             .invalidate_user_sessions(tenant_id, user.id)
@@ -423,12 +472,14 @@ where
             .refresh_token_repo
             .revoke_all_for_user(tenant_id, user.id)
             .await;
-        sessions?;
-        refresh_tokens?;
+        let revocation = sessions.err().or(refresh_tokens.err());
 
-        // The caller needs this to attach an OPAQUE record for the password it
-        // just set; the reset body carries a token, never a user id.
-        Ok(user.id)
+        // The caller needs the id for the SSF credential-change event; the
+        // reset body carries a token, never a user id.
+        Ok(ConfirmedReset {
+            user_id: user.id,
+            revocation,
+        })
     }
 }
 

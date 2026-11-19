@@ -511,6 +511,9 @@ no refresh token. A federated sign-in has no AXIAM credential behind it and carr
 A password reset, a password change and a SCIM password write each write the credential first
 and revoke the user's sessions and refresh tokens afterwards, so no sign-in that read the old
 version can land a session between the two steps.
+If revoking the sessions fails after a password reset has written the new password, the reset
+still emits the SSF `credential-change` event (the password has changed, so receivers must be
+told) and then answers the error (500); both revocations are attempted either way.
 
 *Clock assumption (artefacts without a version).* The stamp is written from the application replica's clock, bound into the
 credential's own transaction, not from the datastore's, because the artefacts it is compared with

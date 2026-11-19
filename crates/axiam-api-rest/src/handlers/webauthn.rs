@@ -1149,28 +1149,20 @@ pub async fn finish_authentication<C: Connection + Clone>(
 
     // SA-06 (SR2-1): refuses a ceremony whose challenge predates a credential
     // change, with the answer an invalid state token gets, then finishes it.
-    let (user_id, org_id, credential_version) = state
+    // The finish and the session write are one `AuthService` call
+    // (`complete_webauthn_second_factor`), so the credential version the
+    // ceremony was checked under is the one the session write compares (SR10-1).
+    let out = state
         .auth_service
-        .finish_webauthn_authentication(
+        .complete_webauthn_second_factor(
             &state.webauthn.webauthn_service,
             tenant_id,
             &b.state_token,
             &b.response,
-        )
-        .await?;
-
-    let out = state
-        .auth_service
-        .create_session_and_tokens(
-            user_id,
-            tenant_id,
-            org_id,
-            client_ip(&req),
-            user_agent(&req),
             // X7.2 — see `authentication_amr`.
             AuthenticationEvidence::now(authentication_amr()),
-            // SR10-1: the version the ceremony was bound to and checked.
-            Some(credential_version),
+            client_ip(&req),
+            user_agent(&req),
         )
         .await?;
 

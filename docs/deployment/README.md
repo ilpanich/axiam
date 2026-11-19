@@ -508,12 +508,24 @@ it read together with that credential into the session write. The write compares
 user's current version inside its own transaction and, when a reset or change committed in
 between, refuses as a wrong password is refused (invalid credentials), creating no session and
 no refresh token. A federated sign-in has no AXIAM credential behind it and carries no version.
-A password reset, a password change and a SCIM password write each write the credential first
-and revoke the user's sessions and refresh tokens afterwards, so no sign-in that read the old
-version can land a session between the two steps.
-If revoking the sessions fails after a password reset has written the new password, the reset
-still emits the SSF `credential-change` event (the password has changed, so receivers must be
-told) and then answers the error (500); both revocations are attempted either way.
+SurrealDB transactions are snapshot-isolated, so that in-transaction comparison alone does not
+abort against a concurrent credential write. The sign-in therefore also re-reads the user's
+credential version after its session row has committed and before it builds any token: if the
+version moved, it deletes that session row (which is also the refresh token) and answers invalid
+credentials. A password reset, a password change and a SCIM password write each write the
+credential first and revoke the user's sessions and refresh tokens afterwards, so a session that
+committed before the revocation is removed by it, and one that commits after it is caught by the
+re-read. If deleting the refused row fails, the sign-in still answers invalid credentials and no
+token is returned; the row is left to expire.
+If revoking the sessions fails after a password reset or a self-service password change has
+written the new password, it still emits the SSF `credential-change` event (the password has
+changed, so receivers must be told) and then answers the error (500); a reset attempts both
+revocations either way. The request's own audit row records that 500 as a `Failure`, so the
+server also records, beside it and in the tenant's own audit log, a row with action
+`auth.password_changed_revocation_failed`, outcome `Success` and metadata
+`{"credential_written": true, "revocation": "failed"}`; the `password_changed` notification rule
+matches that row, as it matches a successful reset's request row. A successful reset or change
+writes no such row.
 
 *Clock assumption (artefacts without a version).* The stamp is written from the application replica's clock, bound into the
 credential's own transaction, not from the datastore's, because the artefacts it is compared with

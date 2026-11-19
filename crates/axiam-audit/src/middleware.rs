@@ -68,6 +68,31 @@ pub struct AuditAttribution {
     pub org_id: Uuid,
 }
 
+/// A second audit row a handler asks the middleware to record beside the
+/// request row (QR13-1, QR13-2).
+///
+/// For a response whose status says less than what happened: a password reset
+/// or change that stored the new credential and then failed to revoke the
+/// account's sessions answers 500, so the request row is a `Failure`, yet the
+/// credential change is real and a `password_changed` notification rule must
+/// see it. The row is attributed exactly as the request row is (the verified
+/// token's tenant, else the [`AuditAttribution`]) and goes through the same
+/// worker, so it is appended and offered to the notification sink the way every
+/// request row is. Ignored on a row the middleware could not place in a tenant.
+#[derive(Debug, Clone)]
+pub struct AuditSupplementalRow {
+    /// The audit action (not a request line).
+    pub action: String,
+    /// Who acted.
+    pub actor_id: Uuid,
+    /// What kind of principal acted.
+    pub actor_type: ActorType,
+    /// The outcome the row records.
+    pub outcome: AuditOutcome,
+    /// Row metadata; `http_status` and `authenticated` are added.
+    pub metadata: serde_json::Value,
+}
+
 /// The organization a request the middleware records in the **system**
 /// partition (nil tenant) concerns (SA-02, N1).
 ///
@@ -677,24 +702,34 @@ where
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let (status, result, attribution, verdict, system_org, pending_org) = match fut.await {
-                Ok(res) => {
-                    let s = res.status().as_u16();
-                    let mut extensions = res.request().extensions_mut();
-                    let attribution = extensions.get::<AuditAttribution>().copied();
-                    let verdict = extensions
-                        .get::<axiam_auth::carrier::AuthVerdict>()
-                        .copied();
-                    let system_org = extensions.get::<AuditOrganization>().copied();
-                    let pending_org = extensions.remove::<PendingAuditOrganization>();
-                    drop(extensions);
-                    (s, Ok(res), attribution, verdict, system_org, pending_org)
-                }
-                Err(err) => {
-                    let s = err.as_response_error().status_code().as_u16();
-                    (s, Err(err), None, None, None, None)
-                }
-            };
+            let (status, result, attribution, verdict, system_org, pending_org, supplement) =
+                match fut.await {
+                    Ok(res) => {
+                        let s = res.status().as_u16();
+                        let mut extensions = res.request().extensions_mut();
+                        let attribution = extensions.get::<AuditAttribution>().copied();
+                        let verdict = extensions
+                            .get::<axiam_auth::carrier::AuthVerdict>()
+                            .copied();
+                        let system_org = extensions.get::<AuditOrganization>().copied();
+                        let pending_org = extensions.remove::<PendingAuditOrganization>();
+                        let supplement = extensions.remove::<AuditSupplementalRow>();
+                        drop(extensions);
+                        (
+                            s,
+                            Ok(res),
+                            attribution,
+                            verdict,
+                            system_org,
+                            pending_org,
+                            supplement,
+                        )
+                    }
+                    Err(err) => {
+                        let s = err.as_response_error().status_code().as_u16();
+                        (s, Err(err), None, None, None, None, None)
+                    }
+                };
 
             let outcome = if status < 400 {
                 AuditOutcome::Success
@@ -773,6 +808,27 @@ where
             // to a bound (R1W2-02).
             crate::dead_letter::bound_fields(&mut entry);
 
+            // The handler's second row, placed in the same tenant as the
+            // request row; none for a row that has no tenant.
+            let supplemental = supplement.filter(|_| !tenant_id.is_nil()).map(|row| {
+                let mut extra = row.metadata;
+                if let Some(map) = extra.as_object_mut() {
+                    map.insert("http_status".into(), status.into());
+                    map.insert("authenticated".into(), authenticated.into());
+                }
+                CreateAuditLogEntry {
+                    tenant_id,
+                    actor_id: row.actor_id,
+                    actor_type: row.actor_type,
+                    action: row.action,
+                    resource_id: None,
+                    outcome: row.outcome,
+                    ip_address: entry.ip_address.clone(),
+                    metadata: Some(extra),
+                    organization_id: None,
+                }
+            });
+
             // `try_send`, never `send`: a full channel must not hold the
             // response. The row it refuses is counted and offered to the
             // dead-letter queue — also non-blocking.
@@ -785,6 +841,18 @@ where
                     pending_organization,
                 },
             );
+            if let Some(mut entry) = supplemental {
+                crate::dead_letter::bound_fields(&mut entry);
+                offer(
+                    &tx,
+                    &loss,
+                    Queued::Event {
+                        event: AuditEvent { entry, org_id },
+                        occurred_at,
+                        pending_organization: None,
+                    },
+                );
+            }
 
             result
         })

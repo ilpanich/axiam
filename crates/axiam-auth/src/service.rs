@@ -1747,6 +1747,48 @@ impl<
         http_client: Option<&reqwest::Client>,
         opaque: Option<crate::opaque::OpaqueEnrolled>,
     ) -> AxiamResult<()> {
+        match self
+            .change_password_reporting_revocation(
+                tenant_id,
+                user_id,
+                current_session_id,
+                current_password,
+                new_password,
+                policy,
+                history_repo,
+                http_client,
+                opaque,
+            )
+            .await?
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// [`change_password_with_opaque`](Self::change_password_with_opaque), but
+    /// a failure to revoke the other sessions AFTER the new credential was
+    /// stored is returned beside success instead of replacing it (QR13-2, as
+    /// [`PasswordResetService::confirm_reset_reporting_revocation`] does for a
+    /// reset). `Err` means the credential was NOT written; `Ok(Some(error))`
+    /// means it was, and the caller must still report the credential change
+    /// before answering the error.
+    ///
+    /// [`PasswordResetService::confirm_reset_reporting_revocation`]:
+    ///     crate::password_reset::PasswordResetService::confirm_reset_reporting_revocation
+    #[allow(clippy::too_many_arguments)]
+    pub async fn change_password_reporting_revocation<H: PasswordHistoryRepository>(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+        current_password: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        history_repo: &H,
+        http_client: Option<&reqwest::Client>,
+        opaque: Option<crate::opaque::OpaqueEnrolled>,
+    ) -> AxiamResult<Option<AxiamError>> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
         // 0. G-3 (T23.3.2): a directory account's password belongs to its
@@ -1849,8 +1891,12 @@ impl<
             .await?;
 
         // 6. Revoke all other sessions + OAuth2 tokens; preserve current session.
-        self.revoke_all_sessions_except(tenant_id, user_id, current_session_id)
-            .await?;
+        //    The new credential is already stored, so a failure here is
+        //    reported beside success (QR13-2), after the log line below.
+        let revocation = self
+            .revoke_all_sessions_except(tenant_id, user_id, current_session_id)
+            .await
+            .err();
 
         tracing::info!(
             %tenant_id,
@@ -1858,10 +1904,11 @@ impl<
             target = %user_id,
             mode = "self_service",
             event_type = "password_changed",
+            revocation_failed = revocation.is_some(),
             "user changed their password"
         );
 
-        Ok(())
+        Ok(revocation)
     }
 
     /// Start MFA enrollment using an MFA setup token (enforcement flow).
@@ -2116,6 +2163,40 @@ impl<
             }
             None => self.session_repo.create(new_session).await?,
         };
+
+        // SR13-1: the in-transaction check above is not enough on its own.
+        // SurrealDB transactions are SNAPSHOT isolation: the session
+        // transaction (which read the user) and a credential write (which
+        // wrote it) are not detected as conflicting, so a reset can commit its
+        // credential AND run both revocations (finding no session yet) before
+        // this row commits. Re-read the version after the commit and before
+        // any token is built: a reset commits its credential before its
+        // revocations, so a session committed before the revocation is removed
+        // by it, and one committed after is caught here.
+        if let Some(version) = credential_version {
+            let stored = self
+                .user_repo
+                .get_by_id(tenant_id, user_id)
+                .await
+                .map(|u| u.credential_version);
+            if stored.as_ref().ok() != Some(&version) {
+                // The row is also the refresh token. Whatever the cause (moved
+                // version, or an unreadable user), never return tokens for it.
+                if let Err(e) = self.session_repo.invalidate(tenant_id, session.id).await {
+                    // Left behind: an unreturned session row whose secret was
+                    // never disclosed; it expires on its own and
+                    // `cleanup_expired` removes it. Nothing can present it.
+                    tracing::error!(
+                        session_id = %session.id,
+                        error = %e,
+                        "could not delete a session refused by the post-commit credential re-check"
+                    );
+                }
+                return Err(AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                });
+            }
+        }
 
         // jti = session.id per D-15 (session-based revocation).
         let access_token = token::issue_access_token(

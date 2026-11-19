@@ -1544,6 +1544,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
 )]
 #[allow(clippy::too_many_arguments)] // Actix DI extractors
 pub async fn change_password<C: Connection + Clone>(
+    http_req: HttpRequest,
     ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<ChangePasswordRequest>,
@@ -1595,9 +1596,14 @@ pub async fn change_password<C: Connection + Clone>(
         // SA-06 / N7 (SR4-2): the new OPAQUE record, if any, is written by the
         // same transaction as the hash, so a concurrent credential write cannot
         // land between them.
-        state
+        //
+        // QR13-2: `Err` means the credential was NOT written. `Ok(Some(_))`
+        // means it was and revoking the other sessions failed afterwards; the
+        // credential-change event goes out all the same and the error is
+        // answered after it, as a password reset does.
+        let revocation = state
             .auth_service
-            .change_password_with_opaque(
+            .change_password_reporting_revocation(
                 tenant_id,
                 user.user_id,
                 user.session_id,
@@ -1622,7 +1628,16 @@ pub async fn change_password<C: Connection + Clone>(
                 CredentialDetail::default(),
             )
             .await;
-        Ok::<(), AxiamApiError>(())
+        match revocation {
+            Some(error) => {
+                crate::handlers::password_reset::record_credential_written_revocation_failed(
+                    &http_req,
+                    user.user_id,
+                );
+                Err(AxiamApiError::from(error))
+            }
+            None => Ok::<(), AxiamApiError>(()),
+        }
     })
     .await?;
 

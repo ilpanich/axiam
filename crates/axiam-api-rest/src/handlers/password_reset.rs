@@ -277,6 +277,28 @@ pub async fn request_reset<C: Connection + Clone>(
     Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
 }
 
+/// Ask the audit middleware to record, beside the request row, that
+/// `user_id`'s password was written and revoking their sessions then failed
+/// (QR13-1, QR13-2). The request answers an error, so its own row is a
+/// `Failure`; this row is a `Success` of the credential change, in the same
+/// tenant, and is what a `password_changed` notification rule matches.
+pub(crate) fn record_credential_written_revocation_failed(http_req: &HttpRequest, user_id: Uuid) {
+    http_req
+        .extensions_mut()
+        .insert(axiam_audit::AuditSupplementalRow {
+            action:
+                axiam_core::models::notification_rule::PASSWORD_CHANGED_REVOCATION_FAILED_ACTION
+                    .into(),
+            actor_id: user_id,
+            actor_type: axiam_core::models::audit::ActorType::User,
+            outcome: axiam_core::models::audit::AuditOutcome::Success,
+            metadata: serde_json::json!({
+                "credential_written": true,
+                "revocation": "failed",
+            }),
+        });
+}
+
 /// `POST /api/v1/auth/reset/confirm`
 ///
 /// Confirms a password reset using a one-time token and a new
@@ -372,7 +394,13 @@ pub async fn confirm_reset<C: Connection + Clone>(
             )
             .await;
         match confirmed.revocation {
-            Some(error) => Err(AxiamApiError::from(error)),
+            Some(error) => {
+                // QR13-1: the request row of this 500 is a `Failure`, which
+                // records no password change and fires no notification. Say
+                // that the credential did change.
+                record_credential_written_revocation_failed(&http_req, confirmed.user_id);
+                Err(AxiamApiError::from(error))
+            }
             None => Ok::<(), AxiamApiError>(()),
         }
     })

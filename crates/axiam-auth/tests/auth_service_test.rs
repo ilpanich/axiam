@@ -4098,6 +4098,12 @@ struct HookedSessionRepo {
     /// `(tenant_id, user_id, version read with the old credential)`.
     pending: Arc<std::sync::Mutex<Option<(Uuid, Uuid, i64)>>>,
     landed: Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+    /// SR13-1: models a SNAPSHOT read. When set, the next
+    /// `create_if_credential_version` first lets a full reset commit (the
+    /// credential write, then both revocations, which find nothing), and then
+    /// writes the row with the unchecked `create`, which is what a transaction
+    /// that read the old version would commit.
+    snapshot_commit: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SessionRepository for HookedSessionRepo {
@@ -4121,6 +4127,15 @@ impl SessionRepository for HookedSessionRepo {
                     },
                 )
                 .await?;
+            if self
+                .snapshot_commit
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.inner
+                    .invalidate_user_sessions(input.tenant_id, input.user_id)
+                    .await?;
+                return self.inner.create(input).await;
+            }
         }
         self.inner
             .create_if_credential_version(input, expected_credential_version)
@@ -4254,6 +4269,7 @@ async fn sr11_1_a_sign_in_landing_during_a_reset_leaves_no_session() {
         bump_before_mint: Arc::new(std::sync::Mutex::new(None)),
         pending: Arc::new(std::sync::Mutex::new(None)),
         landed: Arc::new(std::sync::Mutex::new(None)),
+        snapshot_commit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let svc = PasswordResetService::new(
         user_repo,
@@ -4322,6 +4338,86 @@ async fn sr11_1_a_sign_in_landing_during_a_reset_leaves_no_session() {
     );
 }
 
+/// SR13-1: SurrealDB's transaction is SNAPSHOT isolation, so the in-transaction
+/// version check does not abort against a concurrent credential write. Model
+/// the interleaving: the sign-in read version N, a full reset (credential
+/// write, then both revocations, which find no session yet) commits, and only
+/// then does the session row commit. The re-check after the commit must
+/// delete the row and answer as a wrong password, before any token is
+/// returned; an undisturbed sign-in still gets its session.
+#[tokio::test]
+async fn sr13_1_a_session_committed_after_a_reset_and_its_revocations_does_not_survive() {
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let users = user_repo.clone();
+    let sessions = session_repo.clone();
+    let hook = HookedSessionRepo {
+        inner: session_repo,
+        bump_before_mint: Arc::new(std::sync::Mutex::new(Some(users.clone()))),
+        pending: Arc::new(std::sync::Mutex::new(None)),
+        landed: Arc::new(std::sync::Mutex::new(None)),
+        snapshot_commit: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    };
+    let svc = AuthService::new(
+        user_repo,
+        hook,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let read_version = users
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_version;
+    let mint = |v: i64| {
+        svc.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::now(vec![Amr::Pwd]),
+            Some(v),
+        )
+    };
+
+    let err = mint(read_version)
+        .await
+        .expect_err("a sign-in that read the old version must not get tokens");
+    assert!(
+        matches!(err, AxiamError::AuthenticationFailed { ref reason } if reason == "invalid credentials"),
+        "{err:?}"
+    );
+    assert!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the session row (also the refresh token) must not outlive the reset"
+    );
+
+    // Control: undisturbed, a sign-in at the now-current version still lands.
+    let current = users
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_version;
+    mint(current).await.expect("undisturbed sign-in");
+    assert_eq!(
+        sessions
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 // -----------------------------------------------------------------------
 // SA-06 (N7, QR11-2 / QR12-1) — each path's own wiring of the session-write check
 // -----------------------------------------------------------------------
@@ -4340,15 +4436,12 @@ async fn sr11_1_a_sign_in_landing_during_a_reset_leaves_no_session() {
 // path that passed `None` would do the same. (The previous version bumped the
 // password inside the session write, which a re-read would not have noticed.)
 //
-// WebAuthn second factor: its ceremony finishes in the REST handler
-// (`handlers/webauthn.rs`), which calls `finish_webauthn_authentication` and
-// then `create_session_and_tokens` with the version the finish returned. That
-// pair cannot be driven from this crate and the finish cannot be driven over
-// REST (a ceremony needs an authenticator); `webauthn_single_use_test.rs::
+// WebAuthn second factor: the REST handler delegates the finish and the session
+// write to `AuthService::complete_webauthn_second_factor`, which a ceremony
+// needs an authenticator to reach from here;
+// `webauthn_single_use_test.rs::
 // qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_finish`
-// therefore covers only the contract the handler relies on: the finish returns
-// the version it checked under, and a session write carrying it is refused
-// after a reset. It does not run the handler.
+// covers it.
 
 /// A service whose user repository changes the user's password right after
 /// the path's own check read, plus the handles the tests need.

@@ -1256,6 +1256,15 @@ pub trait SessionRepository: Send + Sync {
     /// the refusal discloses nothing new. No implementation may fall back to a
     /// check-then-create: that is the race this method exists to close.
     ///
+    /// SR13-1: this guarantee is only as strong as the datastore's isolation.
+    /// SurrealDB 4 transactions are SNAPSHOT: a concurrent credential write is
+    /// not detected as a conflict with the transaction that read the user, so a
+    /// reset that commits and revokes between that read and this commit can be
+    /// followed by the row committing anyway. The check here is therefore
+    /// necessary but not sufficient; the caller must re-read the user's
+    /// version after this returns and, if it moved, delete the returned session
+    /// (`AuthService::create_session_and_tokens` does) before issuing any token.
+    ///
     /// [`User::credential_version`]: crate::models::user::User::credential_version
     fn create_if_credential_version(
         &self,

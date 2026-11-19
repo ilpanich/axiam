@@ -9,8 +9,8 @@ pub mod service;
 pub use dead_letter::{DEAD_LETTER_FILE_ENV, DeadLetterWriter};
 pub use loss::{RequestAuditLoss, RequestAuditLossSnapshot};
 pub use middleware::{
-    AuditAttribution, AuditEvent, AuditEventSink, AuditMiddleware, AuditOrganization, ClientIpRule,
-    PENDING_ORGANIZATION_WAIT, PendingAuditOrganization,
+    AuditAttribution, AuditEvent, AuditEventSink, AuditMiddleware, AuditOrganization,
+    AuditSupplementalRow, ClientIpRule, PENDING_ORGANIZATION_WAIT, PendingAuditOrganization,
 };
 pub use notification::{
     NotificationDispatcher, NotificationGate, NotificationSink, NotifyingAuditLog,

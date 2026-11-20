@@ -15,7 +15,8 @@ infra/bench-vm/
 │   ├── outputs.tf            address, ssh command, the host facts for the run notes
 │   ├── example.tfvars        copy to bench-vm.auto.tfvars (gitignored); NO SECRETS EVER
 │   └── tests/                `tofu test`: offline, provider mocked
-└── scripts/                  on the VM, in order; each idempotent and safe to re-run
+└── scripts/                  on the VM, in order; each idempotent and safe to re-run, and each
+                              logs to ~/bench/logs/<script>.log and names the step it stopped at
     ├── versions.env          every pinned version, in one file
     ├── _lib.sh               the helpers, sourced by the rest
     ├── 00-host-prepare.sh    OS and size checks, upgrade, background noise off, base packages

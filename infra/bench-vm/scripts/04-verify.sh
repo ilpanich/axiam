@@ -95,6 +95,16 @@ exactly "go" "$(go version 2>/dev/null | first_version)" "$GO_VERSION"
 dn="$(dotnet --list-sdks 2>/dev/null | awk '{print $1}' | grep "^${DOTNET_CHANNEL}\." | tail -1)"
 [[ -n "$dn" ]] && row PASS ".NET SDK" "$dn" || row FAIL ".NET SDK" "no $DOTNET_CHANNEL.x SDK (02-sdk-toolchains.sh)"
 exactly "swift" "$(swift --version 2>&1 | grep -m1 'Swift version' | first_version)" "$SWIFT_VERSION"
+# 02-sdk-toolchains.sh installs Go, then .NET, then Swift, last, and stops at the
+# first failing step: a missing Go with both later ones missing too means it
+# stopped at Go, not that three installs failed.
+missing=()
+command -v go >/dev/null 2>&1 || missing+=(go)
+[[ -n "$dn" ]] || missing+=(.NET)
+command -v swift >/dev/null 2>&1 || missing+=(swift)
+if (( ${#missing[@]} )); then
+    row WARN "why: ${missing[*]}" "02-sdk-toolchains.sh stopped before it installed ${missing[0]}; re-run it and read its last lines (~/bench/logs/02-sdk-toolchains.log)"
+fi
 at_least "cmake" "$(cmake --version 2>/dev/null | first_version)" 3.16
 for t in cc c++ pkg-config; do command -v "$t" >/dev/null 2>&1 && row PASS "$t" "" || row FAIL "$t" "not found"; done
 for pc in libcurl openssl; do pkg-config --exists "$pc" 2>/dev/null && row PASS "dev: $pc" "" || row FAIL "dev: $pc" "headers missing"; done

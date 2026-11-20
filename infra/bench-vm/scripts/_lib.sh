@@ -48,10 +48,45 @@ version_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]
 
 # The toolchains' PATH, for a script that runs before the new ~/.bashrc block
 # has been read by a login shell.
+# swiftly's home is not the same everywhere: ~/.local/share/swiftly on Linux
+# by default, ~/.swiftly in some releases, or wherever SWIFTLY_HOME_DIR points.
+# A hard-coded path made an installed Swift look absent.
+swiftly_env() {
+    local f
+    for f in "${SWIFTLY_HOME_DIR:+$SWIFTLY_HOME_DIR/env.sh}" \
+             "$HOME/.local/share/swiftly/env.sh" "$HOME/.swiftly/env.sh"; do
+        [[ -n "$f" && -f "$f" ]] && { printf '%s' "$f"; return 0; }
+    done
+    return 1
+}
+
 bench_path() {
     export PATH="/usr/local/go/bin:$HOME/go/bin:/opt/dotnet:$HOME/.cargo/bin:$PATH"
     export DOTNET_ROOT=/opt/dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1
-    # shellcheck disable=SC1091
-    if [[ -f "$HOME/.local/share/swiftly/env.sh" ]]; then . "$HOME/.local/share/swiftly/env.sh"; fi
+    local env_sh
+    # shellcheck disable=SC1090
+    if env_sh="$(swiftly_env)"; then . "$env_sh"; fi
     return 0
+}
+
+# For the installing scripts (set -e): keep a log of the whole run, and when a
+# step fails, say WHICH one instead of exiting on a bare curl or tar message
+# that scrolls past. A re-run skips the steps already done.
+#   log: ${BENCH_DIR:-~/bench}/logs/<script>.log
+stop_loudly() {
+    local name log_dir
+    name="$(basename "$0" .sh)"
+    log_dir="${BENCH_DIR:-$HOME/bench}/logs"
+    mkdir -p "$log_dir"
+    BENCH_SCRIPT_LOG="$log_dir/$name.log"
+    printf '\n===== %s %s =====\n' "$name" "$(date -u +%FT%TZ)" >> "$BENCH_SCRIPT_LOG"
+    exec > >(tee -a "$BENCH_SCRIPT_LOG") 2>&1
+    set -E
+    trap '_stopped $? $LINENO "$BASH_COMMAND"' ERR
+}
+_stopped() {
+    trap - ERR
+    printf '✗ %s STOPPED (exit %s) at line %s: %s\n' "$(basename "$0")" "$1" "$2" "$3" >&2
+    printf '  The steps after this one did not run. Fix the cause shown above and run it again:\n' >&2
+    printf '  what is already installed is skipped. Full output: %s\n' "$BENCH_SCRIPT_LOG" >&2
 }

@@ -20,6 +20,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_lib.sh
 source "$HERE/_lib.sh"
+stop_loudly
 
 MIN_VCPUS="${BENCH_VM_MIN_VCPUS:-12}"
 

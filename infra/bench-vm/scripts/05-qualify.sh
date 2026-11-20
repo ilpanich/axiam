@@ -27,6 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/_lib.sh"
 # shellcheck source=versions.env
 source "$HERE/versions.env"
+stop_loudly
 need sysbench "Run 00-host-prepare.sh."
 need vmstat "Run 00-host-prepare.sh."
 

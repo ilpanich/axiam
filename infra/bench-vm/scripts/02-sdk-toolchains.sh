@@ -24,6 +24,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/_lib.sh"
 # shellcheck source=versions.env
 source "$HERE/versions.env"
+stop_loudly
 bench_path
 
 $SUDO apt-get update -q
@@ -112,6 +113,7 @@ if ! command -v swiftly >/dev/null 2>&1; then
     "$tmp/swiftly" init --assume-yes --quiet-shell-followup --skip-install
     rm -rf "$tmp"
     bench_path
+    command -v swiftly >/dev/null 2>&1 || die "swiftly init ran, but no swiftly env.sh was found (looked in \$SWIFTLY_HOME_DIR, ~/.local/share/swiftly, ~/.swiftly)."
 fi
 if ! swift --version 2>/dev/null | grep -q "Swift version ${SWIFT_VERSION}\b"; then
     say "Installing Swift $SWIFT_VERSION (a large download)"
@@ -131,7 +133,7 @@ cat >> "$HOME/.bashrc" <<EOF
 $BEGIN
 export PATH="/usr/local/go/bin:\$HOME/go/bin:/opt/dotnet:\$HOME/.cargo/bin:\$PATH"
 export DOTNET_ROOT=/opt/dotnet DOTNET_CLI_TELEMETRY_OPTOUT=1
-[ -f "\$HOME/.local/share/swiftly/env.sh" ] && . "\$HOME/.local/share/swiftly/env.sh"
+for f in "\${SWIFTLY_HOME_DIR:-/nonexistent}/env.sh" "\$HOME/.local/share/swiftly/env.sh" "\$HOME/.swiftly/env.sh"; do [ -f "\$f" ] && { . "\$f"; break; }; done; unset f
 $END
 EOF
 ok "PATH block written to ~/.bashrc"

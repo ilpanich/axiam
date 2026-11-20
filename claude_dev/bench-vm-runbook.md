@@ -215,7 +215,11 @@ What each bench needs, read off `benchmarks/sdk/<lang>/run.sh` and the SDK manif
 The script installs each at the version pinned in `versions.env` (Rust via rustup, Node via
 NodeSource, Go from go.dev, .NET via `dotnet-install.sh` into `/opt/dotnet`, Swift via
 `swiftly`; JDK 21, Maven, PHP 8.3, Composer, CMake and the C/C++ libraries from Ubuntu) and
-writes one marked PATH block into `~/.bashrc`.
+writes one marked PATH block into `~/.bashrc`. It installs them in that order and **stops
+at the first step that fails**, printing `STOPPED … at line N` with the failing command; Go,
+.NET and Swift come last, so if `04-verify.sh` finds all three missing, the script stopped at
+Go. Its full output is in `~/bench/logs/02-sdk-toolchains.log`; re-running it skips what is
+already installed.
 
 ### 5.1 Known blocker: the C# bench targets `net8.0`, the SDK `net10.0`
 

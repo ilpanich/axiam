@@ -23,6 +23,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/_lib.sh"
 # shellcheck source=versions.env
 source "$HERE/versions.env"
+stop_loudly
 need git
 
 GH="https://github.com/ilpanich"

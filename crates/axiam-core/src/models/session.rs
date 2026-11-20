@@ -304,8 +304,9 @@ pub struct Session {
     /// `SessionRepository::create_if_credential_version`, which refuses when
     /// the user's version has moved, so a reset that revokes sessions between
     /// the rotation's consume and its create cannot be survived by the new
-    /// row. `AuthService::change_password` re-stamps the one session it
-    /// deliberately keeps.
+    /// row. `SessionRepository::invalidate_user_sessions_except` re-stamps the
+    /// one session a password change deliberately keeps (`change_password`
+    /// reaches it through `revoke_all_sessions_except`).
     ///
     /// `None` for a row written before schema v119 (or by a path that checked
     /// no credential, such as a federated sign-in): rotation then accepts it

@@ -5901,15 +5901,17 @@ DEFINE INDEX IF NOT EXISTS idx_audit_tenant_org_time ON TABLE audit_log FIELDS t
 // an MFA setup token, an in-flight OPAQUE login — that a reset or change did
 // not otherwise reach.
 //
-// **Clock.** The epoch is stamped from the application replica's clock
-// (`Utc::now()`, bound as `$credential_epoch` in the credential's own
-// transaction), not the datastore's `time::now()`: the artefacts it is compared
-// with — an MFA token's `iat`/`iat_ns`, an OPAQUE login's `issued_at`, a
-// WebAuthn state token's `iat_ns` — are all stamped by an application replica,
-// so both sides of the comparison come from the same kind of clock. Replicas
-// are assumed NTP-synchronised to well within a second (as JWT `exp` handling
-// already requires); a skew of delta between the replica that mints an artefact
-// and the replica that writes the epoch shifts the refusal window by delta.
+// **Clock.** The epoch is stamped with the datastore's clock (`time::now()`
+// inside the credential's own statement or transaction; QR17-4), the clock that
+// stamps the `created_at` (`DEFAULT time::now()`) of sessions, refresh tokens,
+// authorization codes, device grants and CIBA requests it is compared with, so
+// those comparisons are independent of any application replica's skew. (An
+// earlier revision bound the application replica's `Utc::now()`.) The
+// artefacts that an application replica stamps itself — an MFA token's
+// `iat`/`iat_ns`, an OPAQUE login's `issued_at`, a WebAuthn state token's
+// `iat_ns` — are compared with it as the credential version's fallback only;
+// that comparison now spans two clocks, as the version check (which compares
+// none) is the primary one.
 //
 // One optional column, **no `DEFAULT` and no backfill**: a row that has not had
 // a credential change since this version reads `NONE`, and a user with no

@@ -540,7 +540,22 @@ rotate (they must sign in again); today no route writes an OPAQUE record or remo
 existing user other than a password change or reset, so none does. An OAuth2
 `refresh_token` grant has no stored version; after writing the successor it re-reads the user and
 refuses, deleting the successor, when the user's `credential_changed_at` is later than the
-presented refresh token's `created_at`.
+presented refresh token's `created_at`. The same rule covers every other OAuth2 route that turns a
+short-lived grant into a refresh token: an authorization code, a device-flow approval and a CIBA
+approval issued before a credential change are refused with `invalid_grant` when redeemed after it
+(compared with the code's `created_at`, the device grant's `created_at` and the CIBA request's
+`decided_at`, so a device approval is also refused when the change falls between the device's
+request and the user's approval, and the user simply approves again). After the refresh token is
+written the user is re-read once more; a change that landed in between deletes the token just
+minted and answers `invalid_grant`, and a failed read deletes it and answers a server error.
+
+**One clock.** `credential_changed_at` is written with the datastore's clock (`time::now()` inside
+the write), as the `created_at` of sessions, refresh tokens, codes and approvals is, so every
+comparison of the stamp with a stored row uses one clock whatever the replicas' skew. The one
+comparison that still sets the stamp against an application-replica time is the one for artefacts
+that are minted by a replica and carry their own issue time (MFA challenge and setup tokens,
+the WebAuthn state token, an in-flight OPAQUE login); those are covered by the credential version
+above, and the stamp is their fallback only.
 If revoking the sessions fails after a password reset or a self-service password change has
 written the new password, it still emits the SSF `credential-change` event (the password has
 changed, so receivers must be told) and then answers the error (500); both revocations are

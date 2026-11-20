@@ -1349,7 +1349,7 @@ impl<
     /// are no-ops when nothing is subscribed — immaterial against a path whose
     /// cheapest stage is a datastore round trip.
     ///
-    /// # Datastore round trips: three, not five
+    /// # Datastore round trips: four, not five
     ///
     /// The rotation used to issue five sequential statements (session read,
     /// expiry check, consume, user read, session create) plus a tenant read in
@@ -1359,6 +1359,12 @@ impl<
     ///   `consume_by_token_hash` (see that method's docs — it also removes the
     ///   read-then-delete window rather than tolerating it);
     /// - the handler's per-refresh tenant read is served from a TTL cache.
+    ///
+    /// That left three (consume, user read, session create). SR16-1 added a
+    /// fourth, the post-commit re-read of the user's credential version, which
+    /// the owner mandated. It is a *user* round trip, so it lies outside the
+    /// session-repository budget that `refresh_roundtrip_budget_test.rs`
+    /// counts (two calls: consume and create), as the user read always has.
     ///
     /// **No security semantics were weakened to get there.** Single-use
     /// rotation is still enforced by `RETURN BEFORE` (and now with no window
@@ -1440,8 +1446,11 @@ impl<
                     .credential_changed_at
                     .is_some_and(|changed| changed > session.created_at)
                 {
+                    // The uniform refusal: a distinct reason would tell a holder
+                    // of a stale token that it was genuine and the credential
+                    // has since changed (QR17-2).
                     return Err(AuthError::TokenInvalid(
-                        "refresh token predates the user's last credential change".into(),
+                        "refresh token not found or already used".into(),
                     )
                     .into());
                 }

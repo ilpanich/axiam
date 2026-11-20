@@ -11,6 +11,7 @@ pub mod cimd;
 pub mod claims_request;
 pub mod client_grants;
 pub mod client_secret_basic;
+pub(crate) mod credential_epoch;
 pub mod dcr;
 pub mod device;
 pub mod device_service;

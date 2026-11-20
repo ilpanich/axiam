@@ -654,6 +654,51 @@ async fn a_user_deleted_after_approval_gets_no_tokens() {
     .await;
 }
 
+/// A credential change of the kind a reset or a password change makes: a new
+/// Argon2 hash, which the repository stamps with `credential_changed_at` and
+/// the credential version in the same statement.
+async fn change_credential(users: &SurrealUserRepository<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$replacement".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// SR17-1: an approval given before a password reset or change is not
+/// redeemable after it. Nothing minted, no refresh-token row, grant consumed.
+#[actix_web::test]
+async fn sr17_1_a_device_approval_given_before_a_credential_change_gets_no_tokens() {
+    assert_redemption_refused_after(|users, tenant_id, user_id| async move {
+        change_credential(&users, tenant_id, user_id).await;
+    })
+    .await;
+}
+
+/// The control: an approval given after the credential change still mints.
+#[actix_web::test]
+async fn sr17_1_a_device_approval_given_after_a_credential_change_still_mints() {
+    let f = setup().await;
+    let app = test_app!(f);
+    change_credential(
+        &SurrealUserRepository::new(f.db.clone()),
+        f.tenant_id,
+        f.user_id,
+    )
+    .await;
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "poll returned {body:?}");
+    assert!(body["refresh_token"].is_string());
+    assert_eq!(refresh_token_rows(&f).await, 1);
+}
+
 // ---------------------------------------------------------------------------
 // #635 (R101W3-01) — the grant authenticates its client
 // ---------------------------------------------------------------------------

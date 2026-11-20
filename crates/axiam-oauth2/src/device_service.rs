@@ -468,8 +468,22 @@ where
             );
             return Err(refused());
         }
+        // SA-06 (SR17-1): an approval given before the user's last credential
+        // change is not redeemable after it. The grant records no approval
+        // time, so its creation is the bound: a change between the device's
+        // request and the user's approval refuses too (the user approves
+        // again). See `crate::credential_epoch`.
+        if crate::credential_epoch::changed_after(&user, redeemed.created_at) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "refusing a device-grant redemption: the user's credential changed after the grant was issued"
+            );
+            return Err(refused());
+        }
 
         let refresh_token = axiam_auth::token::generate_refresh_token();
+        let minted_hash = axiam_auth::token::hash_refresh_token(&refresh_token);
         self.refresh_token_repo
             .create(CreateRefreshToken {
                 tenant_id,
@@ -502,6 +516,17 @@ where
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        // SA-06 (SR17-1): re-read after the write; a later credential change
+        // revokes the token just minted.
+        crate::credential_epoch::recheck_after_mint(
+            &self.user_repo,
+            &self.refresh_token_repo,
+            tenant_id,
+            user.id,
+            redeemed.created_at,
+            &minted_hash,
+        )
+        .await?;
 
         // RFC 8707 §2 — the audience is the resource the device named when it
         // started the flow, or `axiam:user` when it named none. `AUD_USER` is

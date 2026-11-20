@@ -165,7 +165,7 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
                  RETURN meta::id(id) AS record_id, *); \
                  IF array::len($updated) > 0 { \
-                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch, \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = time::now(), \
                  credential_version = (credential_version ?? 0) + 1 \
                  WHERE tenant_id = $tenant_id; \
                  }; \
@@ -173,7 +173,6 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  COMMIT TRANSACTION",
             )
             .bind(("tenant_id", input.tenant_id.to_string()))
-            .bind(("credential_epoch", Utc::now()))
             .bind(("user_id", input.user_id.to_string()))
             .bind(("credential_identifier", input.credential_identifier.clone()))
             .bind(("suite", input.suite.to_string()))
@@ -221,14 +220,13 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  ksf_p = $ksf_p, \
                  record = $record \
                  RETURN meta::id(id) AS record_id, *; \
-                 UPDATE type::record('user', $user_id) SET credential_changed_at = $credential_epoch, \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = time::now(), \
                  credential_version = (credential_version ?? 0) + 1 \
                  WHERE tenant_id = $tenant_id; \
                  COMMIT TRANSACTION",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
-            .bind(("credential_epoch", Utc::now()))
             .bind(("user_id", input.user_id.to_string()))
             .bind(("credential_identifier", input.credential_identifier))
             .bind(("suite", input.suite.to_string()))
@@ -289,7 +287,7 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                      RETURN BEFORE); \
                  IF array::len($gone) > 0 { \
                      UPDATE type::record('user', $user_id) \
-                     SET credential_changed_at = $credential_epoch, \
+                     SET credential_changed_at = time::now(), \
                      credential_version = (credential_version ?? 0) + 1 \
                      WHERE tenant_id = $tenant_id; \
                  }; \
@@ -297,7 +295,6 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  COMMIT TRANSACTION",
             )
             .bind(("tenant_id", tenant_id.to_string()))
-            .bind(("credential_epoch", Utc::now()))
             .bind(("user_id", user_id.to_string()))
             .await
             .map_err(DbError::from)?;

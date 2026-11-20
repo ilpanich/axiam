@@ -228,6 +228,19 @@ where
             );
             return Err(refused());
         }
+        // SA-06 (SR17-1): an approval given before the user's last credential
+        // change is not redeemable after it (see `crate::credential_epoch`).
+        // The bound is the instant the user decided; a row with none falls
+        // back to the request's creation.
+        let approved_at = redeemed.decided_at.unwrap_or(redeemed.created_at);
+        if crate::credential_epoch::changed_after(&user, approved_at) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "refusing a CIBA redemption: the user's credential changed after the approval"
+            );
+            return Err(refused());
+        }
 
         // --- 8. issuance ---------------------------------------------------
         // `tenant` is the one client authentication read (R1W1-03).
@@ -265,10 +278,11 @@ where
 
         let refresh_token = if client.grant_types.iter().any(|g| g == "refresh_token") {
             let raw_refresh = generate_refresh_token();
+            let minted_hash = hash_refresh_token(&raw_refresh);
             self.refresh_token_repo
                 .create(CreateRefreshToken {
                     tenant_id,
-                    token_hash: hash_refresh_token(&raw_refresh),
+                    token_hash: minted_hash.clone(),
                     client_id: client.client_id.clone(),
                     user_id: Some(user_id),
                     scopes: redeemed.scopes.clone(),
@@ -290,6 +304,17 @@ where
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            // SA-06 (SR17-1): re-read after the write; a later credential
+            // change revokes the token just minted.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                user_id,
+                approved_at,
+                &minted_hash,
+            )
+            .await?;
             Some(raw_refresh)
         } else {
             None

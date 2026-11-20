@@ -1256,6 +1256,13 @@ pub trait SessionRepository: Send + Sync {
     /// the refusal discloses nothing new. No implementation may fall back to a
     /// check-then-create: that is the race this method exists to close.
     ///
+    /// The method also **stores** `expected_credential_version` on the new row
+    /// ([`Session::credential_version`]). Refresh rotation depends on it: the
+    /// next rotation of the row compares that stored version with the user's.
+    /// An implementation that checks but does not store breaks rotation.
+    ///
+    /// [`Session::credential_version`]: crate::models::session::Session::credential_version
+    ///
     /// SR13-1: this guarantee is only as strong as the datastore's isolation.
     /// SurrealDB 4 transactions are SNAPSHOT: a concurrent credential write is
     /// not detected as a conflict with the transaction that read the user, so a
@@ -1405,7 +1412,15 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate all sessions for a user except one (e.g., on password
     /// change — preserve the caller's current session).
     ///
+    /// The kept session is **re-stamped** with the user's current credential
+    /// version ([`Session::credential_version`]) in the same transaction that
+    /// deletes the other sessions, so it can still rotate after the credential
+    /// change that prompted this call. An implementation that only deletes
+    /// would compile and silently stop the kept session from rotating.
+    ///
     /// Returns the number of sessions deleted.
+    ///
+    /// [`Session::credential_version`]: crate::models::session::Session::credential_version
     fn invalidate_user_sessions_except(
         &self,
         tenant_id: Uuid,

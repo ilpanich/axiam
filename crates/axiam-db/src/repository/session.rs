@@ -1152,7 +1152,7 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
         // I6: same set, minus the session the caller deliberately kept.
         //
-        // Ordered before `take(0)` for the same reason as `consume` — the
+        // Ordered before `take(2)` for the same reason as `consume` — the
         // DELETE is already committed once the `.await` returns, so a
         // deserialize failure of the BEFORE image must not be able to strand a
         // positive cache entry for a session that no longer exists

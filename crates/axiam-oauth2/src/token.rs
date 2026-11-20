@@ -933,6 +933,20 @@ where
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<(), OAuth2Error> {
+        self.ensure_account_may_act_since(tenant_id, user_id, None)
+            .await
+    }
+
+    /// [`Self::ensure_account_may_act`] for a grant issued at `issued_at`
+    /// (`Some`): it is also refused when the user's credential changed after
+    /// that instant (SA-06, SR17-1; see [`crate::credential_epoch`]). One read
+    /// answers both questions.
+    async fn ensure_account_may_act_since(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        issued_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<(), OAuth2Error> {
         let refused = || {
             OAuth2Error::InvalidGrant(
                 "the account this grant was issued for can no longer sign in".into(),
@@ -943,6 +957,14 @@ where
             Err(AxiamError::NotFound { .. }) => return Err(refused()),
             Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
         };
+        if issued_at.is_some_and(|at| crate::credential_epoch::changed_after(&user, at)) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "refusing an OAuth2 grant: the user's credential changed after it was issued"
+            );
+            return Err(refused());
+        }
         axiam_auth::service::account_may_act(&user).map_err(|reason| {
             tracing::info!(
                 %tenant_id,
@@ -2577,7 +2599,13 @@ where
         }
 
         // F4 P23W1-01 — after the code is spent, so a refused account burns it.
-        self.ensure_account_may_act(tenant_id, auth_code.user_id)
+        //
+        // SA-06 (SR17-1): and a code issued before the user's last credential
+        // change is refused here too. A reset revokes sessions and refresh
+        // tokens but cannot reach a code that has not been redeemed yet, and
+        // the refresh token minted from it would be created after that
+        // revocation and pass the refresh grant's own check.
+        self.ensure_account_may_act_since(tenant_id, auth_code.user_id, Some(auth_code.created_at))
             .await?;
 
         // `org_id` comes from the tenant `authenticate_client_credential` already
@@ -2669,6 +2697,7 @@ where
         let refresh_token = if client.grant_types.iter().any(|s| s == "refresh_token") {
             let raw_refresh = generate_refresh_token();
             let refresh_hash = hash_refresh_token(&raw_refresh);
+            let minted_hash = refresh_hash.clone();
             let refresh_expires =
                 Utc::now() + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
 
@@ -2710,6 +2739,18 @@ where
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            // SA-06 (SR17-1): a reset can land between the pre-check above and
+            // this write, with its `revoke_all_for_user` already run. Re-read
+            // the user; a later change revokes the token just written.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                auth_code.user_id,
+                auth_code.created_at,
+                &minted_hash,
+            )
+            .await?;
             Some(raw_refresh)
         } else {
             None

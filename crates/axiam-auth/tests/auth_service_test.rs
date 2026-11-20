@@ -4638,6 +4638,11 @@ type RotationHook =
 struct ConsumeHookedSessionRepo {
     inner: SurrealSessionRepository<MemDb>,
     after_consume: Arc<std::sync::Mutex<Option<RotationHook>>>,
+    /// QR17-1: models a SNAPSHOT read. Run right before the next
+    /// `create_if_credential_version`; the row is then written with the
+    /// UNCHECKED `create`, which is what a transaction that read the old
+    /// credential version would commit after a reset and its revocations ran.
+    snapshot_before_create: Arc<std::sync::Mutex<Option<RotationHook>>>,
 }
 
 impl SessionRepository for ConsumeHookedSessionRepo {
@@ -4649,6 +4654,11 @@ impl SessionRepository for ConsumeHookedSessionRepo {
         input: CreateSession,
         expected_credential_version: i64,
     ) -> AxiamResult<Session> {
+        let snapshot = self.snapshot_before_create.lock().unwrap().take();
+        if let Some(hook) = snapshot {
+            hook().await;
+            return self.inner.create(input).await;
+        }
         self.inner
             .create_if_credential_version(input, expected_credential_version)
             .await
@@ -4770,6 +4780,7 @@ struct RotationWorld {
     plain: Arc<PlainAuth>,
     hooked: HookedAuth,
     hook: Arc<std::sync::Mutex<Option<RotationHook>>>,
+    snapshot_hook: Arc<std::sync::Mutex<Option<RotationHook>>>,
     users: SurrealUserRepository<MemDb>,
     sessions: SurrealSessionRepository<MemDb>,
     db: Surreal<MemDb>,
@@ -4785,11 +4796,13 @@ impl RotationWorld {
         let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
             setup().await;
         let hook = Arc::new(std::sync::Mutex::new(None));
+        let snapshot_hook = Arc::new(std::sync::Mutex::new(None));
         let hooked = AuthService::new(
             user_repo.clone(),
             ConsumeHookedSessionRepo {
                 inner: session_repo.clone(),
                 after_consume: hook.clone(),
+                snapshot_before_create: snapshot_hook.clone(),
             },
             fed_repo.clone(),
             refresh_token_repo.clone(),
@@ -4808,6 +4821,7 @@ impl RotationWorld {
             plain,
             hooked,
             hook,
+            snapshot_hook,
             users: user_repo,
             sessions: session_repo,
             db,
@@ -4831,6 +4845,11 @@ impl RotationWorld {
 
     fn arm(&self, hook: RotationHook) {
         *self.hook.lock().unwrap() = Some(hook);
+    }
+
+    /// QR17-1: see `ConsumeHookedSessionRepo::snapshot_before_create`.
+    fn arm_snapshot(&self, hook: RotationHook) {
+        *self.snapshot_hook.lock().unwrap() = Some(hook);
     }
 }
 
@@ -4903,6 +4922,83 @@ async fn sr16_1_a_reset_between_the_rotations_consume_and_create_leaves_no_sessi
             .is_empty(),
         "no session may outlive the reset: the rotation's successor was created after the \
          reset's revocation and survived"
+    );
+}
+
+/// QR17-1 (SR13-1 for rotation): the in-transaction version check cannot see a
+/// reset that commits under snapshot isolation. Model it: the reset (credential
+/// write, session revocation, refresh-token revocation) runs, finds nothing,
+/// and THEN the successor row commits carrying the old version (the unchecked
+/// `create`). Only the post-commit re-read of the user's version can refuse it.
+#[tokio::test]
+async fn qr17_1_a_rotation_committed_after_a_reset_and_its_revocations_does_not_survive() {
+    use axiam_auth::password_reset::PasswordResetService;
+    use axiam_db::repository::{
+        SurrealPasswordHistoryRepository, SurrealPasswordResetTokenRepository,
+    };
+
+    let w = RotationWorld::new().await;
+    let out = login_alice(&w.plain, w.tenant_id, w.org_id).await;
+
+    let reset = PasswordResetService::new(
+        w.users.clone(),
+        SurrealPasswordResetTokenRepository::new(w.db.clone()),
+        w.fed.clone(),
+        SurrealPasswordHistoryRepository::new(w.db.clone()),
+        w.sessions.clone(),
+        w.refresh_tokens.clone(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+        5,
+    );
+    let email = w
+        .users
+        .get_by_id(w.tenant_id, w.user_id)
+        .await
+        .unwrap()
+        .email;
+    let (raw_reset, _, _) = reset
+        .initiate_reset(w.tenant_id, &email, 1, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let tenant_id = w.tenant_id;
+    w.arm_snapshot(Box::new(move || {
+        Box::pin(async move {
+            reset
+                .confirm_reset(
+                    tenant_id,
+                    &raw_reset,
+                    "NewStr0ngPassword",
+                    &sr16_policy(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("the reset completes before the successor commits");
+        })
+    }));
+
+    let err = w
+        .hooked
+        .refresh(w.rotate_input(&out.refresh_token))
+        .await
+        .expect_err("a rotation committed after the reset must be refused");
+    assert!(
+        matches!(
+            err,
+            AxiamError::AuthenticationFailed { ref reason }
+                if reason == "invalid token: refresh token not found or already used"
+        ),
+        "the rotation's uniform refusal, got {err:?}"
+    );
+    assert!(
+        w.sessions
+            .list_by_user(w.tenant_id, w.user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the successor committed after the reset's revocations and must be removed by the \
+         post-commit re-read"
     );
 }
 
@@ -5035,8 +5131,14 @@ async fn sr16_1_a_legacy_session_rotates_only_if_created_after_the_last_credenti
         .refresh(w.rotate_input("legacy-before"))
         .await
         .expect_err("a legacy row that predates the credential change must be refused");
+    // QR17-2: the uniform refusal, not a reason that says the token was
+    // genuine and the credential has since changed.
     assert!(
-        matches!(err, AxiamError::AuthenticationFailed { .. }),
+        matches!(
+            err,
+            AxiamError::AuthenticationFailed { ref reason }
+                if reason == "invalid token: refresh token not found or already used"
+        ),
         "{err:?}"
     );
     assert!(

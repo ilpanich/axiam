@@ -655,6 +655,26 @@ to both count queries and bind `$tenant_id`, matching the data query beside each
 
 ### SA-09 — Erasure cancel restores the prior status (N11)
 
+> **EXECUTED (2026-11-20, Sonnet 5.5). N11: reproduced.** On the unfixed code a
+> `Locked`, `Inactive` or `PendingVerification` account read `Active` after an
+> erasure request was cancelled. `create_with_pending_flag` now reads the user's
+> status inside its transaction, before parking the account as `Inactive`, and
+> stores it on the request as `prior_status`; `cancel_tx` restores
+> `prior_status ?? 'Active'`. Schema **v120** (`account_deletion_prior_status`)
+> adds the one optional column — additive, no `DEFAULT`, no backfill: a request
+> written before v120 has none and restores `Active`, as every cancel did before.
+> No domain struct, REST type or OpenAPI change.
+>
+> Regression tests (`crates/axiam-db/src/repository/account_deletion.rs`):
+> `cancel_restores_prior_status_{locked,inactive,pending_verification}` failed
+> before the fix (`left: Active`) and pass after; `cancel_restores_prior_status_active`
+> and `cancel_of_a_legacy_row_without_prior_status_restores_active` pin the
+> unchanged cases; `schema::tests::v120_adds_only_the_optional_prior_status_column`.
+> `cargo test -p axiam-db --lib` 357 passed; the account-deletion integration
+> suites (`deletion_cancel_race_test`, `owed_erasure_claim_test`,
+> `provisioning_sink_test`, `gdpr_handlers_test`, `gdpr_test`) pass; fmt and
+> clippy clean.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-db/src/repository/account_deletion.rs` (211–215,
   370–372), `crates/axiam-db/src/schema.rs`.

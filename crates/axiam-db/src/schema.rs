@@ -628,6 +628,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "session_credential_version",
         sql: SCHEMA_V119,
     },
+    Migration {
+        version: 120,
+        name: "account_deletion_prior_status",
+        sql: SCHEMA_V120,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5951,9 +5956,44 @@ const SCHEMA_V119: &str = "\
 DEFINE FIELD IF NOT EXISTS credential_version ON TABLE session TYPE option<int>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v120 — the status an account had before an erasure request (SA-09,
+// N11)
+// -----------------------------------------------------------------------
+//
+// `account_deletion.prior_status`: the user's status when the request parked it
+// as `Inactive`, written in the request's transaction and restored by a
+// cancel, so cancelling no longer re-activates a suspended, locked or
+// unverified account.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a request written
+// before this version reads `NONE`, and a cancel restores `Active` for it, as
+// every cancel did before.
+const SCHEMA_V120: &str = "\
+DEFINE FIELD IF NOT EXISTS prior_status ON TABLE account_deletion TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-09 (N11) — v120 is the one optional `prior_status` column on
+    /// `account_deletion`, additive, no `DEFAULT`, no backfill.
+    #[test]
+    fn v120_adds_only_the_optional_prior_status_column() {
+        let statements: Vec<&str> = SCHEMA_V120
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS prior_status ON TABLE account_deletion TYPE option<string>"
+            ],
+        );
+        assert!(is_additive(SCHEMA_V120));
+    }
 
     /// SA-06 (N7, SR16-1) — v119 is the one optional `credential_version`
     /// column on `session`, additive, no `DEFAULT`, no backfill.
@@ -8206,8 +8246,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&119),
-            "v119 is the newest migration (SA-06, N7, SR16-1 — `session.credential_version`, \
+            Some(&120),
+            "v120 is the newest migration (SA-09, N11 — `account_deletion.prior_status`, the \
+             status an account had before an erasure request, optional, absent reading as \
+             Active); v119 was (SA-06, N7, SR16-1 — `session.credential_version`, \
              the credential version a session was written under, optional, absent reading as a \
              legacy row); \
              v118 was SA-06, N7, SR3-1 — `user.credential_version`, the \

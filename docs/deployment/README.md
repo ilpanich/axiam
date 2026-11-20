@@ -533,19 +533,23 @@ written in the credential's own transaction) is stamped with the user's new vers
 `invalidate_user_sessions_except`, in the same transaction that deletes the user's other sessions,
 so it can still rotate; this stamp is not part of the credential write itself. A session row written
 before schema v119 has no stored version: it rotates only if the user's `credential_changed_at`
-is not later than the row's `created_at` (so an upgrade logs nobody out, and a legacy row that
-predates a reset is refused), and its successor stores the user's current version. A
+is strictly earlier than the row's `created_at` (a change at or after the row's creation, a tie
+included, refuses, as everywhere; so an upgrade logs nobody out, and a legacy row that predates a
+reset is refused), and its successor stores the user's current version. A
 credential write that does not revoke sessions would make the user's existing sessions unable to
 rotate (they must sign in again); today no route writes an OPAQUE record or removes one for an
 existing user other than a password change or reset, so none does. An OAuth2
 `refresh_token` grant has no stored version; after writing the successor it re-reads the user and
-refuses, revoking the successor, when the user's `credential_changed_at` is later than the
+refuses, revoking the successor, when the user's `credential_changed_at` is at or after the
 presented refresh token's `created_at`. The same rule covers every other OAuth2 route that turns a
 short-lived grant into a refresh token: an authorization code, a device-flow approval and a CIBA
 approval issued before a credential change are refused with `invalid_grant` when redeemed after it
 (compared with the code's `created_at`, the device grant's `created_at` and the CIBA request's
 `decided_at`, so a device approval is also refused when the change falls between the device's
-request and the user's approval; the grant is already redeemed, so the device must start a new device authorization, with a new device code and user code, and the user approves that one). A credential change at the very instant of the grant's time refuses too (a tie fails closed). After the refresh token is
+request and the user's approval; the grant is already redeemed, so the device must start a new
+device authorization, with a new device code and user code, and the user approves that one). A
+credential change at the very instant of the grant's time refuses too (a tie fails closed, here and
+for session rotation: one rule, `User::credential_changed_since`). After the refresh token is
 written the user is re-read once more; a change that landed in between revokes the token just
 minted and answers `invalid_grant`, and a failed read revokes it and answers a server error.
 

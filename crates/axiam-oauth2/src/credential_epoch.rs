@@ -34,6 +34,10 @@
 //! tie (which needs two statements to read one datastore instant) is a sign-in
 //! repeated.
 //!
+//! Session rotation in `axiam-auth` (the versionless legacy-row arm) applies the
+//! same rule through the same method, so there is one tie rule in the codebase,
+//! defined by [`User::credential_changed_since`].
+//!
 //! A user with no stored `credential_changed_at` is refused nothing.
 
 use axiam_core::error::AxiamError;

@@ -938,20 +938,17 @@ where
     }
 
     /// [`Self::ensure_account_may_act`] for a grant issued at `issued_at`
-    /// (`Some`): it is also refused when the user's credential changed after
-    /// that instant (SA-06, SR17-1; see [`crate::credential_epoch`]). One read
-    /// answers both questions.
+    /// (`Some`): it is also refused when the user's credential changed at or
+    /// after that instant (SA-06, SR17-1; a tie refuses: see
+    /// [`crate::credential_epoch`] and `User::credential_changed_since`). One
+    /// read answers both questions.
     async fn ensure_account_may_act_since(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         issued_at: Option<chrono::DateTime<Utc>>,
     ) -> Result<(), OAuth2Error> {
-        let refused = || {
-            OAuth2Error::InvalidGrant(
-                "the account this grant was issued for can no longer sign in".into(),
-            )
-        };
+        let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
         let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
             Ok(user) => user,
             Err(AxiamError::NotFound { .. }) => return Err(refused()),

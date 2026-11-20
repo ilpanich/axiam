@@ -1442,10 +1442,10 @@ impl<
         let rotation_version = match session.credential_version {
             Some(version) => version,
             None => {
-                if user
-                    .credential_changed_at
-                    .is_some_and(|changed| changed > session.created_at)
-                {
+                // One tie rule (SR19-1): a change at or after the row's
+                // creation refuses, as `User::credential_changed_since` does
+                // everywhere else.
+                if user.credential_changed_since(session.created_at) {
                     // The uniform refusal: a distinct reason would tell a holder
                     // of a stale token that it was genuine and the credential
                     // has since changed (QR17-2).

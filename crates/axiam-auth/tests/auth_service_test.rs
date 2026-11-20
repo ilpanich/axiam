@@ -5171,3 +5171,51 @@ async fn sr16_1_a_legacy_session_rotates_only_if_created_after_the_last_credenti
         .unwrap();
     assert_eq!(live.credential_version, Some(current));
 }
+
+/// SR19-1: the tie rule is uniform. A versionless row created at the very
+/// instant of the user's credential change cannot be shown to postdate it, so
+/// it is refused (fail closed) with the uniform message, like every other tie.
+#[tokio::test]
+async fn sr19_1_a_legacy_session_created_at_the_credential_change_instant_is_refused() {
+    let w = RotationWorld::new().await;
+    let row = w
+        .sessions
+        .create(CreateSession {
+            tenant_id: w.tenant_id,
+            user_id: w.user_id,
+            token_hash: token::hash_refresh_token("legacy-tie"),
+            ip_address: None,
+            user_agent: None,
+            expires_at: Utc::now() + Duration::hours(1),
+            authenticated_at: Utc::now(),
+            amr: vec![axiam_core::models::session::Amr::Pwd],
+            browser_token_hash: None,
+            lineage_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(row.credential_version, None);
+    // The epoch equals the row's created_at exactly.
+    set_alices_epoch(&w.db, w.user_id, row.created_at).await;
+
+    let err = w
+        .hooked
+        .refresh(w.rotate_input("legacy-tie"))
+        .await
+        .expect_err("a legacy row created at the credential change instant must be refused");
+    assert!(
+        matches!(
+            err,
+            AxiamError::AuthenticationFailed { ref reason }
+                if reason == "invalid token: refresh token not found or already used"
+        ),
+        "{err:?}"
+    );
+    assert!(
+        w.sessions
+            .list_by_user(w.tenant_id, w.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

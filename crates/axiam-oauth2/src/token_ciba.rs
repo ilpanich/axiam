@@ -210,11 +210,7 @@ where
         };
 
         // --- 7. the subject, re-read after the approval is spent ------------
-        let refused = || {
-            OAuth2Error::InvalidGrant(
-                "the account this grant was issued for can no longer sign in".into(),
-            )
-        };
+        let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
         let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
             Ok(user) => user,
             Err(AxiamError::NotFound { .. }) => return Err(refused()),

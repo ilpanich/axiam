@@ -450,11 +450,7 @@ where
         // grant is already `Redeemed`, so the next poll is refused too. The
         // predicate is CIBA's (`crate::ciba::user_may_be_subject`), shared
         // rather than copied so the two backchannel-style grants cannot drift.
-        let refused = || {
-            OAuth2Error::InvalidGrant(
-                "the account this grant was issued for can no longer sign in".into(),
-            )
-        };
+        let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
         let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
             Ok(user) => user,
             Err(AxiamError::NotFound { .. }) => return Err(refused()),
@@ -490,7 +486,7 @@ where
                 tenant_id,
                 client_id: redeemed.client_id.clone(),
                 user_id: Some(user.id),
-                token_hash: axiam_auth::token::hash_refresh_token(&refresh_token),
+                token_hash: minted_hash.clone(),
                 scopes: redeemed.scopes.clone(),
                 // RFC 8628 has no browser session behind it: the device polls
                 // and the approval happened elsewhere, so there is no AXIAM

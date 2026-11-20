@@ -539,15 +539,15 @@ credential write that does not revoke sessions would make the user's existing se
 rotate (they must sign in again); today no route writes an OPAQUE record or removes one for an
 existing user other than a password change or reset, so none does. An OAuth2
 `refresh_token` grant has no stored version; after writing the successor it re-reads the user and
-refuses, deleting the successor, when the user's `credential_changed_at` is later than the
+refuses, revoking the successor, when the user's `credential_changed_at` is later than the
 presented refresh token's `created_at`. The same rule covers every other OAuth2 route that turns a
 short-lived grant into a refresh token: an authorization code, a device-flow approval and a CIBA
 approval issued before a credential change are refused with `invalid_grant` when redeemed after it
 (compared with the code's `created_at`, the device grant's `created_at` and the CIBA request's
 `decided_at`, so a device approval is also refused when the change falls between the device's
-request and the user's approval, and the user simply approves again). After the refresh token is
-written the user is re-read once more; a change that landed in between deletes the token just
-minted and answers `invalid_grant`, and a failed read deletes it and answers a server error.
+request and the user's approval; the grant is already redeemed, so the device must start a new device authorization, with a new device code and user code, and the user approves that one). A credential change at the very instant of the grant's time refuses too (a tie fails closed). After the refresh token is
+written the user is re-read once more; a change that landed in between revokes the token just
+minted and answers `invalid_grant`, and a failed read revokes it and answers a server error.
 
 **One clock.** `credential_changed_at` is written with the datastore's clock (`time::now()` inside
 the write), as the `created_at` of sessions, refresh tokens, codes and approvals is, so every

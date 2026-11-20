@@ -471,8 +471,9 @@ where
         // SA-06 (SR17-1): an approval given before the user's last credential
         // change is not redeemable after it. The grant records no approval
         // time, so its creation is the bound: a change between the device's
-        // request and the user's approval refuses too (the user approves
-        // again). See `crate::credential_epoch`.
+        // request and the user's approval refuses too (the grant is
+        // already redeemed, so the device starts a new flow with a new code).
+        // See `crate::credential_epoch`.
         if crate::credential_epoch::changed_after(&user, redeemed.created_at) {
             tracing::info!(
                 %tenant_id,
@@ -525,6 +526,7 @@ where
             user.id,
             redeemed.created_at,
             &minted_hash,
+            crate::credential_epoch::REFUSED,
         )
         .await?;
 

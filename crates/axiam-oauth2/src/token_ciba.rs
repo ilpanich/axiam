@@ -313,6 +313,7 @@ where
                 user_id,
                 approved_at,
                 &minted_hash,
+                crate::credential_epoch::REFUSED,
             )
             .await?;
             Some(raw_refresh)

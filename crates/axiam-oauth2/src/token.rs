@@ -2749,6 +2749,7 @@ where
                 auth_code.user_id,
                 auth_code.created_at,
                 &minted_hash,
+                crate::credential_epoch::REFUSED,
             )
             .await?;
             Some(raw_refresh)
@@ -3472,33 +3473,18 @@ where
         // `credential_changed_at` is stamped in the same transaction as every
         // credential write.
         if let Some(user_id) = stored.user_id {
-            let moved = match self.user_repo.get_by_id(tenant_id, user_id).await {
-                Ok(user) => Ok(user
-                    .credential_changed_at
-                    .is_some_and(|changed| changed > stored.created_at)),
-                Err(AxiamError::NotFound { .. }) => Ok(true),
-                Err(e) => Err(e),
-            };
-            if !matches!(moved, Ok(false)) {
-                // Never leave the successor behind, whatever the cause.
-                if let Err(cleanup_err) = self
-                    .refresh_token_repo
-                    .revoke(tenant_id, &new_refresh_hash)
-                    .await
-                {
-                    tracing::warn!(
-                        error = %cleanup_err,
-                        "token: failed to revoke a successor refused by the credential re-check; \
-                         token may linger"
-                    );
-                }
-                return match moved {
-                    Err(e) => Err(OAuth2Error::ServerError(e.to_string())),
-                    _ => Err(OAuth2Error::InvalidGrant(
-                        "refresh token is invalid, expired, or revoked".into(),
-                    )),
-                };
-            }
+            // The shared helper (`crate::credential_epoch`), with this grant's
+            // own refusal text.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                user_id,
+                stored.created_at,
+                &new_refresh_hash,
+                "refresh token is invalid, expired, or revoked",
+            )
+            .await?;
         }
 
         // Now retire the old refresh token — on one of two lanes, chosen by

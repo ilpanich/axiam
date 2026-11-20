@@ -802,8 +802,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 sets.push("address = $address");
             }
             // SA-06 (N7; S-1, S-6): a write of the hash moves the credential
-            // epoch (stamped with the datastore clock, QR17-4) in the same statement, so no moment exists at which the new
-            // hash is stored and an artefact of the old one is still honoured.
+            // epoch (stamped with the datastore clock, QR17-4) in the same
+            // statement, so no moment exists at which the new hash is stored
+            // and an artefact of the old one is still honoured.
             if input.password_hash.is_some() {
                 sets.push("credential_changed_at = time::now()");
                 sets.push("credential_version = (credential_version ?? 0) + 1");

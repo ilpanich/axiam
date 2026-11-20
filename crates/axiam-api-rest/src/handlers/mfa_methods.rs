@@ -87,12 +87,12 @@ pub async fn list_mfa_methods<C: Connection + Clone>(
 
 /// `DELETE /api/v1/users/{user_id}/mfa-methods/{method_id}`
 ///
+/// Remove a specific MFA method. Returns 400 if it is the last
+/// method and MFA is enabled.
+///
 /// **The person's own act (SR4-1).** On the caller's OWN account a token AXIAM
 /// minted for an OAuth2 client is refused `403` (a console sign-in is required);
 /// an administrator with `users:admin` acting on another user is not.
-///
-/// Remove a specific MFA method. Returns 400 if it is the last
-/// method and MFA is enabled.
 #[utoipa::path(
     delete,
     path = "/api/v1/users/{user_id}/mfa-methods/{method_id}",

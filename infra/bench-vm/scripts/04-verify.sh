@@ -70,7 +70,8 @@ docker info >/dev/null 2>&1 && row PASS "docker without sudo" "" || row FAIL "do
 jq -e '."log-opts"."max-size"' /etc/docker/daemon.json >/dev/null 2>&1 \
     && row PASS "container log rotation" "" || row WARN "container log rotation" "not configured (01-docker-k6.sh)"
 exactly "k6" "$(k6 version 2>/dev/null | first_version)" "$K6_VERSION"
-for t in just jq openssl python3 curl git xz tmux vmstat sysbench; do
+exactly "just" "$(just --version 2>/dev/null | first_version)" "$JUST_VERSION"
+for t in jq openssl python3 curl git xz tmux vmstat sysbench; do
     command -v "$t" >/dev/null 2>&1 && row PASS "$t" "" || row FAIL "$t" "not found (00-host-prepare.sh)"
 done
 case "${BENCH_BIND_ADDR:-127.0.0.1}" in

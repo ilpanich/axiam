@@ -20,7 +20,7 @@ infra/bench-vm/
     ├── versions.env          every pinned version, in one file
     ├── _lib.sh               the helpers, sourced by the rest
     ├── 00-host-prepare.sh    OS and size checks, upgrade, background noise off, base packages
-    ├── 01-docker-k6.sh       Docker Engine >= 25, Compose >= 2.24, log rotation, pinned k6
+    ├── 01-docker-k6.sh       Docker Engine >= 25, Compose >= 2.24, log rotation, pinned k6 and just
     ├── 02-sdk-toolchains.sh  the eleven SDK toolchains
     ├── go-toolchain.py       Go from the module proxy, verified against sum.golang.org (02's fallback)
     ├── 03-checkouts.sh       axiam at the release tag, the eleven SDKs beside it

@@ -70,11 +70,13 @@ fi
 $SUDO timedatectl set-timezone UTC && ok "timezone UTC"
 
 # ---------------------------------------------------------------------------
-# 4. Base packages (the harness: run6-runbook.md §1.2; the samplers; tmux)
+# 4. Base packages (the harness: run6-runbook.md §1.2; the samplers; tmux).
+#    `just` is NOT among them: Ubuntu's 1.21.0 cannot parse the benchmark
+#    justfile, so 01-docker-k6.sh installs a pinned release.
 # ---------------------------------------------------------------------------
 say "Installing base packages"
 apt_install git curl ca-certificates gnupg jq openssl python3 python3-venv python3-pip \
-            just tmux xz-utils unzip rsync procps sysstat sysbench
+            tmux xz-utils unzip rsync procps sysstat sysbench
 ok "base packages"
 
 if [[ -f /var/run/reboot-required ]]; then

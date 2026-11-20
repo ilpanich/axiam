@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Docker Engine (>= 25), Compose (>= 2.24) and the pinned k6. Idempotent.
+# Docker Engine (>= 25), Compose (>= 2.24), and the pinned k6 and just. Idempotent.
 #
 # Runbook: claude_dev/bench-vm-runbook.md §3-§4. Docker comes from Docker's own
 # repository (Ubuntu's docker.io lags); Engine >= 25 because the authentik
@@ -73,6 +73,31 @@ else
     rm -rf "$tmp"
     k6 version | grep -q "v${K6_VERSION}\b" || die "k6 did not install as $K6_VERSION: $(k6 version | head -1)"
     ok "k6 $K6_VERSION"
+fi
+
+# ---------------------------------------------------------------------------
+# just, pinned and checksum-verified (Ubuntu's 1.21.0 cannot parse the
+# benchmark justfile — see versions.env)
+# ---------------------------------------------------------------------------
+if dpkg -s just >/dev/null 2>&1; then
+    say "Removing Ubuntu's just $(dpkg-query -W -f='${Version}' just) (too old for benchmarks/justfile)"
+    $SUDO apt-get remove -y -q just
+fi
+if command -v just >/dev/null 2>&1 && [[ "$(just --version 2>/dev/null)" == "just ${JUST_VERSION}" ]]; then
+    ok "just $JUST_VERSION already installed"
+else
+    say "Installing just $JUST_VERSION"
+    tmp="$(mktemp -d)"
+    curl --fail --location --silent --show-error --retry 3 -o "$tmp/just.tgz" \
+        "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+    echo "${JUST_SHA256}  $tmp/just.tgz" | sha256sum --check --quiet \
+        || die "just-${JUST_VERSION}: the download does not match the SHA-256 pinned in versions.env."
+    tar -xzf "$tmp/just.tgz" -C "$tmp" just
+    $SUDO install -m 0755 "$tmp/just" /usr/local/bin/just
+    rm -rf "$tmp"
+    hash -r
+    [[ "$(just --version)" == "just ${JUST_VERSION}" ]] || die "just did not install as $JUST_VERSION: $(just --version)"
+    ok "just $JUST_VERSION (sha256 verified)"
 fi
 
 ok "Standard-benchmark tooling installed. Next: log out and in, the registry logins (runbook §4), then ./02-sdk-toolchains.sh"

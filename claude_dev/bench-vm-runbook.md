@@ -165,7 +165,11 @@ sudo reboot
 ```
 
 Docker Engine and the Compose plugin from Docker's own repository (≥ 25 and ≥ 2.24, checked),
-container log rotation so a 20-hour run cannot fill the disk, and k6 at the pinned version.
+container log rotation so a 20-hour run cannot fill the disk, and k6 and `just` at the pinned
+versions. **`just` is deliberately not Ubuntu's package**: 24.04 ships 1.21.0, which refuses
+`benchmarks/justfile` (`Non-default parameter \`services\` follows default parameter`, at
+`bench-logs`); the script removes it and installs release 1.59.0, checked against the SHA-256
+pinned in `versions.env`.
 Log out and back in afterwards (the docker group).
 
 ---

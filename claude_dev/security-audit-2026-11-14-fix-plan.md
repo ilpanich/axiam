@@ -722,6 +722,30 @@ admin network documentation: guarded fetches do not use an egress proxy.
 
 ### SA-11 — SAML SP: mandatory Recipient and audience binding (N21, D-5)
 
+> **EXECUTED (2026-11-20, Sonnet 5.5). N21: reproduced.** In the form-ACS
+> argument shape (no expected destination), a correctly signed assertion with no
+> `AudienceRestriction` and a `Recipient` naming another SP was accepted; so was a
+> no-audience assertion with the correct `Recipient`: the audience check ran only
+> when the element was present. `saml.rs` now rejects `<Conditions>` with an
+> absent or empty `AudienceRestriction`, and still requires the SP entity ID among
+> the audiences (D-5, no opt-out). `saml_acs_form_public` passes
+> `login_state.idp_redirect_uri.as_deref()` (the ACS URL the SAML start stored, as
+> the JSON ACS already used), so `Response@Destination` and the signed
+> `SubjectConfirmationData@Recipient` are compared on both ACS paths.
+> Six tests in `saml::tests`: `form_acs_shape_rejects_no_audience_foreign_recipient_assertion`
+> and `assertion_without_audience_restriction_is_rejected` failed before and pass
+> after; `assertion_with_foreign_audience_is_rejected`,
+> `form_acs_with_expected_destination_{rejects_foreign_recipient,accepts_conformant_assertion}`
+> and `nameid_with_interior_comment_parses_to_full_text` (hardening notes) pin
+> behaviour that was already correct. `generate.sh` gained an audience-block
+> argument and three fixtures; the script mints a fresh key, so the whole fixture
+> set and `signing_cert.pem` were re-signed (content and audiences unchanged).
+> After: `axiam-federation` 418 lib tests; REST `federation_test` 87,
+> `sec095_federated_login_gate_test` 6, `saml_idp_e2e_test` 10,
+> `saml_idp_sso_test` 22, `saml_admin_test` 38; `axiam-server` `req5_saml_e2e` 9;
+> SAML-off `cargo check` clean. **Upgrade note for SA-50:** an IdP that omits
+> `AudienceRestriction` for the SP entity ID is now refused.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-federation/src/saml.rs` (636, 1483),
   `crates/axiam-api-rest/src/handlers/federation_login.rs` (1331).

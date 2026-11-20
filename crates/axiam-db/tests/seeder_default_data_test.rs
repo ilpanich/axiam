@@ -1124,3 +1124,64 @@ async fn reconcile_revokes_the_sa_02_actions_from_an_existing_ordinary_tenant() 
         ReconcileOutcome::default()
     );
 }
+
+// ---------------------------------------------------------------------------
+// SA-12 (N4, D-2): `users:validate_credentials` is seeded to no role
+// ---------------------------------------------------------------------------
+
+/// The permission that admits a service account to gRPC
+/// `UserService/ValidateCredentials` — a password oracle over every account in
+/// the tenant — is granted by an operator, never by a default. Neither the
+/// bootstrap seeding nor the boot-time reconcile may give it to any of the
+/// three seeded roles; the reconcile in particular grants super-admin "every
+/// permission", which is exactly how a new registry entry would otherwise
+/// reach every existing tenant on upgrade.
+#[tokio::test]
+async fn users_validate_credentials_is_granted_to_no_default_role() {
+    let (db, _org, tenant_id) = setup().await;
+    let registry: &[(&str, &str)] = &[
+        ("users:list", "List users"),
+        ("users:get", "Get a user"),
+        (
+            "users:validate_credentials",
+            "Check a user's password over gRPC",
+        ),
+    ];
+
+    seed_permissions(&db, tenant_id, registry).await.unwrap();
+    let roles = seed_default_roles(&db, tenant_id, registry).await.unwrap();
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let held_by = |role_id| {
+        let perm_repo = perm_repo.clone();
+        async move {
+            perm_repo
+                .get_role_permissions(tenant_id, role_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .any(|p| p.action == "users:validate_credentials")
+        }
+    };
+    for (role, id) in [
+        ("super-admin", roles.super_admin_role_id),
+        ("admin", roles.admin_role_id),
+        ("viewer", roles.viewer_role_id),
+    ] {
+        assert!(
+            !held_by(id).await,
+            "{role} was seeded with users:validate_credentials"
+        );
+    }
+
+    reconcile_default_role_grants(&db, tenant_id).await.unwrap();
+    for (role, id) in [
+        ("super-admin", roles.super_admin_role_id),
+        ("admin", roles.admin_role_id),
+        ("viewer", roles.viewer_role_id),
+    ] {
+        assert!(
+            !held_by(id).await,
+            "the reconcile granted {role} users:validate_credentials"
+        );
+    }
+}

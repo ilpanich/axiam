@@ -260,6 +260,14 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     // attacker used. `axiam_auth::lockout::SettingsLockoutPolicy` is that
     // resolver; `StaticLockoutPolicy` is the deployment-default fallback.
     lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
+    // SA-12 (N4, D-2) — `UserService`'s own `AuthorizationEngine`: `GetUser`
+    // of another user requires `users:get`, `ValidateCredentials` requires a
+    // service account holding `users:validate_credentials`. A third instance
+    // for the reason `reactor_engine` is a second (the type is not `Clone`);
+    // MUST be built like the other two (same repositories, decision cache and
+    // invalidation broadcaster). `ValidateCredentials` audits through a clone
+    // of `reactor_audit_repo`.
+    user_engine: AuthorizationEngine<R, P, Res, S, G>,
     // R-1 / T-234 — how this listener terminates TLS, decided and built by the
     // composition root. See [`GrpcTls`] for why it is a value and not an env
     // read, and the module docs for what changed.
@@ -279,7 +287,7 @@ where
     U: UserRepository + Clone + 'static,
     C: Connection + 'static,
     Rr: ReactorRepository + 'static,
-    A: AuditLogRepository + 'static,
+    A: AuditLogRepository + Clone + 'static,
 {
     // I2: per-family ceilings (unset knobs derived from the authz ceiling).
     let rate_limits = grpc_config.rate_limits();
@@ -340,6 +348,8 @@ where
             auth_config.clone(),
             crypto_semaphore,
             lockout_policy,
+            Arc::new(user_engine),
+            Arc::new(reactor_audit_repo.clone()),
         ),
         AuthInterceptor::new(auth_config.clone()),
     );

@@ -2661,6 +2661,29 @@ where
             None => engine,
         }
     };
+    // SA-12 (N4, D-2) — `UserServiceImpl`'s own `AuthorizationEngine`, built
+    // identically for the same reason as `grpc_reactor_engine` above.
+    let grpc_user_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
+        );
+        let engine = match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
+            None => engine,
+        }
+    };
     let grpc_reactor_repo = reactor_repo.clone();
     // `pool` is moved into `health_checker` before this point (see the
     // comment near `session_client_repo` above), so this reuses the
@@ -2804,6 +2827,7 @@ where
             grpc_reactor_dispatch_available,
             grpc_crypto_semaphore,
             grpc_lockout_policy,
+            grpc_user_engine,
             grpc_tls,
             deployment_profile,
             async move {

@@ -761,6 +761,38 @@ comment parses to its full text.
 
 ### SA-12 — RBAC on gRPC `UserService` (N4, D-2)
 
+> **EXECUTED (2026-11-20, Opus 5.5). N4: reproduced.** A same-tenant
+> `axiam:user` token whose subject held no grant read another user's username,
+> email and status through `GetUser`; `ValidateCredentials` answered
+> (`valid: true`) for a user token and for a service account with no permission,
+> and wrote no audit row. Now `GetUser` requires `users:get` (resource nil, as
+> REST) unless `claims.sub == user_id`. `ValidateCredentials` first refuses any
+> caller that is not a service account, by REST's own machine-principal rule
+> (`aud == axiam:m2m` **and** `sub_kind == ServiceAccount`, so a user token
+> narrowed to `axiam:m2m` by exchange is refused too), then requires the new
+> `users:validate_credentials`; both run before the lookup, the hash permit and
+> lockout accrual. Every answered call writes one `auth.credentials_validated`
+> row (Success/Failure, service-account actor, matched user as resource, peer
+> IP; the presented name is not recorded); refused callers write none.
+> The permission is registered in `permissions.rs` and listed in the new
+> `axiam_db::seeder::SEEDED_TO_NO_ROLE`, which both seeding and reconciliation
+> skip (an operator's explicit grant is kept). The engine is injected as a third
+> gRPC `AuthorizationEngine` built in `axiam-server/src/boot.rs` (not in the
+> file list; needed to wire it) through two trait objects,
+> `UserServiceAuthorizer` and `CredentialAuditSink`; no new crate edge, no proto
+> change. Tests: `grpc_auth_test` 4 new failing-before (another user's record,
+> user token, unpermitted service account, audit rows), `grpc_units`
+> `get_user_of_another_user_without_users_get_is_denied` (was the pinned-defect
+> case) and a rewritten `get_user_success` (self-read), `seeder_default_data_test`
+> `users_validate_credentials_is_granted_to_no_default_role`; all failed before
+> and pass after. After: `grpc_auth_test` 15, `grpc_server_test` 7, `grpc_units`
+> 55, seeder 22, REST `m2m_management_test` 16, `rbac_test` 12; workspace clippy,
+> fmt, layering, digest and registry checks clean.
+> **Upgrade note for SA-50:** gRPC `GetUser` of another user needs `users:get`;
+> `ValidateCredentials` accepts only a service account granted
+> `users:validate_credentials`, which no role holds after upgrade, so existing
+> SDK gRPC callers get `PERMISSION_DENIED` until an operator grants it.
+
 - **Model:** Opus 5.5. Adds a permission to the registry and wires the
   authorization engine into a service that has none.
 - **Files:** `crates/axiam-api-grpc/src/services/user.rs` (138, 180, 272–275),

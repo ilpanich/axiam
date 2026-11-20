@@ -10,14 +10,22 @@
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, issue_access_token};
 use axiam_authz::AuthorizationEngine;
+use axiam_core::models::audit::ActorType;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::permission::CreatePermission;
+use axiam_core::models::role::{AssignmentScope, CreateRole};
+use axiam_core::models::service_account::CreateServiceAccount;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
-use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+use axiam_core::repository::{
+    AuditLogFilter, AuditLogRepository, OrganizationRepository, Pagination, PermissionRepository,
+    RoleRepository, ServiceAccountRepository, TenantRepository, UserRepository,
+};
 use axiam_db::repository::{
-    SurrealGroupRepository, SurrealOrganizationRepository, SurrealPermissionRepository,
-    SurrealResourceRepository, SurrealRoleRepository, SurrealScopeRepository,
-    SurrealTenantRepository, SurrealUserRepository,
+    SurrealAuditLogRepository, SurrealGroupRepository, SurrealOrganizationRepository,
+    SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
+    SurrealScopeRepository, SurrealServiceAccountRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::Mem;
@@ -236,6 +244,7 @@ fn make_engine(db: &Surreal<TestDb>) -> TestEngine {
 // ---------------------------------------------------------------------------
 
 async fn start_test_server<U: UserRepository + Clone + 'static>(
+    db: &Surreal<TestDb>,
     engine: TestEngine,
     user_repo: U,
     auth_config: AuthConfig,
@@ -259,6 +268,10 @@ async fn start_test_server<U: UserRepository + Clone + 'static>(
             // Argon2id gate; these interceptor tests never reach the verify,
             // so any non-zero permit count works.
             std::sync::Arc::new(tokio::sync::Semaphore::new(4)),
+            // SA-12: UserService's own engine and audit sink, over the same
+            // datastore — as `server.rs` wires them.
+            std::sync::Arc::new(make_engine(db)),
+            std::sync::Arc::new(SurrealAuditLogRepository::new(db.clone())),
         ),
         AuthInterceptor::new(auth_config.clone()),
     );
@@ -321,7 +334,7 @@ async fn grpc_rejects_call_without_bearer_token() {
     let auth_config = test_auth_config();
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let (endpoint, _shutdown) = start_test_server(&db, engine, user_repo, auth_config).await;
     let mut client = bare_client(endpoint).await;
 
     let result = client
@@ -355,7 +368,7 @@ async fn grpc_accepts_call_with_valid_bearer_token() {
     let token = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let (endpoint, _shutdown) = start_test_server(&db, engine, user_repo, auth_config).await;
 
     let channel = Channel::from_shared(endpoint)
         .unwrap()
@@ -393,7 +406,7 @@ async fn grpc_rejects_call_with_malformed_token() {
     let auth_config = test_auth_config();
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let (endpoint, _shutdown) = start_test_server(&db, engine, user_repo, auth_config).await;
 
     let channel = Channel::from_shared(endpoint)
         .unwrap()
@@ -438,7 +451,7 @@ async fn grpc_user_service_get_user_rejects_without_bearer_token() {
     let auth_config = test_auth_config();
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let (endpoint, _shutdown) = start_test_server(&db, engine, user_repo, auth_config).await;
     let mut client = bare_user_client(endpoint).await;
 
     let result = client
@@ -465,7 +478,7 @@ async fn grpc_user_service_validate_credentials_rejects_without_bearer_token() {
     let auth_config = test_auth_config();
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let (endpoint, _shutdown) = start_test_server(&db, engine, user_repo, auth_config).await;
     let mut client = bare_user_client(endpoint).await;
 
     let result = client
@@ -495,7 +508,7 @@ async fn grpc_token_service_introspect_rejects_without_bearer_token() {
     let token_to_introspect = mint_test_token(tenant_id, user_id, &auth_config);
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let (endpoint, _shutdown) = start_test_server(&db, engine, user_repo, auth_config).await;
     let mut client = bare_token_client(endpoint).await;
 
     let result = client
@@ -526,7 +539,7 @@ async fn grpc_get_user_cross_tenant_denied() {
     let token_a = mint_test_token(tenant_a, user_a, &auth_config);
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config).await;
+    let (endpoint, _shutdown) = start_test_server(&db, engine, user_repo, auth_config).await;
 
     let channel = Channel::from_shared(endpoint)
         .unwrap()
@@ -569,7 +582,18 @@ async fn grpc_get_user_cross_tenant_denied() {
 async fn grpc_validate_credentials_wrong_password_accrues_lockout() {
     let (db, tenant_id, user_id) = setup().await;
     let auth_config = test_auth_config();
-    let token = mint_test_token(tenant_id, user_id, &auth_config);
+    // SA-12 (N4, D-2): only a service account holding
+    // `users:validate_credentials` reaches the credential check; this test
+    // used a user token, which is now refused before any accrual.
+    let sa_id = create_service_account(&db, tenant_id).await;
+    grant_action(
+        &db,
+        tenant_id,
+        "users:validate_credentials",
+        Grantee::ServiceAccount(sa_id),
+    )
+    .await;
+    let token = mint_m2m_token(tenant_id, sa_id, &auth_config);
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
 
@@ -590,7 +614,7 @@ async fn grpc_validate_credentials_wrong_password_accrues_lockout() {
         .unwrap();
 
     let (endpoint, _shutdown) =
-        start_test_server(engine, user_repo.clone(), auth_config.clone()).await;
+        start_test_server(&db, engine, user_repo.clone(), auth_config.clone()).await;
 
     let channel = Channel::from_shared(endpoint)
         .unwrap()
@@ -668,7 +692,8 @@ async fn grpc_rejects_a_resource_bound_token() {
     let auth_config = test_auth_config();
     let engine = make_engine(&db);
     let user_repo = SurrealUserRepository::new(db.clone());
-    let (endpoint, _shutdown) = start_test_server(engine, user_repo, auth_config.clone()).await;
+    let (endpoint, _shutdown) =
+        start_test_server(&db, engine, user_repo, auth_config.clone()).await;
 
     let bound = axiam_auth::token::AccessTokenSpec::user(
         user_id,
@@ -729,4 +754,366 @@ async fn grpc_rejects_a_resource_bound_token() {
         client.check_access(request()).await.is_ok(),
         "the 401 above must be about the audience, not about the route"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SA-12 (N4, D-2) — RBAC on UserService
+// ---------------------------------------------------------------------------
+
+/// A `UserServiceClient` that sends `$token` as its bearer.
+macro_rules! user_client_with {
+    ($endpoint:expr, $token:expr) => {{
+        let token = $token;
+        let channel = Channel::from_shared($endpoint)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        UserServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+            req.metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            Ok(req)
+        })
+    }};
+}
+
+/// A second, ordinary user of `tenant_id` holding no grant at all.
+async fn create_plain_user(db: &Surreal<TestDb>, tenant_id: Uuid, name: &str) -> Uuid {
+    SurrealUserRepository::new(db.clone())
+        .create(CreateUser {
+            tenant_id,
+            username: name.into(),
+            email: format!("{name}@example.com"),
+            password: "pass123456789".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .id
+}
+
+async fn create_service_account(db: &Surreal<TestDb>, tenant_id: Uuid) -> Uuid {
+    SurrealServiceAccountRepository::new(db.clone())
+        .create(CreateServiceAccount {
+            tenant_id,
+            name: "credential-checker".into(),
+            description: None,
+        })
+        .await
+        .unwrap()
+        .0
+        .id
+}
+
+/// Who a test grant is given to.
+enum Grantee {
+    User(Uuid),
+    ServiceAccount(Uuid),
+}
+
+/// Give `grantee` a global role holding exactly `action` — the resource-nil
+/// shape REST's `RequirePermission::new(action, Uuid::nil())` checks.
+async fn grant_action(db: &Surreal<TestDb>, tenant_id: Uuid, action: &str, grantee: Grantee) {
+    let role_repo = SurrealRoleRepository::new(db.clone());
+    let perm_repo = SurrealPermissionRepository::new(db.clone());
+    let role = role_repo
+        .create(CreateRole {
+            tenant_id,
+            name: format!("holds-{action}-{}", Uuid::new_v4()),
+            description: format!("Holds {action}"),
+            is_global: true,
+        })
+        .await
+        .unwrap();
+    let perm = perm_repo
+        .create(CreatePermission {
+            tenant_id,
+            action: action.into(),
+            description: format!("Can {action}"),
+        })
+        .await
+        .unwrap();
+    perm_repo
+        .grant_to_role(tenant_id, role.id, perm.id)
+        .await
+        .unwrap();
+    match grantee {
+        Grantee::User(id) => role_repo
+            .assign_to_user(tenant_id, id, role.id, AssignmentScope::global())
+            .await
+            .unwrap(),
+        Grantee::ServiceAccount(id) => role_repo
+            .assign_to_service_account(tenant_id, id, role.id, AssignmentScope::global())
+            .await
+            .unwrap(),
+    }
+}
+
+/// A service-account (`aud = axiam:m2m`, `sub_kind = service_account`) token.
+fn mint_m2m_token(tenant_id: Uuid, service_account_id: Uuid, auth_config: &AuthConfig) -> String {
+    axiam_auth::token::issue_service_account_token(
+        service_account_id,
+        tenant_id,
+        Uuid::nil(),
+        Uuid::new_v4().to_string(),
+        None,
+        auth_config,
+    )
+    .expect("service-account token issuance must succeed")
+}
+
+async fn activate(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// **N4** — the lead itself. A same-tenant user token whose subject holds no
+/// grant asks for another user's record. REST's twin answers 403 unless the
+/// caller holds `users:get`; so must this transport.
+#[tokio::test]
+async fn grpc_get_user_of_another_user_without_users_get_is_denied() {
+    let (db, tenant_id, victim_id) = setup().await;
+    let auth_config = test_auth_config();
+    let caller_id = create_plain_user(&db, tenant_id, "nosy-neighbour").await;
+    let token = mint_test_token(tenant_id, caller_id, &auth_config);
+    let (endpoint, _shutdown) = start_test_server(
+        &db,
+        make_engine(&db),
+        SurrealUserRepository::new(db.clone()),
+        auth_config,
+    )
+    .await;
+    let mut client = user_client_with!(endpoint, token);
+
+    let result = client
+        .get_user(GetUserRequest {
+            tenant_id: tenant_id.to_string(),
+            user_id: victim_id.to_string(),
+        })
+        .await;
+    match result {
+        Ok(resp) => panic!(
+            "a subject with no grant read another user's record: {:?}",
+            resp.into_inner()
+        ),
+        Err(err) => assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}"),
+    }
+}
+
+/// The self-read exemption REST's handler makes (`is_own_resource`): reading
+/// one's own record needs no grant.
+#[tokio::test]
+async fn grpc_get_user_reads_own_record_without_any_grant() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
+    let (endpoint, _shutdown) = start_test_server(
+        &db,
+        make_engine(&db),
+        SurrealUserRepository::new(db.clone()),
+        auth_config,
+    )
+    .await;
+    let mut client = user_client_with!(endpoint, token);
+
+    let resp = client
+        .get_user(GetUserRequest {
+            tenant_id: tenant_id.to_string(),
+            user_id: user_id.to_string(),
+        })
+        .await
+        .expect("a subject may read its own record")
+        .into_inner();
+    assert_eq!(resp.id, user_id.to_string());
+    assert_eq!(resp.username, "auth-tester");
+}
+
+/// The control for the denial above: the same call, by a subject holding
+/// `users:get`, is answered.
+#[tokio::test]
+async fn grpc_get_user_of_another_user_with_users_get_is_allowed() {
+    let (db, tenant_id, target_id) = setup().await;
+    let auth_config = test_auth_config();
+    let caller_id = create_plain_user(&db, tenant_id, "helpdesk").await;
+    grant_action(&db, tenant_id, "users:get", Grantee::User(caller_id)).await;
+    let token = mint_test_token(tenant_id, caller_id, &auth_config);
+    let (endpoint, _shutdown) = start_test_server(
+        &db,
+        make_engine(&db),
+        SurrealUserRepository::new(db.clone()),
+        auth_config,
+    )
+    .await;
+    let mut client = user_client_with!(endpoint, token);
+
+    let resp = client
+        .get_user(GetUserRequest {
+            tenant_id: tenant_id.to_string(),
+            user_id: target_id.to_string(),
+        })
+        .await
+        .expect("users:get admits reading another user's record")
+        .into_inner();
+    assert_eq!(resp.id, target_id.to_string());
+}
+
+/// **N4 / D-2** — `ValidateCredentials` is for machine principals. A user
+/// token is refused even when its subject holds
+/// `users:validate_credentials`: the grant is necessary, not sufficient.
+#[tokio::test]
+async fn grpc_validate_credentials_refuses_a_user_token() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    activate(&db, tenant_id, user_id).await;
+    grant_action(
+        &db,
+        tenant_id,
+        "users:validate_credentials",
+        Grantee::User(user_id),
+    )
+    .await;
+    let token = mint_test_token(tenant_id, user_id, &auth_config);
+    let (endpoint, _shutdown) = start_test_server(
+        &db,
+        make_engine(&db),
+        SurrealUserRepository::new(db.clone()),
+        auth_config,
+    )
+    .await;
+    let mut client = user_client_with!(endpoint, token);
+
+    let result = client
+        .validate_credentials(ValidateCredentialsRequest {
+            tenant_id: tenant_id.to_string(),
+            username_or_email: "auth-tester".into(),
+            password: "pass123456789".into(),
+        })
+        .await;
+    match result {
+        Ok(resp) => panic!(
+            "a user token reached the credential check: {:?}",
+            resp.into_inner()
+        ),
+        Err(err) => assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}"),
+    }
+}
+
+/// **N4 / D-2** — a service account without `users:validate_credentials` is
+/// refused: a machine audience is necessary, not sufficient.
+#[tokio::test]
+async fn grpc_validate_credentials_refuses_a_service_account_without_the_permission() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    activate(&db, tenant_id, user_id).await;
+    let sa_id = create_service_account(&db, tenant_id).await;
+    let token = mint_m2m_token(tenant_id, sa_id, &auth_config);
+    let (endpoint, _shutdown) = start_test_server(
+        &db,
+        make_engine(&db),
+        SurrealUserRepository::new(db.clone()),
+        auth_config,
+    )
+    .await;
+    let mut client = user_client_with!(endpoint, token);
+
+    let result = client
+        .validate_credentials(ValidateCredentialsRequest {
+            tenant_id: tenant_id.to_string(),
+            username_or_email: "auth-tester".into(),
+            password: "pass123456789".into(),
+        })
+        .await;
+    match result {
+        Ok(resp) => panic!(
+            "a service account without the permission reached the credential check: {:?}",
+            resp.into_inner()
+        ),
+        Err(err) => assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}"),
+    }
+}
+
+/// **N4 / D-2** — the admitted caller: a service account holding
+/// `users:validate_credentials`. Both answers are audited as
+/// `auth.credentials_validated`, success and failure, naming the service
+/// account as the actor and the checked user as the resource.
+#[tokio::test]
+async fn grpc_validate_credentials_admits_a_permitted_service_account_and_audits_both_outcomes() {
+    let (db, tenant_id, user_id) = setup().await;
+    let auth_config = test_auth_config();
+    activate(&db, tenant_id, user_id).await;
+    let sa_id = create_service_account(&db, tenant_id).await;
+    grant_action(
+        &db,
+        tenant_id,
+        "users:validate_credentials",
+        Grantee::ServiceAccount(sa_id),
+    )
+    .await;
+    let token = mint_m2m_token(tenant_id, sa_id, &auth_config);
+    let (endpoint, _shutdown) = start_test_server(
+        &db,
+        make_engine(&db),
+        SurrealUserRepository::new(db.clone()),
+        auth_config,
+    )
+    .await;
+    let mut client = user_client_with!(endpoint, token);
+
+    let right = client
+        .validate_credentials(ValidateCredentialsRequest {
+            tenant_id: tenant_id.to_string(),
+            username_or_email: "auth-tester".into(),
+            password: "pass123456789".into(),
+        })
+        .await
+        .expect("a permitted service account is admitted")
+        .into_inner();
+    assert!(right.valid);
+    assert_eq!(right.user_id, user_id.to_string());
+
+    let wrong = client
+        .validate_credentials(ValidateCredentialsRequest {
+            tenant_id: tenant_id.to_string(),
+            username_or_email: "auth-tester".into(),
+            password: "definitely-wrong-password".into(),
+        })
+        .await
+        .expect("a permitted service account is admitted")
+        .into_inner();
+    assert!(!wrong.valid);
+
+    let rows = SurrealAuditLogRepository::new(db.clone())
+        .list(
+            tenant_id,
+            AuditLogFilter {
+                action: Some("auth.credentials_validated".into()),
+                ..Default::default()
+            },
+            Pagination {
+                offset: 0,
+                limit: 50,
+                search: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items;
+    assert_eq!(rows.len(), 2, "one row per call: {rows:?}");
+    for row in &rows {
+        assert_eq!(row.actor_id, sa_id);
+        assert_eq!(row.actor_type, ActorType::ServiceAccount);
+        assert_eq!(row.resource_id, Some(user_id));
+    }
+    let mut outcomes: Vec<_> = rows.iter().map(|r| format!("{:?}", r.outcome)).collect();
+    outcomes.sort();
+    assert_eq!(outcomes, ["Failure", "Success"]);
 }

@@ -210,6 +210,57 @@ the five waves, the review gate of §1.6 (two Opus 5.5 reviews per round).
 
 ## 4. Wave 1 — server, principal boundaries
 
+> **REVIEW GATE — PASSED (2026-11-20), 41 rounds.**
+>
+> **Shape.**
+> - 21 review rounds (1, 3, 5 … 41). Each review round had one code-quality and one security review, both by Opus 5.5 reviewers who wrote none of the code.
+> - 20 fix rounds, one signed commit each: `5a2d68d` … `7c0f1e9` (`fix(review): … (wave 1, round M)`).
+> - Reviewers received the complete wave diff, this plan's §1–§4 and the report sections, plus the owner decisions below. They did not receive implementer summaries.
+> - Every finding was fixed. None was rejected.
+>
+> **Owner decisions taken during the gate.** These were binding on later rounds.
+> - **SA-02 system audit:** filter by the caller's organization, record the organization on new system-partition rows, and resolve it off the response path. Lookups are bounded by a semaphore and the permit is taken only for the datastore read. The admin UI gates the System-audit, organization Settings/Email tabs and the tenant View button exactly as the server does.
+> - **SA-03 typed tokens:**
+>   - a legacy `typ: JWT` counts as untyped;
+>   - purpose tokens follow the relax flag;
+>   - introspection is gated on `at+jwt`;
+>   - logout tokens are typed `logout+jwt`;
+>   - CONTRACT 1.67 §34.11 (e) records the wire changes, and the binding SDK rule lands in 1.68 with SA-17.
+> - **SA-04 client-minted tokens:**
+>   - OIDC scope consent, the account delete and export acts, every credential-management route, and every self-update are first-party only;
+>   - own-account SCIM PUT, PATCH and DELETE and own-account `DELETE /users/{id}` are first-party only;
+>   - an admin acting on another user is unchanged;
+>   - a proposed unverified-address rule on reset was withdrawn.
+> - **SA-06 credential epoch and version (N7):**
+>   - Every credential write stamps `credential_changed_at`, written with the datastore clock, and bumps `credential_version` in one transaction. Directory accounts refuse credential writes in the repository.
+>   - MFA challenge, MFA setup, WebAuthn state and `SealedLogin` artefacts carry the version and are judged by it alone. Only versionless artefacts fall back to the timestamp, and a tie refuses.
+>   - The session mint checks the version in its transaction and re-reads it after commit.
+>   - Session rows store the version (v119). Refresh rotation enforces it, and a legacy row refuses a change at or after its `created_at`.
+>   - The OAuth2 refresh, authorization-code, device and CIBA grants refuse a credential change at or after the grant's time and re-check after minting. A device login that spans a change is refused (accepted and documented).
+>   - Reset and change emit the SSF credential-change event and audit record even when revocation fails. A successful change notifies `PasswordChanged`.
+>   - SCIM password writes return 400 `mutability` when OPAQUE is `required`.
+>
+> **Accepted residue (documented, not a defect).** The timestamp fallback for versionless MFA, WebAuthn and OPAQUE artefacts compares an application-clock `iat` with the datastore-clock stamp.
+>
+> **Stop rule changed by the owner (2026-11-20).** Round 41 was declared the final round, provided it found nothing of medium severity or higher. Lower findings are filed as GitHub issues instead of another fix round, and the run moves to the next wave. This replaces item 3 of §1.6 for findings below medium, from this gate onward.
+>
+> **Round 41 outcome.**
+> - Security review: no findings.
+> - Code-quality review: two low findings and one nit, all on tests or docs, none a behaviour defect. Each was filed with the label `wave-1-review-follow-up`:
+>   - **QR22-1 (low)**, #872: the same-second, after-epoch acceptance of unversioned tokens is no longer covered by a test.
+>   - **QR22-2 (low)**, #873: OPAQUE `login/finish` duplicates the credential-superseded rule, and no test covers it.
+>   - **QR22-3 (nit)**, #874: the first SA-06 paragraph of the deployment guide presents the timestamp check as the rule for current tokens.
+>
+> **Leads.** All eight Wave 1 leads (N1, N5, N6, N7, N8, N9, N10, N20) reproduced. C1 and C3 were confirmed findings.
+>
+> **Carried forward, outside Wave 1's scope.**
+> - SA-17 bumps CONTRACT to 1.68 with the typ/purpose/kid rule.
+> - Logout tokens without a `kid` (§12.4) are not yet addressed.
+> - The `allow_missing_aud_as_user` default change is not yet recorded.
+> - The plan's "1.66" reference is stale.
+> - SDKs re-sync to CONTRACT 1.67 in Wave 3.
+> - OAuth2 introspection may still report a surviving pre-change refresh token as active (SA-41).
+
 ### SA-01 — Bootstrap always requires the setup secret (C1)
 
 > **EXECUTED (2026-11-15, Sonnet 5.5).** `bootstrap()` now treats

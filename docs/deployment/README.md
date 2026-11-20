@@ -2720,6 +2720,15 @@ The exception applies to the first hop only; redirect targets are always
 validated strictly, and cloud metadata endpoints stay unreachable even for an
 allowlisted host. Every use is logged.
 
+**Guarded fetches do not use an egress proxy.** These fetches ignore
+`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` (and their lowercase forms) even
+when the server process has them set. The guard validates one resolved address
+and connects to exactly that address; through a proxy the destination would be
+named by hostname and re-resolved by the proxy, so the validated address would
+no longer decide where the connection goes. If the network only permits egress
+via a proxy, allow these fetches at the network layer instead (for example a
+firewall rule or a transparent egress gateway).
+
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).
 

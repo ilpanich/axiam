@@ -687,6 +687,30 @@ restore it in `cancel_tx`. Rows created before the change have no value: restore
 
 ### SA-10 — Guarded HTTP client ignores environment proxies (N13, D-4)
 
+> **EXECUTED (2026-11-20, Sonnet 5.5). N13: reproduced.** With `HTTPS_PROXY`
+> pointing at a loopback fixture, the unfixed `pinned_client` sent
+> `CONNECT rebind.example.test:443` to the proxy: the destination was named by
+> hostname and the validated IP no longer decided it. `pinned_client` now calls
+> `.no_proxy()` unconditionally (D-4). Regression test
+> `ssrf::tests::n13_pinned_client_ignores_environment_proxy` failed before and
+> passes after; `cargo test -p axiam-pki --lib` 152 passed. The deployment
+> guide ("Outbound SSRF guard — same-network IdPs") now says guarded fetches
+> ignore `HTTP(S)_PROXY`/`ALL_PROXY`.
+>
+> Every fetch of a tenant-, admin- or IdP-supplied URL goes through
+> `guarded_fetch*` and therefore `pinned_client`: webhooks, back-channel logout,
+> SSF push, CIBA ping, CIMD, JWKS, OIDC discovery and token exchange, OAuth2
+> social endpoints, SAML SP/IdP metadata, SCIM outbound, e-mail HTTP providers,
+> FIDO MDS. Clients that do **not** use `pinned_client` (none fetches a
+> tenant-supplied URL; listed per the instructions, not changed): the shared
+> `http_client` (`axiam-server/src/boot.rs` ~1297) and the `reqwest::Client::new()`
+> defaults in `axiam-api-rest/src/state/mod.rs` (~375, 834, 911, 1017) — handed
+> to the federation constructors but used only for the HIBP check;
+> `axiam-auth/src/policy.rs` ~197 (HIBP range API, fixed host); the Vault clients
+> in `axiam-pki/src/ca_key_store.rs` ~201, `axiam-auth/src/secrets.rs` ~274 and
+> `axiam-pki/src/vault_pki.rs` (operator-configured address); the local health
+> probe `axiam-server/src/healthcheck.rs` ~106. These keep env-proxy discovery.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-pki/src/ssrf.rs` (`pinned_client`, 251–257).
 

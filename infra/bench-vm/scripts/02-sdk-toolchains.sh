@@ -12,7 +12,8 @@
 #   kotlin      the same JDK; Gradle via the wrapper
 #   csharp      .NET SDK DOTNET_CHANNEL via dotnet-install.sh   net10.0
 #   php         PHP 8.3 + sodium/sockets + Composer     php >= 8.2, ext-sodium
-#   go          Go GO_VERSION from go.dev               go 1.26.0
+#   go          Go GO_VERSION from go.dev, else the     go 1.26.0
+#               module proxy (sum.golang.org-verified)
 #   swift       Swift SWIFT_VERSION via swiftly         swift-tools-version 6.2
 #   c, cpp      CMake, gcc/g++, libcurl, OpenSSL        cmake >= 3.16, C11 / C++17
 #
@@ -78,13 +79,29 @@ ok "node $(node --version)"
 # ---------------------------------------------------------------------------
 # Go
 # ---------------------------------------------------------------------------
+# Two channels, both official. First the release tarball on go.dev; if that
+# cannot be downloaded (a VM got HTTP 404 from it on 2026-11-20 for a release
+# that exists), the module proxy, which is how `go` itself fetches toolchains:
+# golang.org/toolchain@v0.0.1-go<version>.linux-amd64 on proxy.golang.org,
+# accepted only if its hash matches the public checksum log at sum.golang.org
+# (go-toolchain.py recomputes it from the zip).
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
     say "Installing Go $GO_VERSION"
     tmp="$(mktemp -d)"
-    curl --fail --location --silent --show-error --retry 3 \
-        -o "$tmp/go.tgz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
-    $SUDO rm -rf /usr/local/go
-    $SUDO tar -C /usr/local -xzf "$tmp/go.tgz"
+    if curl --fail --location --silent --show-error --retry 3 \
+            -o "$tmp/go.tgz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; then
+        $SUDO rm -rf /usr/local/go
+        $SUDO tar -C /usr/local -xzf "$tmp/go.tgz"
+    else
+        warn "go.dev did not serve go${GO_VERSION}.linux-amd64.tar.gz; using the Go module proxy, verified against sum.golang.org"
+        mod="golang.org/toolchain@v0.0.1-go${GO_VERSION}.linux-amd64"
+        curl --fail --location --silent --show-error --retry 3 \
+            -o "$tmp/go.zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go${GO_VERSION}.linux-amd64.zip"
+        curl --fail --location --silent --show-error --retry 3 \
+            -o "$tmp/lookup.txt" "https://sum.golang.org/lookup/${mod}"
+        $SUDO rm -rf /usr/local/go
+        $SUDO python3 -I "$HERE/go-toolchain.py" "$GO_VERSION" "$tmp/go.zip" "$tmp/lookup.txt" /usr/local/go
+    fi
     rm -rf "$tmp"
 fi
 ok "$(/usr/local/go/bin/go version)"

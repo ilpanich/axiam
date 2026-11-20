@@ -213,7 +213,8 @@ What each bench needs, read off `benchmarks/sdk/<lang>/run.sh` and the SDK manif
 | cpp | CMake ≥ 3.16, a C++17 compiler, libcurl, OpenSSL | `axiam-cplusplus-sdk/CMakeLists.txt` |
 
 The script installs each at the version pinned in `versions.env` (Rust via rustup, Node via
-NodeSource, Go from go.dev, .NET via `dotnet-install.sh` into `/opt/dotnet`, Swift via
+NodeSource, Go from go.dev or, when go.dev fails, from the Go module proxy verified against
+sum.golang.org, .NET via `dotnet-install.sh` into `/opt/dotnet`, Swift via
 `swiftly`; JDK 21, Maven, PHP 8.3, Composer, CMake and the C/C++ libraries from Ubuntu) and
 writes one marked PATH block into `~/.bashrc`. It installs them in that order and **stops
 at the first step that fails**, printing `STOPPED … at line N` with the failing command; Go,

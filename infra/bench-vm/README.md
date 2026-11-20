@@ -22,6 +22,7 @@ infra/bench-vm/
     ├── 00-host-prepare.sh    OS and size checks, upgrade, background noise off, base packages
     ├── 01-docker-k6.sh       Docker Engine >= 25, Compose >= 2.24, log rotation, pinned k6
     ├── 02-sdk-toolchains.sh  the eleven SDK toolchains
+    ├── go-toolchain.py       Go from the module proxy, verified against sum.golang.org (02's fallback)
     ├── 03-checkouts.sh       axiam at the release tag, the eleven SDKs beside it
     ├── 04-verify.sh          read-only PASS/WARN/FAIL table; exit status = number of FAILs
     └── 05-qualify.sh         sysbench consistency and steal under load; go / watch / recreate
@@ -66,7 +67,10 @@ Verified on 2026-11-08 in an Ubuntu 24.04 sandbox: `tofu validate` and `tofu fmt
 eleven offline tests (`./run.sh test`), `shellcheck` on every script, every apt package
 name resolving on Ubuntu 24.04, the PHP extensions (`sodium`, `sockets`) present in
 `php8.3-cli`, `03-checkouts.sh` end to end against the real repositories (all twelve at
-`v1.3.0`), `04-verify.sh`'s table, and `05-qualify.sh` end to end. Every pinned version
+`v1.3.0`), `04-verify.sh`'s table, and `05-qualify.sh` end to end. The Go step of
+`02-sdk-toolchains.sh` ran end to end on its fallback path (Go 1.27.3 from the module
+proxy, hash checked against sum.golang.org, a test program compiled), and a tampered hash
+is refused. Every pinned version
 was confirmed to exist upstream (sources in `versions.env`).
 
 **Not verified**: an apply against Infomaniak (no credentials in the sandbox — the first

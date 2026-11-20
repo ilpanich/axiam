@@ -13,8 +13,8 @@
 //! Each of the three redemption paths therefore applies two rules, both defined
 //! here so they cannot drift apart:
 //!
-//! 1. **Before minting**: refuse when [`changed_after`] says the credential
-//!    changed after the grant was issued.
+//! 1. **Before minting**: refuse when [`changed_since`] says the credential
+//!    changed at or after the grant was issued.
 //! 2. **After the refresh token is created**: re-read the user
 //!    ([`recheck_after_mint`]). A change can land between the pre-check and the
 //!    write, and its `revoke_all_for_user` may already have run. A credential
@@ -57,7 +57,7 @@ pub(crate) const REFUSED: &str = "the account this grant was issued for can no l
 /// `issued_at` (a tie refuses: see the module docs). Both are datastore times.
 /// `false` for a user with no change on record.
 #[must_use]
-pub(crate) fn changed_after(user: &User, issued_at: DateTime<Utc>) -> bool {
+pub(crate) fn changed_since(user: &User, issued_at: DateTime<Utc>) -> bool {
     user.credential_changed_since(issued_at)
 }
 
@@ -80,7 +80,7 @@ where
     RT: RefreshTokenRepository,
 {
     let moved = match users.get_by_id(tenant_id, user_id).await {
-        Ok(user) => Ok(changed_after(&user, issued_at)),
+        Ok(user) => Ok(changed_since(&user, issued_at)),
         Err(AxiamError::NotFound { .. }) => Ok(true),
         Err(e) => Err(e),
     };
@@ -284,10 +284,10 @@ mod tests {
         let r = rig().await;
         let changed = change_credential(&r).await;
         let epoch = changed.credential_changed_at.expect("the write stamps it");
-        assert!(changed_after(&changed, epoch), "equal timestamps: refused");
-        assert!(changed_after(&changed, epoch - Duration::nanoseconds(1)));
-        assert!(!changed_after(&changed, epoch + Duration::nanoseconds(1)));
-        assert!(!changed_after(&r.user, epoch), "no change on record");
+        assert!(changed_since(&changed, epoch), "equal timestamps: refused");
+        assert!(changed_since(&changed, epoch - Duration::nanoseconds(1)));
+        assert!(!changed_since(&changed, epoch + Duration::nanoseconds(1)));
+        assert!(!changed_since(&r.user, epoch), "no change on record");
 
         mint(&r, "h-tie").await;
         let err = recheck(&r, r.user.id, epoch, "h-tie").await.unwrap_err();

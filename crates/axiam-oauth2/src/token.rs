@@ -954,11 +954,11 @@ where
             Err(AxiamError::NotFound { .. }) => return Err(refused()),
             Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
         };
-        if issued_at.is_some_and(|at| crate::credential_epoch::changed_after(&user, at)) {
+        if issued_at.is_some_and(|at| crate::credential_epoch::changed_since(&user, at)) {
             tracing::info!(
                 %tenant_id,
                 %user_id,
-                "refusing an OAuth2 grant: the user's credential changed after it was issued"
+                "refusing an OAuth2 grant: the user's credential changed at or after it was issued"
             );
             return Err(refused());
         }

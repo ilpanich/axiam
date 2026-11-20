@@ -560,6 +560,16 @@ comparison that still sets the stamp against an application-replica time is the 
 that are minted by a replica and carry their own issue time (MFA challenge and setup tokens,
 the WebAuthn state token, an in-flight OPAQUE login); those are covered by the credential version
 above, and the stamp is their fallback only.
+*Clock assumption (artefacts without a version).* The stamp is the datastore's clock, as above; it is
+not written from an application replica's clock. The residual skew is between that datastore stamp and
+the `iat` / `issued_at` that the minting replica put on an MFA, WebAuthn or OPAQUE artefact that carries
+no credential version. Run the replicas (and, for a remote cluster, the datastore) NTP-synchronised, as
+JWT `exp` handling already requires. A skew of delta shifts the refusal window by delta: if the minting
+replica runs delta ahead of the datastore, an artefact without a version minted up to delta before the
+change is still accepted (every artefact of this release carries one and is refused regardless); if it
+runs delta behind, one minted up to delta after the change is refused and the person signs in again.
+Normal NTP keeps delta in the milliseconds.
+
 If revoking the sessions fails after a password reset or a self-service password change has
 written the new password, it still emits the SSF `credential-change` event (the password has
 changed, so receivers must be told) and then answers the error (500); both revocations are
@@ -570,16 +580,6 @@ server also records, beside it and in the tenant's own audit log, a row with act
 matches that row, as it matches a successful reset's request row and a successful change's
 request row (`POST /api/v1/auth/password/change`). A successful reset or change writes no such
 row.
-
-*Clock assumption (artefacts without a version).* The stamp is written from the application replica's clock, bound into the
-credential's own transaction, not from the datastore's, because the artefacts it is compared with
-are stamped by an application replica too. Run the replicas (and, for a remote cluster, the
-datastore) NTP-synchronised, as JWT `exp` handling already requires. A skew of delta shifts the
-refusal window by delta: if the replica that minted a token runs delta ahead of the one that wrote
-the stamp, an artefact without a version minted up to delta before the change is still accepted
-(every artefact of this release carries one and is refused regardless); if it runs delta behind,
-one minted up to delta after the change is refused and the person signs in again. Normal NTP keeps
-delta in the milliseconds.
 
 **Accounts whose entry has no usable e-mail address cannot be provisioned.** A
 local account must have an e-mail address, and AXIAM does not invent one: a

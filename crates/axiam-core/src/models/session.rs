@@ -310,8 +310,10 @@ pub struct Session {
     ///
     /// `None` for a row written before schema v119 (or by a path that checked
     /// no credential, such as a federated sign-in): rotation then accepts it
-    /// only if the user's `credential_changed_at` is not later than
-    /// [`Self::created_at`], and carries the user's current version forward.
+    /// only if the user's credential change is strictly earlier than
+    /// [`Self::created_at`] (a change at or after it is refused, as
+    /// `User::credential_changed_since` decides), and carries the user's
+    /// current version forward.
     ///
     /// [`User::credential_version`]: crate::models::user::User::credential_version
     #[serde(default)]

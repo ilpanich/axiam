@@ -229,11 +229,11 @@ where
         // The bound is the instant the user decided; a row with none falls
         // back to the request's creation.
         let approved_at = redeemed.decided_at.unwrap_or(redeemed.created_at);
-        if crate::credential_epoch::changed_after(&user, approved_at) {
+        if crate::credential_epoch::changed_since(&user, approved_at) {
             tracing::info!(
                 %tenant_id,
                 %user_id,
-                "refusing a CIBA redemption: the user's credential changed after the approval"
+                "refusing a CIBA redemption: the user's credential changed at or after the approval"
             );
             return Err(refused());
         }

@@ -470,11 +470,11 @@ where
         // request and the user's approval refuses too (the grant is
         // already redeemed, so the device starts a new flow with a new code).
         // See `crate::credential_epoch`.
-        if crate::credential_epoch::changed_after(&user, redeemed.created_at) {
+        if crate::credential_epoch::changed_since(&user, redeemed.created_at) {
             tracing::info!(
                 %tenant_id,
                 %user_id,
-                "refusing a device-grant redemption: the user's credential changed after the grant was issued"
+                "refusing a device-grant redemption: the user's credential changed at or after the grant was issued"
             );
             return Err(refused());
         }

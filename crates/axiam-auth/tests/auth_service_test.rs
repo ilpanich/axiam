@@ -3606,6 +3606,45 @@ async fn sr3_1_a_challenge_without_a_version_falls_back_to_the_timestamp_check()
     );
 }
 
+/// QR21-1: a challenge that carries the user's CURRENT credential version is
+/// accepted even when its issue time is at or before the credential epoch (the
+/// application clock reading behind the datastore's). The version alone decides.
+#[tokio::test]
+async fn qr21_1_a_challenge_with_the_current_version_is_accepted_despite_an_earlier_iat() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let users = user_repo.clone();
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let _totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let challenge_token =
+        match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+            LoginResult::MfaRequired(c) => c.challenge_token,
+            other => panic!("expected MfaRequired, got {other:?}"),
+        };
+    // The datastore clock reads an hour ahead of the minting replica: the epoch
+    // is now after the challenge's `iat`, with the version untouched.
+    db.query("UPDATE type::record('user', $id) SET credential_changed_at = time::now() + 1h")
+        .bind(("id", user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let user = users.get_by_id(tenant_id, user_id).await.unwrap();
+    assert!(user.credential_changed_at.unwrap() > Utc::now() + Duration::minutes(30));
+
+    assert!(
+        svc.decode_mfa_challenge_ids(&challenge_token).await.is_ok(),
+        "the current version decides; the timestamp is not consulted"
+    );
+}
+
 /// SR3-2 / QR3-1: a stale MFA challenge, and one for an account that is gone,
 /// are refused with exactly the answer a challenge that is not one gets: the
 /// client-visible reason names no cause.
@@ -3805,8 +3844,31 @@ fn token_issue_time(token: &str) -> (i64, Option<i64>) {
     )
 }
 
+/// The same token with its credential-version claim (`cv`) removed and
+/// re-signed under `typ`: what a release that predates the counter minted.
+fn without_version(token: &str, typ: &str) -> String {
+    use base64::Engine;
+    let payload = token.split('.').nth(1).unwrap();
+    let mut json: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        json.as_object_mut().unwrap().remove("cv").is_some(),
+        "the token carried a version"
+    );
+    sign_with_typ(&json, Some(typ))
+}
+
 /// QR2-6: a challenge and a setup token issued after the epoch but in the same
 /// second as it are accepted; one issued before it, in that second, is refused.
+///
+/// QR21-1: the timestamp rule now applies to a token that carries no credential
+/// version (a release that predates the counter); a versioned token is judged by
+/// its version alone, so the "issued before the epoch" half uses the same token
+/// with its version removed, and the versioned original is accepted.
 #[tokio::test]
 async fn qr2_6_a_token_issued_after_the_epoch_in_the_same_second_is_accepted() {
     let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
@@ -3845,11 +3907,14 @@ async fn qr2_6_a_token_issued_after_the_epoch_in_the_same_second_is_accepted() {
         None => chrono::DateTime::from_timestamp(iat + 1, 0).unwrap(),
     };
     set_alices_epoch(&db, user_id, before).await;
+    let unversioned = without_version(&challenge_token, "axiam-mfa-challenge+jwt");
     assert!(
-        svc.decode_mfa_challenge_ids(&challenge_token)
-            .await
-            .is_err(),
-        "a challenge issued before the epoch is refused"
+        svc.decode_mfa_challenge_ids(&unversioned).await.is_err(),
+        "an unversioned challenge issued before the epoch is refused"
+    );
+    assert!(
+        svc.decode_mfa_challenge_ids(&challenge_token).await.is_ok(),
+        "a challenge of the current version is judged by its version alone (QR21-1)"
     );
 }
 
@@ -3886,7 +3951,12 @@ async fn qr2_6_a_setup_token_issued_after_the_epoch_in_the_same_second_is_accept
         None => chrono::DateTime::from_timestamp(iat + 1, 0).unwrap(),
     };
     set_alices_epoch(&db, user_id, before).await;
-    assert!(svc.decode_setup_token(&setup_token).await.is_err());
+    let unversioned = without_version(&setup_token, "axiam-mfa-setup+jwt");
+    assert!(svc.decode_setup_token(&unversioned).await.is_err());
+    assert!(
+        svc.decode_setup_token(&setup_token).await.is_ok(),
+        "a setup token of the current version is judged by its version alone (QR21-1)"
+    );
 }
 
 // -----------------------------------------------------------------------

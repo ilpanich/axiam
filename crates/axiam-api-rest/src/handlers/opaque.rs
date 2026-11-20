@@ -323,11 +323,14 @@ pub async fn opaque_login_finish<C: Connection + Clone>(
     // the exchange was built from a verifier that no longer stands, and
     // finishing it would mint a session the change never saw. Refused with the
     // same 401 as every other failure here, and not counted: the KE3 was valid.
-    // SR3-1: and when its credential version is no longer the user's, which
-    // needs no ordering of two clocks.
-    if user.credential_changed_since(verified.issued_at)
-        || user.credential_version_stale(verified.credential_version)
-    {
+    // SR3-1 / QR21-1: a sealed login that carries a credential version is
+    // judged by it alone (no ordering of two clocks); one without it (sealed by
+    // a release that predates the counter) by the timestamp, ties refused.
+    let superseded = match verified.credential_version {
+        Some(_) => user.credential_version_stale(verified.credential_version),
+        None => user.credential_changed_since(verified.issued_at),
+    };
+    if superseded {
         return Err(AxiamApiError(AxiamError::AuthenticationFailed {
             reason: "invalid credentials".into(),
         }));

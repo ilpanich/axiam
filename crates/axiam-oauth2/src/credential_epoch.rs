@@ -20,8 +20,8 @@
 //!    write, and its `revoke_all_for_user` may already have run. A credential
 //!    write commits BEFORE its revocation, so either the change is visible to
 //!    the re-read (the new token is revoked here) or it commits later and its
-//!    revocation removes the token itself. A later change, or a user that no
-//!    longer exists, revokes what was minted and answers `invalid_grant`; a read
+//!    revocation removes the token itself. A change at or after the grant's time,
+//!    or a user that no longer exists, revokes what was minted and answers `invalid_grant`; a read
 //!    error revokes it too and answers a server error.
 //!
 //! The refresh grant's own rotation applies rule 2 through the same helper

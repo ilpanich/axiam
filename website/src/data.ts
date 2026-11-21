@@ -1670,14 +1670,14 @@ export const PHASES: Phase[] = [
 ];
 
 /**
- * Benchmark scenarios, transcribed from
- * `benchmarks/PUBLIC_BENCH_ANALYSIS.md` (sixth draft, run 5 of 2026-08-05/06,
- * AXIAM 1.0.0-alpha24 — the published, digest-pinned release image — vs
- * Keycloak 26.7.0 vs Zitadel v4.16.2). All figures are the p0-plaintext
- * profile from the capped matrix (§1/§8), **median of 3 runs** (per-cell
- * throughput spread ±0.3–2.1% on AXIAM cells, ±12–17% on the batch cells).
- * Only valid cells are charted; comparability labels are carried onto the
- * chart.
+ * Benchmark scenarios, transcribed from the run-6 report (`report.md` of the
+ * 2026-11-20/21 run): AXIAM 1.3.0 — the published release image, pulled by
+ * digest — on SurrealDB v4.0.1, vs Keycloak 26.8.1, Zitadel v4.19.5 and
+ * authentik 2026.8.5, on a qualified 16-vCPU AMD EPYC Genoa cloud VM. All
+ * figures are the p0-plaintext profile of the capped matrix, **median of 3
+ * runs** (per-cell throughput spread ±0.3–4.5% on AXIAM cells). Valid cells
+ * are charted; a parenthesised value failed the validity gate and is shown
+ * only so the target is not silently missing.
  */
 export const BENCH_SCENARIOS: BenchScenario[] = [
   {
@@ -1685,229 +1685,237 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     title: "Machine-to-machine token issuance",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 2804, display: "2,804", axiam: true },
-      { target: "Zitadel", value: 431, display: "431" },
-      { target: "Keycloak", value: 354, display: "354" },
+      { target: "AXIAM", value: 1610, display: "1,610", axiam: true },
+      { target: "Zitadel", value: 425, display: "425" },
+      { target: "Keycloak", value: 411, display: "411" },
+      { target: "authentik", value: 5, display: "(5)" },
     ],
     takeaway:
-      "AXIAM issues 7.9× more tokens/s than Keycloak and 6.5× more than Zitadel — and, new this run, roughly 8× under TLS 1.3 and mutual TLS too. The previous draft's one glaring asterisk, a −57% drop on this endpoint under TLS, is gone: the cause was Nagle's algorithm interacting with delayed ACKs, and with TCP_NODELAY shipped as the default the TLS penalty is now −2.0%.",
+      "AXIAM issues 3.9× the tokens/s of Keycloak and 3.8× those of Zitadel, at a 15 ms p50 against their 99–109 ms, and holds within 2% under TLS 1.3 and mutual TLS. The lead is half what run 5 measured (7.9×): AXIAM's server used 0.70 of its 2 cores while SurrealDB sat at its 2-core cap, so this cell now measures the database tier, not the token service.",
   },
   {
     id: "introspection",
     title: "Token introspection (RFC 7662)",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 4504, display: "4,504", axiam: true },
-      { target: "Keycloak", value: 1888, display: "1,888" },
-      { target: "Zitadel", value: 941, display: "941" },
+      { target: "Keycloak", value: 1940, display: "1,940" },
+      { target: "AXIAM", value: 1582, display: "1,582", axiam: true },
+      { target: "Zitadel", value: 827, display: "827" },
+      { target: "authentik", value: 19, display: "(19)" },
     ],
     takeaway:
-      "2.4× Keycloak and 4.8× Zitadel, with a ~1.8× better p95 (48 vs 82 ms) and a near-zero TLS/mTLS penalty (−2.5% / −2.8%). Held within ±0.5% across three runs on the released image.",
+      "Keycloak wins this cell: 1,940 against AXIAM's 1,582 req/s, with a lower p50 (5.4 vs 15.2 ms) though a higher p95 (85 vs 69 ms). AXIAM led by 2.4× in run 5. Its server was at 0.67 cores with SurrealDB pegged, and server-only AXIAM still spends the least CPU per request (0.42 cpu·ms against Keycloak's 1.04) — but throughput is what a client sees, and on throughput this is a loss.",
   },
   {
     id: "jwks",
     title: "JWKS fetch (RFC 7517)",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 26680, display: "26,680", axiam: true },
-      { target: "Keycloak", value: 4573, display: "4,573" },
-      { target: "Zitadel", value: 2091, display: "2,091" },
+      { target: "AXIAM", value: 43640, display: "43,640", axiam: true },
+      { target: "Keycloak", value: 5529, display: "5,529" },
+      { target: "Zitadel", value: 2031, display: "2,031" },
+      { target: "authentik", value: 24, display: "(24)" },
     ],
     takeaway:
-      "A 5.8–12.8× gap — and still limited by the load generator rather than by AXIAM: k6 itself burned ~5 CPU cores while the AXIAM server sat below 1.7 of its 2, so the true ceiling is higher. This cell measures latency, not capacity.",
+      "The one cell that never touches the database, and the clearest read of AXIAM's own code path: 43,640 req/s at a 1.8 ms p95 — 7.9× Keycloak and 21× Zitadel, and 64% above run 5. The server used 1.31 of its 2 cores, so the ceiling is still above what was measured; k6 itself used 7.5 cores here.",
   },
   {
     id: "userinfo",
     title: "OIDC userinfo — REST",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 4752, display: "4,752", axiam: true },
-      { target: "Keycloak", value: 3721, display: "3,721" },
-      { target: "Zitadel", value: 995, display: "995" },
+      { target: "Keycloak", value: 3862, display: "3,862" },
+      { target: "AXIAM", value: 1411, display: "1,411", axiam: true },
+      { target: "Zitadel", value: 859, display: "859" },
+      { target: "authentik", value: 20, display: "(20)" },
     ],
     takeaway:
-      "AXIAM leads 1.3× Keycloak and 4.8× Zitadel while its database is pegged. On whole-stack req/s-per-core Keycloak again wins this cell; on server-only CPU per request AXIAM is 2.1× cheaper (0.25 vs 0.53 cpu·ms). Both are published, as in every draft.",
+      "Keycloak serves 2.7× AXIAM's userinfo reads (3,862 vs 1,411 req/s); AXIAM still leads Zitadel by 1.6×. Keycloak answers this endpoint without touching PostgreSQL (0.01 cores), whereas AXIAM reads SurrealDB on every call and SurrealDB is pegged. Server-only, AXIAM costs 0.42 cpu·ms per request against Keycloak's 0.52, so the gap is the database round trip, not the server.",
+    note: "Zitadel: token minted via client_credentials in setup()",
   },
   {
     id: "userinfo_grpc",
     title: "OIDC userinfo — gRPC",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 12307, display: "12,307", axiam: true },
-      { target: "Zitadel", value: 191, display: "191" },
+      { target: "AXIAM", value: 3078, display: "3,078", axiam: true },
+      { target: "Zitadel", value: 245, display: "245" },
     ],
     takeaway:
-      "12,307 identity reads/s at a 6 ms p95 — 2.6× AXIAM's own REST path and 3.3× Keycloak's best userinfo number. Zitadel's own gRPC userinfo measured 191–201/s on the same harness, 80% below its REST cell: its gRPC surface is a management API, which is fair, and is exactly why treating gRPC as a first-class data plane is a differentiator. Keycloak exposes no gRPC equivalent.",
+      "3,078 identity reads/s at a 59 ms p95 — 2.2× AXIAM's own REST path and 12.6× Zitadel's gRPC userinfo, which runs 71% below Zitadel's REST cell (its gRPC surface is a management API, which is fair). Keycloak and authentik expose no gRPC equivalent. Run 5 measured 12,307/s here; the same pegged database explains the fall.",
   },
   {
     id: "password_login",
     title: "Password login (real hashing)",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 69, display: "69", axiam: true },
-      { target: "Keycloak", value: 47, display: "(47)" },
-      { target: "Zitadel", value: 2.0, display: "(2)" },
+      { target: "AXIAM", value: 49, display: "49", axiam: true },
+      { target: "Keycloak", value: 47, display: "47" },
+      { target: "Zitadel", value: 2, display: "(2)" },
+      { target: "authentik", value: 1, display: "(1)" },
     ],
     takeaway:
-      "AXIAM is the only target valid at every profile — 69 req/s at a 761 ms p95, on ~119 MiB of average server memory. Parenthesized numbers failed our own validity gate: Keycloak completed 1 of 3 runs cleanly at p0 (it did produce its first valid login cell of the series at p2 — 51 req/s), and Zitadel's default bcrypt cost puts it at ~22 s p50. The promised 4 GiB Keycloak attempt ran, and did not rescue it: ~21 req/s at a ~2.5 s p95, slower than its 2 GiB survivor runs.",
-    note: "2 of 3 targets excluded by the validity gate",
+      "A draw on throughput, with AXIAM's tail tighter (p95 1,046 vs 1,213 ms). Both servers are CPU-bound on password hashing at their 2-core cap; AXIAM's server holds 73 MiB against Keycloak's 708. New this run: Keycloak is valid at every profile. Parenthesised numbers failed the validity gate — Zitadel's default bcrypt cost puts it at a ~29 s p50, and authentik's cell is protocol-variant and over the gate.",
+    note: "2 of 4 targets excluded by the validity gate",
   },
   {
     id: "token_refresh",
     title: "Session / token refresh",
     unit: "throughput · requests/s · plaintext · median of 3",
     bars: [
-      { target: "AXIAM", value: 545, display: "545", axiam: true },
-      { target: "Keycloak", value: 377, display: "377" },
+      { target: "Keycloak", value: 435, display: "435" },
+      { target: "AXIAM", value: 347, display: "347", axiam: true },
     ],
     takeaway:
-      "Informational, not a like-for-like race: AXIAM has no ROPC/password grant by design, so its cell measures session-cookie refresh (CSRF double-submit, single-use rotation) while Keycloak's measures the OAuth2 refresh-token grant. Honesty first — AXIAM's refresh regressed 35% since the previous draft (839 → 545 req/s, p50 47.5 → 88.8 ms), with no harness change on that path; the suspects are our own post-run-4 security hardening and/or database version drift, and the bisection is open. Zitadel needs an offline_access flow the harness doesn't implement.",
-    note: "protocol-variant — and a −35% regression we introduced ourselves",
+      "Informational, not a like-for-like race: AXIAM has no ROPC/password grant by design, so its cell measures session-cookie refresh (CSRF double-submit, single-use rotation) while Keycloak's measures the OAuth2 refresh-token grant. Keycloak is ahead this run; AXIAM's server sat at 0.27 cores with SurrealDB pegged, and refresh is three database round trips. Zitadel's and authentik's cells are fallback operations and are excluded.",
+    note: "protocol-variant",
   },
 ];
 
 /**
- * Whole-stack efficiency, head-to-head (p0-plaintext, median-of-3, run 5).
+ * Whole-stack efficiency, head-to-head (p0-plaintext, median-of-3, run 6).
  * `req/s per core` is higher-is-better; `cpu·ms/req` is lower-is-better.
- * AXIAM's figures still carry its audit broker and, on some cells, a
- * saturated database inside them — which is why Keycloak edges it on the
- * userinfo cpu·ms/req cell (server-only, AXIAM's server is 2.1× cheaper
- * there; both breakdowns are published in the raw report).
+ * AXIAM's whole-stack figures carry a pegged SurrealDB and the RabbitMQ
+ * audit broker; the server-only breakdown is in `BENCH_CPU_PER_REQ`.
  */
 export const BENCH_EFFICIENCY: BenchEfficiencyRow[] = [
-  { scenario: "Client credentials", perCore: ["816", "171", "122"], cpuMs: ["1.23", "5.85", "8.21"] },
-  { scenario: "Token introspection", perCore: ["1,269", "799", "252"], cpuMs: ["0.79", "1.25", "3.98"] },
-  { scenario: "JWKS fetch", perCore: ["15,855", "2,288", "701"], cpuMs: ["0.06", "0.44", "1.43"] },
-  { scenario: "OIDC userinfo", perCore: ["1,437", "1,863", "346"], cpuMs: ["0.70", "0.54", "2.89"] },
+  { scenario: "Client credentials", perCore: ["545", "192", "111"], cpuMs: ["1.84", "5.21", "8.99"] },
+  { scenario: "Token introspection", perCore: ["538", "771", "212"], cpuMs: ["1.86", "1.30", "4.72"] },
+  { scenario: "JWKS fetch", perCore: ["20,277", "2,734", "668"], cpuMs: ["0.05", "0.37", "1.50"] },
+  { scenario: "OIDC userinfo", perCore: ["498", "1,915", "292"], cpuMs: ["2.01", "0.52", "3.42"] },
 ];
 
 /**
- * AXIAM-only authorization decisions (no head-to-head — Keycloak and Zitadel
- * expose no equivalent endpoint). Each check is a full RBAC evaluation against
- * live data. Values are p0-plaintext throughput (requests/s, median-of-3; the
- * cache-ON rows are a labeled best-case sensitivity pass, not the default).
+ * AXIAM-only authorization decisions (no head-to-head — no other target
+ * exposes an equivalent endpoint). Each check is a full RBAC evaluation
+ * against live data, decision cache off. Batch bars are checks/s: batch
+ * operations/s × the batch size of 5, at the shipped `coalesced` strategy.
  */
 export const BENCH_AUTHZ: BenchScenario = {
   id: "authz",
   title: "Authorization decisions (AXIAM-only)",
-  unit: "decisions/s · plaintext · median of 3 · decision cache OFF unless labelled",
+  unit: "decisions/s · plaintext · median of 3 · decision cache OFF",
   bars: [
-    { target: "REST · single", value: 1032, display: "1,032", axiam: true },
-    { target: "gRPC · single", value: 1268, display: "1,268", axiam: true },
-    { target: "REST · batch", value: 5130, display: "5,130", axiam: true },
-    { target: "gRPC · batch", value: 4640, display: "4,640", axiam: true },
-    { target: "REST · caches ON", value: 11647, display: "11,647", axiam: true },
-    { target: "gRPC · cache ON", value: 11172, display: "11,172", axiam: true },
+    { target: "REST · single", value: 492, display: "492", axiam: true },
+    { target: "gRPC · single", value: 645, display: "645", axiam: true },
+    { target: "REST · batch", value: 2425, display: "2,425", axiam: true },
+    { target: "gRPC · batch", value: 3100, display: "3,100", axiam: true },
   ],
   takeaway:
-    "Single checks are up +37% (REST) and +43% (gRPC) on the released image, the direct result of removing two full-table scans found with EXPLAIN after run 4 — a fix now guarded by CI tests that fail if any hot authorization query regresses to a table scan. The batch cells finally measure the strategy the product actually ships (`coalesced`), and the settled claim reproduces at matrix scale: 1,026 REST batch ops/s = 5,130 checks/s = 4.97× singles. The two cache rows are a labelled best-case pass, not the default: with both the decision cache and the session-validation cache on (5 s TTL), REST reaches parity with gRPC — confirming that REST's deficit was one extra database round-trip, its per-request session-revocation read. Caches stay OFF by default, and revocation through the API was measured to take effect 262 ms after the call even with them on.",
+    "gRPC delivers 31% more single checks than REST at a lower p95 (100 vs 153 ms), and a batch of five turns 485 REST operations/s into 2,425 checks/s — 4.9× singles, the same amplification run 5 measured. The absolute figures are half or less of run 5's (1,032 / 1,268 / 5,130 / 4,640): on every authorization cell SurrealDB used 2.02 of its 2 cores while AXIAM's server used 0.38–0.43. These are database-tier numbers; the cache-on sensitivity pass was not part of this run.",
   note: "AXIAM-only — no competitor exposes an equivalent decision endpoint",
 };
 
 /**
- * Resource usage during the tests (run 5 §5) — p0-plaintext, median-of-3,
+ * Resource usage during the tests (run 6) — p0-plaintext, median-of-3,
  * every server container capped identically at 2 CPUs / 2,048 MiB.
- * Values are `[AXIAM, Keycloak, Zitadel]`.
+ * Values are `[AXIAM, Keycloak, Zitadel]`; `null` is no valid cell.
  */
 
 /** Average RSS of the *server* container in MiB, by scenario. */
 export const BENCH_MEMORY_AVG: BenchResourceRow[] = [
-  { scenario: "JWKS fetch", values: [88, 836, 154] },
-  { scenario: "Client credentials", values: [90, 710, 138] },
-  { scenario: "Token introspection", values: [95, 752, 153] },
-  { scenario: "Token refresh", values: [95, 755, null] },
-  { scenario: "OIDC userinfo", values: [94, 756, 153] },
-  { scenario: "Password login", values: [119, 853, 154], marker: "*" },
-  { scenario: "Authorization check / batch", values: [94, null, null], marker: "†" },
+  { scenario: "JWKS fetch", values: [54, 784, 133] },
+  { scenario: "Client credentials", values: [57, 782, 129] },
+  { scenario: "Token introspection", values: [58, 941, 130] },
+  { scenario: "Token refresh", values: [57, 877, null] },
+  { scenario: "OIDC userinfo", values: [57, 878, 127] },
+  { scenario: "Password login", values: [73, 708, null] },
+  { scenario: "Authorization check / batch", values: [57, null, null], marker: "†" },
 ];
 
 /** The highest per-scenario server average observed anywhere in the run, in MiB. */
 export const BENCH_MEMORY_WORST: BenchResourceRow = {
   scenario: "Highest scenario average, whole run",
-  values: [119, 853, 154],
+  values: [75, 941, 137],
 };
 
 /** The identical per-server container memory cap, in MiB. */
 export const BENCH_MEMORY_CAP = 2048;
 
-/** Whole-stack memory range (server + database + broker), in MiB. */
-export const BENCH_STACK_MEMORY: [string, string, string][] = [
-  ["AXIAM", "375–533 MiB", "server + SurrealDB + RabbitMQ"],
-  ["Keycloak", "816–973 MiB", "server + PostgreSQL"],
-  ["Zitadel", "281–457 MiB", "server + PostgreSQL"],
+/**
+ * Whole-stack memory, in MiB: the range of per-cell averages under load
+ * (valid cells, all profiles), and the median RSS / cgroup working set at
+ * rest on a freshly started stack. authentik has no valid cell under load.
+ */
+export const BENCH_STACK_MEMORY: [string, string, string, string, string][] = [
+  ["AXIAM", "288–415", "373", "216", "server + SurrealDB + RabbitMQ"],
+  ["Keycloak", "853–1,105", "1,074", "934", "server + PostgreSQL"],
+  ["Zitadel", "263–412", "593", "172", "server + PostgreSQL"],
+  ["authentik", "—", "1,668", "819", "server + worker + PostgreSQL"],
 ];
 
 /** CPU-milliseconds per request, whole stack unless noted (lower is better). */
 export const BENCH_CPU_PER_REQ: BenchResourceRow[] = [
-  { scenario: "Client credentials", values: [1.23, 5.85, 8.21] },
-  { scenario: "Token introspection", values: [0.79, 1.25, 3.98] },
-  { scenario: "JWKS fetch", values: [0.06, 0.44, 1.43] },
-  { scenario: "OIDC userinfo", values: [0.7, 0.54, 2.89] },
-  { scenario: "OIDC userinfo (server only)", values: [0.25, 0.53, 0.86] },
+  { scenario: "Client credentials", values: [1.84, 5.21, 8.99] },
+  { scenario: "Client credentials (server only)", values: [0.44, 4.89, 4.61] },
+  { scenario: "Token introspection", values: [1.86, 1.3, 4.72] },
+  { scenario: "Token introspection (server only)", values: [0.42, 1.04, 2.31] },
+  { scenario: "JWKS fetch", values: [0.05, 0.37, 1.5] },
+  { scenario: "OIDC userinfo", values: [2.01, 0.52, 3.42] },
+  { scenario: "OIDC userinfo (server only)", values: [0.42, 0.52, 1.05] },
 ];
 
 /** Requests per second per GiB of whole-stack RAM (higher is better). */
 export const BENCH_RPS_PER_GIB: BenchResourceRow[] = [
-  { scenario: "Client credentials", values: [6528, 416, 1239] },
-  { scenario: "Token introspection", values: [9312, 2134, 2228] },
-  { scenario: "OIDC userinfo", values: [11522, 4319, 2319] },
-  { scenario: "JWKS fetch", values: [66270, 5022, 7351] },
+  { scenario: "Client credentials", values: [4554, 456, 1240] },
+  { scenario: "Token introspection", values: [3913, 1798, 2122] },
+  { scenario: "OIDC userinfo", values: [3630, 3777, 2205] },
+  { scenario: "JWKS fetch", values: [140970, 6493, 7908] },
 ];
 
 /**
- * Security cost of TLS 1.3 (p2) and native, in-process mutual TLS (p3),
- * as a throughput delta against the plaintext (p0) cell of the same
- * scenario — run 5 §4, median-of-3, valid cells only. Negative is a cost.
+ * Security cost of TLS 1.3 (p2) and native, in-process mutual TLS (p3) on
+ * AXIAM, as a throughput delta against the plaintext (p0) cell of the same
+ * scenario — run 6, median-of-3, valid cells only. Negative is a cost.
  */
 export const BENCH_TLS_COST: { scenario: string; tls: string; mtls: string }[] = [
-  { scenario: "Client credentials", tls: "−2.0%", mtls: "−3.8%" },
-  { scenario: "Token introspection", tls: "−2.5%", mtls: "−2.8%" },
-  { scenario: "OIDC userinfo — REST / gRPC", tls: "−3.5% / −2.9%", mtls: "−6.6% / −3.0%" },
-  { scenario: "Authz check — REST / gRPC", tls: "−0.8% / −0.2%", mtls: "−1.5% / −0.7%" },
-  { scenario: "Authz batch — REST / gRPC", tls: "−1.1% / −1.2%", mtls: "−2.2% / −0.3%" },
-  { scenario: "Session refresh", tls: "−0.9%", mtls: "−0.5%" },
-  { scenario: "Password login", tls: "+0.3%", mtls: "−2.1%" },
-  { scenario: "JWKS fetch", tls: "−9.7%", mtls: "−10.2%" },
+  { scenario: "Client credentials", tls: "−0.9%", mtls: "−1.9%" },
+  { scenario: "Token introspection", tls: "−1.4%", mtls: "+0.4%" },
+  { scenario: "OIDC userinfo — REST / gRPC", tls: "+1.0% / −0.1%", mtls: "+0.6% / −0.4%" },
+  { scenario: "Authz check — REST / gRPC", tls: "−1.2% / −1.4%", mtls: "+0.8% / 0.0%" },
+  { scenario: "Authz batch — REST / gRPC", tls: "+0.8% / +2.1%", mtls: "+1.9% / +1.3%" },
+  { scenario: "Session refresh", tls: "+0.3%", mtls: "−2.0%" },
+  { scenario: "Password login", tls: "0.0%", mtls: "0.0%" },
+  { scenario: "JWKS fetch", tls: "−16.0%", mtls: "−12.7%" },
 ];
 
 /**
- * SDK client benchmarks — run 5 §9. All eleven official SDKs ran the same
- * four operations against the same seeded AXIAM at plaintext, **three passes
- * each, medianed**, with a matched-concurrency k6 wire baseline measured on
- * the same host first — which is what makes the overhead column meaningful
- * for the first time in this series.
+ * SDK client benchmarks — run 6. All eleven official SDKs (1.3.1) ran the
+ * same four operations against the same seeded AXIAM at plaintext, **three
+ * passes each, medianed**, with a matched-concurrency k6 wire baseline
+ * (authorization-check p95 71.1 ms at 16 VUs) measured on the same host.
  */
 export const BENCH_SDK_LATENCY: BenchSdkRow[] = [
-  { sdk: "Rust", login: "257.5", refresh: "17.3", checkP50: "10.0", checkP95: "59.8", thr: "869", overhead: "+2.7", best: true },
-  { sdk: "Go", login: "253.8", refresh: "17.3", checkP50: "10.1", checkP95: "60.0", thr: "840", overhead: "+2.9" },
-  { sdk: "Java", login: "254.7", refresh: "17.3", checkP50: "10.3", checkP95: "60.1", thr: "835", overhead: "+3.0" },
-  { sdk: "C#", login: "234.6", refresh: "17.2", checkP50: "10.3", checkP95: "60.8", thr: "821", overhead: "+3.7", flag: "merged 2 of 3 passes" },
-  { sdk: "TypeScript", login: "255.7", refresh: "16.7", checkP50: "18.1", checkP95: "34.2", thr: "805", overhead: "(−22.9)", flag: "baseline comparability under audit" },
-  { sdk: "Kotlin", login: "233.4", refresh: "17.2", checkP50: "11.0", checkP95: "61.7", thr: "773", overhead: "+4.6" },
-  { sdk: "Swift", login: "231.7", refresh: "17.3", checkP50: "11.3", checkP95: "61.4", thr: "747", overhead: "+4.3" },
-  { sdk: "Python", login: "238.9", refresh: "17.3", checkP50: "40.2", checkP95: "116.8", thr: "311", overhead: "+59.7", flag: "slow outlier — being profiled" },
-  { sdk: "C++", login: "242.2", refresh: "17.2", checkP50: "3.2", checkP95: "280.2", thr: "313", overhead: "+223.1", flag: "reconnect-shaped p95 tail, under investigation" },
-  { sdk: "C", login: "—", refresh: "—", checkP50: "3.0", checkP95: "3.8", thr: "318", overhead: "—", serial: true },
-  { sdk: "PHP", login: "—", refresh: "—", checkP50: "3.6", checkP95: "4.3", thr: "272", overhead: "—", serial: true },
+  { sdk: "C++", login: "327.1", refresh: "10.4", checkP50: "18.4", checkP95: "72.0", thr: "465", overhead: "+0.8" },
+  { sdk: "Go", login: "332.9", refresh: "11.1", checkP50: "18.7", checkP95: "71.8", thr: "462", overhead: "+0.7" },
+  { sdk: "Java", login: "326.6", refresh: "11.2", checkP50: "18.7", checkP95: "71.8", thr: "456", overhead: "+0.7" },
+  { sdk: "Kotlin", login: "324.6", refresh: "10.5", checkP50: "18.9", checkP95: "71.9", thr: "453", overhead: "+0.7" },
+  { sdk: "C#", login: "336.0", refresh: "12.1", checkP50: "19.4", checkP95: "73.3", thr: "436", overhead: "+2.2" },
+  { sdk: "Swift", login: "323.8", refresh: "10.3", checkP50: "18.7", checkP95: "71.6", thr: "434", overhead: "+0.5", best: true },
+  { sdk: "Rust", login: "329.4", refresh: "10.9", checkP50: "20.3", checkP95: "73.8", thr: "424", overhead: "+2.7" },
+  { sdk: "TypeScript", login: "331.7", refresh: "11.5", checkP50: "21.7", checkP95: "74.3", thr: "414", overhead: "+3.2" },
+  { sdk: "Python", login: "327.0", refresh: "11.4", checkP50: "39.3", checkP95: "92.4", thr: "344", overhead: "+21.2", flag: "slowest concurrent SDK — being profiled" },
+  { sdk: "C", login: "49.0", refresh: "11.5", checkP50: "5.6", checkP95: "7.0", thr: "176", overhead: "—", serial: true },
+  { sdk: "PHP", login: "52.8", refresh: "10.4", checkP50: "6.6", checkP95: "8.2", thr: "150", overhead: "—", serial: true },
 ];
 
 /**
- * Each SDK's own client-side process cost over its whole bench — new in run 5,
- * and half the story for IoT and sidecar deployments where the client, not the
- * server, is the constrained side.
+ * Each SDK's own client-side process cost over its whole bench (median of
+ * the three passes) — half the story for IoT and sidecar deployments where
+ * the client, not the server, is the constrained side.
  */
 export const BENCH_SDK_FOOTPRINT: BenchSdkFootprintRow[] = [
-  { sdk: "Go", runtime: "go 1.26", cpu: 3.3, rss: 36 },
-  { sdk: "PHP", runtime: "php 8.5", cpu: 5.6, rss: 59, serial: true },
-  { sdk: "C#", runtime: ".NET 8", cpu: 10.3, rss: 105 },
-  { sdk: "TypeScript", runtime: "node 22", cpu: 13.1, rss: 125 },
-  { sdk: "Swift", runtime: "swift 6.3", cpu: 13.3, rss: 48 },
-  { sdk: "C", runtime: "gcc 16, C11", cpu: 13.9, rss: 13, serial: true },
-  { sdk: "Kotlin", runtime: "JVM 21", cpu: 17.1, rss: 458 },
-  { sdk: "C++", runtime: "g++ 16", cpu: 17.6, rss: 39 },
-  { sdk: "Java", runtime: "JVM 21", cpu: 21.1, rss: 306 },
-  { sdk: "Rust", runtime: "cargo", cpu: 23.4, rss: 23 },
-  { sdk: "Python", runtime: "python 3.14", cpu: 40.0, rss: 88 },
+  { sdk: "C", runtime: "gcc 13, C11", cpu: 2.7, rss: 10, serial: true },
+  { sdk: "C++", runtime: "g++ 13, C++17", cpu: 3.0, rss: 15 },
+  { sdk: "Go", runtime: "go 1.27", cpu: 4.4, rss: 35 },
+  { sdk: "Swift", runtime: "swift 6.4", cpu: 7.9, rss: 54 },
+  { sdk: "PHP", runtime: "php 8.3", cpu: 8.7, rss: 39, serial: true },
+  { sdk: "C#", runtime: ".NET 10", cpu: 13.9, rss: 91 },
+  { sdk: "TypeScript", runtime: "node 22", cpu: 14.5, rss: 127 },
+  { sdk: "Kotlin", runtime: "JVM 21", cpu: 19.4, rss: 623 },
+  { sdk: "Rust", runtime: "rustc 1.99", cpu: 22.1, rss: 23 },
+  { sdk: "Java", runtime: "JVM 21", cpu: 24.0, rss: 335 },
+  { sdk: "Python", runtime: "python 3.12, uvloop", cpu: 62.1, rss: 89 },
 ];
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";

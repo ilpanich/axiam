@@ -1127,6 +1127,44 @@ reflects it; exchange with narrowed scope drops it.
 
 ### SA-17 — CONTRACT 1.66
 
+> **EXECUTED (2026-11-21, Opus 5.5). Published as contract 1.68**, not 1.66:
+> Wave 1 had already taken 1.67. `sdks/CONTRACT.md` only (+599/−7); no code, no
+> `openapi.json` or `proto/` change, so the spec digest and the registry are
+> unchanged. Clauses: §2 gains informative notes on the gRPC `UserService`
+> rules (SA-12) and a `tenant_suspended` mapping table plus
+> `409 organization_tenant_not_suspendable` and OD-13b (SA-13). SCIM follows the
+> code: a suspended tenant's provisioning token is a 401, the same as an unknown
+> token. §3a: the double-submit check is restated for every cookie-accepting
+> guard (N12). §8: a "Signed authorization responses" subsection with the wire
+> shape, the canonical order, the consumer obligations (strict parse, tenant
+> subkey, `tenant_id`/`correlation_id`/`nonce` checks, discard on failure) and
+> `reply_to`; a pre-1.68 server is refused by default with an explicit opt-out;
+> the SA-15 vectors are copied verbatim and checked against
+> `authz_response_vectors.rs` (N2). §10.1 rules 10–12: `typ`, `purpose` and
+> `kid` on the access-token path only (N14). §11.1/§11.2 rule 11: `require_role`
+> reads only `roles` and fails closed, a new `require_scope` helper, and the
+> scope and claim exactly as SA-18 ships them (N15, D-1). §12.3: an optional
+> `binding_digest` on store entries. §12.4 rule 2: the 50-kid/60 s conformance
+> test (C5). A new §12.8 for the login glue: browser binding and `return_to`
+> (C7, C6), obliging TS, Python, Java, Kotlin, C# and PHP. Also a change-log
+> entry, §27.1, §34.11(e), a new §34.12 table of clauses and the SDKs each one
+> obliges, and the footer.
+>
+> **Choices made within the plan:**
+> - `require_scope` passes on any one of the scopes it is given.
+> - The binding digest is SHA-256 over the base64url cookie value.
+> - The `axiam_oidc_bind` fallback applies only to an `http:` loopback
+>   `redirect_uri`.
+> - With two concurrent logins in one browser, the earlier one fails.
+> - SDK guards admit a token with no `typ` but refuse any other non-`at+jwt`
+>   value (stricter at the server).
+>
+> **Noted, not changed (pre-existing):**
+> - §12.7.3 logout-token verification reuses the §12.4 verifier, while logout
+>   tokens carry no `kid`. The new kid rule is therefore scoped to access tokens.
+> - The §8 intro lists six AMQP SDKs instead of seven.
+> - `website/src/contractAnchors.ts` is still at 1.64.
+
 - **Model:** Opus 5.5. Eleven SDK tasks implement exactly what this says.
 - **Depends on:** SA-03, SA-15, SA-18. Runs last in Wave 2.
 - **Files:** `sdks/CONTRACT.md` (§3a, §10, §11, §12, §12.4, change log).

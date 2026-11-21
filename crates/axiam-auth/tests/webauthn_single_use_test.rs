@@ -798,3 +798,117 @@ async fn qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_fin
     );
     assert_eq!(sessions(&w).await, 1);
 }
+
+// ---------------------------------------------------------------------------
+// SA-13 (N16, D-3): the WebAuthn door refuses a suspended tenant
+// ---------------------------------------------------------------------------
+
+/// Suspend or reactivate the world's tenant.
+async fn set_tenant_status(w: &World, status: axiam_core::models::tenant::TenantStatus) {
+    use axiam_core::models::tenant::UpdateTenant;
+    SurrealTenantRepository::new(w.db.clone())
+        .update(
+            w.tenant_id,
+            UpdateTenant {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The service as the composition root builds it: with the tenant check.
+fn gated(w: &World) -> Auth {
+    w.auth
+        .clone()
+        .with_tenant_admission(Arc::new(SurrealTenantRepository::new(w.db.clone())))
+}
+
+/// Both WebAuthn sign-ins — the second factor (`/auth/webauthn/authenticate/
+/// finish`, `complete_webauthn_second_factor`) and the passkey-first
+/// discoverable one (`finish_discoverable_authentication`, then the session the
+/// handler mints) — are refused `TenantSuspended` with a valid assertion, and
+/// write no session; un-suspending restores them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_webauthn_sign_in_to_a_suspended_tenant_is_refused() {
+    use axiam_core::error::AxiamError;
+    use axiam_core::models::tenant::TenantStatus;
+
+    let w = world().await;
+    let auth = gated(&w);
+    set_tenant_status(&w, TenantStatus::Suspended).await;
+
+    // Second factor.
+    let (challenge, token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let refused = auth
+        .complete_webauthn_second_factor(
+            &w.webauthn,
+            w.tenant_id,
+            &token,
+            &assertion,
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            None,
+            None,
+        )
+        .await
+        .expect_err("second factor for a suspended tenant");
+    assert!(
+        matches!(refused, AxiamError::TenantSuspended),
+        "{refused:?}"
+    );
+
+    // Discoverable (passkey-first): the ceremony verifies, the session does not.
+    let (rcr, token) = w
+        .webauthn
+        .start_discoverable_authentication(w.tenant_id, w.org_id)
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 2, w.user_id);
+    let (user_id, org_id) = w
+        .webauthn
+        .finish_discoverable_authentication(w.tenant_id, &token, &assertion)
+        .await
+        .unwrap();
+    let refused = auth
+        .create_session_and_tokens(
+            user_id,
+            w.tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::now(vec![Amr::Hwk]),
+            None,
+        )
+        .await
+        .expect_err("discoverable sign-in for a suspended tenant");
+    assert!(
+        matches!(refused, AxiamError::TenantSuspended),
+        "{refused:?}"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was written");
+
+    set_tenant_status(&w, TenantStatus::Active).await;
+    let (challenge, token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 3, w.user_id);
+    assert!(
+        auth.complete_webauthn_second_factor(
+            &w.webauthn,
+            w.tenant_id,
+            &token,
+            &assertion,
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            None,
+            None,
+        )
+        .await
+        .is_ok(),
+        "un-suspending restores WebAuthn sign-in"
+    );
+    assert_eq!(sessions(&w).await, 1);
+}

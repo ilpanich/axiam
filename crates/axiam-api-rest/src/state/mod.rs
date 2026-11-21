@@ -658,7 +658,9 @@ impl<C: Connection + Clone> AppState<C> {
             refresh_token_repo.clone(),
             auth_config.clone(),
             Arc::clone(&crypto_semaphore),
-        );
+        )
+        // SA-13 (N16): as the composition root attaches it.
+        .with_tenant_admission(Arc::new(tenant_repo.clone()));
         let webauthn_service =
             WebauthnService::new(webauthn_cred_repo.clone(), auth_config.clone())
                 .expect("test WebauthnService construction");

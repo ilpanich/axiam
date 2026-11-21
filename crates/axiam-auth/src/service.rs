@@ -292,6 +292,17 @@ pub struct AuthService<
     /// consulted before the directory is asked; see
     /// [`crate::unknown_name_lockout`].
     unknown_name_lockout: Arc<crate::unknown_name_lockout::UnknownNameLockout>,
+    /// SA-13 (N16, D-3) — whether the tenant still admits its principals,
+    /// asked where every browser sign-in ends ([`Self::create_session_and_tokens`]:
+    /// password, OPAQUE, WebAuthn, federation and social login, the MFA and
+    /// setup-token completions, directory accounts) and on every refresh.
+    ///
+    /// Optional for the reason the directory authenticator is: a harness that
+    /// does not exercise tenant lifecycle leaves it out. The composition root
+    /// and `AppState` always attach the tenant repository, and with it a
+    /// suspended tenant's sign-in or refresh is refused `tenant_suspended`
+    /// with nothing issued. One tenant read per sign-in or refresh, uncached.
+    tenant_admission: Option<axiam_core::models::tenant::SharedTenantAdmission>,
 }
 
 impl<
@@ -321,6 +332,27 @@ impl<
             directory_audit: None,
             directory_group_mapper: None,
             unknown_name_lockout: Arc::default(),
+            tenant_admission: None,
+        }
+    }
+
+    /// Attach the tenant lifecycle check (SA-13, N16, D-3): a sign-in or a
+    /// refresh for a tenant that does not admit its principals
+    /// ([`axiam_core::models::tenant::tenant_accepts_principals`]) is refused
+    /// `tenant_suspended`, before any session or token is written.
+    pub fn with_tenant_admission(
+        mut self,
+        admission: axiam_core::models::tenant::SharedTenantAdmission,
+    ) -> Self {
+        self.tenant_admission = Some(admission);
+        self
+    }
+
+    /// The tenant lifecycle check, when one is attached (SA-13).
+    async fn admit_tenant(&self, tenant_id: Uuid) -> AxiamResult<()> {
+        match &self.tenant_admission {
+            Some(admission) => admission.admit(tenant_id).await,
+            None => Ok(()),
         }
     }
 
@@ -1421,6 +1453,10 @@ impl<
             .get_by_id(input.tenant_id, session.user_id)
             .await?;
         account_may_act(&user)?;
+        // SA-13 (N16, D-3): and its tenant still admits it. The consumed row
+        // stays consumed: a suspension revoked it anyway, and un-suspending
+        // restores sign-in through a new session, not this one.
+        self.admit_tenant(input.tenant_id).await?;
         let user_lookup_us = t_user.elapsed().as_micros() as u64;
 
         // 4. Create new session with rotated refresh token.
@@ -2195,6 +2231,12 @@ impl<
         evidence: AuthenticationEvidence,
         credential_version: Option<i64>,
     ) -> AxiamResult<LoginOutput> {
+        // SA-13 (N16, D-3): every browser sign-in ends here, so this is where a
+        // suspended tenant is refused — after the caller verified the
+        // credential (no oracle for an unauthenticated caller beyond what the
+        // door itself answers), before anything is written.
+        self.admit_tenant(tenant_id).await?;
+
         let raw_refresh = token::generate_refresh_token();
         let token_hash = token::hash_refresh_token(&raw_refresh);
         let expires_at =

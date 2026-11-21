@@ -1649,8 +1649,16 @@ where
     /// `deleted_at = NONE`) and reads as the same `invalid_client` a wrong
     /// credential does. Any other error is a datastore fault and stays a
     /// `server_error`, never masquerading as bad client credentials.
+    ///
+    /// SA-13 (N16, D-3): and `tenant_suspended` if the tenant no longer admits
+    /// its principals (`tenant_accepts_principals`). Every grant authenticates
+    /// its client through here — code, refresh, client credentials (clients
+    /// and service accounts), device, CIBA, UMA, token exchange and the native
+    /// provider ID token — after the credential, so no grant of a suspended
+    /// tenant mints a token.
     async fn live_tenant(&self, tenant_id: Uuid) -> Result<Tenant, OAuth2Error> {
-        self.tenant_repo
+        let tenant = self
+            .tenant_repo
             .get_by_id(tenant_id)
             .await
             .map_err(|e| match e {
@@ -1658,7 +1666,11 @@ where
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
-            })
+            })?;
+        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+            return Err(OAuth2Error::TenantSuspended);
+        }
+        Ok(tenant)
     }
 
     /// The credential check proper, split out of

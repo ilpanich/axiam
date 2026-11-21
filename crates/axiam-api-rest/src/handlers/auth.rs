@@ -549,6 +549,13 @@ pub async fn login<C: Connection + Clone>(
             reason: "invalid credentials".into(),
         }));
     }
+    // SA-13 (N16, D-3): a suspended tenant's users do not sign in. Asked of the
+    // tenant just loaded — no second read — and before the password is
+    // stretched; `create_session_and_tokens` asks again where every sign-in
+    // ends, which is what covers the MFA and setup-token completions.
+    if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+        return Err(AxiamError::TenantSuspended.into());
+    }
     let org_id = tenant.organization_id;
 
     // Tell the audit middleware which tenant this request is about.
@@ -985,6 +992,12 @@ pub async fn device_auth<C: Connection + Clone>(
         tenant_id: cert_auth.tenant_id,
         org_id: tenant.organization_id,
     });
+
+    // SA-13 (N16, D-3): a suspended tenant's devices get no token, however
+    // valid the certificate and its account. The tenant is already loaded.
+    if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+        return Err(AxiamError::TenantSuspended.into());
+    }
 
     // N5 / SA-05: the certificate binding says *which* service account this
     // device is, not that the account may still sign in. Disabling an account

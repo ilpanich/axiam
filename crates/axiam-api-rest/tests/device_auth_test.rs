@@ -1255,3 +1255,85 @@ async fn the_certificate_endpoints_do_not_know_the_saml_signing_type() {
         assert_eq!(resp.status().as_u16(), 400, "{uri} must refuse SamlSigning");
     }
 }
+
+/// SA-13 (N16, D-3): a device whose certificate and service account are both
+/// valid gets no token from `POST /api/v1/auth/device` while its tenant is
+/// suspended — the refusal carries the stable `tenant_suspended` code — and
+/// gets one again once the tenant is set back to `Active`.
+#[actix_rt::test]
+async fn device_auth_refuses_a_suspended_tenant() {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let user_id = create_admin_user(&db, tenant_id).await;
+    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let ca_token = organization_ca_token(&db, &auth, org_id).await;
+    let app = test_app!(db, auth);
+
+    let anchor_id = generate_ca!(app, org_id, ca_token);
+    flag_trust_anchor(&db, org_id, &anchor_id).await;
+    let ca_id = tenant_signing_ca!(app, org_id, tenant_id, ca_token, anchor_id);
+    let (cert_id, public_cert_pem) = generate_device_cert!(app, ca_id, token);
+    let sa_id = create_service_account!(app, token);
+    let req = test::TestRequest::post()
+        .uri(&format!(
+            "/api/v1/service-accounts/{sa_id}/bind-certificate"
+        ))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+        .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+        .insert_header(("Content-Type", "application/json"))
+        .set_json(serde_json::json!({ "certificate_id": cert_id }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 200);
+
+    let encoded_pem = urlencode(&public_cert_pem);
+    let device_auth = || {
+        test::TestRequest::post()
+            .uri("/api/v1/auth/device")
+            .peer_addr(device_peer())
+            .insert_header(("X-Client-Certificate", encoded_pem.as_str()))
+            .to_request()
+    };
+    assert_eq!(
+        test::call_service(&app, device_auth())
+            .await
+            .status()
+            .as_u16(),
+        200,
+        "the device authenticates while its tenant is active"
+    );
+
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let set_status = |status| UpdateTenant {
+        status: Some(status),
+        ..Default::default()
+    };
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Suspended))
+        .await
+        .unwrap();
+    let resp = test::call_service(&app, device_auth()).await;
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status, 403, "a suspended tenant's device: {body}");
+    assert_eq!(body["error"], "tenant_suspended", "{body}");
+    assert!(
+        body.get("access_token").is_none(),
+        "no token is minted: {body}"
+    );
+
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Active))
+        .await
+        .unwrap();
+    assert_eq!(
+        test::call_service(&app, device_auth())
+            .await
+            .status()
+            .as_u16(),
+        200,
+        "un-suspending restores device sign-in"
+    );
+}

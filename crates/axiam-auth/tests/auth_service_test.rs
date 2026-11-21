@@ -5289,3 +5289,163 @@ async fn sr19_1_a_legacy_session_created_at_the_credential_change_instant_is_ref
             .is_empty()
     );
 }
+
+/// SA-13 (N16, D-3): every browser sign-in — password, OPAQUE, WebAuthn,
+/// federation and social login, the MFA and setup-token completions — ends in
+/// `create_session_and_tokens`, and every refresh in `refresh`. With the
+/// tenant lifecycle check attached (as the composition root attaches it), a
+/// suspended tenant gets `TenantSuspended` from both and no session row is
+/// written; un-suspending restores sign-in, and the session the suspension
+/// left behind is not what restores it.
+#[tokio::test]
+async fn a_suspended_tenant_is_refused_where_every_sign_in_and_refresh_ends() {
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let svc = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    )
+    .with_tenant_admission(Arc::new(tenants.clone()));
+    let sign_in = || {
+        svc.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::upstream(None, Utc::now(), vec![Amr::Fed]),
+            None,
+        )
+    };
+    let sessions = || async {
+        let mut result = db
+            .query("SELECT count() AS total FROM session WHERE tenant_id = $t GROUP ALL")
+            .bind(("t", tenant_id.to_string()))
+            .await
+            .unwrap();
+        let rows: Vec<axiam_db::CountRow> = result.take(0).unwrap();
+        rows.first().map_or(0, |r| r.total)
+    };
+    let set_status = |status| UpdateTenant {
+        status: Some(status),
+        ..Default::default()
+    };
+
+    let before = sign_in().await.expect("sign-in while active");
+
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Suspended))
+        .await
+        .unwrap();
+    assert_eq!(sessions().await, 0, "suspending revoked the session");
+    let refused = sign_in().await.expect_err("a suspended tenant's sign-in");
+    assert!(
+        matches!(refused, AxiamError::TenantSuspended),
+        "{refused:?}"
+    );
+    assert_eq!(sessions().await, 0, "the refused sign-in wrote no session");
+    let refused = svc
+        .refresh(RefreshInput {
+            tenant_id,
+            org_id,
+            raw_refresh_token: before.refresh_token.clone(),
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .expect_err("a suspended tenant's refresh");
+    assert!(
+        matches!(
+            refused,
+            AxiamError::TenantSuspended | AxiamError::AuthenticationFailed { .. }
+        ),
+        "{refused:?}"
+    );
+
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Active))
+        .await
+        .unwrap();
+    sign_in().await.expect("un-suspending restores sign-in");
+    assert!(
+        svc.refresh(RefreshInput {
+            tenant_id,
+            org_id,
+            raw_refresh_token: before.refresh_token,
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .is_err(),
+        "the pre-suspension refresh token stays revoked: a new session is required"
+    );
+}
+
+/// SA-13 (N16): the refresh door itself, for a session that survived the
+/// suspension's revocation (one a sign-in wrote as the suspension committed).
+#[tokio::test]
+async fn refresh_refuses_a_suspended_tenant_even_with_a_live_session() {
+    use axiam_core::models::session::{Amr, AuthenticationEvidence};
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let plain = AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    let gated = plain
+        .clone()
+        .with_tenant_admission(Arc::new(tenants.clone()));
+
+    tenants
+        .update(
+            tenant_id,
+            UpdateTenant {
+                status: Some(TenantStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // Written past the gate, as a racing sign-in's would be.
+    let raced = plain
+        .create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::upstream(None, Utc::now(), vec![Amr::Fed]),
+            None,
+        )
+        .await
+        .unwrap();
+    let refused = gated
+        .refresh(RefreshInput {
+            tenant_id,
+            org_id,
+            raw_refresh_token: raced.refresh_token,
+            ip_address: None,
+            user_agent: None,
+        })
+        .await
+        .expect_err("refresh of a suspended tenant's session");
+    assert!(
+        matches!(refused, AxiamError::TenantSuspended),
+        "{refused:?}"
+    );
+}

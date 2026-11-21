@@ -811,6 +811,55 @@ gRPC callers of these RPCs now need the permission.
 
 ### SA-13 — Enforce tenant suspension (N16, D-3)
 
+> **EXECUTED (2026-11-21, Opus 5.5). N16: reproduced.** A `suspended` tenant
+> kept issuing and accepting credentials: password login, refresh, OAuth2
+> token grants, token exchange, device authorization, WebAuthn, OIDC/social
+> first-time SSO, handoff redemption, SCIM bearer tokens, the REST extractor,
+> gRPC and AMQP authz all answered as for an active tenant, and existing
+> sessions survived the status change. The fix adds
+> `axiam_core::tenant_accepts_principals` and a `TenantAdmission` port, and
+> checks it at every door: `create_session_and_tokens` and `refresh`
+> (`axiam-auth`), `live_tenant` and token exchange (`axiam-oauth2`), login and
+> device auth, the REST auth extractor (`TenantScopeResolver::admit_principals`),
+> the SCIM token resolver, a new gRPC `tenant_admission` layer (fails **closed**
+> with `UNAVAILABLE` on a datastore error) and the AMQP `authz_consumer`.
+> Suspending a tenant deletes its sessions and revokes its refresh tokens in
+> the same transaction as the status write; the tombstone also revokes SCIM
+> tokens. New error `AxiamError::TenantSuspended` → REST 403 / OAuth2 400 /
+> gRPC `PERMISSION_DENIED` / AMQP `reason_code`, all `tenant_suspended`.
+>
+> Owner decisions taken during execution (binding):
+> - **OD-13a** — the Organization-kind tenant cannot be suspended: 409
+>   `organization_tenant_not_suspendable` (`AxiamError::OrganizationTenantNotSuspendable`),
+>   checked in the handler before any revocation and again in
+>   `SurrealTenantRepository::update`.
+> - **OD-13b** — on a suspended tenant, organization principals acting through
+>   the `X-Axiam-Tenant` header get reads and the status change only; any other
+>   write, including a tenant update that also changes name, slug or metadata,
+>   returns 403 `tenant_suspended`.
+> - **OD-13c** — path-scoped organization routes block writes and allow reads:
+>   signing-CA creation and `sign-csr` are refused, intermediate listing,
+>   tenant `GET`, `audit-export` and tenant `DELETE` stay allowed. Header-scoped
+>   read-only POSTs (`/authz/check`, `/authz/check/batch`, audit export,
+>   `saml/parse-sp-metadata`, `/pgp-keys/{id}/encrypt`, `/oauth2/userinfo`)
+>   count as reads; `email-config/test` and `/account/export` stay writes.
+>   Recorded in `docs/admin/organization-scope.md`, "Suspending a tenant".
+>
+> Tests: new `tenant_suspension_test` (15), plus additions to
+> `auth_service_test`, `webauthn_single_use_test`, `device_auth_test`,
+> `opaque_login_test`, `federation_first_time_sso_test`,
+> `federation_login_providers_test`, `authz_consumer_test` and the gRPC
+> admission layer; each failed before and passes after. Regression: REST lib
+> 333, `tenant_test` 30, `org_scope_gaps` 11, `tenant_scoped_roles` 15,
+> `tenant_issuer_paths` 22, `organization_scope_consistency` 8,
+> `certificate_test` 17, `auth_test` 33, `oauth2_flow_test` 49. fmt, layering,
+> spec digest, registry and workspace clippy clean. No OpenAPI-visible change.
+>
+> **Upgrade notes (SA-50):** suspending a tenant now ends its sessions and
+> refresh tokens immediately and is not undone by reactivation; the
+> organization's own tenant can no longer be suspended; clients must handle
+> `tenant_suspended` (and SA-17 carries both codes into CONTRACT.md).
+
 - **Model:** Opus 5.5. Every authentication door has to agree.
 - **Files:** `crates/axiam-db/src/repository/tenant.rs` (status update,
   tombstone transaction 1132–1167), `crates/axiam-auth/src/service.rs` (login),

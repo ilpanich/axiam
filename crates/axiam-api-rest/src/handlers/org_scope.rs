@@ -201,10 +201,21 @@ pub async fn principal_tenant_reach<C: Connection + Clone>(
 /// administrator unable to administer the tenant it was created for.
 ///
 /// So the reach must *cover the named tenant*, rather than be unrestricted.
+///
+/// `action` says what the endpoint does to the tenant, for the one decision
+/// that depends on it (SA-13, owner decision OD-13c): while the named tenant is
+/// suspended, a [`TenantAction::Write`] is refused with `403 tenant_suspended`
+/// and a [`TenantAction::Read`] is not. Every path-scoped endpoint under
+/// `/organizations/{org_id}/tenants/{tenant_id}/…` that names a tenant passes
+/// through here, so this is the one place a path-scoped write meets the
+/// suspension — the header-scoped twin is `act_on_requested_tenant` in the
+/// authentication extractor. The tenant update (the un-suspend) and the tenant
+/// `DELETE` use the organization-wide form and are not affected.
 pub async fn require_organization_principal_for_tenant<C: Connection + Clone>(
     user: &AuthenticatedUser,
     state: &AppState<C>,
     tenant_id: uuid::Uuid,
+    action: TenantAction,
 ) -> Result<(), AxiamApiError> {
     let deny = |reason: &str| -> AxiamApiError {
         AxiamApiError(AxiamError::AuthorizationDenied {
@@ -236,5 +247,28 @@ pub async fn require_organization_principal_for_tenant<C: Connection + Clone>(
         ));
     }
 
+    // SA-13 (OD-13c): asked after the checks above, so only a caller allowed
+    // to act on the tenant learns it is suspended — and only of a tenant in its
+    // own organization; any other is left to the handler's own 404.
+    if action == TenantAction::Write
+        && let Ok(target) = state.tenant_repo.get_by_id(tenant_id).await
+        && target.organization_id == user.org_id
+        && !axiam_core::models::tenant::tenant_accepts_principals(&target)
+    {
+        return Err(AxiamApiError(AxiamError::TenantSuspended));
+    }
+
     Ok(())
+}
+
+/// What a path-scoped organization endpoint does to the tenant it names, for
+/// [`require_organization_principal_for_tenant`] (SA-13, OD-13c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TenantAction {
+    /// Reads the tenant, or something of it (its record, its signing CAs, its
+    /// audit trail): allowed while it is suspended.
+    Read,
+    /// Writes into the tenant (a signing CA, a signed CSR): refused while it
+    /// is suspended.
+    Write,
 }

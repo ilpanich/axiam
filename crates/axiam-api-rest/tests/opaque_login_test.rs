@@ -1413,3 +1413,49 @@ async fn n7_control_a_change_with_a_new_record_keeps_it() {
             .is_some()
     );
 }
+
+/// SA-13 (N16, D-3): an OPAQUE sign-in to a suspended tenant issues no session,
+/// whatever the exchange proves, and the refusal carries `tenant_suspended`.
+/// Un-suspending restores it.
+#[actix_web::test]
+async fn an_opaque_sign_in_to_a_suspended_tenant_is_refused() {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let (db, org_id, tenant_id, _user_id, app) = enrolled_app!("suspended");
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let set_status = |status| UpdateTenant {
+        status: Some(status),
+        ..Default::default()
+    };
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Suspended))
+        .await
+        .unwrap();
+
+    let (start_status, started, finish_status, finished, cookies) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert!(
+        !cookies.iter().any(|c| c.name() == "axiam_access"),
+        "no session for a suspended tenant: start {start_status} {started}, \
+         finish {finish_status} {finished}"
+    );
+    let refusal = if start_status == 200 {
+        (finish_status, finished)
+    } else {
+        (start_status, started)
+    };
+    assert_eq!(refusal.0, 403, "refusal: {}", refusal.1);
+    assert_eq!(
+        refusal.1["error"], "tenant_suspended",
+        "refusal: {}",
+        refusal.1
+    );
+
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Active))
+        .await
+        .unwrap();
+    let (_, _, status, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_eq!(status, 200, "un-suspending restores OPAQUE sign-in");
+}

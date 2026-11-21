@@ -68,6 +68,7 @@ use crate::middleware::rate_limit::{
     GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer,
 };
 use crate::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
+use crate::middleware::tenant_admission::GrpcTenantAdmissionLayer;
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::reactor_admin_service_server::ReactorAdminServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
@@ -317,6 +318,14 @@ where
     // itself (`per_sec_to_window_limit`) — previously the per-second number
     // was passed to a per-minute window verbatim, which made the effective
     // gRPC ceiling 1/60th of the configured one.
+    let db: DbHandle<C> = db.into();
+    // SA-13 (N16, D-3): always on — a suspended tenant's tokens are refused on
+    // this listener as on REST. Its own repository over the same handle; it
+    // holds no cache (see `middleware::tenant_admission`).
+    let tenant_admission_layer = GrpcTenantAdmissionLayer::new(
+        Arc::new(axiam_db::SurrealTenantRepository::new(db.clone())),
+        auth_config.clone(),
+    );
     let shared_rate_limit_layer =
         GrpcSharedRateLimitLayer::new_method_scoped(db, rate_limits, trusted_hops);
     let governor_layer = build_grpc_method_scoped_governor_layer(rate_limits);
@@ -437,7 +446,10 @@ where
         .layer(DrainRejectedBodyLayer)
         .layer(governor_layer)
         .layer(shared_rate_limit_layer)
-        .layer(tower::util::option_layer(strict_revocation_layer));
+        .layer(tower::util::option_layer(strict_revocation_layer))
+        // SA-13: inside the rate limiters, like strict revocation, so a flood
+        // from a suspended tenant is throttled before it reaches the datastore.
+        .layer(tenant_admission_layer);
 
     // R-1 / T-234: the services are registered once, and only *how the bytes
     // arrive* differs between the two modes below. Before this change the whole

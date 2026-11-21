@@ -120,6 +120,69 @@ impl Tenant {
     }
 }
 
+/// Whether `tenant` admits its own principals: sign-in, token issuance,
+/// refresh and API requests (SA-13, N16, D-3).
+///
+/// The **one** predicate every authentication door asks — password, OPAQUE,
+/// WebAuthn, federation and social sign-in, the token endpoint for every grant,
+/// refresh, device mTLS, SCIM token resolution, the REST principal extractor,
+/// the gRPC listener and AMQP authorization requests — so the doors cannot come
+/// to disagree about what suspension means. A door that refuses answers
+/// [`crate::error::AxiamError::TenantSuspended`] (`tenant_suspended`).
+///
+/// A [`TenantStatus::Suspended`] tenant keeps its data, and organization
+/// principals — who live in the organization's own tenant, not this one — keep
+/// reading it and can set it back to [`TenantStatus::Active`]. A tombstoned
+/// tenant is not this predicate's to answer: every read filters it out, so a
+/// door never holds one.
+#[must_use]
+pub const fn tenant_accepts_principals(tenant: &Tenant) -> bool {
+    matches!(tenant.status, TenantStatus::Active)
+}
+
+/// The tenant check of an authentication door that has not already loaded the
+/// tenant (SA-13, N16): one read, then [`tenant_accepts_principals`].
+///
+/// Object-safe — a boxed future — so a service that is not generic over the
+/// datastore (`axiam_auth::AuthService`, the gRPC listener's layer) can hold
+/// one. Every [`crate::repository::TenantRepository`] is one, through the
+/// blanket implementation below; there is deliberately no cache in front of it,
+/// so a suspension takes effect at the next door, on every replica.
+pub trait TenantAdmission: Send + Sync {
+    /// `Ok` when the tenant admits its principals, or when no such tenant is
+    /// stored (a tombstoned or never-created tenant is refused by the door's
+    /// own lookups, not here); `Err(TenantSuspended)` when it does not; the
+    /// datastore's error otherwise.
+    fn admit(
+        &self,
+        tenant_id: Uuid,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::error::AxiamResult<()>> + Send + '_>,
+    >;
+}
+
+impl<T: crate::repository::TenantRepository> TenantAdmission for T {
+    fn admit(
+        &self,
+        tenant_id: Uuid,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::error::AxiamResult<()>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            use crate::error::AxiamError;
+            match self.get_by_id(tenant_id).await {
+                Ok(tenant) if tenant_accepts_principals(&tenant) => Ok(()),
+                Ok(_) => Err(AxiamError::TenantSuspended),
+                Err(AxiamError::NotFound { .. }) => Ok(()),
+                Err(other) => Err(other),
+            }
+        })
+    }
+}
+
+/// What a service holds: a shared, type-erased [`TenantAdmission`].
+pub type SharedTenantAdmission = std::sync::Arc<dyn TenantAdmission>;
+
 /// Fields required to create a new tenant.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateTenant {
@@ -184,6 +247,15 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// SA-13 (N16): only an `Active` tenant admits its principals.
+    #[test]
+    fn only_an_active_tenant_accepts_principals() {
+        let mut tenant = a_tenant(TenantKind::Standard);
+        assert!(tenant_accepts_principals(&tenant));
+        tenant.status = TenantStatus::Suspended;
+        assert!(!tenant_accepts_principals(&tenant));
     }
 
     #[test]

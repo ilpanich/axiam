@@ -291,6 +291,65 @@ server registers one at startup (`axiam-server`'s composition root, alongside
 the session validator); without it the extractor refuses every switch, so an
 organization administrator would be unable to act on any tenant at all.
 
+## Suspending a tenant
+
+```http
+PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}
+{ "status": "Suspended" }
+```
+
+A suspended tenant keeps all of its data, and admits none of its own
+principals: sign-in (every method), the token endpoint for every grant, refresh,
+device mTLS, SCIM provisioning tokens, REST, gRPC and AMQP authorization
+requests all answer `tenant_suspended` (REST `403`, OAuth2 `400`). The
+suspension revokes the tenant's sessions and refresh tokens in the same
+transaction as the status write, so setting it back to `Active` restores
+sign-in through a **new** session only.
+
+Two further rules apply to it:
+
+* **The organization tenant cannot be suspended.** It holds every organization
+  principal — the only principals that can lift a suspension — so a request
+  that sets `status = Suspended` on it answers
+  `409 organization_tenant_not_suspendable`, writes nothing and revokes
+  nothing. The refusal is made by the tenant repository's status write, not by
+  the handler, so no other path reaches around it.
+* **Organization principals read it and change its status, nothing else.**
+  While a tenant is suspended, an organization principal may read it, change
+  its status, and delete it; every other state-changing request on it answers
+  `403 tenant_suspended`. The rule holds however the request names the tenant:
+
+  * **Through `X-Axiam-Tenant`.** Decided once, where the extractor resolves
+    the tenant the request acts on. Admitted: `GET`/`HEAD`; the tenant-update
+    request above for that same tenant; and the `POST`s that only read —
+    `/authz/check`, `/authz/check/batch`,
+    `/organizations/{org_id}/tenants/{tenant_id}/audit-export`,
+    `/tenants/{tenant_id}/saml/parse-sp-metadata`, `/pgp-keys/{id}/encrypt`
+    and `/oauth2/userinfo`. Everything else — creating a user or a role in it,
+    changing its settings, its SAML or SCIM configuration, testing its mail
+    relay, queuing an account export — is refused. A `POST` route added later
+    counts as a write until it is listed as a read.
+  * **By path, under `/api/v1/organizations/{org_id}/tenants/{tenant_id}`.**
+    Decided once, in the per-tenant organization guard
+    (`require_organization_principal_for_tenant`) from what the route declares
+    it does; the tenant update checks its own body:
+
+    | Route | On a suspended tenant |
+    |---|---|
+    | `GET …/tenants/{tenant_id}` | allowed (read) |
+    | `PUT …/tenants/{tenant_id}`, body `{"status": …}` only | allowed (the un-suspend) |
+    | `PUT …/tenants/{tenant_id}`, any other field in the body | `403 tenant_suspended` |
+    | `DELETE …/tenants/{tenant_id}` | allowed (a lifecycle act) |
+    | `POST …/tenants/{tenant_id}/audit-export` | allowed (read) |
+    | `GET …/tenants/{tenant_id}/signing-cas` | allowed (read) |
+    | `POST …/tenants/{tenant_id}/signing-cas` | `403 tenant_suspended` |
+    | `POST …/tenants/{tenant_id}/signing-cas/sign-csr` | `403 tenant_suspended` |
+
+  The tenant-update request is accepted on a suspended tenant only when its
+  body changes **nothing but `status`** — with or without the header — so a
+  rename or a metadata change has to wait for the tenant to be active again.
+  The un-suspend is therefore always `{"status": "Active"}` on its own.
+
 ## What an organization principal's own account does
 
 `X-Axiam-Tenant` says which tenant a request **acts on**. It says nothing about

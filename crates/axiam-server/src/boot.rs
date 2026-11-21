@@ -789,6 +789,9 @@ where
         std::sync::Arc::new(axiam_api_rest::SurrealScimTokenResolver::new(
             scim_token_repo.clone(),
             axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
+            // SA-13 (N16): a tombstoned or suspended tenant's tokens resolve to
+            // no principal.
+            SurrealTenantRepository::new(pool.handle_for_repo()),
         ));
     let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo())
         .with_minimisation(audit_minimisation);
@@ -972,7 +975,9 @@ where
     // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
     // the linking of an account, on the same append-only repository (and the
     // same minimisation) as every other audit row.
-    .with_directory_audit(Arc::clone(&directory_audit_sink) as _);
+    .with_directory_audit(Arc::clone(&directory_audit_sink) as _)
+    // SA-13 (N16, D-3): a suspended tenant's sign-in and refresh are refused.
+    .with_tenant_admission(Arc::new(tenant_repo.clone()));
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());
@@ -2194,6 +2199,8 @@ where
         };
         let amqp_signing_key_clone = amqp_signing_key.clone();
         let authz_nonce_repo = amqp_nonce_repo.clone();
+        // SA-13 (N16): a suspended tenant's authz requests are denied.
+        let authz_tenant_repo = tenant_repo.clone();
         let died = fatal_stop.clone();
         tokio::spawn(async move {
             axiam_amqp::authz_consumer::start_authz_consumer(
@@ -2201,6 +2208,7 @@ where
                 amqp_engine,
                 amqp_signing_key_clone,
                 authz_nonce_repo,
+                authz_tenant_repo,
                 amqp_replay_skew,
             )
             .await;

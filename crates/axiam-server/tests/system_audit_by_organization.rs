@@ -201,6 +201,7 @@ async fn an_organization_reads_only_its_own_rows_of_the_system_partition() {
         scim_token_resolver: Arc::new(SurrealScimTokenResolver::new(
             SurrealScimTokenRepository::new(db.clone()),
             SurrealUserRepository::new(db.clone()),
+            SurrealTenantRepository::new(db.clone()),
         )),
         app_state: AppState::for_test(db.clone(), auth.clone()),
         rate_limit: RateLimitConfig::default(),

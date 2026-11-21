@@ -791,6 +791,8 @@ pub async fn generate_intermediate<C: Connection + Clone>(
         &user,
         state.get_ref(),
         tenant_id,
+        // SA-13 (OD-13c): it writes into the tenant — refused while suspended.
+        crate::handlers::org_scope::TenantAction::Write,
     )
     .await?;
 
@@ -858,6 +860,8 @@ pub async fn sign_intermediate_csr<C: Connection + Clone>(
         &user,
         state.get_ref(),
         tenant_id,
+        // SA-13 (OD-13c): it writes into the tenant — refused while suspended.
+        crate::handlers::org_scope::TenantAction::Write,
     )
     .await?;
 
@@ -919,6 +923,7 @@ pub async fn list_intermediates<C: Connection + Clone>(
             &user,
             state.get_ref(),
             tenant_id,
+            crate::handlers::org_scope::TenantAction::Read,
         )
         .await?;
     }

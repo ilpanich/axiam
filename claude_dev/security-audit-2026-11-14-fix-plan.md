@@ -1004,6 +1004,36 @@ the seven AMQP SDKs verify against them in Wave 3 (D-9).
 
 ### SA-16 — Supply chain and deployment (N17, N18, N19)
 
+> **EXECUTED (2026-11-21, Sonnet 5.5). N17, N18, N19: reproduced.**
+> **N17:** `release-opaque.yml` had 22 `uses:` lines on mutable tags
+> (`actions/checkout@v7`, `dtolnay/rust-toolchain@stable`,
+> `rust-lang/crates-io-auth-action@v1`, …) and `npm install -g npm@latest`. All
+> 22 are now pinned to 40-hex SHAs with a version comment — every SHA reused
+> from `release.yml`/`ci.yml` except `rust-lang/crates-io-auth-action`
+> `v1.0.6` = `3268eb41…4cd9`, resolved with `git ls-remote` (and re-checked by
+> the orchestrator) — and npm is pinned to `11.21.2` (newest 11.x at least two
+> weeks old; ≥ 11.5.1). The acceptance grep prints nothing.
+> **N18 (D-6):** the dev compose `axiam-server` image was
+> `ghcr.io/axiamhq/axiam/server:latest`; it is now
+> `ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:-1.3.1}`, the namespace
+> `release.yml` publishes and the released tag matching `Cargo.toml`.
+> **N19:** rendered `docker compose … config` showed
+> `start --user … --pass …` for dev, minimal and prod, and the SurrealDB
+> StatefulSet args carried `--pass`. All four now pass the credentials as
+> `SURREAL_USER` / `SURREAL_PASS` (dev: the existing `root` literals; minimal
+> and prod: `${AXIAM__DB__USERNAME:?…}` / `${AXIAM__DB__PASSWORD:?…}`; k8s: the
+> `surrealdb-credentials` Secret, env renamed from `SURREALDB_USER/PASS`), and
+> no rendered `command:` contains a password. Health checks were already
+> `/surreal isready` without credentials. Verified with `docker compose config`
+> (v5.6.1) and a YAML parse; all Architecture Invariants checks clean. No Rust
+> changed.
+>
+> **Upgrade notes (SA-50):** operators with a customised SurrealDB command or
+> StatefulSet must move `--user/--pass` to `SURREAL_USER/SURREAL_PASS`; that
+> SurrealDB v4 honours those variables was not run-verified here (no Docker
+> daemon) and should be smoke-tested before release. The dev compose image
+> default tag must be bumped with each release (override: `AXIAM_IMAGE_TAG`).
+
 - **Model:** Sonnet 5.5.
 - **Files:** `.github/workflows/release-opaque.yml`, `docker/docker-compose.dev.yml`
   (68, 111, 143), `docker/docker-compose.prod.yml` (133, 178, 419),

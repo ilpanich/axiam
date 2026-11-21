@@ -768,6 +768,12 @@ impl<C: Connection + Clone> AppState<C> {
         // settings-backed value.
         let refresh_reuse_policy: axiam_oauth2::refresh_reuse::SharedRefreshReusePolicy =
             settings_policy;
+        // SA-18 (N15): the `roles` claim's global role names, read by every
+        // grant that mints an access token carrying the `roles` scope.
+        let role_source: axiam_oauth2::roles_claim::SharedRoleSource =
+            Arc::new(axiam_oauth2::roles_claim::RepositoryRoleSource::new(
+                SurrealRoleRepository::new(db.clone()),
+            ));
         let authorize_service =
             AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600)
                 .with_scope_policy(Arc::clone(&scope_policy));
@@ -796,7 +802,8 @@ impl<C: Connection + Clone> AppState<C> {
             )),
         )
         .with_scope_policy(Arc::clone(&scope_policy))
-        .with_refresh_reuse_policy(refresh_reuse_policy);
+        .with_refresh_reuse_policy(refresh_reuse_policy)
+        .with_role_source(Arc::clone(&role_source));
         // B2: the URI the user is told to visit. Derived from the OIDC issuer
         // rather than configured separately — a verification URI on a
         // different origin from the issuer is a phishing shape, and deriving
@@ -845,7 +852,8 @@ impl<C: Connection + Clone> AppState<C> {
             2_592_000,
             verification_uri,
         )
-        .with_scope_policy(Arc::clone(&scope_policy));
+        .with_scope_policy(Arc::clone(&scope_policy))
+        .with_role_source(Arc::clone(&role_source));
         // B3: the exchanged-token ceiling. The ordinary access-token lifetime
         // is the right default — an exchange is a narrowing, so it has no
         // business producing something longer-lived than a normal token — and
@@ -855,7 +863,8 @@ impl<C: Connection + Clone> AppState<C> {
             tenant_repo.clone(),
             auth_config.clone(),
             auth_config.access_token_lifetime_secs as i64,
-        );
+        )
+        .with_role_source(Arc::clone(&role_source));
         let password_reset_service = PasswordResetService::new(
             user_repo.clone(),
             password_reset_token_repo,

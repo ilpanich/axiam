@@ -322,6 +322,18 @@ pub struct AccessTokenClaims {
     /// Code flows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// SA-18 (N15, D-1) — the names of the subject's **global** roles in this
+    /// token's tenant, assigned directly or through a group, sorted and
+    /// de-duplicated. Resource-scoped assignments are not included.
+    ///
+    /// Present **only** when the grant carried the `roles` scope; absent — not
+    /// `[]` — otherwise, so a consumer can tell "not requested" from "holds no
+    /// roles". A snapshot taken at mint time, stale for at most one token
+    /// lifetime: nothing on the server reads it to authorize anything, and
+    /// `require_access` remains the authoritative check. Never carried by an
+    /// ID token or released by UserInfo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
     /// Self-describing subject kind (FUNC-04, D-09/D-10/D-11).
     ///
     /// Always serialized when a token is issued. Missing on decode (a
@@ -852,6 +864,7 @@ pub struct AccessTokenSpec {
     exchanged: bool,
     client_id: Option<String>,
     requested_userinfo_claims: Option<Vec<String>>,
+    roles: Option<Vec<String>>,
 }
 
 impl AccessTokenSpec {
@@ -881,6 +894,7 @@ impl AccessTokenSpec {
             exchanged: false,
             client_id: None,
             requested_userinfo_claims: None,
+            roles: None,
         }
     }
 
@@ -1049,6 +1063,18 @@ impl AccessTokenSpec {
         self
     }
 
+    /// Carry the `roles` claim (SA-18, N15). `None` — every grant that was
+    /// not granted the `roles` scope — leaves the claim absent and the token
+    /// byte-identical to one minted before the claim existed.
+    ///
+    /// The caller decides the value (the global role names, read at mint
+    /// time); this builder neither reads roles nor checks the scope.
+    #[must_use]
+    pub fn roles(mut self, roles: Option<Vec<String>>) -> Self {
+        self.roles = roles;
+        self
+    }
+
     /// Bind this token to the session it was issued from (`sid`).
     ///
     /// Call it wherever a session exists. Omitting it does not fail — it
@@ -1129,6 +1155,7 @@ impl AccessTokenSpec {
             ext: self.ext.clone(),
             client_id: self.client_id.clone(),
             axiam_requested_claims: self.requested_userinfo_claims.clone(),
+            roles: self.roles.clone(),
         })
     }
 
@@ -1371,6 +1398,41 @@ pub fn issue_exchanged_token(
     cnf: Option<CnfClaim>,
     client_id: &str,
 ) -> Result<String, AuthError> {
+    exchanged_token_spec(
+        subject,
+        sub_kind,
+        tenant_id,
+        org_id,
+        scopes,
+        jti,
+        aud,
+        expires_at,
+        act,
+        ext_exchange,
+        cnf,
+        client_id,
+    )
+    .issue(config)
+}
+
+/// The [`AccessTokenSpec`] [`issue_exchanged_token`] signs, for a caller that
+/// adds a claim before signing (the SA-18 `roles` claim, which the exchange
+/// recomputes for the subject when the narrowed scopes keep `roles`).
+#[allow(clippy::too_many_arguments)]
+pub fn exchanged_token_spec(
+    subject: &str,
+    sub_kind: SubjectKind,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    jti: String,
+    aud: &str,
+    expires_at: i64,
+    act: Option<ActClaim>,
+    ext_exchange: Option<ExtExchangeClaim>,
+    cnf: Option<CnfClaim>,
+    client_id: &str,
+) -> AccessTokenSpec {
     AccessTokenSpec::exchanged(subject, sub_kind, tenant_id, org_id, jti, aud)
         // RFC 9068 §2.2 (#819): the client that ran the exchange.
         .client_id(Some(client_id))
@@ -1381,7 +1443,6 @@ pub fn issue_exchanged_token(
         // SEC-096: the exchanging client's OWN constraint, never the subject
         // token's -- see the function's doc comment.
         .cnf(cnf)
-        .issue(config)
 }
 
 /// Issue a JWT access token for OAuth2 Client Credentials grant (M2M).
@@ -3385,6 +3446,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     fn claims_with_cnf(cnf: Option<CnfClaim>) -> AccessTokenClaims {
         AccessTokenClaims {
             axiam_requested_claims: None,
+            roles: None,
             sub: Uuid::new_v4().to_string(),
             tenant_id: Uuid::new_v4().to_string(),
             org_id: Uuid::new_v4().to_string(),

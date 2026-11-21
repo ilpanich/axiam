@@ -1360,6 +1360,13 @@ where
     // by the token endpoint only after a refresh-token replay was refused.
     let refresh_reuse_policy: axiam_oauth2::refresh_reuse::SharedRefreshReusePolicy =
         settings_policy;
+    // SA-18 (N15) — the subject's global role names for the access token's
+    // `roles` claim, read by every grant whose scopes carry `roles` (code,
+    // refresh, client credentials, CIBA, device, native sign-in, exchange).
+    // Left unwired, such a grant is refused with `server_error`.
+    let role_source: axiam_oauth2::roles_claim::SharedRoleSource = Arc::new(
+        axiam_oauth2::roles_claim::RepositoryRoleSource::new(role_repo.clone()),
+    );
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
@@ -1402,6 +1409,8 @@ where
     .with_scope_policy(Arc::clone(&scope_policy))
     // G-C (#818) — see `refresh_reuse_policy` above.
     .with_refresh_reuse_policy(refresh_reuse_policy)
+    // SA-18 (N15) — see `role_source` above.
+    .with_role_source(Arc::clone(&role_source))
     // X5.1 — `private_key_jwt` (RFC 7523 §2.2), one of FAPI 2.0's two
     // client-authentication families.
     //
@@ -1454,7 +1463,8 @@ where
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
         device_verification_uri,
     )
-    .with_scope_policy(Arc::clone(&scope_policy));
+    .with_scope_policy(Arc::clone(&scope_policy))
+    .with_role_source(Arc::clone(&role_source));
 
     // G-7 — CIBA. The pending-request store seals a ping-mode request's
     // notification credentials under `pki_encryption_key`, the key webhook
@@ -1515,7 +1525,8 @@ where
         config.auth.clone(),
         i64::try_from(config.auth.access_token_lifetime_secs)
             .expect("access_token_lifetime_secs exceeds i64::MAX"),
-    );
+    )
+    .with_role_source(Arc::clone(&role_source));
 
     // B5 / RFC 9126. Composed here at the root, not lazily: an AppState field
     // that only the test builder populates is exactly the gap that left B2's

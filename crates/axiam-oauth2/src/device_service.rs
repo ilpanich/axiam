@@ -200,6 +200,9 @@ pub struct DeviceAuthorizationService<DG, RT, UR> {
     verification_uri: String,
     /// #613 (T-289) — see [`crate::scope_ceiling`].
     scope_policy: crate::scope_ceiling::SharedScopePolicy,
+    /// SA-18 (N15) — see [`crate::roles_claim`]. Read only when the device
+    /// grant carries the `roles` scope.
+    role_source: crate::roles_claim::SharedRoleSource,
 }
 
 impl<DG, RT, UR> DeviceAuthorizationService<DG, RT, UR>
@@ -227,7 +230,17 @@ where
             refresh_token_lifetime_secs,
             verification_uri,
             scope_policy: crate::scope_ceiling::unwired(),
+            role_source: crate::roles_claim::unwired(),
         }
+    }
+
+    /// Install the role source for the `roles` claim (SA-18). Until one is
+    /// installed a device grant carrying the `roles` scope is refused with
+    /// `server_error`.
+    #[must_use]
+    pub fn with_role_source(mut self, source: crate::roles_claim::SharedRoleSource) -> Self {
+        self.role_source = source;
+        self
     }
 
     /// Install the tenant scope policy (#613). Until one is installed an
@@ -479,6 +492,16 @@ where
             return Err(refused());
         }
 
+        // SA-18 (N15) — the `roles` claim when the approved scopes carry it. Read
+        // before the refresh token is written, so a failed read mints nothing.
+        let roles = crate::roles_claim::roles_claim(
+            self.role_source.as_ref(),
+            tenant_id,
+            crate::roles_claim::RolesSubject::Principal(user.id),
+            &redeemed.scopes,
+        )
+        .await?;
+
         let refresh_token = axiam_auth::token::generate_refresh_token();
         let minted_hash = axiam_auth::token::hash_refresh_token(&refresh_token);
         self.refresh_token_repo
@@ -553,6 +576,7 @@ where
         )
         .aud(audience)
         .scopes(&redeemed.scopes)
+        .roles(roles)
         .cnf(client.cnf.clone())
         .client_id(Some(client.client_id()))
         .issue(&self.minting_config(issuer))

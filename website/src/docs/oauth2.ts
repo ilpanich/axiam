@@ -231,6 +231,11 @@ export const OAUTH2_PAGES: DocPage[] = [
           ],
           ["`aud`", "`axiam:user` or `axiam:m2m` — or, when the grant named an RFC 8707 `resource`, that resource's URI, which AXIAM's own endpoints refuse.", "Always on a current token."],
           ["`scope`", "Space-separated OAuth2 scopes.", "When non-empty scopes were granted."],
+          [
+            "`roles`",
+            "The names of the subject's global roles in the tenant (direct or through a group; resource-scoped assignments excluded), sorted. A snapshot taken at mint time, stale for at most one access-token lifetime — `require_access` stays the authoritative check. See [`docs/api/roles-claim.md`](https://github.com/ilpanich/axiam/blob/main/docs/api/roles-claim.md).",
+            "Only when the `roles` scope was granted — absent otherwise, never `[]`. Never in an ID token or UserInfo.",
+          ],
           ["`sub_kind`", "Whether the subject is a user, a service account or an OAuth2 client. Informational — it does not affect validation or authorization.", "Always."],
           [
             "`cnf`",

@@ -256,6 +256,14 @@ where
             .as_deref()
             .unwrap_or(axiam_auth::token::AUD_USER)
             .to_owned();
+        // SA-18 (N15) — the `roles` claim when the approved scopes carry it.
+        let roles = self
+            .roles_claim_for(
+                tenant_id,
+                crate::roles_claim::RolesSubject::Principal(user_id),
+                &redeemed.scopes,
+            )
+            .await?;
         let minting = self.minting_config(ctx.issuer.as_deref());
         let access_token = axiam_auth::token::AccessTokenSpec::user(
             user_id,
@@ -265,6 +273,7 @@ where
         )
         .aud(&audience)
         .scopes(&redeemed.scopes)
+        .roles(roles)
         .cnf(cnf)
         .ext(ext)
         .client_id(Some(&client.client_id))

@@ -5,9 +5,7 @@
 use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_access_token_for_client,
-    issue_client_credentials_token_for_resource, issue_id_token,
-    issue_service_account_client_credentials_token_enriched,
+    AccessTokenSpec, IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_id_token,
 };
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -769,6 +767,11 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     /// read only after a refresh-token replay has been refused. Defaults to
     /// the system default, `revoke_session`; see [`crate::refresh_reuse`].
     refresh_reuse_policy: crate::refresh_reuse::SharedRefreshReusePolicy,
+    /// SA-18 (N15) — where the subject's global role names are read for the
+    /// `roles` claim. Read only when a grant carries the `roles` scope; left
+    /// unwired, such a grant is refused with `server_error` rather than minted
+    /// with a claim nobody computed. See [`crate::roles_claim`].
+    role_source: crate::roles_claim::SharedRoleSource,
 }
 
 /// A well-formed current-scheme client-secret hash that no secret produces
@@ -884,7 +887,27 @@ where
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
             scope_policy: crate::scope_ceiling::unwired(),
             refresh_reuse_policy: crate::refresh_reuse::default_policy(),
+            role_source: crate::roles_claim::unwired(),
         }
+    }
+
+    /// Install the role source for the `roles` claim (SA-18). See the
+    /// `role_source` field.
+    #[must_use]
+    pub fn with_role_source(mut self, source: crate::roles_claim::SharedRoleSource) -> Self {
+        self.role_source = source;
+        self
+    }
+
+    /// The `roles` claim for a token granted `scopes` (SA-18): absent unless
+    /// `roles` is among them, and then read now for `subject`.
+    pub(crate) async fn roles_claim_for(
+        &self,
+        tenant_id: Uuid,
+        subject: crate::roles_claim::RolesSubject,
+        scopes: &[String],
+    ) -> Result<Option<Vec<String>>, OAuth2Error> {
+        crate::roles_claim::roles_claim(self.role_source.as_ref(), tenant_id, subject, scopes).await
     }
 
     /// The config every token minted for **this** request is signed under
@@ -2068,13 +2091,27 @@ where
         let tenant = self.live_tenant(tenant_id).await?;
         let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
 
-        if let Some(scope) = requested_scope.filter(|s| !s.trim().is_empty()) {
-            return Err(OAuth2Error::InvalidScope(format!(
-                "unregistered scopes: {} — a service account registers no scopes; \
-                 its authorization comes from the roles assigned to it",
-                scope.split_whitespace().collect::<Vec<_>>().join(", ")
-            )));
-        }
+        // SA-18 (N15) — a service account registers no scopes, so the one it
+        // may ask for is `roles`: a statement about its own assignments, which
+        // is all its authority already is. Every other scope is refused as it
+        // always was.
+        let scopes: Vec<String> = match requested_scope.filter(|s| !s.trim().is_empty()) {
+            None => Vec::new(),
+            Some(scope) => {
+                let invalid: Vec<&str> = scope
+                    .split_whitespace()
+                    .filter(|s| *s != crate::roles_claim::ROLES_SCOPE)
+                    .collect();
+                if !invalid.is_empty() {
+                    return Err(OAuth2Error::InvalidScope(format!(
+                        "unregistered scopes: {} — a service account registers no scopes; \
+                         its authorization comes from the roles assigned to it",
+                        invalid.join(", ")
+                    )));
+                }
+                vec![crate::roles_claim::ROLES_SCOPE.to_owned()]
+            }
+        };
 
         let t_token_mint = std::time::Instant::now();
         // X1 — the fourth issuance path, hooked like the other three.
@@ -2084,24 +2121,32 @@ where
                 &sa.id.to_string(),
                 "service_account",
                 &sa.client_id,
-                &[],
+                &scopes,
             )
             .await?;
-        let access_token = issue_service_account_client_credentials_token_enriched(
+        let roles = self
+            .roles_claim_for(
+                tenant_id,
+                crate::roles_claim::RolesSubject::Principal(sa.id),
+                &scopes,
+            )
+            .await?;
+        let access_token = AccessTokenSpec::service_account(
             sa.id,
             tenant_id,
             tenant.organization_id,
-            &[],
-            &self.minting_config(issuer),
-            ext,
-            // No binding on this grant: it authenticates by client secret, and
-            // a client whose registered posture wants certificate or DPoP
-            // binding is served by `certificate_binding_for` on the general
-            // client-credentials path. Stamping a `cnf` here from a
-            // certificate the client did not register against would bind a
-            // token nobody asked to have bound.
-            None,
+            uuid::Uuid::new_v4().to_string(),
         )
+        .scopes(&scopes)
+        .roles(roles)
+        .ext(ext)
+        // No binding on this grant: it authenticates by client secret, and
+        // a client whose registered posture wants certificate or DPoP
+        // binding is served by `certificate_binding_for` on the general
+        // client-credentials path. Stamping a `cnf` here from a
+        // certificate the client did not register against would bind a
+        // token nobody asked to have bound.
+        .issue(&self.minting_config(issuer))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
 
@@ -2117,7 +2162,7 @@ where
             token_type: "Bearer".to_string(),
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: None,
-            scope: None,
+            scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
             id_token: None,
         })
     }
@@ -2677,6 +2722,15 @@ where
             .as_deref()
             .unwrap_or(axiam_auth::token::AUD_USER)
             .to_owned();
+        // SA-18 (N15) — the `roles` claim, only when the code carries the
+        // `roles` scope; read now, so it reflects the assignments at mint time.
+        let roles = self
+            .roles_claim_for(
+                tenant_id,
+                crate::roles_claim::RolesSubject::Principal(auth_code.user_id),
+                &auth_code.scopes,
+            )
+            .await?;
         let access_token = axiam_auth::token::AccessTokenSpec::user(
             auth_code.user_id,
             tenant_id,
@@ -2685,6 +2739,7 @@ where
         )
         .aud(&audience)
         .scopes(&auth_code.scopes)
+        .roles(roles)
         .cnf(cnf)
         .ext(ext)
         .client_id(Some(client_id))
@@ -3042,16 +3097,21 @@ where
         // deployment today — mints `axiam:m2m`, byte for byte (I2).
         let resource =
             crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
-        let access_token = issue_client_credentials_token_for_resource(
-            client_id,
-            tenant_id,
-            tenant.organization_id,
-            &scopes,
-            &self.minting_config(ctx.issuer.as_deref()),
-            cnf,
-            ext,
-            resource.as_deref(),
-        )
+        // SA-18 (N15) — an OAuth2 client holds no roles: a granted `roles`
+        // scope yields `[]`, an absent one no claim.
+        let roles = self
+            .roles_claim_for(tenant_id, crate::roles_claim::RolesSubject::Client, &scopes)
+            .await?;
+        let spec = AccessTokenSpec::oauth2_client(client_id, tenant_id, tenant.organization_id)
+            .scopes(&scopes)
+            .cnf(cnf)
+            .ext(ext)
+            .roles(roles);
+        let access_token = match resource.as_deref() {
+            Some(aud) => spec.aud(aud),
+            None => spec,
+        }
+        .issue(&self.minting_config(ctx.issuer.as_deref()))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
 
@@ -3363,46 +3423,59 @@ where
             // access to consented claims at UserInfo fifteen minutes after the
             // consent was given, which the end user would experience as the
             // consent not having worked.
-            issue_access_token_for_client(
+            // SA-18 (N15) — recomputed at every rotation, never carried from
+            // the previous token: a role change shows in the next token.
+            let roles = self
+                .roles_claim_for(
+                    tenant_id,
+                    crate::roles_claim::RolesSubject::Principal(user_id),
+                    &scopes,
+                )
+                .await?;
+            AccessTokenSpec::user(
                 user_id,
                 tenant_id,
                 tenant.organization_id,
-                &scopes,
-                &self.minting_config(ctx.issuer.as_deref()),
                 uuid::Uuid::new_v4().to_string(),
-                // RFC 8707 — the SAME audience the grant was issued for.
-                // `None` for every grant that named no resource, which mints
-                // `axiam:user` exactly as this path always did (I2).
-                resource.as_deref().unwrap_or(axiam_auth::token::AUD_USER),
-                cnf,
-                ext,
-                Some(client_id),
-                // Rotation carries the session forward. A refreshed token that
-                // dropped `sid` would stop working at UserInfo the moment it
-                // replaced the one that did, which the end user would
-                // experience as the session silently ending mid-flow.
-                stored.session_id,
-                // And the claims request, for exactly the same reason (T-241).
-                // Empty for every grant that sent no `claims` parameter, and
-                // an empty list leaves this token byte-identical to what it
-                // was before §5.5.
-                &stored.requested_userinfo_claims,
             )
+            // RFC 8707 — the SAME audience the grant was issued for.
+            // `None` for every grant that named no resource, which mints
+            // `axiam:user` exactly as this path always did (I2).
+            .aud(resource.as_deref().unwrap_or(axiam_auth::token::AUD_USER))
+            .scopes(&scopes)
+            .roles(roles)
+            .cnf(cnf)
+            .ext(ext)
+            .client_id(Some(client_id))
+            // Rotation carries the session forward. A refreshed token that
+            // dropped `sid` would stop working at UserInfo the moment it
+            // replaced the one that did, which the end user would
+            // experience as the session silently ending mid-flow.
+            .session(stored.session_id)
+            // And the claims request, for exactly the same reason (T-241).
+            // Empty for every grant that sent no `claims` parameter, and
+            // an empty list leaves this token byte-identical to what it
+            // was before §5.5.
+            .requested_userinfo_claims(&stored.requested_userinfo_claims)
+            .issue(&self.minting_config(ctx.issuer.as_deref()))
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {
             // Client-credentials-originated refresh (shouldn't normally
-            // happen, but handle gracefully)
-            issue_client_credentials_token_for_resource(
-                client_id,
-                tenant_id,
-                tenant.organization_id,
-                &scopes,
-                &self.minting_config(ctx.issuer.as_deref()),
-                cnf,
-                ext,
-                // RFC 8707 — carried across the rotation on this branch too.
-                resource.as_deref(),
-            )
+            // happen, but handle gracefully). SA-18: a client holds no roles.
+            let roles = self
+                .roles_claim_for(tenant_id, crate::roles_claim::RolesSubject::Client, &scopes)
+                .await?;
+            let spec = AccessTokenSpec::oauth2_client(client_id, tenant_id, tenant.organization_id)
+                .scopes(&scopes)
+                .roles(roles)
+                .cnf(cnf)
+                .ext(ext);
+            // RFC 8707 — carried across the rotation on this branch too.
+            match resource.as_deref() {
+                Some(aud) => spec.aud(aud),
+                None => spec,
+            }
+            .issue(&self.minting_config(ctx.issuer.as_deref()))
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         };
 

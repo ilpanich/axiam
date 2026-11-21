@@ -34,6 +34,7 @@ pub use token::provider_id_token;
 pub mod redirect_uri;
 pub mod refresh_reuse;
 pub mod resource;
+pub mod roles_claim;
 pub mod scope_ceiling;
 pub mod sensitive;
 pub mod ssf;

@@ -1055,6 +1055,44 @@ Instructions:
 
 ### SA-18 — `roles` scope and claim (N15, D-1)
 
+> **EXECUTED (2026-11-21, Opus 5.5). N15: reproduced.** With the code unfixed,
+> a client allowed `roles` that asked for `openid roles` received a token whose
+> `scope` was `"openid roles"` and which had no `roles` claim at all: no role
+> information was ever emitted, so `scope` was the only thing an SDK could read.
+> The server now has a `roles` scope (`crates/axiam-oauth2/src/roles_claim.rs`)
+> and `AccessTokenClaims.roles: Option<Vec<String>>` (skipped when `None`, so a
+> token without the scope is byte-identical to before). It is set by the
+> authorization-code, refresh (recomputed at each rotation), client-credentials,
+> service-account client-credentials, device, CIBA, native sign-in and token
+> exchange grants (the exchange recomputes it only when `roles` survives
+> narrowing, on both the same-domain and external paths). Contents: the names of
+> assignments **with no resource**, direct or through a group, reaching the
+> token's tenant, sorted and de-duplicated; an OAuth2-client subject gets `[]`
+> without a read; a failed read, or a service left without a wired role source,
+> is `server_error`, never `[]`. ID tokens and UserInfo never carry it. The scope
+> and claim are listed in `scopes_supported` / `claims_supported`;
+> `docs/api/roles-claim.md` states that the claim is a snapshot stale for at
+> most one access-token lifetime and that `require_access` remains
+> authoritative. Tests: `crates/axiam-api-rest/tests/oauth2_roles_claim_test.rs`
+> (9; 6 failed before, 9 pass after), plus the oauth2/auth lib suites and the
+> REST oauth2, exchange, device, CIBA, service-account, auth and suspension
+> suites. No OpenAPI-visible type changed; no config key added.
+>
+> **Implementation decisions within the plan:** (1) a service account registers
+> no scopes, so to make rule 3 reachable its client-credentials grant now
+> accepts `scope=roles` and nothing else (any other scope is still
+> `invalid_scope`), and the response then carries `scope: "roles"`; without a
+> scope the behaviour is unchanged. (2) "Global role" is read as an assignment
+> with no resource, so an `is_global` role assigned on a resource is excluded
+> (fail-closed). (3) A token exchange that keeps `roles` for a user or
+> service-account subject whose `sub` is not a UUID is refused `invalid_grant`.
+> Not in scope and not changed: introspection responses, RPTs, mTLS
+> device-login tokens and the non-OAuth2 login tokens.
+>
+> **Upgrade notes (SA-50):** a client that already registered an application
+> scope literally named `roles` now receives the claim when it asks for it.
+> Service accounts may now send `scope=roles`.
+
 - **Model:** Opus 5.5. New token content, touched by every grant.
 - **Depends on:** SA-03.
 - **Files:** `crates/axiam-oauth2` (scope handling, token minting for every

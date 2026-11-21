@@ -2008,6 +2008,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         let now = Utc::now().timestamp();
         let claims = AccessTokenClaims {
             axiam_requested_claims: None,
+            roles: None,
             sub: Uuid::new_v4().to_string(),
             tenant_id: Uuid::new_v4().to_string(),
             org_id: Uuid::new_v4().to_string(),
@@ -2231,6 +2232,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
         let now = Utc::now().timestamp();
         ValidatedClaims(AccessTokenClaims {
             axiam_requested_claims: None,
+            roles: None,
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
             org_id: org_id.to_string(),

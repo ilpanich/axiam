@@ -622,3 +622,189 @@ async fn a_suspended_tenants_request_is_denied_tenant_suspended() {
         other => panic!("expected Publish(Allow), got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// SA-15 (N2): the response is bound to its tenant and request, and signed
+// ---------------------------------------------------------------------------
+
+/// The canonical signed form of an `AuthzResponse`, written out independently
+/// of the server type so the test pins the field set and order: the JSON
+/// object in exactly this order, `reason` and `reason_code` omitted when
+/// absent, `hmac_signature` absent.
+#[derive(serde::Serialize)]
+struct CanonicalResponse<'a> {
+    correlation_id: Uuid,
+    allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_code: Option<&'a str>,
+    tenant_id: Uuid,
+    nonce: Uuid,
+}
+
+/// Assert `payload` is a response for `tenant_id`, bound to the request's
+/// `correlation_id` and `nonce`, whose `hmac_signature` verifies under that
+/// tenant's subkey over the canonical form — and under no other tenant's.
+fn assert_signed_for(payload: &[u8], tenant_id: Uuid, correlation_id: Uuid, nonce: Uuid) {
+    let v: serde_json::Value = serde_json::from_slice(payload).unwrap();
+    assert_eq!(
+        v["tenant_id"],
+        tenant_id.to_string(),
+        "the response names its tenant: {v}"
+    );
+    assert_eq!(
+        v["correlation_id"],
+        correlation_id.to_string(),
+        "the response carries the request's correlation_id: {v}"
+    );
+    assert_eq!(
+        v["nonce"],
+        nonce.to_string(),
+        "the response echoes the request nonce: {v}"
+    );
+    let signature = v["hmac_signature"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the response is signed: {v}"));
+    let canonical = serde_json::to_vec(&CanonicalResponse {
+        correlation_id,
+        allowed: v["allowed"].as_bool().unwrap(),
+        reason: v["reason"].as_str(),
+        reason_code: v["reason_code"].as_str(),
+        tenant_id,
+        nonce,
+    })
+    .unwrap();
+    assert!(
+        axiam_amqp::messages::verify_tenant_signature(
+            MASTER,
+            tenant_id,
+            CURRENT_KEY_VERSION,
+            &canonical,
+            Some(signature),
+        ),
+        "the signature verifies under the tenant subkey over the canonical form: {v}"
+    );
+    assert!(
+        !axiam_amqp::messages::verify_tenant_signature(
+            MASTER,
+            Uuid::new_v4(),
+            CURRENT_KEY_VERSION,
+            &canonical,
+            Some(signature),
+        ),
+        "another tenant's subkey does not verify it"
+    );
+}
+
+/// N2 (report, Validation plan → Local): run `process_authz_request` for two
+/// dummy tenants. Each serialized response must name its tenant, echo the
+/// request nonce and carry an `hmac_signature` made with that tenant's
+/// subkey; before SA-15 both carried only correlation_id/allowed/reason.
+#[tokio::test]
+async fn n2_responses_for_two_tenants_are_tenant_bound_and_signed() {
+    for granted in [true, false] {
+        let mut seen = Vec::new();
+        for _tenant in 0..2 {
+            // One in-memory database per tenant: the seed uses fixed slugs.
+            let db = setup_db().await;
+            let (tenant_id, user_id) = seed_tenant_user(&db).await;
+            let resource_id = if granted {
+                grant(&db, tenant_id, user_id, "read").await
+            } else {
+                Uuid::new_v4()
+            };
+            let engine = make_engine(&db);
+            let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+            let now = Utc::now();
+            let nonce = Uuid::new_v4();
+            let raw = signed_request(
+                tenant_id,
+                user_id,
+                resource_id,
+                "read",
+                CURRENT_KEY_VERSION,
+                now,
+                nonce,
+            );
+            let correlation_id: Uuid =
+                serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["correlation_id"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+
+            let outcome = process_authz_request(
+                &raw,
+                &engine,
+                MASTER,
+                &nonce_repo,
+                &tenants(&db),
+                skew(),
+                now,
+            )
+            .await;
+            let AuthzOutcome::Publish(payload) = outcome else {
+                panic!("expected Publish, got {outcome:?}");
+            };
+            assert_eq!(allowed_field(&payload), granted);
+            assert_signed_for(&payload, tenant_id, correlation_id, nonce);
+            seen.push(tenant_id);
+        }
+        assert_ne!(seen[0], seen[1], "two distinct tenants were exercised");
+    }
+}
+
+/// N2: the SA-13 tenant-suspended denial is a published response too, and is
+/// signed and bound exactly like an engine decision.
+#[tokio::test]
+async fn n2_the_tenant_suspended_denial_is_signed() {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let db = setup_db().await;
+    let (tenant_id, user_id) = seed_tenant_user(&db).await;
+    let engine = make_engine(&db);
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    tenants(&db)
+        .update(
+            tenant_id,
+            UpdateTenant {
+                status: Some(TenantStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let nonce = Uuid::new_v4();
+    let raw = signed_request(
+        tenant_id,
+        user_id,
+        Uuid::new_v4(),
+        "read",
+        CURRENT_KEY_VERSION,
+        now,
+        nonce,
+    );
+    let correlation_id: Uuid =
+        serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["correlation_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
+    let AuthzOutcome::Publish(payload) = outcome else {
+        panic!("expected Publish, got {outcome:?}");
+    };
+    assert!(!allowed_field(&payload));
+    assert_signed_for(&payload, tenant_id, correlation_id, nonce);
+}

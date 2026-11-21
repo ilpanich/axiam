@@ -95,7 +95,12 @@ channels:
     description: >-
       Outbound authorization decision responses (queue: `axiam.authz.response`,
       durable). No DLQ — this is a response queue, not subject to poison-message
-      dead-lettering.
+      dead-lettering. SA-15 (N2): a request whose AMQP `reply_to` property
+      names a queue is answered on that queue instead (default exchange,
+      routing key = `reply_to`); this shared queue receives only the answers
+      to requests that name none. Every response is signed with the
+      requester's tenant subkey and bound to the request's `nonce`, so a
+      requester trusts the signature, not the route.
     bindings:
       amqp:
         is: queue
@@ -482,8 +487,9 @@ components:
       name: AuthzResponse
       title: Authorization decision response
       summary: >-
-        Authorization decision published to `axiam.authz.response`
-        (source: crates/axiam-amqp/src/messages.rs L148-153).
+        Authorization decision published to the request's AMQP `reply_to`
+        queue, or to `axiam.authz.response` when the request names none
+        (source: crates/axiam-amqp/src/messages.rs, `AuthzResponse`).
       contentType: application/json
       payload:
         $ref: '#/components/schemas/AuthzResponse'
@@ -685,9 +691,24 @@ components:
 
     AuthzResponse:
       type: object
+      description: >-
+        SA-15 (N2): HMAC-SHA256-signed by the server with the same per-tenant
+        subkey as the request it answers (HKDF over the master key, the
+        request's `tenant_id` and `key_version`). The canonical form is the
+        JSON object with `hmac_signature` absent and the fields in this order:
+        correlation_id, allowed, reason?, reason_code?, tenant_id, nonce
+        (optional members omitted when absent). A requester verifies the
+        signature with its own tenant's subkey at the `key_version` it sent and
+        accepts the response only when `tenant_id`, `correlation_id` and
+        `nonce` match a request it still has outstanding. `tenant_id`, `nonce`
+        and `hmac_signature` are additive; `allowed`, `reason` and
+        `reason_code` keep their meaning.
       required:
         - correlation_id
         - allowed
+        - tenant_id
+        - nonce
+        - hmac_signature
       properties:
         correlation_id:
           type: string
@@ -697,6 +718,26 @@ components:
         reason:
           type: string
           nullable: true
+        reason_code:
+          type: string
+          nullable: true
+          description: >-
+            Machine-readable decision reason: `allowed`, `no_grant`,
+            `denied_by_rule` or `tenant_suspended`; absent on an internal
+            error.
+        tenant_id:
+          type: string
+          format: uuid
+          description: The tenant of the request this answers.
+        nonce:
+          type: string
+          format: uuid
+          description: The `nonce` of the request this answers, echoed.
+        hmac_signature:
+          type: string
+          description: >-
+            HMAC-SHA256 hex digest of the canonical form under the
+            requester's tenant subkey.
 
     AuditEventMessage:
       type: object

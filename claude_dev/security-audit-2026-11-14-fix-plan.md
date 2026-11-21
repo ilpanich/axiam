@@ -957,6 +957,39 @@ subscription.
 
 ### SA-15 — Signed, per-producer authz responses (N2)
 
+> **EXECUTED (2026-11-21, Opus 5.5). N2: reproduced.** On the unfixed code
+> `process_authz_request` answered two tenants with responses carrying only
+> `correlation_id`, `allowed`, `reason` and `reason_code` — no tenant, no nonce,
+> no signature — and the consumer always published to the shared
+> `axiam.authz.response` queue, ignoring `reply_to`. The fix is additive:
+> `AuthzResponse` gains `tenant_id`, the request `nonce` and `hmac_signature`
+> (HMAC-SHA256 with the request's tenant subkey at the request's
+> `key_version`, via the existing `derive_tenant_key`) over the canonical form:
+> compact JSON without `hmac_signature`, members in the order
+> `correlation_id, allowed, reason?, reason_code?, tenant_id, nonce`, optional
+> members omitted when absent. Every response path (allow/deny, engine error,
+> `tenant_suspended`, tenant-read error) is signed. A non-empty AMQP
+> `reply_to` routes the response there on the default exchange; otherwise it
+> goes to the shared queue as before (`response_routing_key`). The response
+> carries no `key_version`; the requester verifies with the one it sent.
+>
+> Tests: `n2_responses_for_two_tenants_are_tenant_bound_and_signed` and
+> `n2_the_tenant_suspended_denial_is_signed` failed before (no `tenant_id`) and
+> pass after; `authz_response_routing_test` (2) did not compile before (no
+> routing seam) and passes after; `authz_response_vectors` pins the subkey and
+> three vectors (allow, deny `no_grant`, deny `denied_by_rule`) byte for byte,
+> answering the existing `AuthzRequest` vector, cross-checked by an independent
+> Python HKDF/HMAC computation. Regression: `axiam-amqp` all green (lib 210,
+> `authz_consumer_test` 13, v2 reference vectors 2). fmt, all Architecture
+> Invariants checks and workspace clippy clean. AsyncAPI documents the new
+> fields, routing and canonical form (and the already-sent `reason_code`).
+> CONTRACT §8 text and vectors are handed to SA-17.
+>
+> **Upgrade notes (SA-50):** additive on the wire; existing consumers that
+> ignore unknown fields are unaffected. SDKs gain response verification in
+> Wave 3 (D-9). A requester that sets `reply_to` now receives its response on
+> that queue instead of the shared one.
+
 - **Model:** Opus 5.5. Changes CONTRACT §8.
 - **Files:** `crates/axiam-amqp/src/authz_consumer.rs` (304),
   `crates/axiam-amqp/src/messages.rs` (202), `sdks/CONTRACT.md` §8.

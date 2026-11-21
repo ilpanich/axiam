@@ -78,6 +78,11 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "/etc/axiam/amqp/client.key",
           ],
           [
+            "AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE",
+            "Whether the server-internal queues — transactional mail, webhooks, SSF push, outbound SCIM and CIBA ping, and their retry queues — refuse a message without the signed envelope AXIAM now puts on them (default `true`). Set `false` for **one** rolling-upgrade deployment only, or to replay a pre-upgrade dead-lettered message: unsigned, old-shape messages are then accepted (each logged as a warning), while everything is still signed on publish and an envelope that fails to verify is refused either way. Remove it once no old replica is left and the retry queues have turned over. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#the-server-internal-queues-are-signed-too-sa-14).",
+            "false",
+          ],
+          [
             "AXIAM__SERVER__HOST",
             "REST bind address (default 127.0.0.1). Set 0.0.0.0 in a container.",
             "0.0.0.0",

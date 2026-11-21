@@ -219,8 +219,11 @@ What each bench needs, read off `benchmarks/sdk/<lang>/run.sh` and the SDK manif
 The script installs each at the version pinned in `versions.env` (Rust via rustup, Node via
 NodeSource, Go from go.dev or, when go.dev fails, from the Go module proxy verified against
 sum.golang.org, .NET via `dotnet-install.sh` into `/opt/dotnet`, Swift via
-`swiftly`; JDK 21, Maven, PHP 8.3, Composer, CMake and the C/C++ libraries from Ubuntu) and
-writes one marked PATH block into `~/.bashrc`. It installs them in that order and **stops
+`swiftly`; Maven at the Java SDK's own pinned 3.9.16, checksum-verified, not Ubuntu's 3.8.7;
+JDK 21, PHP 8.3, Composer, CMake and the C/C++ libraries from Ubuntu). `go`, `dotnet` and `mvn`
+are linked into `/usr/local/bin`, so every shell finds them; `cargo` and `swift` come from one
+marked PATH block in `~/.bashrc` (`exec bash -l` once). `04-verify.sh` checks the shell's real
+`PATH`, which is the one the SDK benches see. It installs them in that order and **stops
 at the first step that fails**, printing `STOPPED … at line N` with the failing command; Go,
 .NET and Swift come last, so if `04-verify.sh` finds all three missing, the script stopped at
 Go. Its full output is in `~/bench/logs/02-sdk-toolchains.log`; re-running it skips what is

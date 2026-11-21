@@ -20,7 +20,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/_lib.sh"
 # shellcheck source=versions.env
 source "$HERE/versions.env"
-bench_path
+# No bench_path here, deliberately: the benches see the PATH of the shell that
+# runs `just`, so this checks that PATH. (It used to add the toolchain
+# directories first, and passed while the Go bench, run from a shell without
+# them, reported its toolchain missing.) Go, .NET, Maven, k6 and just live in
+# /usr/local/bin; cargo and swift come from ~/.bashrc — `exec bash -l` once
+# after 02-sdk-toolchains.sh.
 
 mkdir -p "$BENCH_DIR/logs"
 REPORT="$BENCH_DIR/logs/verify.txt"
@@ -42,7 +47,7 @@ at_least() {
 }
 # exactly NAME FOUND WANT
 exactly() {
-    if [[ "$2" == "$3" ]]; then row PASS "$1" "$2"; else row FAIL "$1" "${2:-not found} (versions.env pins $3)"; fi
+    if [[ "$2" == "$3" ]]; then row PASS "$1" "$2"; else row FAIL "$1" "${2:-not on PATH} (versions.env pins $3)"; fi
 }
 first_version() { grep -oE '[0-9]+(\.[0-9]+)+' | head -1; }
 
@@ -86,7 +91,7 @@ nv="$(node --version 2>/dev/null | first_version)"
 at_least "python3" "$(python3 --version 2>/dev/null | first_version)" 3.11
 jv="$(java -version 2>&1 | sed -n 's/.*version "\([^"]*\)".*/\1/p' | head -1)"
 [[ "${jv%%.*}" == 21 ]] && row PASS "java" "$jv" || row FAIL "java" "${jv:-not found} (the Java SDK compiles with release 21)"
-at_least "maven" "$(mvn -v 2>/dev/null | first_version)" 3.6
+exactly "maven" "$(mvn -v 2>/dev/null | grep -m1 'Apache Maven' | first_version)" "$MAVEN_VERSION"
 at_least "php" "$(php -r 'echo PHP_VERSION;' 2>/dev/null)" 8.2
 for ext in sodium sockets; do
     php -m 2>/dev/null | grep -qix "$ext" && row PASS "php ext-$ext" "" || row FAIL "php ext-$ext" "missing"
@@ -104,7 +109,11 @@ command -v go >/dev/null 2>&1 || missing+=(go)
 [[ -n "$dn" ]] || missing+=(.NET)
 command -v swift >/dev/null 2>&1 || missing+=(swift)
 if (( ${#missing[@]} )); then
-    row WARN "why: ${missing[*]}" "02-sdk-toolchains.sh stopped before it installed ${missing[0]}; re-run it and read its last lines (~/bench/logs/02-sdk-toolchains.log)"
+    if grep -q 'SDK toolchains installed' "$BENCH_DIR/logs/02-sdk-toolchains.log" 2>/dev/null; then
+        row WARN "why: ${missing[*]}" "02-sdk-toolchains.sh completed, so this shell's PATH lacks them: re-run 02 (it links go and dotnet into /usr/local/bin), then exec bash -l (swift)"
+    else
+        row WARN "why: ${missing[*]}" "02-sdk-toolchains.sh stopped before it installed ${missing[0]}; re-run it and read its last lines (~/bench/logs/02-sdk-toolchains.log)"
+    fi
 fi
 at_least "cmake" "$(cmake --version 2>/dev/null | first_version)" 3.16
 for t in cc c++ pkg-config; do command -v "$t" >/dev/null 2>&1 && row PASS "$t" "" || row FAIL "$t" "not found"; done

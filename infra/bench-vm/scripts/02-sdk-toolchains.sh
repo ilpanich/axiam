@@ -8,7 +8,8 @@
 #   rust        Rust (RUST_VERSION) via rustup          REST feature only, no protoc
 #   typescript  Node NODE_MAJOR.x via NodeSource        engines: node >= 22
 #   python      Python 3.12 (Ubuntu) + venv             requires-python >= 3.11
-#   java        OpenJDK 21 + Maven (Ubuntu)             maven.compiler.release 21
+#   java        OpenJDK 21 (Ubuntu) + Maven MAVEN_VERSION maven.compiler.release 21;
+#               (the SDK's own wrapper pin, not Ubuntu's 3.8.7)
 #   kotlin      the same JDK; Gradle via the wrapper
 #   csharp      .NET SDK DOTNET_CHANNEL via dotnet-install.sh   net10.0
 #   php         PHP 8.3 + sodium/sockets + Composer     php >= 8.2, ext-sodium
@@ -33,9 +34,9 @@ $SUDO apt-get update -q
 # ---------------------------------------------------------------------------
 # Distribution packages: C/C++, Java, PHP, Python venv, Swift's runtime deps
 # ---------------------------------------------------------------------------
-say "Distribution packages (C/C++, JDK 21, Maven, PHP 8.3, Composer, Swift's dependencies)"
+say "Distribution packages (C/C++, JDK 21, PHP 8.3, Composer, Swift's dependencies)"
 apt_install build-essential cmake pkg-config libcurl4-openssl-dev libssl-dev \
-            openjdk-21-jdk-headless maven \
+            openjdk-21-jdk-headless \
             php8.3-cli php8.3-curl php8.3-mbstring php8.3-xml composer \
             python3-venv libicu74 \
             binutils gnupg2 libc6-dev libedit2 libgcc-13-dev libncurses-dev libpython3-dev \
@@ -44,6 +45,28 @@ for ext in sodium sockets curl; do
     php -m | grep -qix "$ext" || die "PHP extension $ext is missing (php -m). The PHP SDK needs sodium; its bench loads sockets."
 done
 ok "distribution packages"
+
+# ---------------------------------------------------------------------------
+# Maven, the Java SDK's own pinned version (versions.env), checksum-verified
+# ---------------------------------------------------------------------------
+if dpkg -s maven >/dev/null 2>&1; then
+    say "Removing Ubuntu's Maven $(dpkg-query -W -f='${Version}' maven) (the Java SDK builds with $MAVEN_VERSION)"
+    $SUDO apt-get remove -y -q maven
+fi
+if [[ "$(/opt/apache-maven-${MAVEN_VERSION}/bin/mvn -v 2>/dev/null | grep -m1 -oE 'Apache Maven [0-9.]+')" != "Apache Maven ${MAVEN_VERSION}" ]]; then
+    say "Installing Apache Maven $MAVEN_VERSION into /opt"
+    tmp="$(mktemp -d)"
+    curl --fail --location --silent --show-error --retry 3 -o "$tmp/maven.zip" \
+        "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.zip"
+    echo "${MAVEN_SHA256}  $tmp/maven.zip" | sha256sum --check --quiet \
+        || die "apache-maven-${MAVEN_VERSION}: the download does not match the SHA-256 pinned in versions.env."
+    $SUDO rm -rf "/opt/apache-maven-${MAVEN_VERSION}"
+    $SUDO unzip -q "$tmp/maven.zip" -d /opt
+    rm -rf "$tmp"
+fi
+$SUDO ln -sf "/opt/apache-maven-${MAVEN_VERSION}/bin/mvn" /usr/local/bin/mvn
+hash -r
+ok "$(mvn -v 2>/dev/null | grep -m1 'Apache Maven')"
 
 # ---------------------------------------------------------------------------
 # Rust
@@ -104,6 +127,10 @@ if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
     fi
     rm -rf "$tmp"
 fi
+# Linked into /usr/local/bin, which every shell has on PATH: a bench must not
+# depend on whether the shell that runs `just` read ~/.bashrc.
+$SUDO ln -sf /usr/local/go/bin/go /usr/local/bin/go
+$SUDO ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 ok "$(/usr/local/go/bin/go version)"
 
 # ---------------------------------------------------------------------------
@@ -116,6 +143,8 @@ if ! /opt/dotnet/dotnet --list-sdks 2>/dev/null | grep -q "^${DOTNET_CHANNEL}\."
     $SUDO bash "$tmp/dotnet-install.sh" --channel "$DOTNET_CHANNEL" --install-dir /opt/dotnet
     rm -rf "$tmp"
 fi
+# The dotnet host follows the link to find its root, so /usr/local/bin is enough.
+$SUDO ln -sf /opt/dotnet/dotnet /usr/local/bin/dotnet
 ok ".NET SDK $(/opt/dotnet/dotnet --list-sdks | awk '{print $1}' | tail -1)"
 
 # ---------------------------------------------------------------------------

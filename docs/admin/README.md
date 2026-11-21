@@ -51,25 +51,15 @@ it — at any depth of the resource hierarchy, and at equal specificity. See
 
 ## First-run admin bootstrap
 
-On a fresh tenant with zero admins, `POST /api/v1/admin/bootstrap` creates the
-first super-admin user and seeds the default permission set and roles. The
-endpoint is fail-closed (SECHRD-04): it is refused unless **one** of two
-mandatory gates is satisfied — no admin can ever be created "unconditionally".
+On a fresh deployment with zero admins, `POST /api/v1/admin/bootstrap` creates
+the first super-admin user and seeds the default permission set and roles. The
+endpoint is fail-closed (SECHRD-04): it is **always** refused unless the request
+carries the valid, unconsumed one-time setup token — no admin can ever be
+created without it, and no environment variable replaces it.
 
-**Gate 1 — `AXIAM_BOOTSTRAP_ADMIN_EMAIL` env var.** If this environment
-variable is set on the `axiam-server` process, the bootstrap request's
-`email` field must match it exactly, or the request is rejected with `403`.
-This is a deploy-time env var — it is **not** part of the
-[deployment guide's required-secrets table](../deployment/README.md#required-secrets--environment)
-(`k8s/server/secret.yml`), since it is optional and low-sensitivity; add it
-to your `axiam-server` container's environment (e.g. a ConfigMap or a
-deployment-manifest override) if you want to lock first-run bootstrap to a
-known email address ahead of time.
-
-**Gate 2 — one-time setup token (fallback).** If `AXIAM_BOOTSTRAP_ADMIN_EMAIL`
-is not set, `axiam-server` mints a single-use setup token on first boot
-(only when no admin has ever been bootstrapped) and logs it once at `info`
-level:
+**The one-time setup token (always required).** On first boot (only when no
+admin has ever been bootstrapped) `axiam-server` mints a single-use setup token
+and logs it once at `info` level, as a `setup_token` field on this line:
 
 ```
 AXIAM first-run bootstrap setup token minted. Use this token ONCE to
@@ -79,11 +69,34 @@ field) ...
 
 Capture that token from the server logs and pass it in the bootstrap
 request's `setup_token` field. It is consumed atomically on first successful
-use — a replay of the same token is rejected.
+use — a replay of the same token is rejected. Only its hash is stored.
 
-If **neither** gate is satisfied (env var unset AND no/invalid/already-used
-setup token), bootstrap is refused with `403` — an unset gate never allows
-an arbitrary caller to create the first admin.
+How to retrieve it:
+
+- **Docker Compose:** `docker compose logs axiam-server` (or
+  `docker logs <container>`). The repository's `scripts/first-boot-token.sh
+  [container]` extracts it and is what `scripts/e2e-bootstrap.sh` uses.
+- **Kubernetes:** `kubectl -n axiam logs deploy/axiam-server | scripts/first-boot-token.sh -`
+  (add `--previous` if the pod has restarted).
+
+**First-boot logs are secret until bootstrap completes.** Anyone who can read
+that log line can create the first super-admin, so restrict log access
+accordingly, and do not ship first-boot logs to a shared aggregator before
+bootstrap has run. Once the token is consumed it is worthless.
+
+**Optional additional restriction — `AXIAM_BOOTSTRAP_ADMIN_EMAIL`.** If this
+environment variable is set (and non-empty) on the `axiam-server` process, the
+bootstrap request's `email` field must **also** match it exactly, or the request
+is rejected with `403`. It narrows who may bootstrap; it is **not** a
+credential and never substitutes for the setup token — an address is not
+secret. It is a deploy-time env var and is not part of the
+[deployment guide's required-secrets table](../deployment/README.md#required-secrets--environment).
+
+If the token is missing, invalid, unknown or already consumed, or the email
+restriction is set and does not match, bootstrap is refused with `403`. The
+token is checked first, and every one of these refusals carries the same
+reason text, so a caller without the token can learn neither whether the email
+restriction is set nor whether a guessed address is the configured one.
 
 ### I lost the setup token
 
@@ -134,7 +147,7 @@ POST /api/v1/admin/bootstrap
   "email": "admin@example.com",
   "username": "admin",
   "password": "<strong password>",
-  "setup_token": "<only if AXIAM_BOOTSTRAP_ADMIN_EMAIL is unset>"
+  "setup_token": "<the one-time token from the first-boot log; always required>"
 }
 ```
 
@@ -146,9 +159,12 @@ the tenant's first admin against them).
 
 On success (`201`), no token is issued — log in via `POST
 /api/v1/auth/login` with the new admin's credentials to obtain a session.
-Bootstrapping the same tenant again always returns `409 Conflict` (at most
-one super-admin can ever be created per tenant via this endpoint, even under
-concurrent first-run requests).
+A later bootstrap call is refused `403` by the gate, because the first one
+consumed the setup token; `409 Conflict` is answered only to the loser of two
+requests racing with the same still-unconsumed token. Either way at most one
+super-admin can ever be created via this endpoint, even under concurrent
+first-run requests. To find out whether a deployment is bootstrapped, sign in
+as the admin (as `scripts/e2e-bootstrap.sh` and `benchmarks/runner/seed.sh` do).
 
 ## Creating an organization and tenant
 
@@ -237,6 +253,50 @@ twice — once as the receipt inside the tenant, and once as a
 /api/v1/audit-logs/system`), which survives the tenant and names the receipt
 that authorised it. It cannot prove you kept the file. Streaming the export to
 `/dev/null` is possible and is exactly as deliberate an act as it looks.
+
+#### Who reads the system audit log
+
+The system audit log is the deployment-wide partition of entries that belong
+to no tenant: requests the server could not attribute to one (a SCIM
+provisioning call, a request with a refused or expired token, unauthenticated
+OAuth2 and SAML traffic), and the `tenants.deleted` / `tenants.purged` records
+of deleted tenants. Since SA-02 (security audit 2026-11-14, N1) it is read
+**per organization**:
+
+- `GET /api/v1/audit-logs/system` requires `audit_logs:list_system` **and** a
+  caller whose own record lives in the organization's scope tenant and whose
+  roles are not restricted to particular tenants of it (see
+  [organization scope](organization-scope.md#restricting-an-organization-user-to-some-tenants)).
+  A tenant administrator, and an organization account whose role assignments
+  name a `tenant_scope`, are refused `403` whatever their roles hold; the admin
+  console does not draw the System tab for either.
+- It returns only the entries whose recorded `organization_id` is the
+  caller's organization. The server records it on a new entry only when it can
+  resolve it with certainty: the deleted tenant's organization for
+  `tenants.deleted` and `tenants.purged`; the provisioning token's tenant for a
+  SCIM call; an organization (`/api/v1/organizations/{org_id}/…`) or tenant
+  (`/saml/v2/{tenant_id}/…`, `/t/{tenant_id}/…`) the request's path names and
+  that exists. An entry whose organization cannot be resolved — a request that
+  names none (`/oauth2/token?tenant_id=…`, `/api/v1/users` without a token), one
+  naming an organization or tenant that does not exist, an orphaned tenant's
+  purge — records none and is returned to **nobody** through this endpoint.
+- The organization of a request entry is looked up **after** the response has
+  been sent, by the audit writer, never while the client waits (review SR4-3):
+  how long a response takes says nothing about whether the organization or
+  tenant its path names exists. An entry the writer could not take at all (its
+  queue full, so the entry went straight to the dead-letter file) is recorded
+  before that lookup and carries no organization; replayed, it is returned to
+  nobody.
+- The lookup is bounded: at most 128 datastore reads run at once, and the
+  writer waits at most 5 seconds for each answer. An entry served while all 128
+  are in flight (one already in the writer's memory still records its
+  organization), or whose lookup did not answer within 5 seconds, records no
+  organization and is returned to nobody. Under load, then, an entry missing
+  from this endpoint does not prove that no such request arrived.
+- Entries written **before** this change record no organization, so they are
+  no longer returned by this endpoint. They are not modified or deleted (the
+  audit log is append-only; nothing is backfilled) and stay in the datastore
+  until the retention sweep removes them.
 
 The admin UI does this for you: confirming **Delete Tenant** downloads the
 trail to your browser and then deletes.

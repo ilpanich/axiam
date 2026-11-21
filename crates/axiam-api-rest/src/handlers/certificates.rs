@@ -637,6 +637,7 @@ async fn audit_pending_vault_revocation<C: Connection + Clone>(
                 "certificate_id": id,
                 "reason": axiam_pki::vault_forward::sanitise_reason(&reason),
             })),
+            organization_id: None,
         })
         .await
     {

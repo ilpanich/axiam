@@ -123,6 +123,7 @@ async fn a_request_to_a_federation_route_is_audited_and_keyed_on_its_principal()
         scim_token_resolver: Arc::new(SurrealScimTokenResolver::new(
             SurrealScimTokenRepository::new(db.clone()),
             SurrealUserRepository::new(db.clone()),
+            SurrealTenantRepository::new(db.clone()),
         )),
         app_state: AppState::for_test(db.clone(), auth.clone()),
         rate_limit: RateLimitConfig {

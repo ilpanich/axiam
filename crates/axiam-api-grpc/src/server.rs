@@ -68,6 +68,7 @@ use crate::middleware::rate_limit::{
     GrpcSharedRateLimitLayer, build_grpc_method_scoped_governor_layer,
 };
 use crate::middleware::strict_revocation::{GrpcStrictRevocationLayer, SessionRevocationCheck};
+use crate::middleware::tenant_admission::GrpcTenantAdmissionLayer;
 use crate::proto::authorization_service_server::AuthorizationServiceServer;
 use crate::proto::reactor_admin_service_server::ReactorAdminServiceServer;
 use crate::proto::token_service_server::TokenServiceServer;
@@ -260,6 +261,14 @@ pub async fn start_grpc_server<R, P, Res, S, G, U, C, Rr, A>(
     // attacker used. `axiam_auth::lockout::SettingsLockoutPolicy` is that
     // resolver; `StaticLockoutPolicy` is the deployment-default fallback.
     lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
+    // SA-12 (N4, D-2) — `UserService`'s own `AuthorizationEngine`: `GetUser`
+    // of another user requires `users:get`, `ValidateCredentials` requires a
+    // service account holding `users:validate_credentials`. A third instance
+    // for the reason `reactor_engine` is a second (the type is not `Clone`);
+    // MUST be built like the other two (same repositories, decision cache and
+    // invalidation broadcaster). `ValidateCredentials` audits through a clone
+    // of `reactor_audit_repo`.
+    user_engine: AuthorizationEngine<R, P, Res, S, G>,
     // R-1 / T-234 — how this listener terminates TLS, decided and built by the
     // composition root. See [`GrpcTls`] for why it is a value and not an env
     // read, and the module docs for what changed.
@@ -279,7 +288,7 @@ where
     U: UserRepository + Clone + 'static,
     C: Connection + 'static,
     Rr: ReactorRepository + 'static,
-    A: AuditLogRepository + 'static,
+    A: AuditLogRepository + Clone + 'static,
 {
     // I2: per-family ceilings (unset knobs derived from the authz ceiling).
     let rate_limits = grpc_config.rate_limits();
@@ -309,6 +318,14 @@ where
     // itself (`per_sec_to_window_limit`) — previously the per-second number
     // was passed to a per-minute window verbatim, which made the effective
     // gRPC ceiling 1/60th of the configured one.
+    let db: DbHandle<C> = db.into();
+    // SA-13 (N16, D-3): always on — a suspended tenant's tokens are refused on
+    // this listener as on REST. Its own repository over the same handle; it
+    // holds no cache (see `middleware::tenant_admission`).
+    let tenant_admission_layer = GrpcTenantAdmissionLayer::new(
+        Arc::new(axiam_db::SurrealTenantRepository::new(db.clone())),
+        auth_config.clone(),
+    );
     let shared_rate_limit_layer =
         GrpcSharedRateLimitLayer::new_method_scoped(db, rate_limits, trusted_hops);
     let governor_layer = build_grpc_method_scoped_governor_layer(rate_limits);
@@ -340,6 +357,8 @@ where
             auth_config.clone(),
             crypto_semaphore,
             lockout_policy,
+            Arc::new(user_engine),
+            Arc::new(reactor_audit_repo.clone()),
         ),
         AuthInterceptor::new(auth_config.clone()),
     );
@@ -427,7 +446,10 @@ where
         .layer(DrainRejectedBodyLayer)
         .layer(governor_layer)
         .layer(shared_rate_limit_layer)
-        .layer(tower::util::option_layer(strict_revocation_layer));
+        .layer(tower::util::option_layer(strict_revocation_layer))
+        // SA-13: inside the rate limiters, like strict revocation, so a flood
+        // from a suspended tenant is throttled before it reaches the datastore.
+        .layer(tenant_admission_layer);
 
     // R-1 / T-234: the services are registered once, and only *how the bytes
     // arrive* differs between the two modes below. Before this change the whole

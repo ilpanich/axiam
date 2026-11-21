@@ -78,7 +78,7 @@ use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{
     CountRow, TxFail, classify_write_error, paginate, parse_uuid, retry_on_write_conflict,
-    search_bind, search_filter, take_first_or_not_found,
+    search_bind, search_filter, take_first_or_not_found, thrown,
 };
 
 const SEGMENT_ENTITY: &str = "network_segment";
@@ -146,15 +146,6 @@ fn refusal_of(combined: &str) -> Option<NetworkConflict> {
     } else {
         return None;
     })
-}
-
-/// Whether `combined` carries `marker` exactly as the engine renders a `THROW`
-/// of it: `An error occurred: <marker>`, ended by the end of the text or `;`.
-fn thrown(combined: &str, marker: &str) -> bool {
-    let head = format!("An error occurred: {marker}");
-    combined
-        .match_indices(&head)
-        .any(|(at, _)| matches!(combined[at + head.len()..].chars().next(), None | Some(';')))
 }
 
 /// The name of the unique index a clash reports, read where SurrealDB 3.x puts

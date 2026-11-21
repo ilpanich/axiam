@@ -933,16 +933,35 @@ where
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<(), OAuth2Error> {
-        let refused = || {
-            OAuth2Error::InvalidGrant(
-                "the account this grant was issued for can no longer sign in".into(),
-            )
-        };
+        self.ensure_account_may_act_since(tenant_id, user_id, None)
+            .await
+    }
+
+    /// [`Self::ensure_account_may_act`] for a grant issued at `issued_at`
+    /// (`Some`): it is also refused when the user's credential changed at or
+    /// after that instant (SA-06, SR17-1; a tie refuses: see
+    /// [`crate::credential_epoch`] and `User::credential_changed_since`). One
+    /// read answers both questions.
+    async fn ensure_account_may_act_since(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        issued_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<(), OAuth2Error> {
+        let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
         let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
             Ok(user) => user,
             Err(AxiamError::NotFound { .. }) => return Err(refused()),
             Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
         };
+        if issued_at.is_some_and(|at| crate::credential_epoch::changed_since(&user, at)) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "refusing an OAuth2 grant: the user's credential changed at or after it was issued"
+            );
+            return Err(refused());
+        }
         axiam_auth::service::account_may_act(&user).map_err(|reason| {
             tracing::info!(
                 %tenant_id,
@@ -1195,6 +1214,7 @@ where
                     // `null` otherwise.
                     "failed_writes": response.and_then(RefusedReplayResponse::failed_writes),
                 })),
+                organization_id: None,
             })
             .await
         {
@@ -1629,8 +1649,16 @@ where
     /// `deleted_at = NONE`) and reads as the same `invalid_client` a wrong
     /// credential does. Any other error is a datastore fault and stays a
     /// `server_error`, never masquerading as bad client credentials.
+    ///
+    /// SA-13 (N16, D-3): and `tenant_suspended` if the tenant no longer admits
+    /// its principals (`tenant_accepts_principals`). Every grant authenticates
+    /// its client through here — code, refresh, client credentials (clients
+    /// and service accounts), device, CIBA, UMA, token exchange and the native
+    /// provider ID token — after the credential, so no grant of a suspended
+    /// tenant mints a token.
     async fn live_tenant(&self, tenant_id: Uuid) -> Result<Tenant, OAuth2Error> {
-        self.tenant_repo
+        let tenant = self
+            .tenant_repo
             .get_by_id(tenant_id)
             .await
             .map_err(|e| match e {
@@ -1638,7 +1666,11 @@ where
                     OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
                 }
                 other => OAuth2Error::ServerError(other.to_string()),
-            })
+            })?;
+        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+            return Err(OAuth2Error::TenantSuspended);
+        }
+        Ok(tenant)
     }
 
     /// The credential check proper, split out of
@@ -2576,7 +2608,13 @@ where
         }
 
         // F4 P23W1-01 — after the code is spent, so a refused account burns it.
-        self.ensure_account_may_act(tenant_id, auth_code.user_id)
+        //
+        // SA-06 (SR17-1): and a code issued before the user's last credential
+        // change is refused here too. A reset revokes sessions and refresh
+        // tokens but cannot reach a code that has not been redeemed yet, and
+        // the refresh token minted from it would be created after that
+        // revocation and pass the refresh grant's own check.
+        self.ensure_account_may_act_since(tenant_id, auth_code.user_id, Some(auth_code.created_at))
             .await?;
 
         // `org_id` comes from the tenant `authenticate_client_credential` already
@@ -2668,6 +2706,7 @@ where
         let refresh_token = if client.grant_types.iter().any(|s| s == "refresh_token") {
             let raw_refresh = generate_refresh_token();
             let refresh_hash = hash_refresh_token(&raw_refresh);
+            let minted_hash = refresh_hash.clone();
             let refresh_expires =
                 Utc::now() + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
 
@@ -2709,6 +2748,19 @@ where
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            // SA-06 (SR17-1): a reset can land between the pre-check above and
+            // this write, with its `revoke_all_for_user` already run. Re-read
+            // the user; a later change revokes the token just written.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                auth_code.user_id,
+                auth_code.created_at,
+                &minted_hash,
+                crate::credential_epoch::REFUSED,
+            )
+            .await?;
             Some(raw_refresh)
         } else {
             None
@@ -3407,6 +3459,42 @@ where
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+
+        // SA-06 (N7, SR16-1) — a rotation is a mint, and a credential change
+        // revokes every refresh token of the user: `revoke_all_for_user` after
+        // a reset, a password change or a SCIM password write. That revocation
+        // can land between this request's read of the token and the `create`
+        // above, finding nothing of ours to remove, and the successor would
+        // then outlive the credential change.
+        //
+        // The check is a re-read AFTER the successor is written, against the
+        // predecessor's own `created_at`: a credential write commits BEFORE its
+        // revocation, so either the write is already visible here (and the
+        // successor is removed below), or it commits later and its revocation
+        // runs after the `create` and removes the successor itself. A
+        // predecessor written after the last credential change always passes,
+        // so a refresh token issued under the current credential is never
+        // affected; every token a credential change would have revoked
+        // predates it.
+        //
+        // No stored credential version is used: unlike a session, a refresh
+        // token has no column for one, and the comparison needs none, because
+        // `credential_changed_at` is stamped in the same transaction as every
+        // credential write.
+        if let Some(user_id) = stored.user_id {
+            // The shared helper (`crate::credential_epoch`), with this grant's
+            // own refusal text.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                user_id,
+                stored.created_at,
+                &new_refresh_hash,
+                "refresh token is invalid, expired, or revoked",
+            )
+            .await?;
+        }
 
         // Now retire the old refresh token — on one of two lanes, chosen by
         // the client's registration and by nothing else (T-254).

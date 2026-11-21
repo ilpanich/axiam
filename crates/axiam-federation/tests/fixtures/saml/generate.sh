@@ -76,6 +76,16 @@ echo "Certificate generated: signing_cert.pem"
 # -----------------------------------------------------------------------------
 emit_template() {
   local out="$1" aid="$2" resp_attrs="$3" scd_attrs="$4" cond_noa="$5"
+  # Optional 6th argument: the <AudienceRestriction> block. Defaults to the SP
+  # entity ID; pass "-" to omit the restriction entirely (SA-11 / N21 vector).
+  local aud_block="${6-}"
+  if [ -z "$aud_block" ]; then
+    aud_block='<saml:AudienceRestriction>
+        <saml:Audience>https://sp.example.com</saml:Audience>
+      </saml:AudienceRestriction>'
+  elif [ "$aud_block" = "-" ]; then
+    aud_block=''
+  fi
   cat > "$out" << ENDXML
 <?xml version="1.0" encoding="UTF-8"?>
 <samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
@@ -120,9 +130,7 @@ emit_template() {
       </saml:SubjectConfirmation>
     </saml:Subject>
     <saml:Conditions NotBefore="2026-01-01T00:00:00Z" NotOnOrAfter="${cond_noa}">
-      <saml:AudienceRestriction>
-        <saml:Audience>https://sp.example.com</saml:Audience>
-      </saml:AudienceRestriction>
+      ${aud_block}
     </saml:Conditions>
     <saml:AuthnStatement AuthnInstant="2099-01-01T00:00:00Z">
       <saml:AuthnContext>
@@ -241,11 +249,50 @@ sed '/<saml:SubjectConfirmation /,/<\/saml:SubjectConfirmation>/d' \
   > /tmp/saml_scd_missing_tmpl.xml
 sign_template /tmp/saml_scd_missing_tmpl.xml scd_missing_confirmation_response.xml
 
+# -----------------------------------------------------------------------------
+# 3. SA-11 / N21 — the SP must bind the assertion to ITSELF.
+#
+#   scd_no_audience_foreign_recipient_response.xml — the report's fixture: NO
+#     <AudienceRestriction> and a signed @Recipient naming another SP. Everything
+#     else (signature, Destination, InResponseTo, Conditions window) is valid.
+#   scd_no_audience_response.xml — NO <AudienceRestriction>, correct @Recipient:
+#     isolates the mandatory-audience rule from the Recipient comparison.
+#   scd_foreign_audience_response.xml — <AudienceRestriction> naming another SP,
+#     correct @Recipient: the audience-mismatch rule on the SP-initiated shape.
+# -----------------------------------------------------------------------------
+echo "=== scd_no_audience_foreign_recipient_response.xml ==="
+emit_template /tmp/saml_scd_noaud_foreign_tmpl.xml \
+  "scd-no-audience-foreign-recipient-1" \
+  "$SCD_RESP_ATTRS" \
+  "NotOnOrAfter=\"2099-01-01T01:00:00Z\" Recipient=\"https://other-sp.example.com/api/v1/federation/saml/acs\" InResponseTo=\"_axiam-req-1\"" \
+  "2099-01-01T01:00:00Z" \
+  "-"
+sign_template /tmp/saml_scd_noaud_foreign_tmpl.xml scd_no_audience_foreign_recipient_response.xml
+
+echo "=== scd_no_audience_response.xml ==="
+emit_template /tmp/saml_scd_noaud_tmpl.xml \
+  "scd-no-audience-1" \
+  "$SCD_RESP_ATTRS" \
+  "NotOnOrAfter=\"2099-01-01T01:00:00Z\" Recipient=\"$ACS_URL\" InResponseTo=\"_axiam-req-1\"" \
+  "2099-01-01T01:00:00Z" \
+  "-"
+sign_template /tmp/saml_scd_noaud_tmpl.xml scd_no_audience_response.xml
+
+echo "=== scd_foreign_audience_response.xml ==="
+emit_template /tmp/saml_scd_foraud_tmpl.xml \
+  "scd-foreign-audience-1" \
+  "$SCD_RESP_ATTRS" \
+  "NotOnOrAfter=\"2099-01-01T01:00:00Z\" Recipient=\"$ACS_URL\" InResponseTo=\"_axiam-req-1\"" \
+  "2099-01-01T01:00:00Z" \
+  '<saml:AudienceRestriction><saml:Audience>https://other-sp.example.com</saml:Audience></saml:AudienceRestriction>'
+sign_template /tmp/saml_scd_foraud_tmpl.xml scd_foreign_audience_response.xml
+
 echo "=== Cleanup ==="
 rm -f "$KEY" /tmp/saml_well_tmpl.xml /tmp/saml_replay_tmpl.xml \
   /tmp/saml_scd_valid_tmpl.xml /tmp/saml_scd_recipient_tmpl.xml \
   /tmp/saml_scd_expired_tmpl.xml /tmp/saml_scd_irt_tmpl.xml \
-  /tmp/saml_scd_missing_tmpl.xml
+  /tmp/saml_scd_missing_tmpl.xml /tmp/saml_scd_noaud_foreign_tmpl.xml \
+  /tmp/saml_scd_noaud_tmpl.xml /tmp/saml_scd_foraud_tmpl.xml
 
 echo ""
 echo "Done. Generated files:"

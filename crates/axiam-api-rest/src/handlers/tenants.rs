@@ -64,7 +64,7 @@ use actix_web::http::header;
 use actix_web::{HttpResponse, web};
 use axiam_core::error::AxiamError;
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
-use axiam_core::models::tenant::{CreateTenant, Tenant, TenantKind, UpdateTenant};
+use axiam_core::models::tenant::{CreateTenant, Tenant, TenantKind, TenantStatus, UpdateTenant};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, PaginatedResult, Pagination, TenantRepository,
 };
@@ -578,6 +578,9 @@ fn page_of(tenants: Vec<Tenant>, pagination: &Pagination) -> PaginatedResult<Ten
     ),
     responses(
         (status = 200, description = "Tenant found", body = Tenant),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      one whose reach does not cover the tenant, or lacks \
+                                      `tenants:get`"),
         (status = 404, description = "Tenant not found"),
     ),
     security(("bearer" = []))
@@ -602,6 +605,19 @@ pub async fn get<C: Connection + Clone>(
             },
         ));
     }
+
+    // SA-02 (N9): the path names a tenant, and `org_id == user.org_id` is
+    // passed by every principal of the organization — a tenant administrator
+    // read its siblings' records here. The caller must be an organization
+    // principal whose reach covers the named tenant. (An ordinary tenant
+    // principal still sees its own tenant through the reach-filtered `list`.)
+    crate::handlers::org_scope::require_organization_principal_for_tenant(
+        &user,
+        state.get_ref(),
+        path.tenant_id,
+        crate::handlers::org_scope::TenantAction::Read,
+    )
+    .await?;
 
     let tenant = state.tenant_repo.get_by_id(path.tenant_id).await?;
     if tenant.organization_id != path.org_id {
@@ -665,10 +681,52 @@ pub async fn update<C: Connection + Clone>(
         .into());
     }
     let body = body.into_inner();
+    // SA-13 (OD-13b): a suspended tenant's record changes only its status —
+    // the un-suspend, `{"status": "Active"}` on its own. A body that also
+    // renames it, re-slugs it or rewrites its metadata is refused whole, with
+    // or without `X-Axiam-Tenant`, rather than half-applied: it waits until the
+    // tenant is active again. (The extractor admits this request through the
+    // header for the same reason: it is the one write a suspended tenant takes.)
+    if !axiam_core::models::tenant::tenant_accepts_principals(&existing)
+        && (body.name.is_some() || body.slug.is_some() || body.metadata.is_some())
+    {
+        return Err(AxiamError::TenantSuspended.into());
+    }
     if let Some(refusal) = reject_reserved_metadata(body.metadata.as_ref()) {
         return Ok(refusal);
     }
+    let suspends = body.status == Some(TenantStatus::Suspended);
+    // SA-13 (OD-13a): the organization's own tenant is never suspended — 409,
+    // before the revocation below touches anything. The repository's status
+    // write refuses it too, for any other caller.
+    if suspends && existing.is_organization_scope() {
+        return Err(AxiamError::OrganizationTenantNotSuspendable.into());
+    }
+    // SA-13 (N16, D-3): suspending a tenant refuses its principals at every
+    // door (`tenant_accepts_principals`) and revokes what they hold, in the
+    // tombstone's order: its sessions first, through the repository that
+    // publishes them to the revocation feed and drops them from the validity
+    // cache, then its refresh tokens. A failure here leaves the status as it
+    // was and the PUT retryable. The status write then revokes once more in its
+    // own transaction (a sign-in that raced this pass). Its data stays, and the
+    // caller — an organization principal, whose own tenant this is not — keeps
+    // reading it and can set it back to `Active`; sign-in then needs a new
+    // session.
+    if suspends {
+        state
+            .session_repo
+            .invalidate_tenant_sessions(path.tenant_id)
+            .await?;
+        state
+            .refresh_token_repo
+            .revoke_all_for_tenant(path.tenant_id)
+            .await?;
+    }
     let tenant = state.tenant_repo.update(path.tenant_id, body).await?;
+    if suspends && let Some(cache) = state.session_repo.validation_cache() {
+        // Any session the status write's own pass removed.
+        cache.invalidate_tenant(path.tenant_id);
+    }
     Ok(HttpResponse::Ok().json(tenant))
 }
 
@@ -841,6 +899,9 @@ pub async fn delete<C: Connection + Clone>(
                 // name yet; the cleanup job's sweep forwards them.
                 "signing_ca_vault_revocations_pending": signing_cas.vault_pending,
             })),
+            // SA-02 (N1): the deleted tenant's organization, as its record had
+            // it, so the system log shows this row to that organization only.
+            organization_id: Some(existing.organization_id),
         },
     )
     .await;
@@ -874,6 +935,9 @@ pub async fn delete<C: Connection + Clone>(
     responses(
         (status = 200, description = "Newline-delimited audit entries, then a \
              manifest line", content_type = "application/x-ndjson"),
+        (status = 403, description = "The caller is not an organization-level principal, or \
+                                      one whose reach does not cover the tenant, or lacks \
+                                      `tenants:export_audit`"),
         (status = 404, description = "Tenant not found"),
     ),
     security(("bearer" = []))
@@ -896,6 +960,20 @@ pub async fn export_audit<C: Connection + Clone>(
             resource_id: None,
         }));
     }
+
+    // SA-02 (N9): the export streams the named tenant's whole trail and writes
+    // a receipt into it. Neither the permission (seeded to every ordinary
+    // tenant's admins) nor the org check above binds the path tenant to the
+    // caller; this does — an organization principal whose reach covers it.
+    crate::handlers::org_scope::require_organization_principal_for_tenant(
+        &user,
+        state.get_ref(),
+        path.tenant_id,
+        // OD-13c: the export reads the trail (its receipt is the audit of
+        // that read), so it stays open on a suspended tenant.
+        crate::handlers::org_scope::TenantAction::Read,
+    )
+    .await?;
 
     let existing = state.tenant_repo.get_by_id(path.tenant_id).await?;
     if existing.organization_id != path.org_id {
@@ -1047,6 +1125,7 @@ where
                                     "digest": format!("sha256:{digest}"),
                                     "exported_through": started_at,
                                 })),
+                                organization_id: None,
                             })
                             .await;
                         let receipt = match receipt {

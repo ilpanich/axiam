@@ -14,9 +14,9 @@ use axiam_core::models::settings::{LockoutPolicy, MfaPolicy, PasswordPolicy};
 use axiam_core::models::user::{UpdateUser, User, UserStatus};
 use axiam_core::repository::{
     FederationLinkRepository, PasswordHistoryRepository, RefreshTokenRepository, SessionRepository,
-    UserRepository,
+    UserRepository, WebauthnCredentialRepository,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -28,7 +28,9 @@ use crate::config::AuthConfig;
 use crate::crypto_gate::acquire_hash_permit;
 use crate::error::AuthError;
 use crate::token::AUD_USER;
+use crate::webauthn::WebauthnService;
 use crate::{password, token, totp};
+use webauthn_rs::prelude::PublicKeyCredential;
 
 mod directory;
 pub use directory::{
@@ -201,8 +203,28 @@ struct MfaChallengeClaims {
     purpose: String,
     iss: String,
     iat: i64,
+    /// The issue time in nanoseconds since the Unix epoch. `iat` is whole
+    /// seconds, which cannot tell a token minted just after a credential change
+    /// from one minted just before it in the same second (SA-06, QR2-6). Both
+    /// token kinds are server-internal, so the claim is ours to add. Absent on a
+    /// token minted before it existed; the comparison then uses `iat`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iat_ns: Option<i64>,
+    /// The user's credential version when this token was issued, read in the
+    /// same row as the password hash the login verified (SA-06, SR3-1). Refused
+    /// once the user's version differs, which no ordering of two clocks can
+    /// defeat. Absent on a token minted before the claim existed; the
+    /// timestamp check alone then applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cv: Option<i64>,
     exp: i64,
 }
+
+/// The reason every refusal of an MFA challenge gives for a token that is not
+/// (or is no longer) a valid challenge: a forged or mistyped one, one that
+/// predates a credential change, and one for a user that is gone. A single
+/// text, so the client-visible answer reveals nothing about *why* (SR3-2).
+const NOT_AN_MFA_CHALLENGE: &str = "not an MFA challenge token";
 
 // -----------------------------------------------------------------------
 // AuthService
@@ -270,6 +292,17 @@ pub struct AuthService<
     /// consulted before the directory is asked; see
     /// [`crate::unknown_name_lockout`].
     unknown_name_lockout: Arc<crate::unknown_name_lockout::UnknownNameLockout>,
+    /// SA-13 (N16, D-3) — whether the tenant still admits its principals,
+    /// asked where every browser sign-in ends ([`Self::create_session_and_tokens`]:
+    /// password, OPAQUE, WebAuthn, federation and social login, the MFA and
+    /// setup-token completions, directory accounts) and on every refresh.
+    ///
+    /// Optional for the reason the directory authenticator is: a harness that
+    /// does not exercise tenant lifecycle leaves it out. The composition root
+    /// and `AppState` always attach the tenant repository, and with it a
+    /// suspended tenant's sign-in or refresh is refused `tenant_suspended`
+    /// with nothing issued. One tenant read per sign-in or refresh, uncached.
+    tenant_admission: Option<axiam_core::models::tenant::SharedTenantAdmission>,
 }
 
 impl<
@@ -299,6 +332,27 @@ impl<
             directory_audit: None,
             directory_group_mapper: None,
             unknown_name_lockout: Arc::default(),
+            tenant_admission: None,
+        }
+    }
+
+    /// Attach the tenant lifecycle check (SA-13, N16, D-3): a sign-in or a
+    /// refresh for a tenant that does not admit its principals
+    /// ([`axiam_core::models::tenant::tenant_accepts_principals`]) is refused
+    /// `tenant_suspended`, before any session or token is written.
+    pub fn with_tenant_admission(
+        mut self,
+        admission: axiam_core::models::tenant::SharedTenantAdmission,
+    ) -> Self {
+        self.tenant_admission = Some(admission);
+        self
+    }
+
+    /// The tenant lifecycle check, when one is attached (SA-13).
+    async fn admit_tenant(&self, tenant_id: Uuid) -> AxiamResult<()> {
+        match &self.tenant_admission {
+            Some(admission) => admission.admit(tenant_id).await,
+            None => Ok(()),
         }
     }
 
@@ -484,7 +538,7 @@ impl<
         }
     }
 
-    /// One Argon2id verify against [`password::DUMMY_HASH`], to make a branch
+    /// One Argon2id verify against the process-wide dummy hash ([`password::equalising_dummy_verify`]), to make a branch
     /// that verifies no real hash cost what one that does costs (SEC-026).
     ///
     /// B1: the crypto permit is acquired with the SAME acquire-with-timeout the
@@ -741,7 +795,12 @@ impl<
             // asked for step-up *after* seeing this login has, by definition,
             // seen that and asked anyway.
             if links.is_empty() || reactor_requires_mfa {
-                let setup_token = self.issue_mfa_setup_token(user.id, tenant_id, org_id)?;
+                let setup_token = self.issue_mfa_setup_token(
+                    user.id,
+                    tenant_id,
+                    org_id,
+                    user.credential_version,
+                )?;
                 return Ok(LoginResult::MfaSetupRequired(MfaSetupOutput {
                     setup_token,
                 }));
@@ -751,7 +810,8 @@ impl<
         // 6. Check MFA — trigger for any user with mfa_enabled, regardless
         //    of whether they use TOTP or WebAuthn.
         if user.mfa_enabled {
-            let challenge_token = self.issue_mfa_challenge(user.id, tenant_id, org_id)?;
+            let challenge_token =
+                self.issue_mfa_challenge(user.id, tenant_id, org_id, user.credential_version)?;
             return Ok(LoginResult::MfaRequired(MfaChallengeOutput {
                 challenge_token,
                 available_methods: Vec::new(), // populated by REST handler
@@ -769,6 +829,9 @@ impl<
                 // A password and nothing else: this branch is reached only
                 // when no second factor was required (RFC 8176 `pwd`).
                 AuthenticationEvidence::now(vec![Amr::Pwd]),
+                // SR10-1: the version read with the credential that was just
+                // verified (the `user` snapshot), checked by the session write.
+                Some(user.credential_version),
             )
             .await?;
 
@@ -960,7 +1023,26 @@ impl<
             .map_err(|_| AuthError::TokenInvalid("bad org_id".into()))?;
 
         // 2. Fetch user and verify TOTP.
-        let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| {
+                // The same answer as a forged challenge: a gone account must
+                // not be told apart from one that never existed (SR3-2).
+                tracing::debug!(target: "axiam::auth", "MFA challenge for an unreadable user");
+                AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into())
+            })?;
+        // SA-06 (S-6): a challenge minted before the credential last changed
+        // answers to the old password. Refused as any invalid challenge is.
+        if user.credential_superseded(claims.iat, claims.iat_ns, claims.cv) {
+            tracing::debug!(
+                target: "axiam::auth",
+                user_id = %user_id,
+                "MFA challenge predates a credential change"
+            );
+            return Err(AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into()).into());
+        }
         Self::check_user_status(
             &user.status,
             user.created_at,
@@ -1017,6 +1099,9 @@ impl<
             // `mfa` is recorded alongside the two factors, as RFC 8176 §2
             // intends, rather than instead of them.
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
+            // SR10-1: the version of the user row read above, which the
+            // challenge was just checked against.
+            Some(user.credential_version),
         )
         .await
     }
@@ -1026,7 +1111,28 @@ impl<
     /// This is used by the WebAuthn REST handler to extract
     /// `(user_id, tenant_id, org_id)` from an MFA challenge token
     /// so it can start a WebAuthn authentication ceremony.
-    pub fn decode_mfa_challenge_ids(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+    ///
+    /// Async because a challenge minted before the user's credential last
+    /// changed is refused (SA-06, S-6), which needs the user's credential
+    /// epoch; the refusal is the one an invalid token gets.
+    pub async fn decode_mfa_challenge_ids(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+        self.decode_mfa_challenge_ids_at(token)
+            .await
+            .map(|(user_id, tenant_id, org_id, _, _)| (user_id, tenant_id, org_id))
+    }
+
+    /// As [`Self::decode_mfa_challenge_ids`], and also the challenge's issue
+    /// time, which the WebAuthn second-factor ceremony carries in its state
+    /// token so that its finish can be refused when the credential changed
+    /// after the challenge was issued (SA-06, SR2-1). A challenge minted before
+    /// the sub-second claim existed reports its whole-second `iat`.
+    pub async fn decode_mfa_challenge_ids_at(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, Uuid, DateTime<Utc>, Option<i64>), AuthError> {
         let claims = self.decode_mfa_challenge(token)?;
         let user_id: Uuid = claims
             .sub
@@ -1040,7 +1146,105 @@ impl<
             .org_id
             .parse()
             .map_err(|_| AuthError::TokenInvalid("bad org_id".into()))?;
-        Ok((user_id, tenant_id, org_id))
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| {
+                tracing::debug!(target: "axiam::auth", "MFA challenge for an unreadable user");
+                AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into())
+            })?;
+        if user.credential_superseded(claims.iat, claims.iat_ns, claims.cv) {
+            tracing::debug!(
+                target: "axiam::auth",
+                user_id = %user_id,
+                "MFA challenge predates a credential change"
+            );
+            return Err(AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into()));
+        }
+        let issued_at = match claims.iat_ns {
+            Some(ns) => DateTime::from_timestamp_nanos(ns),
+            None => DateTime::from_timestamp(claims.iat, 0)
+                .ok_or_else(|| AuthError::TokenInvalid("bad iat".into()))?,
+        };
+        Ok((user_id, tenant_id, org_id, issued_at, claims.cv))
+    }
+
+    /// The whole WebAuthn second-factor completion: the ceremony's finish
+    /// ([`Self::finish_webauthn_authentication`]) and, only if it succeeded,
+    /// the session ([`Self::create_session_and_tokens`]) carrying the
+    /// credential version the finish checked the ceremony under (SR10-1).
+    ///
+    /// One method so the pair cannot drift apart: a handler that re-read the
+    /// user between the two would make the session-write check vacuous
+    /// (QR12-1). `POST /auth/webauthn/authenticate/finish` calls this.
+    pub async fn complete_webauthn_second_factor<W: WebauthnCredentialRepository>(
+        &self,
+        webauthn: &WebauthnService<W>,
+        tenant_id: Uuid,
+        state_token: &str,
+        response: &PublicKeyCredential,
+        evidence: AuthenticationEvidence,
+        ip_address: Option<String>,
+        user_agent: Option<String>,
+    ) -> AxiamResult<LoginOutput> {
+        let (user_id, org_id, credential_version) = self
+            .finish_webauthn_authentication(webauthn, tenant_id, state_token, response)
+            .await?;
+        self.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            ip_address,
+            user_agent,
+            evidence,
+            Some(credential_version),
+        )
+        .await
+    }
+
+    /// The WebAuthn second-factor finish: refuse a ceremony whose challenge
+    /// predates the user's last credential change, then verify the assertion
+    /// ([`WebauthnService::finish_authentication`]). Returns the
+    /// authenticated `(user_id, org_id, credential_version)`; the version is
+    /// the one [`Self::create_session_and_tokens`] must be given (SR10-1).
+    ///
+    /// `start_authentication` checks the credential epoch when the ceremony
+    /// starts; the state token it mints lives
+    /// `mfa_challenge_lifetime_secs`, and a password reset or change between
+    /// start and finish must not be survived by it (SA-06, SR2-1). The state
+    /// token carries the issue time of the MFA challenge it descends from,
+    /// compared here at full precision. The refusal comes before the assertion
+    /// is looked at and is the answer an invalid state token gets, as is an
+    /// unreadable user (fail closed).
+    pub async fn finish_webauthn_authentication<W: WebauthnCredentialRepository>(
+        &self,
+        webauthn: &WebauthnService<W>,
+        tenant_id: Uuid,
+        state_token: &str,
+        response: &PublicKeyCredential,
+    ) -> AxiamResult<(Uuid, Uuid, i64)> {
+        let (user_id, state_tenant_id, issued) =
+            webauthn.authentication_state_issue(state_token)?;
+        if state_tenant_id != tenant_id {
+            return Err(AuthError::WebauthnStateInvalid.into());
+        }
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        if user.credential_superseded(issued.iat, issued.iat_ns, issued.credential_version) {
+            return Err(AuthError::WebauthnStateInvalid.into());
+        }
+        // SR10-1: the version the ceremony was bound to when the state token
+        // carries one, else the one just read (equal when both exist: the
+        // check above refused any other). Handed to the session write.
+        let credential_version = issued.credential_version.unwrap_or(user.credential_version);
+        let (user_id, org_id) = webauthn
+            .finish_authentication(tenant_id, state_token, response)
+            .await?;
+        Ok((user_id, org_id, credential_version))
     }
 
     /// Start MFA enrollment for a user (step 1 of 2).
@@ -1177,7 +1381,7 @@ impl<
     /// are no-ops when nothing is subscribed — immaterial against a path whose
     /// cheapest stage is a datastore round trip.
     ///
-    /// # Datastore round trips: three, not five
+    /// # Datastore round trips: four, not five
     ///
     /// The rotation used to issue five sequential statements (session read,
     /// expiry check, consume, user read, session create) plus a tenant read in
@@ -1187,6 +1391,12 @@ impl<
     ///   `consume_by_token_hash` (see that method's docs — it also removes the
     ///   read-then-delete window rather than tolerating it);
     /// - the handler's per-refresh tenant read is served from a TTL cache.
+    ///
+    /// That left three (consume, user read, session create). SR16-1 added a
+    /// fourth, the post-commit re-read of the user's credential version, which
+    /// the owner mandated. It is a *user* round trip, so it lies outside the
+    /// session-repository budget that `refresh_roundtrip_budget_test.rs`
+    /// counts (two calls: consume and create), as the user read always has.
     ///
     /// **No security semantics were weakened to get there.** Single-use
     /// rotation is still enforced by `RETURN BEFORE` (and now with no window
@@ -1243,6 +1453,10 @@ impl<
             .get_by_id(input.tenant_id, session.user_id)
             .await?;
         account_may_act(&user)?;
+        // SA-13 (N16, D-3): and its tenant still admits it. The consumed row
+        // stays consumed: a suspension revoked it anyway, and un-suspending
+        // restores sign-in through a new session, not this one.
+        self.admit_tenant(input.tenant_id).await?;
         let user_lookup_us = t_user.elapsed().as_micros() as u64;
 
         // 4. Create new session with rotated refresh token.
@@ -1252,42 +1466,112 @@ impl<
         let expires_at =
             Utc::now() + Duration::seconds(self.config.refresh_token_lifetime_secs as i64);
 
-        let new_session = self
+        // SR16-1: a rotation is a session mint and gets the protection a
+        // sign-in has. The version the consumed row carries is the credential
+        // it was minted under; the new row is written only if the user's is
+        // still that, inside the write's own transaction. A row with no stored
+        // version (written before schema v119, or by a path that checked no
+        // credential) is trusted only if the credential has not changed since
+        // it was created, and then takes the user's current version — so an
+        // upgrade logs nobody out, and a legacy row that predates a reset is
+        // refused like any other.
+        let rotation_version = match session.credential_version {
+            Some(version) => version,
+            None => {
+                // One tie rule (SR19-1): a change at or after the row's
+                // creation refuses, as `User::credential_changed_since` does
+                // everywhere else.
+                if user.credential_changed_since(session.created_at) {
+                    // The uniform refusal: a distinct reason would tell a holder
+                    // of a stale token that it was genuine and the credential
+                    // has since changed (QR17-2).
+                    return Err(AuthError::TokenInvalid(
+                        "refresh token not found or already used".into(),
+                    )
+                    .into());
+                }
+                user.credential_version
+            }
+        };
+
+        let new_session = CreateSession {
+            tenant_id: input.tenant_id,
+            user_id: user.id,
+            token_hash: new_hash,
+            ip_address: input.ip_address,
+            user_agent: input.user_agent,
+            expires_at,
+            // X7.2 (plan §4.3): **copied**, never re-stamped. A refresh is
+            // not an authentication event — nobody proved anything to
+            // AXIAM here — and a session whose `authenticated_at` reset on
+            // every refresh would report a freshness that grows younger
+            // the longer the user stays signed in. OIDC Core §12.2 says
+            // the same thing about the `auth_time` of a refreshed ID
+            // token: it must equal the original.
+            authenticated_at: session.authenticated_at,
+            amr: session.amr,
+            // W3: **copied**, for a reason adjacent to the one above. A
+            // refresh response never reaches `/oauth2/authorize`'s cookie
+            // path, so the `axiam_op_session` value in the browser is not
+            // reissued here and cannot be. A rotation that dropped the
+            // digest would leave a live cookie pointing at a row that no
+            // longer exists, and the user would be signed out of the
+            // authorization endpoint alone — invisibly, at a moment nothing
+            // in the interface corresponds to.
+            browser_token_hash: session.browser_token_hash,
+            // #844 (D-N43): **copied**, and for the reason this whole
+            // field exists. The new row has a new id; every OAuth2 grant
+            // and session participant recorded under the old one still
+            // names that id, and the lineage is how a logout of this row
+            // reaches them. A rotation that started a new lineage would be
+            // exactly the bug it fixes.
+            lineage_id: Some(session.lineage_id),
+        };
+        let new_session = match self
             .session_repo
-            .create(CreateSession {
-                tenant_id: input.tenant_id,
-                user_id: user.id,
-                token_hash: new_hash,
-                ip_address: input.ip_address,
-                user_agent: input.user_agent,
-                expires_at,
-                // X7.2 (plan §4.3): **copied**, never re-stamped. A refresh is
-                // not an authentication event — nobody proved anything to
-                // AXIAM here — and a session whose `authenticated_at` reset on
-                // every refresh would report a freshness that grows younger
-                // the longer the user stays signed in. OIDC Core §12.2 says
-                // the same thing about the `auth_time` of a refreshed ID
-                // token: it must equal the original.
-                authenticated_at: session.authenticated_at,
-                amr: session.amr,
-                // W3: **copied**, for a reason adjacent to the one above. A
-                // refresh response never reaches `/oauth2/authorize`'s cookie
-                // path, so the `axiam_op_session` value in the browser is not
-                // reissued here and cannot be. A rotation that dropped the
-                // digest would leave a live cookie pointing at a row that no
-                // longer exists, and the user would be signed out of the
-                // authorization endpoint alone — invisibly, at a moment nothing
-                // in the interface corresponds to.
-                browser_token_hash: session.browser_token_hash,
-                // #844 (D-N43): **copied**, and for the reason this whole
-                // field exists. The new row has a new id; every OAuth2 grant
-                // and session participant recorded under the old one still
-                // names that id, and the lineage is how a logout of this row
-                // reaches them. A rotation that started a new lineage would be
-                // exactly the bug it fixes.
-                lineage_id: Some(session.lineage_id),
-            })
-            .await?;
+            .create_if_credential_version(new_session, rotation_version)
+            .await
+        {
+            Ok(created) => created,
+            // The version-checked write's refusal is a wrong-password answer;
+            // for a rotation the uniform refusal is the one a consumed or
+            // unknown token gets.
+            Err(AxiamError::AuthenticationFailed { .. }) => {
+                return Err(AuthError::TokenInvalid(
+                    "refresh token not found or already used".into(),
+                )
+                .into());
+            }
+            Err(e) => return Err(e),
+        };
+
+        // SR13-1 for rotation (SR16-1): the in-transaction check is not
+        // sufficient under snapshot isolation. A reset commits its credential
+        // BEFORE it revokes, so a rotation row committed before the revocation
+        // is removed by it, and one committed after is caught by this re-read.
+        // Removed through the logout path, like the sign-in re-check, so the
+        // row's id reaches the revocation feed for a session no client held.
+        let stored_version = self
+            .user_repo
+            .get_by_id(input.tenant_id, session.user_id)
+            .await
+            .map(|u| u.credential_version);
+        if stored_version.as_ref().ok() != Some(&rotation_version) {
+            if let Err(e) = self
+                .session_repo
+                .invalidate(input.tenant_id, new_session.id)
+                .await
+            {
+                tracing::error!(
+                    session_id = %new_session.id,
+                    error = %e,
+                    "could not delete a rotated session refused by the post-commit credential re-check"
+                );
+            }
+            return Err(
+                AuthError::TokenInvalid("refresh token not found or already used".into()).into(),
+            );
+        }
         let session_create_us = t_create.elapsed().as_micros() as u64;
 
         // 5. Issue new access token (jti = new session.id per D-15).
@@ -1454,17 +1738,22 @@ impl<
     /// the OAuth2-flow refresh tokens (via `refresh_token_repo`). RESEARCH §4
     /// confirmed these are two separate tables; both must be hit.
     pub async fn revoke_all_sessions(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
-        self.session_repo
+        let sessions = self
+            .session_repo
             .invalidate_user_sessions(tenant_id, user_id)
-            .await?;
+            .await;
 
         // Also revoke OAuth2 refresh tokens for this user (the second
         // chokepoint identified in RESEARCH §4). Tolerate 0 revocations —
-        // user may not have any OAuth2 tokens.
-        let oauth2_revoked = self
+        // user may not have any OAuth2 tokens. Attempted even when the session
+        // delete failed (QR12-3): one failure must not leave the other
+        // chokepoint's tokens live. The first error is reported.
+        let oauth2 = self
             .refresh_token_repo
             .revoke_all_for_user(tenant_id, user_id)
-            .await?;
+            .await;
+        sessions?;
+        let oauth2_revoked = oauth2?;
         tracing::debug!(
             %tenant_id, %user_id, %oauth2_revoked,
             "revoke_all_sessions: session-flow and OAuth2 refresh tokens revoked"
@@ -1488,19 +1777,22 @@ impl<
         user_id: Uuid,
         current_session_id: Uuid,
     ) -> AxiamResult<()> {
-        let sessions_deleted = self
+        let sessions = self
             .session_repo
             .invalidate_user_sessions_except(tenant_id, user_id, current_session_id)
-            .await?;
+            .await;
 
         // Revoke all OAuth2 refresh tokens for the user. OAuth2 tokens are not
         // session-scoped, so we must revoke all of them even on a "keep current
         // session" path — the caller's browser session continues but any OAuth2
-        // app must re-authenticate. Tolerate 0 revocations.
-        let oauth2_revoked = self
+        // app must re-authenticate. Tolerate 0 revocations. Attempted even when
+        // the session delete failed (QR12-3); the first error is reported.
+        let oauth2 = self
             .refresh_token_repo
             .revoke_all_for_user(tenant_id, user_id)
-            .await?;
+            .await;
+        let sessions_deleted = sessions?;
+        let oauth2_revoked = oauth2?;
         tracing::debug!(
             %tenant_id, %user_id, %sessions_deleted, %oauth2_revoked,
             event_type = "sessions_revoked_except_current",
@@ -1533,6 +1825,82 @@ impl<
         history_repo: &H,
         http_client: Option<&reqwest::Client>, // CQ-B35: pass through to HIBP check
     ) -> AxiamResult<()> {
+        self.change_password_with_opaque(
+            tenant_id,
+            user_id,
+            current_session_id,
+            current_password,
+            new_password,
+            policy,
+            history_repo,
+            http_client,
+            None,
+        )
+        .await
+    }
+
+    /// [`change_password`](Self::change_password) carrying the OPAQUE record
+    /// for the new password.
+    ///
+    /// SA-06 / N7 (SR4-2): the record is written in the same transaction as
+    /// the hash, the credential epoch and the credential version, so no other
+    /// credential write can commit between them. `None` keeps the behaviour of
+    /// a plain change: the hash write retires any existing record.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn change_password_with_opaque<H: PasswordHistoryRepository>(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+        current_password: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        history_repo: &H,
+        http_client: Option<&reqwest::Client>,
+        opaque: Option<crate::opaque::OpaqueEnrolled>,
+    ) -> AxiamResult<()> {
+        match self
+            .change_password_reporting_revocation(
+                tenant_id,
+                user_id,
+                current_session_id,
+                current_password,
+                new_password,
+                policy,
+                history_repo,
+                http_client,
+                opaque,
+            )
+            .await?
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// [`change_password_with_opaque`](Self::change_password_with_opaque), but
+    /// a failure to revoke the other sessions AFTER the new credential was
+    /// stored is returned beside success instead of replacing it (QR13-2, as
+    /// [`PasswordResetService::confirm_reset_reporting_revocation`] does for a
+    /// reset). `Err` means the credential was NOT written; `Ok(Some(error))`
+    /// means it was, and the caller must still report the credential change
+    /// before answering the error.
+    ///
+    /// [`PasswordResetService::confirm_reset_reporting_revocation`]:
+    ///     crate::password_reset::PasswordResetService::confirm_reset_reporting_revocation
+    #[allow(clippy::too_many_arguments)]
+    pub async fn change_password_reporting_revocation<H: PasswordHistoryRepository>(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        current_session_id: Uuid,
+        current_password: &str,
+        new_password: &str,
+        policy: &PasswordPolicy,
+        history_repo: &H,
+        http_client: Option<&reqwest::Client>,
+        opaque: Option<crate::opaque::OpaqueEnrolled>,
+    ) -> AxiamResult<Option<AxiamError>> {
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
 
         // 0. G-3 (T23.3.2): a directory account's password belongs to its
@@ -1628,14 +1996,19 @@ impl<
                 user_id,
                 UpdateUser {
                     password_hash: Some(new_hash),
+                    opaque_record: opaque.map(|e| e.into_credential(user_id)),
                     ..Default::default()
                 },
             )
             .await?;
 
         // 6. Revoke all other sessions + OAuth2 tokens; preserve current session.
-        self.revoke_all_sessions_except(tenant_id, user_id, current_session_id)
-            .await?;
+        //    The new credential is already stored, so a failure here is
+        //    reported beside success (QR13-2), after the log line below.
+        let revocation = self
+            .revoke_all_sessions_except(tenant_id, user_id, current_session_id)
+            .await
+            .err();
 
         tracing::info!(
             %tenant_id,
@@ -1643,10 +2016,11 @@ impl<
             target = %user_id,
             mode = "self_service",
             event_type = "password_changed",
+            revocation_failed = revocation.is_some(),
             "user changed their password"
         );
 
-        Ok(())
+        Ok(revocation)
     }
 
     /// Start MFA enrollment using an MFA setup token (enforcement flow).
@@ -1657,7 +2031,7 @@ impl<
         &self,
         setup_token: &str,
     ) -> AxiamResult<EnrollMfaOutput> {
-        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token)?;
+        let (user_id, tenant_id, _org_id, _cv) = self.decode_mfa_setup_token(setup_token).await?;
 
         // Guard: if MFA is already configured, reject.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
@@ -1680,7 +2054,7 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, _org_id) = self.decode_mfa_setup_token(setup_token)?;
+        let (user_id, tenant_id, _org_id, _cv) = self.decode_mfa_setup_token(setup_token).await?;
 
         // Confirm MFA (validates code, flips mfa_enabled to true).
         self.confirm_mfa(tenant_id, user_id, totp_code).await?;
@@ -1732,9 +2106,20 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, org_id) = self.decode_mfa_setup_token(setup_token)?;
-        self.create_session_and_tokens(user_id, tenant_id, org_id, ip_address, user_agent, evidence)
-            .await
+        let (user_id, tenant_id, org_id, credential_version) =
+            self.decode_mfa_setup_token(setup_token).await?;
+        // SR10-1: the version of the user row read while the setup token was
+        // checked, so a credential change after that read refuses the session.
+        self.create_session_and_tokens(
+            user_id,
+            tenant_id,
+            org_id,
+            ip_address,
+            user_agent,
+            evidence,
+            Some(credential_version),
+        )
+        .await
     }
 
     /// Decode a setup token for a caller that is about to enrol the account's
@@ -1751,8 +2136,11 @@ impl<
     /// this service holds only the first. The caller asks
     /// [`crate::mfa_methods::MfaMethodService::available_method_types`], which
     /// holds both.
-    pub fn decode_setup_token(&self, setup_token: &str) -> AxiamResult<(Uuid, Uuid, Uuid)> {
-        self.decode_mfa_setup_token(setup_token).map_err(Into::into)
+    pub async fn decode_setup_token(&self, setup_token: &str) -> AxiamResult<(Uuid, Uuid, Uuid)> {
+        self.decode_mfa_setup_token(setup_token)
+            .await
+            .map(|(user_id, tenant_id, org_id, _)| (user_id, tenant_id, org_id))
+            .map_err(Into::into)
     }
 
     // `reset_mfa` used to live here. It moved to
@@ -1822,6 +2210,17 @@ impl<
     /// upstream identity provider may be replaying an SSO session it
     /// established hours ago, and dating that login "now" would tell a
     /// relying party the user just authenticated when they did not.
+    ///
+    /// # The credential version (SA-06, SR10-1)
+    ///
+    /// `credential_version` is the [`User::credential_version`] read together
+    /// with the credential (or second factor, or setup/challenge artefact) the
+    /// caller just verified. `Some` makes the session write refuse, inside its
+    /// own transaction, when the user's version has moved — answered
+    /// `invalid credentials`, with no session and no refresh token created. It
+    /// is `None` only where AXIAM verified no credential of its own: a
+    /// federated sign-in, whose upstream assertion has no AXIAM password
+    /// behind it to be reset.
     pub async fn create_session_and_tokens(
         &self,
         user_id: Uuid,
@@ -1830,7 +2229,14 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
         evidence: AuthenticationEvidence,
+        credential_version: Option<i64>,
     ) -> AxiamResult<LoginOutput> {
+        // SA-13 (N16, D-3): every browser sign-in ends here, so this is where a
+        // suspended tenant is refused — after the caller verified the
+        // credential (no oracle for an unauthenticated caller beyond what the
+        // door itself answers), before anything is written.
+        self.admit_tenant(tenant_id).await?;
+
         let raw_refresh = token::generate_refresh_token();
         let token_hash = token::hash_refresh_token(&raw_refresh);
         let expires_at =
@@ -1850,21 +2256,69 @@ impl<
         let raw_browser_session = token::generate_browser_session_token();
         let browser_token_hash = token::hash_browser_session_token(&raw_browser_session);
 
-        let session = self
-            .session_repo
-            .create(CreateSession {
-                tenant_id,
-                user_id,
-                token_hash,
-                ip_address,
-                user_agent,
-                expires_at,
-                authenticated_at: evidence.authenticated_at,
-                amr: evidence.amr,
-                browser_token_hash: Some(browser_token_hash),
-                lineage_id: None,
-            })
-            .await?;
+        let new_session = CreateSession {
+            tenant_id,
+            user_id,
+            token_hash,
+            ip_address,
+            user_agent,
+            expires_at,
+            authenticated_at: evidence.authenticated_at,
+            amr: evidence.amr,
+            browser_token_hash: Some(browser_token_hash),
+            lineage_id: None,
+        };
+        // SR10-1: a sign-in that verified a credential carries the version it
+        // read with it, and the session row — which is also the refresh token
+        // — is written only if that is still the user's, inside the same
+        // transaction. A reset or change that committed in between refuses the
+        // sign-in as a wrong password is, and leaves nothing behind.
+        let session = match credential_version {
+            Some(version) => {
+                self.session_repo
+                    .create_if_credential_version(new_session, version)
+                    .await?
+            }
+            None => self.session_repo.create(new_session).await?,
+        };
+
+        // SR13-1: the in-transaction check above is not enough on its own.
+        // SurrealDB transactions are SNAPSHOT isolation: the session
+        // transaction (which read the user) and a credential write (which
+        // wrote it) are not detected as conflicting, so a reset can commit its
+        // credential AND run both revocations (finding no session yet) before
+        // this row commits. Re-read the version after the commit and before
+        // any token is built: a reset commits its credential before its
+        // revocations, so a session committed before the revocation is removed
+        // by it, and one committed after is caught here.
+        if let Some(version) = credential_version {
+            let stored = self
+                .user_repo
+                .get_by_id(tenant_id, user_id)
+                .await
+                .map(|u| u.credential_version);
+            if stored.as_ref().ok() != Some(&version) {
+                // The row is also the refresh token. Whatever the cause (moved
+                // version, or an unreadable user), never return tokens for it.
+                // The row is removed through the logout path
+                // (`session_repo.invalidate`), so its id is published on the
+                // revocation feed and, with an SSF sink, emitted as
+                // `session-revoked`, for a session no client ever held.
+                if let Err(e) = self.session_repo.invalidate(tenant_id, session.id).await {
+                    // Left behind: an unreturned session row whose secret was
+                    // never disclosed; it expires on its own and
+                    // `cleanup_expired` removes it. Nothing can present it.
+                    tracing::error!(
+                        session_id = %session.id,
+                        error = %e,
+                        "could not delete a session refused by the post-commit credential re-check"
+                    );
+                }
+                return Err(AxiamError::AuthenticationFailed {
+                    reason: "invalid credentials".into(),
+                });
+            }
+        }
 
         // jti = session.id per D-15 (session-based revocation).
         let access_token = token::issue_access_token(
@@ -1891,10 +2345,10 @@ impl<
         user_id: Uuid,
         tenant_id: Uuid,
         org_id: Uuid,
+        credential_version: i64,
     ) -> Result<String, AuthError> {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
-
-        let now = Utc::now().timestamp();
+        let issued_at = Utc::now();
+        let now = issued_at.timestamp();
         let claims = MfaChallengeClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -1902,14 +2356,13 @@ impl<
             purpose: "mfa_challenge".into(),
             iss: self.config.jwt_issuer.clone(),
             iat: now,
+            iat_ns: issued_at.timestamp_nanos_opt(),
+            cv: Some(credential_version),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
-        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        let header = Header::new(Algorithm::EdDSA);
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        // SA-03: typed, so no access-token verifier can admit it.
+        token::sign_purpose_token(&claims, token::TYP_MFA_CHALLENGE, &self.config)
     }
 
     fn decode_mfa_challenge(&self, token: &str) -> Result<MfaChallengeClaims, AuthError> {
@@ -1930,8 +2383,14 @@ impl<
                 }
             })?;
 
-        if data.claims.purpose != "mfa_challenge" {
-            return Err(AuthError::TokenInvalid("not an MFA challenge token".into()));
+        // SA-03 rule 6: an access token (or any other kind) is not a challenge.
+        if !token::purpose_token_typ_accepted(
+            data.header.typ.as_deref(),
+            token::TYP_MFA_CHALLENGE,
+            &self.config,
+        ) || data.claims.purpose != "mfa_challenge"
+        {
+            return Err(AuthError::TokenInvalid(NOT_AN_MFA_CHALLENGE.into()));
         }
 
         Ok(data.claims)
@@ -1943,10 +2402,10 @@ impl<
         user_id: Uuid,
         tenant_id: Uuid,
         org_id: Uuid,
+        credential_version: i64,
     ) -> Result<String, AuthError> {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
-
-        let now = Utc::now().timestamp();
+        let issued_at = Utc::now();
+        let now = issued_at.timestamp();
         let claims = MfaChallengeClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -1954,19 +2413,25 @@ impl<
             purpose: "mfa_setup".into(),
             iss: self.config.jwt_issuer.clone(),
             iat: now,
+            iat_ns: issued_at.timestamp_nanos_opt(),
+            cv: Some(credential_version),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
-        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        let header = Header::new(Algorithm::EdDSA);
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        // SA-03: typed, so no access-token verifier can admit it.
+        token::sign_purpose_token(&claims, token::TYP_MFA_SETUP, &self.config)
     }
 
     /// Decode and validate an MFA setup token, returning (user_id,
     /// tenant_id, org_id).
-    fn decode_mfa_setup_token(&self, token: &str) -> Result<(Uuid, Uuid, Uuid), AuthError> {
+    ///
+    /// A token minted before the user's credential last changed is refused
+    /// with the same [`AuthError::MfaSetupTokenInvalid`] an expired or forged
+    /// one gets (SA-06, S-6).
+    async fn decode_mfa_setup_token(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, Uuid, i64), AuthError> {
         use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 
         let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
@@ -1986,7 +2451,13 @@ impl<
                 }
             })?;
 
-        if data.claims.purpose != "mfa_setup" {
+        // SA-03 rule 6: an access token (or any other kind) is not a setup token.
+        if !token::purpose_token_typ_accepted(
+            data.header.typ.as_deref(),
+            token::TYP_MFA_SETUP,
+            &self.config,
+        ) || data.claims.purpose != "mfa_setup"
+        {
             return Err(AuthError::MfaSetupTokenInvalid);
         }
 
@@ -2006,7 +2477,18 @@ impl<
             .parse()
             .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
 
-        Ok((user_id, tenant_id, org_id))
+        // SA-06 (S-6): fail closed — an unreadable user is as unusable as a
+        // forged token, and one whose credential changed after `iat` is stale.
+        let user = self
+            .user_repo
+            .get_by_id(tenant_id, user_id)
+            .await
+            .map_err(|_| AuthError::MfaSetupTokenInvalid)?;
+        if user.credential_superseded(data.claims.iat, data.claims.iat_ns, data.claims.cv) {
+            return Err(AuthError::MfaSetupTokenInvalid);
+        }
+
+        Ok((user_id, tenant_id, org_id, user.credential_version))
     }
 
     /// Record one failed authentication attempt against `user_id`, for the

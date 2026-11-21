@@ -1,15 +1,45 @@
 //! UserService gRPC implementation.
+//!
+//! # Authorization (SA-12, N4, decision D-2)
+//!
+//! The `AuthInterceptor` in front of this service authenticates any
+//! `axiam:user` or `axiam:m2m` token of the tenant; it authorizes nothing. So
+//! each RPC decides for itself, against the same [`AuthorizationEngine`] REST
+//! uses:
+//!
+//! - **`GetUser`** answers a caller reading its own record (`sub ==
+//!   user_id`), and otherwise requires [`GET_USER_PERMISSION`] — the rule of
+//!   REST's `GET /api/v1/users/{user_id}`, which exempts `is_own_resource`
+//!   and otherwise requires `users:get`.
+//! - **`ValidateCredentials`** is a password oracle over every account in the
+//!   tenant, so it is restricted to a **service-account principal** (`aud =
+//!   axiam:m2m` *and* `sub_kind = service_account`, the definition REST's
+//!   machine-principal extractor uses) holding
+//!   [`VALIDATE_CREDENTIALS_PERMISSION`], which the seeder gives to no role.
+//!   Every answer is audited as [`CREDENTIALS_VALIDATED_ACTION`].
+//!
+//! Before this, the only check was that the body's `tenant_id` matched the
+//! token's, so any same-tenant user token read any user's username, email and
+//! status, and could drive any account's lockout counter.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::crypto_gate::acquire_hash_permit;
 use axiam_auth::password;
-use axiam_auth::token::ValidatedClaims;
+use axiam_auth::token::{AUD_M2M, SubjectKind, ValidatedClaims};
+use axiam_authz::AuthorizationEngine;
+use axiam_authz::types::{AccessRequest, SubjectScope};
 use axiam_core::error::AxiamError;
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::user::UserStatus;
-use axiam_core::repository::UserRepository;
+use axiam_core::repository::{
+    AuditLogRepository, GroupRepository, PermissionRepository, ResourceRepository, RoleRepository,
+    ScopeRepository, UserRepository,
+};
 use secrecy::ExposeSecret;
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
@@ -19,6 +49,100 @@ use crate::proto::user_service_server::UserService;
 use crate::proto::{
     GetUserRequest, UserResponse, ValidateCredentialsRequest, ValidateCredentialsResponse,
 };
+
+/// The permission `GetUser` requires to read a user other than the caller.
+/// The same action string REST's `GET /api/v1/users/{user_id}` checks.
+pub const GET_USER_PERMISSION: &str = "users:get";
+
+/// The permission `ValidateCredentials` requires of its (service-account)
+/// caller. Registered in `axiam_api_rest::permissions::PERMISSION_REGISTRY`
+/// and seeded to **no** role (`axiam_db::seeder`): an operator grants it to the
+/// one service account that needs it.
+pub const VALIDATE_CREDENTIALS_PERMISSION: &str = "users:validate_credentials";
+
+/// The audit action every `ValidateCredentials` answer is recorded under —
+/// `Success` for a valid credential, `Failure` for any refusal.
+pub const CREDENTIALS_VALIDATED_ACTION: &str = "auth.credentials_validated";
+
+/// A boxed, sendable future — the shape the two object-safe seams below
+/// return.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The authorization decision `UserServiceImpl` needs: may `subject_id` of
+/// `tenant_id` perform `action`, globally (resource nil — REST's
+/// `RequirePermission::new(action, Uuid::nil())`).
+///
+/// A trait object rather than five more type parameters, for the reason
+/// `lockout_policy` is one: this service is generic over `U` alone, and the
+/// engine's five repository parameters would reach every call site and every
+/// test double. Production passes an [`AuthorizationEngine`], which implements
+/// it.
+pub trait UserServiceAuthorizer: Send + Sync {
+    /// `Ok(())` when allowed; `PERMISSION_DENIED` when the engine denies;
+    /// `INTERNAL` when it could not decide (fail closed).
+    fn require<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+        action: &'a str,
+    ) -> BoxFuture<'a, Result<(), Status>>;
+}
+
+impl<Rl, P, Res, S, G> UserServiceAuthorizer for AuthorizationEngine<Rl, P, Res, S, G>
+where
+    Rl: RoleRepository + 'static,
+    P: PermissionRepository + 'static,
+    Res: ResourceRepository + 'static,
+    S: ScopeRepository + 'static,
+    G: GroupRepository + 'static,
+{
+    fn require<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+        action: &'a str,
+    ) -> BoxFuture<'a, Result<(), Status>> {
+        Box::pin(async move {
+            let decision = self
+                .check_access(&AccessRequest {
+                    tenant_id,
+                    subject_scope: SubjectScope::Tenant,
+                    subject_id,
+                    action: action.to_string(),
+                    resource_id: Uuid::nil(),
+                    scope: None,
+                })
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if decision.is_allowed() {
+                Ok(())
+            } else {
+                Err(Status::permission_denied(decision.reason().to_string()))
+            }
+        })
+    }
+}
+
+/// Where `ValidateCredentials` writes its `auth.credentials_validated` rows.
+///
+/// Best effort, as every handler-written audit row on REST is: a failed append
+/// is logged and does not change the answer. Every [`AuditLogRepository`] is
+/// one.
+pub trait CredentialAuditSink: Send + Sync {
+    /// Append `entry`, logging (not returning) a failure.
+    fn record(&self, entry: CreateAuditLogEntry) -> BoxFuture<'_, ()>;
+}
+
+impl<A: AuditLogRepository> CredentialAuditSink for A {
+    fn record(&self, entry: CreateAuditLogEntry) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let action = entry.action.clone();
+            if let Err(e) = self.append(entry).await {
+                tracing::error!(error = %e, action, "failed to write a gRPC credential-check audit row");
+            }
+        })
+    }
+}
 
 pub struct UserServiceImpl<U: UserRepository> {
     user_repo: U,
@@ -41,6 +165,12 @@ pub struct UserServiceImpl<U: UserRepository> {
     /// threshold sat in the database unread — so lowering the threshold in the
     /// admin UI changed nothing on this path.
     lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
+    /// SA-12 (N4): the per-RPC authorization decision. In production an
+    /// [`AuthorizationEngine`] built like the listener's other engines (same
+    /// repositories, same decision cache and invalidation broadcaster).
+    authorizer: Arc<dyn UserServiceAuthorizer>,
+    /// SA-12: where `ValidateCredentials` audits its answers.
+    audit: Arc<dyn CredentialAuditSink>,
 }
 
 impl<U: UserRepository> UserServiceImpl<U> {
@@ -53,17 +183,24 @@ impl<U: UserRepository> UserServiceImpl<U> {
     /// and tenant repositories REST's login handler reads, so both transports
     /// lock accounts on the same numbers. [`Self::with_static_lockout_policy`]
     /// is the deployment-default shorthand.
+    ///
+    /// `authorizer` decides `GetUser`'s and `ValidateCredentials`' permission
+    /// checks; `audit` receives `ValidateCredentials`' audit rows.
     pub fn new(
         user_repo: U,
         auth_config: AuthConfig,
         crypto_semaphore: Arc<Semaphore>,
         lockout_policy: Arc<dyn axiam_auth::lockout::LockoutPolicySource>,
+        authorizer: Arc<dyn UserServiceAuthorizer>,
+        audit: Arc<dyn CredentialAuditSink>,
     ) -> Self {
         Self {
             user_repo,
             auth_config,
             crypto_semaphore,
             lockout_policy,
+            authorizer,
+            audit,
         }
     }
 
@@ -73,6 +210,8 @@ impl<U: UserRepository> UserServiceImpl<U> {
         user_repo: U,
         auth_config: AuthConfig,
         crypto_semaphore: Arc<Semaphore>,
+        authorizer: Arc<dyn UserServiceAuthorizer>,
+        audit: Arc<dyn CredentialAuditSink>,
     ) -> Self {
         let policy = axiam_auth::lockout::policy_from_config(&auth_config);
         Self::new(
@@ -80,8 +219,54 @@ impl<U: UserRepository> UserServiceImpl<U> {
             auth_config,
             crypto_semaphore,
             Arc::new(axiam_auth::lockout::StaticLockoutPolicy(policy)),
+            authorizer,
+            audit,
         )
     }
+
+    /// Record one `ValidateCredentials` answer (SA-12).
+    ///
+    /// Every answered call writes exactly one row, whichever branch answered,
+    /// so the audit write costs every outcome the same round-trip and does
+    /// not tell them apart by latency. `resource_id` is the matched account,
+    /// when one matched; the presented name is not recorded.
+    async fn audit_credential_check(
+        &self,
+        tenant_id: Uuid,
+        caller_id: Uuid,
+        matched_user: Option<Uuid>,
+        valid: bool,
+        ip_address: Option<String>,
+    ) {
+        self.audit
+            .record(CreateAuditLogEntry {
+                tenant_id,
+                actor_id: caller_id,
+                actor_type: ActorType::ServiceAccount,
+                action: CREDENTIALS_VALIDATED_ACTION.into(),
+                resource_id: matched_user,
+                outcome: if valid {
+                    AuditOutcome::Success
+                } else {
+                    AuditOutcome::Failure
+                },
+                ip_address,
+                metadata: Some(serde_json::json!({
+                    "transport": "grpc",
+                    "rpc": "axiam.v1.UserService/ValidateCredentials",
+                })),
+                organization_id: None,
+            })
+            .await;
+    }
+}
+
+/// Whether `claims` name a **service account** — the machine principal
+/// `ValidateCredentials` admits. The audience alone is not enough, for the
+/// reason REST's `AuthenticatedPrincipal` gives: an RFC 8693 exchange can
+/// narrow a *user* token to `axiam:m2m`, and that is still a user.
+fn is_service_account(claims: &ValidatedClaims) -> bool {
+    claims.0.aud.as_deref() == Some(AUD_M2M) && claims.0.sub_kind == SubjectKind::ServiceAccount
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
@@ -129,6 +314,7 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             .ok_or_else(|| Status::unauthenticated("missing validated claims"))?
             .clone();
         let claims_tenant_id = parse_uuid(&claims.0.tenant_id, "claims.tenant_id")?;
+        let subject_id = parse_uuid(&claims.0.sub, "claims.sub")?;
 
         let req = request.into_inner();
         let tenant_id = parse_uuid(&req.tenant_id, "tenant_id")?;
@@ -139,6 +325,15 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             return Err(Status::permission_denied(
                 "tenant_id mismatch: body does not match token claims",
             ));
+        }
+
+        // SA-12 (N4): the REST twin's rule. One's own record needs no grant;
+        // anybody else's needs `users:get`. Decided before the read, so a
+        // refused caller cannot tell an existing id from a missing one.
+        if subject_id != user_id {
+            self.authorizer
+                .require(claims_tenant_id, subject_id, GET_USER_PERMISSION)
+                .await?;
         }
 
         let user = self
@@ -170,6 +365,8 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             .ok_or_else(|| Status::unauthenticated("missing validated claims"))?
             .clone();
         let claims_tenant_id = parse_uuid(&claims.0.tenant_id, "claims.tenant_id")?;
+        let caller_id = parse_uuid(&claims.0.sub, "claims.sub")?;
+        let ip_address = request.remote_addr().map(|addr| addr.ip().to_string());
 
         let req = request.into_inner();
         let tenant_id = parse_uuid(&req.tenant_id, "tenant_id")?;
@@ -182,6 +379,20 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
                 "tenant_id mismatch: body does not match token claims",
             ));
         }
+
+        // SA-12 (N4, D-2): a password oracle over the whole tenant is for the
+        // service that needs one, not for every holder of a tenant token. A
+        // service account, and one an operator granted the permission to —
+        // decided before the lookup, the hash permit and the lockout
+        // accrual, so a refused caller can neither probe nor lock anyone.
+        if !is_service_account(&claims) {
+            return Err(Status::permission_denied(
+                "ValidateCredentials is restricted to service-account (axiam:m2m) principals",
+            ));
+        }
+        self.authorizer
+            .require(claims_tenant_id, caller_id, VALIDATE_CREDENTIALS_PERMISSION)
+            .await?;
 
         let invalid = Response::new(ValidateCredentialsResponse {
             valid: false,
@@ -217,6 +428,7 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         // one) and none counts a failure: the caller did not guess wrong, or
         // the account is already locked. Never a fallback to the local hash,
         // exactly as `AuthService::login` refuses one.
+        let matched_user = found.as_ref().map(|user| user.id);
         let user = found.filter(|user| {
             !axiam_auth::lockout::is_locked_out(user)
                 && user.status == UserStatus::Active
@@ -275,6 +487,14 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             })
             .await
             .map_err(|e| Status::internal(format!("spawn_blocking join error: {e}")))?;
+            self.audit_credential_check(
+                claims_tenant_id,
+                caller_id,
+                matched_user,
+                false,
+                ip_address,
+            )
+            .await;
             return Ok(invalid);
         };
         let pw_owned = req.password.clone();
@@ -309,8 +529,24 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
             if !admitted {
+                self.audit_credential_check(
+                    claims_tenant_id,
+                    caller_id,
+                    matched_user,
+                    false,
+                    ip_address,
+                )
+                .await;
                 return Ok(invalid);
             }
+            self.audit_credential_check(
+                claims_tenant_id,
+                caller_id,
+                matched_user,
+                true,
+                ip_address,
+            )
+            .await;
             Ok(Response::new(ValidateCredentialsResponse {
                 valid: true,
                 user_id: user.id.to_string(),
@@ -328,6 +564,14 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+            self.audit_credential_check(
+                claims_tenant_id,
+                caller_id,
+                matched_user,
+                false,
+                ip_address,
+            )
+            .await;
             Ok(invalid)
         }
     }

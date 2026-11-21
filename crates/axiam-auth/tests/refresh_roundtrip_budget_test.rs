@@ -86,6 +86,17 @@ impl SessionRepository for CountingSessionRepo {
         self.inner.create(input).await
     }
 
+    async fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> AxiamResult<Session> {
+        self.hit();
+        self.inner
+            .create_if_credential_version(input, expected_credential_version)
+            .await
+    }
+
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {
         self.hit();
         self.inner.get_by_id(tenant_id, id).await

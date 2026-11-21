@@ -395,6 +395,11 @@ where
         // values (a SAML handle, `RelayState`, `state`, a reset token) and
         // `{token}` path segments redacted from `http.target`.
         .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
+        // SA-02 (N1): inside the audit wrap, so the organization it resolves
+        // for a system-partition request row is there when the row is built.
+        .wrap(actix_web::middleware::from_fn(
+            axiam_api_rest::audit_organization::system_audit_organization::<C, _>,
+        ))
         .wrap(deps.audit_middleware)
         .wrap(build_cors(&deps.cors_allowed_origins))
         // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
@@ -784,6 +789,9 @@ where
         std::sync::Arc::new(axiam_api_rest::SurrealScimTokenResolver::new(
             scim_token_repo.clone(),
             axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
+            // SA-13 (N16): a tombstoned or suspended tenant's tokens resolve to
+            // no principal.
+            SurrealTenantRepository::new(pool.handle_for_repo()),
         ));
     let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo())
         .with_minimisation(audit_minimisation);
@@ -967,7 +975,9 @@ where
     // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
     // the linking of an account, on the same append-only repository (and the
     // same minimisation) as every other audit row.
-    .with_directory_audit(Arc::clone(&directory_audit_sink) as _);
+    .with_directory_audit(Arc::clone(&directory_audit_sink) as _)
+    // SA-13 (N16, D-3): a suspended tenant's sign-in and refresh are refused.
+    .with_tenant_admission(Arc::new(tenant_repo.clone()));
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());
@@ -2189,6 +2199,8 @@ where
         };
         let amqp_signing_key_clone = amqp_signing_key.clone();
         let authz_nonce_repo = amqp_nonce_repo.clone();
+        // SA-13 (N16): a suspended tenant's authz requests are denied.
+        let authz_tenant_repo = tenant_repo.clone();
         let died = fatal_stop.clone();
         tokio::spawn(async move {
             axiam_amqp::authz_consumer::start_authz_consumer(
@@ -2196,6 +2208,7 @@ where
                 amqp_engine,
                 amqp_signing_key_clone,
                 authz_nonce_repo,
+                authz_tenant_repo,
                 amqp_replay_skew,
             )
             .await;
@@ -2656,6 +2669,29 @@ where
             None => engine,
         }
     };
+    // SA-12 (N4, D-2) — `UserServiceImpl`'s own `AuthorizationEngine`, built
+    // identically for the same reason as `grpc_reactor_engine` above.
+    let grpc_user_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
+        );
+        let engine = match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
+            None => engine,
+        }
+    };
     let grpc_reactor_repo = reactor_repo.clone();
     // `pool` is moved into `health_checker` before this point (see the
     // comment near `session_client_repo` above), so this reuses the
@@ -2799,6 +2835,7 @@ where
             grpc_reactor_dispatch_available,
             grpc_crypto_semaphore,
             grpc_lockout_policy,
+            grpc_user_engine,
             grpc_tls,
             deployment_profile,
             async move {
@@ -3103,6 +3140,9 @@ where
         // `managed_by`, which never changes for a `client_id` — cache it
         // (see axiam_api_rest::client_managed_by_cache).
         client_managed_by_cache: Arc::new(Default::default()),
+        // QR2-8 / SR2-4: bounds the system-audit organization lookup (see
+        // axiam_api_rest::audit_organization).
+        system_audit_org_cache: Arc::new(Default::default()),
         user_repo: user_repo.clone(),
         group_repo: group_repo.clone(),
         role_repo: role_repo.clone(),
@@ -3789,9 +3829,79 @@ fn trusted_proxies_for_boot(
         .map_err(|e| format!("invalid rate-limit configuration: {e}"))
 }
 
+/// `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER`, read by hand in `main` (the
+/// spelling operators already use).
+///
+/// The same variable is first read by the layered config loader
+/// (`load_config`), which binds it to `AuthConfig::allow_missing_aud_as_user`
+/// like every other `AXIAM__*` boolean. The loader accepts only `1`, `true`,
+/// `on`, `yes`, `0`, `false`, `off` and `no` (case-insensitive, untrimmed);
+/// any other value — an empty Compose `${VAR:-}`, a padded value, a typo —
+/// fails the load and the server does not start. This function never sees
+/// such a value.
+///
+/// It runs after a successful load and fails closed (S-9): only `true`, `1`
+/// or `yes` enable the switch. Of the values the loader accepts, the one
+/// whose outcome it changes is `on`: the loader reads it as `true`, and this
+/// override turns it back off.
+pub fn allow_missing_aud_override(value: &str) -> bool {
+    let value = value.trim();
+    ["true", "1", "yes"]
+        .iter()
+        .any(|on| value.eq_ignore_ascii_case(on))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    /// Q-9: the rolling-upgrade escape hatch loads from its documented
+    /// environment spelling — the `config` crate coerces the string to a
+    /// `bool` — and the default stays strict.
+    #[test]
+    fn require_access_token_typ_is_read_from_the_environment() {
+        assert!(config_from(&[]).auth.require_access_token_typ);
+        for off in ["false", "FALSE", "0", "no", "off"] {
+            let cfg = config_from(&[("AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP", off)]);
+            assert!(!cfg.auth.require_access_token_typ, "{off:?} must relax it");
+        }
+        let on = config_from(&[("AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP", "true")]);
+        assert!(on.auth.require_access_token_typ);
+
+        // A value that is not a boolean stops the load (and so the server)
+        // rather than silently leaving either posture in force.
+        let typo: HashMap<String, String> = [(
+            "AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP".to_owned(),
+            "flase".to_owned(),
+        )]
+        .into();
+        let loaded = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("AXIAM")
+                    .separator("__")
+                    .source(Some(typo)),
+            )
+            .build()
+            .and_then(|c| c.try_deserialize::<super::AppConfig>());
+        assert!(loaded.is_err(), "a typo must not load");
+    }
+
+    /// S-9: the `allow_missing_aud_as_user` override enables only on an
+    /// explicit affirmative. These are helper-level cases: at startup the
+    /// config loader has already refused every value it cannot read as a
+    /// boolean (empty, padded, a typo), so of the inputs below only `on`
+    /// reaches this function from a running server and changes its outcome.
+    #[test]
+    fn the_missing_aud_override_enables_only_on_an_affirmative() {
+        for on in ["true", "TRUE", " True ", "1", "yes", "YES", " yes\n"] {
+            assert!(super::allow_missing_aud_override(on), "{on:?}");
+        }
+        for off in [
+            "", " ", "false", "0", "no", "off", "on?", "ture", "enabled", "2",
+        ] {
+            assert!(!super::allow_missing_aud_override(off), "{off:?}");
+        }
+    }
 
     #[test]
     fn a_non_utf8_trusted_proxies_value_stops_the_boot() {

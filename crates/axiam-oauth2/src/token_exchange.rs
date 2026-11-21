@@ -792,6 +792,11 @@ where
             .get_by_id(tenant_id)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        // SA-13 (N16, D-3): the tenant is in hand; a suspended one issues
+        // nothing (the client's authentication refused it already).
+        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+            return Err(OAuth2Error::TenantSuspended);
+        }
 
         let act = actor_sub.as_ref().map(|actor| ActClaim {
             sub: actor.clone(),
@@ -1042,6 +1047,11 @@ where
             .get_by_id(tenant_id)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        // SA-13 (N16, D-3): the tenant is in hand; a suspended one issues
+        // nothing (the client's authentication refused it already).
+        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+            return Err(OAuth2Error::TenantSuspended);
+        }
 
         let access_token = issue_exchanged_token(
             &external.user_id.to_string(),

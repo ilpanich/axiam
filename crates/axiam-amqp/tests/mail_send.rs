@@ -253,6 +253,8 @@ impl UserRepository for MockUserRepo {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: None,
+            credential_version: 0,
             metadata: serde_json::Value::Null,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -324,6 +326,7 @@ impl AuditLogRepository for MockAuditRepo {
             ip_address: input.ip_address.clone(),
             metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         };
         self.appended.lock().unwrap().push(input);
         Ok(entry)
@@ -338,6 +341,7 @@ impl AuditLogRepository for MockAuditRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _f: AuditLogFilter,
         _p: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {

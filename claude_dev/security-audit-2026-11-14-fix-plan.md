@@ -210,7 +210,89 @@ the five waves, the review gate of §1.6 (two Opus 5.5 reviews per round).
 
 ## 4. Wave 1 — server, principal boundaries
 
+> **REVIEW GATE — PASSED (2026-11-20), 41 rounds.**
+>
+> **Shape.**
+> - 21 review rounds (1, 3, 5 … 41). Each review round had one code-quality and one security review, both by Opus 5.5 reviewers who wrote none of the code.
+> - 20 fix rounds, one signed commit each: `5a2d68d` … `7c0f1e9` (`fix(review): … (wave 1, round M)`).
+> - Reviewers received the complete wave diff, this plan's §1–§4 and the report sections, plus the owner decisions below. They did not receive implementer summaries.
+> - Every finding was fixed. None was rejected.
+>
+> **Owner decisions taken during the gate.** These were binding on later rounds.
+> - **SA-02 system audit:** filter by the caller's organization, record the organization on new system-partition rows, and resolve it off the response path. Lookups are bounded by a semaphore and the permit is taken only for the datastore read. The admin UI gates the System-audit, organization Settings/Email tabs and the tenant View button exactly as the server does.
+> - **SA-03 typed tokens:**
+>   - a legacy `typ: JWT` counts as untyped;
+>   - purpose tokens follow the relax flag;
+>   - introspection is gated on `at+jwt`;
+>   - logout tokens are typed `logout+jwt`;
+>   - CONTRACT 1.67 §34.11 (e) records the wire changes, and the binding SDK rule lands in 1.68 with SA-17.
+> - **SA-04 client-minted tokens:**
+>   - OIDC scope consent, the account delete and export acts, every credential-management route, and every self-update are first-party only;
+>   - own-account SCIM PUT, PATCH and DELETE and own-account `DELETE /users/{id}` are first-party only;
+>   - an admin acting on another user is unchanged;
+>   - a proposed unverified-address rule on reset was withdrawn.
+> - **SA-06 credential epoch and version (N7):**
+>   - Every credential write stamps `credential_changed_at`, written with the datastore clock, and bumps `credential_version` in one transaction. Directory accounts refuse credential writes in the repository.
+>   - MFA challenge, MFA setup, WebAuthn state and `SealedLogin` artefacts carry the version and are judged by it alone. Only versionless artefacts fall back to the timestamp, and a tie refuses.
+>   - The session mint checks the version in its transaction and re-reads it after commit.
+>   - Session rows store the version (v119). Refresh rotation enforces it, and a legacy row refuses a change at or after its `created_at`.
+>   - The OAuth2 refresh, authorization-code, device and CIBA grants refuse a credential change at or after the grant's time and re-check after minting. A device login that spans a change is refused (accepted and documented).
+>   - Reset and change emit the SSF credential-change event and audit record even when revocation fails. A successful change notifies `PasswordChanged`.
+>   - SCIM password writes return 400 `mutability` when OPAQUE is `required`.
+>
+> **Accepted residue (documented, not a defect).** The timestamp fallback for versionless MFA, WebAuthn and OPAQUE artefacts compares an application-clock `iat` with the datastore-clock stamp.
+>
+> **Stop rule changed by the owner (2026-11-20).** Round 41 was declared the final round, provided it found nothing of medium severity or higher. Lower findings are filed as GitHub issues instead of another fix round, and the run moves to the next wave. This replaces item 3 of §1.6 for findings below medium, from this gate onward.
+>
+> **Round 41 outcome.**
+> - Security review: no findings.
+> - Code-quality review: two low findings and one nit, all on tests or docs, none a behaviour defect. Each was filed with the label `wave-1-review-follow-up`:
+>   - **QR22-1 (low)**, #872: the same-second, after-epoch acceptance of unversioned tokens is no longer covered by a test.
+>   - **QR22-2 (low)**, #873: OPAQUE `login/finish` duplicates the credential-superseded rule, and no test covers it.
+>   - **QR22-3 (nit)**, #874: the first SA-06 paragraph of the deployment guide presents the timestamp check as the rule for current tokens.
+>
+> **Leads.** All eight Wave 1 leads (N1, N5, N6, N7, N8, N9, N10, N20) reproduced. C1 and C3 were confirmed findings.
+>
+> **Carried forward, outside Wave 1's scope.**
+> - SA-17 bumps CONTRACT to 1.68 with the typ/purpose/kid rule.
+> - Logout tokens without a `kid` (§12.4) are not yet addressed.
+> - The `allow_missing_aud_as_user` default change is not yet recorded.
+> - The plan's "1.66" reference is stale.
+> - SDKs re-sync to CONTRACT 1.67 in Wave 3.
+> - OAuth2 introspection may still report a surviving pre-change refresh token as active (SA-41).
+
 ### SA-01 — Bootstrap always requires the setup secret (C1)
+
+> **EXECUTED (2026-11-15, Sonnet 5.5).** `bootstrap()` now treats
+> `AXIAM_BOOTSTRAP_ADMIN_EMAIL` as an additional restriction only (mismatch →
+> 403) and requires a valid, unconsumed `setup_token` on every path; the token
+> hash is always consumed in the bootstrap transaction (`consumed_token_hash` is
+> no longer an `Option`). No new environment variable (D-8).
+>
+> - **Regression test:** `bootstrap_test::bootstrap_email_gate_still_requires_setup_token`
+>   (email set: no token → 403, garbage token → 403, valid token + wrong email →
+>   403, valid token + right email → 201). Unfixed code: `FAILED … left: 201
+>   right: 403` at the first assertion. Fixed: passes. Control
+>   `bootstrap_valid_token_without_email_gate_succeeds` (email unset + valid
+>   token → 201) passes before and after. Whole file: 15 passed.
+> - **Rewritten tests:** every email-only bootstrap test, including
+>   `bootstrap_creates_org_tenant_admin`, now mints and sends a token (helpers
+>   `first_boot_token`, `post_bootstrap_status`).
+> - **Not anticipated:** (1) `bootstrap_returns_409_after_admin`: the second
+>   sequential call now answers **403**, not 409, because the first call
+>   consumed the token and the gate runs before the lock — the same behaviour
+>   the email-unset path already had. The test asserts 403 and exactly one
+>   user; the 409 lock path stays covered by `bootstrap_concurrent_race_single_admin`.
+>   (2) Token extraction lives in one new helper, `scripts/first-boot-token.sh`,
+>   used by `scripts/e2e-bootstrap.sh` (CI and examples-smoke call it; no
+>   workflow change) and `benchmarks/runner/seed.sh`, which bootstrapped by
+>   email only. `infra/rpi5-k3s/scripts/03-axiam-bootstrap.sh` no longer falls
+>   back to email-only. (3) Doc-comment changes moved `sdks/openapi.json`
+>   (regenerated; digest checked) and two sentences of `sdks/CONTRACT.md`
+>   (bootstrap rows; no version bump) — both re-sync downstream with SA-17.
+> - Docs: `docs/admin/README.md`, `docs/deployment/README.md`,
+>   `docs/deployment/rpi5-k3s.md`, the k8s ConfigMap and e2e/bench compose
+>   comments, the first-boot log text in `main.rs`, the `BootstrapPage` hint.
 
 - **Model:** Sonnet 5.5. One handler, the fix is sketched in the report.
 - **Files:** `crates/axiam-api-rest/src/handlers/bootstrap.rs` (280–320),
@@ -238,6 +320,52 @@ valid token + wrong email → 403; email set + valid token + right email → 201
 email unset + valid token → 201. Rewrite `bootstrap_creates_org_tenant_admin`.
 
 ### SA-02 — Organization-level guard on three handlers (N1, N8, N9)
+
+> **EXECUTED (2026-11-15, Opus 5.5). N1, N8, N9: all reproduced.**
+> `audit_logs:list_system`, `organizations:get_settings`,
+> `organizations:update_settings` and `tenants:export_audit` joined
+> `ORGANIZATION_LEVEL_ACTIONS`. `require_organization_principal` guards
+> `audit::list_system`, `settings::{get,set}_org_settings` and
+> `email_config::get_org_email_config`; `require_organization_principal_for_tenant`
+> guards `tenants::get` and `tenants::export_audit`.
+>
+> - **Validation (unfixed → fixed):**
+>   N1 `audit_test::standard_tenant_admin_cannot_read_the_system_audit_partition`:
+>   `left: 200 right: 403` (body held B's `POST /scim/v2/Users` row) → ok.
+>   N8 `rbac_test::standard_tenant_admin_cannot_rewrite_the_org_baseline` and
+>   `…_cannot_read_the_org_baseline`: `200` vs `403` → ok.
+>   N9 `tenant_test::standard_tenant_admin_cannot_export_a_sibling_tenants_audit_trail`,
+>   `…_cannot_read_a_sibling_tenant`,
+>   `a_restricted_organization_principal_exports_only_the_tenants_it_reaches`:
+>   `200` vs `403` → ok. Unfixed runs: handlers and `permission_scope.rs`
+>   stashed, tests in place.
+> - **Step 4 — no migration needed.** The server reconciles default-role grants
+>   at every boot (`main.rs:630` → `seeder.rs:839`
+>   `reconcile_default_role_grants`, revoke at `seeder.rs:992` driven by
+>   `is_organization_level_action`), so extending the list revokes the four
+>   actions from existing Standard tenants' super-admin and admin roles.
+>   Pinned by `seeder_default_data_test::reconcile_revokes_the_sa_02_actions_from_an_existing_ordinary_tenant`
+>   (unfixed: `revoked: 0`, expected 8) and
+>   `the_sa_02_actions_are_withheld_from_a_new_ordinary_tenant`. Limit: a
+>   custom role an operator granted one of these keeps the row; the handler
+>   guard refuses it (tested through the "explicit grant" caller).
+> - **Step 3:** the org email-config setters (`set_`, `delete_`,
+>   `test_org_email_config`) were already guarded; only the getter was not.
+>   `email_config:read`/`:write` are shared with the tenant handlers, so neither
+>   joins the list (the scope guard is the control there).
+> - **Step 5:** `organization_scope_consistency_test` now carries
+>   `ORGANIZATION_ROUTES` (all 25 `/organizations/{org_id}` routes, method,
+>   path, handler, guard; five GET routes `Exempt` with a reason).
+>   `every_organization_route_is_on_the_guard_list` compares it with
+>   `server.rs` both ways (checked by adding a probe route: FAILED, then
+>   reverted); `every_listed_organization_route_reaches_its_guard` failed on
+>   the five unguarded handlers before the fix.
+> - **Step 6:** `rbac_test::org_settings_update_allows_org_settings_permission`
+>   now uses a user of the organization's scope tenant.
+> - **Not anticipated:** 20 existing tests in `settings_test`, `cimd_test`,
+>   `dynamic_registration_test`, `directory_config_test`, `gdpr_handlers_test`
+>   and `ssf_shared_issuer_test` wrote the org settings with an ordinary-tenant
+>   token; each now uses a scope-tenant token for that request only.
 
 - **Model:** Opus 5.5. This is the highest-value boundary in the report, the
   existing tests pin the wrong behaviour, and already-seeded tenants hold the
@@ -277,6 +405,57 @@ Instructions:
 
 ### SA-03 — Typed access tokens (N10, server side of N14)
 
+> **EXECUTED (2026-11-15, Opus 5.5). N10: reproduced** (discoverable and
+> second-factor WebAuthn state tokens accepted by `validate_access_token`, the
+> gRPC `AuthInterceptor` and `ValidateToken`). Every access token is signed
+> with `typ: at+jwt` and a `kid` through the single `sign_claims` path; purpose
+> tokens go through a new `sign_purpose_token`, which refuses `at+jwt` and
+> `JWT`. `decode_access_token` **and** `decode_access_token_any_audience`
+> (introspection) apply `check_access_token_type` (typ rule + `purpose` rule).
+> `require_access_token_typ` (`AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP`) defaults
+> to `true`; `allow_missing_aud_as_user` now defaults to `false`. Documented in
+> `docs/deployment/README.md` ("Access-token type … and upgrading"), with a
+> startup warning when the flag is off.
+>
+> | Token | `typ` | `kid` |
+> |---|---|---|
+> | Access (user, client credentials, service account, RPT, exchange) | `at+jwt` | yes |
+> | OIDC ID token | `JWT` | yes |
+> | WebAuthn state | `axiam-webauthn-state+jwt` | no (wave 1 review S-8) |
+> | MFA challenge / MFA setup | `axiam-mfa-challenge+jwt` / `axiam-mfa-setup+jwt` | no (wave 1 review S-8) |
+> | Back-channel logout | `logout+jwt` (new) | no |
+> | SSF SET | `secevent+jwt` (unchanged) | yes |
+>
+> - **Regression tests (unfixed → fixed):**
+>   `webauthn_single_use_test::n10_a_discoverable_state_token_is_not_an_access_token`,
+>   `…n10_a_second_factor_state_token_is_not_an_access_token` (FAILED: "state
+>   token was accepted as an access token: Ok(…)") → ok;
+>   `grpc_units::n10_the_interceptor_refuses_a_webauthn_state_token`,
+>   `…n10_validate_token_reports_a_webauthn_state_token_invalid` (FAILED,
+>   subject nil UUID) → ok; `webauthn::tests::the_state_verifier_requires_the_state_typ`
+>   (rule 6; FAILED: accepted `at+jwt`) → ok;
+>   `auth_service_test::sa03_mfa_purpose_tokens_are_typed_and_are_not_access_tokens`,
+>   `…sa03_an_access_token_is_refused_by_the_mfa_verifiers` (FAILED on `typ`) → ok.
+>   Positive controls pass: REST, gRPC, `token_exchange_test`, `uma_test`
+>   (`claim_token`). The gRPC N10 tests set `allow_missing_aud_as_user: true`
+>   so that the type, not the new aud default, is what refuses.
+> - **MFA challenge/setup → access token: not reproduced as an acceptance**
+>   (no `jti`, so deserialisation already failed); typed anyway per step 2, tests kept as pins.
+> - **Rewritten:** `config_tests::default_has_sane_values` (now asserts
+>   `allow_missing_aud_as_user == false`, `require_access_token_typ == true`).
+> - **Not anticipated:** (1) Every pre-SA-03 token carried `typ: "JWT"`
+>   (`jsonwebtoken::Header::new`), not an absent `typ`. Absent and `JWT` are
+>   both treated as "untyped": refused in strict mode, accepted in relaxed
+>   mode only without `purpose`; any other `typ` is refused in both modes.
+>   (2) Purpose verifiers follow the same flag, so in-flight ceremonies survive
+>   a relaxed rolling upgrade. (3) Introspection reports purpose tokens
+>   inactive. (4) Logout tokens gain `typ: logout+jwt` (OIDC Back-Channel
+>   Logout §2.4). (5) `logout::decode_id_token_hint` (also used by `/oauth2/authorize`)
+>   and `ciba::verify_id_token_hint` originally checked no `typ`; since the
+>   wave 1 review (Q-8/S-10) both accept only `JWT` or an absent `typ`. (6) Upgrade effect for SA-50: under the strict default
+>   every session re-authenticates or refreshes within one access-token
+>   lifetime (15 min).
+
 - **Model:** Opus 5.5. Token validation is shared by REST, gRPC, token exchange
   and UMA; a mistake either locks out valid tokens or leaves the hole open.
 - **Files:** `crates/axiam-auth/src/token.rs` (`decode_access_token`, 1714–1718,
@@ -315,6 +494,28 @@ each purpose-token verifier.
 
 ### SA-04 — `/oauth2/authorize` refuses client-minted user tokens (N6)
 
+> **EXECUTED (2026-11-15, Sonnet 5.5). N6: reproduced.**
+> `resolve_authorize_principal` gains an arm before Path 1: a principal whose
+> token `minted_for_client()` becomes an `AuthenticationFailed` and flows into
+> the anonymous Path 2 — 302 to `/login?return_to=…` for a `browser_sso`
+> client, the ordinary anonymous 401 otherwise; never 403.
+>
+> - **Regression tests** (`oauth2_login_hop_test`, real tokens: confidential X
+>   via the code flow, public PKCE client Y):
+>   `n6_a_client_minted_token_does_not_authorize_another_client` (bearer)
+>   unfixed `FAILED: must fall through to the login page:
+>   https://rp.example.com/callback?code=…` → ok;
+>   `n6_a_client_minted_token_in_the_access_cookie_does_not_authorize`
+>   (same token in `axiam_access`) FAILED → ok.
+> - **Controls:** `n6_control_a_first_party_session_cookie_still_authorizes`
+>   ok before and after; existing
+>   `a_token_bearing_request_is_unaffected_and_ignores_the_tenant_parameter`
+>   (console bearer token) and the `axiam_op_session` hop tests pass. Ten
+>   oauth2 test files pass (243 tests).
+> - **Not anticipated:** the cookie-borne variant is closed by the same arm.
+>   The refresh-token half of the report's chain was not exercised: code
+>   issuance is the gating step.
+
 - **Model:** Sonnet 5.5. The rule exists (`minted_for_client`,
   `extractors/auth.rs:414`); it has to be applied in one more place.
 - **Files:** `crates/axiam-api-rest/src/handlers/oauth2.rs`
@@ -331,6 +532,23 @@ working: add a control test for that.
 
 ### SA-05 — mTLS device login checks service-account status (N5)
 
+> **EXECUTED (2026-11-15, Sonnet 5.5). N5: reproduced.** `device_auth` loads
+> the bound service account and answers 401 ("the service account bound to
+> this certificate is not active") when it cannot be loaded or its status is
+> not `Active`, mirroring `network_decide.rs`. It also inserts
+> `AuditAttribution` for the proven tenant, so the refusal (and success) row is
+> written under that tenant rather than the nil partition.
+>
+> - **Regression test:** `device_auth_test::device_auth_refuses_a_non_active_service_account`
+>   (Inactive, Locked, PendingVerification in turn; 401, no `access_token`, an
+>   audit row with `http_status` 401 under the tenant; control: reactivated →
+>   200 with `sub` = the account). Unfixed: `FAILED … a Inactive service account
+>   must not be issued a device token … left: 200 right: 401`. Fixed: ok;
+>   `device_auth_test` 15 passed, `device_login_rate_limit_test` 6 passed.
+> - **Not anticipated:** the file's `test_app!` now wraps the app in
+>   `AuditMiddleware`. The OpenAPI 401 description was left unchanged (no spec
+>   change). `axiam-server`'s `radius_e2e.rs` was not run.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-api-rest/src/handlers/auth.rs` (`device_auth`, 934–976),
   `crates/axiam-api-rest/tests/device_auth_test.rs`.
@@ -342,6 +560,32 @@ and returning 401 unless `status == UserStatus::Active`, mirroring
 `network_decide.rs:362–368`. Write an audit row for the refusal.
 
 ### SA-06 — Password reset and change retire the stale OPAQUE record (N7)
+
+> **EXECUTED (2026-11-15).** N7 **reproduced** for password reset and for
+> self-service change: on unfixed code, under `opaque_mode=optional`, OPAQUE
+> login with the pre-reset/pre-change password returned 200.
+> Fix: `SurrealUserRepository::update` (`crates/axiam-db/src/repository/user.rs`)
+> deletes the user's `opaque_credential` row in the same SurrealDB transaction
+> as any write of `password_hash`. Every writer of the hash — reset
+> (`PasswordResetService::confirm_reset`), change (`AuthService::change_password`)
+> and SCIM password PATCH — goes through that call, so one rule covers all of
+> them. Admin create and bootstrap create a user with no prior record; directory
+> linking already deleted the record; no login-time rehash of user passwords
+> exists. Deviation from the letter of the plan: the delete is unconditional on a
+> hash write rather than only when `enrolled` is `None`; when a new record is
+> supplied, `store_credential` upserts it immediately after (both handlers call
+> it after the hash update), so the outcome is identical on success, and on an
+> upsert failure the user is left with no record rather than one answering to the
+> old password. Tests: `opaque_login_test.rs`
+> `n7_a_reset_without_a_record_retires_the_old_opaque_record`,
+> `n7_a_change_without_a_record_retires_the_old_opaque_record` (FAILED before,
+> `left: 200 right: 200`; pass after), controls
+> `n7_control_a_reset_with_a_new_record_keeps_it`,
+> `n7_control_a_change_with_a_new_record_keeps_it`; `opaque_coverage_test.rs`
+> `writing_the_password_hash_retires_the_opaque_record`,
+> `writing_the_hash_and_the_email_together_retires_the_record` (FAILED before,
+> pass after), `an_update_that_leaves_the_hash_alone_keeps_the_record`. SCIM is
+> covered at the repository level only (no SCIM end-to-end test).
 
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-api-rest/src/handlers/opaque_enrollment.rs`
@@ -358,6 +602,21 @@ every writer of the Argon2 hash and apply the same rule.
 
 ### SA-07 — Dummy Argon2 hash uses production parameters (C3)
 
+> **EXECUTED (2026-11-15).** `crates/axiam-auth/src/password.rs`: new
+> `production_params()` (m=19456, t=2, p=1) is the single source used by
+> `hash_password`; the `DUMMY_HASH` constant (m=65536, t=3, p=4) is replaced by
+> `dummy_hash()`, a process-wide `OnceLock<String>` filled by `hash_password` on a
+> random UUID. `equalising_dummy_verify` still goes through `verify_password` with
+> the configured pepper, so the dummy does the same work as a real wrong-password
+> verify with or without a pepper (the pepper is a prefix, not a pre-hash). The
+> `OnceLock` init uses `expect`: its only failure paths are statically valid
+> params and a hash of a short random value. Doc comments in `password_reset.rs`
+> and `service.rs` updated (they named the removed constant). Test:
+> `password::tests::the_dummy_hash_uses_the_production_argon2_parameters` —
+> FAILED before (`memory cost left: 65536 right: 19456`), passes after
+> (`axiam-auth --lib`: 292 passed, 0 failed). No other hard-coded Argon2 PHC
+> strings or production parameters exist in `crates/`.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-auth/src/password.rs` (22, 43, 53).
 
@@ -368,6 +627,19 @@ the dummy must be hashed and verified the same way a real hash is. Unit test:
 the parameters parsed from the dummy hash equal `production_params()`.
 
 ### SA-08 — Tenant predicate on group member counts (N20)
+
+> **EXECUTED (2026-11-15).** N20 **reproduced** for both functions: with a
+> tenant-B group of three members, `get_members(A, group_id)` and
+> `get_service_account_members(A, group_id)` returned empty items but
+> `total == 3`. Fix (`crates/axiam-db/src/repository/group.rs`): both count
+> queries now require `out.tenant_id = $tenant_id AND in.tenant_id = $tenant_id`
+> (the `member_of` edge has no tenant column; the predicate sits on its
+> endpoints) and bind `$tenant_id`. Tests in `group_repository_test.rs`:
+> `get_members_total_does_not_leak_other_tenant_count`,
+> `get_service_account_members_total_does_not_leak_other_tenant_count` — FAILED
+> before (`left: 3, right: 0`), pass after (11 passed); each includes a
+> same-tenant control (`total == 3`). The other count queries in `group.rs`
+> already filter on `tenant_id`.
 
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-db/src/repository/group.rs` (`get_members`,
@@ -383,6 +655,26 @@ to both count queries and bind `$tenant_id`, matching the data query beside each
 
 ### SA-09 — Erasure cancel restores the prior status (N11)
 
+> **EXECUTED (2026-11-20, Sonnet 5.5). N11: reproduced.** On the unfixed code a
+> `Locked`, `Inactive` or `PendingVerification` account read `Active` after an
+> erasure request was cancelled. `create_with_pending_flag` now reads the user's
+> status inside its transaction, before parking the account as `Inactive`, and
+> stores it on the request as `prior_status`; `cancel_tx` restores
+> `prior_status ?? 'Active'`. Schema **v120** (`account_deletion_prior_status`)
+> adds the one optional column — additive, no `DEFAULT`, no backfill: a request
+> written before v120 has none and restores `Active`, as every cancel did before.
+> No domain struct, REST type or OpenAPI change.
+>
+> Regression tests (`crates/axiam-db/src/repository/account_deletion.rs`):
+> `cancel_restores_prior_status_{locked,inactive,pending_verification}` failed
+> before the fix (`left: Active`) and pass after; `cancel_restores_prior_status_active`
+> and `cancel_of_a_legacy_row_without_prior_status_restores_active` pin the
+> unchanged cases; `schema::tests::v120_adds_only_the_optional_prior_status_column`.
+> `cargo test -p axiam-db --lib` 357 passed; the account-deletion integration
+> suites (`deletion_cancel_race_test`, `owed_erasure_claim_test`,
+> `provisioning_sink_test`, `gdpr_handlers_test`, `gdpr_test`) pass; fmt and
+> clippy clean.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-db/src/repository/account_deletion.rs` (211–215,
   370–372), `crates/axiam-db/src/schema.rs`.
@@ -395,6 +687,30 @@ restore it in `cancel_tx`. Rows created before the change have no value: restore
 
 ### SA-10 — Guarded HTTP client ignores environment proxies (N13, D-4)
 
+> **EXECUTED (2026-11-20, Sonnet 5.5). N13: reproduced.** With `HTTPS_PROXY`
+> pointing at a loopback fixture, the unfixed `pinned_client` sent
+> `CONNECT rebind.example.test:443` to the proxy: the destination was named by
+> hostname and the validated IP no longer decided it. `pinned_client` now calls
+> `.no_proxy()` unconditionally (D-4). Regression test
+> `ssrf::tests::n13_pinned_client_ignores_environment_proxy` failed before and
+> passes after; `cargo test -p axiam-pki --lib` 152 passed. The deployment
+> guide ("Outbound SSRF guard — same-network IdPs") now says guarded fetches
+> ignore `HTTP(S)_PROXY`/`ALL_PROXY`.
+>
+> Every fetch of a tenant-, admin- or IdP-supplied URL goes through
+> `guarded_fetch*` and therefore `pinned_client`: webhooks, back-channel logout,
+> SSF push, CIBA ping, CIMD, JWKS, OIDC discovery and token exchange, OAuth2
+> social endpoints, SAML SP/IdP metadata, SCIM outbound, e-mail HTTP providers,
+> FIDO MDS. Clients that do **not** use `pinned_client` (none fetches a
+> tenant-supplied URL; listed per the instructions, not changed): the shared
+> `http_client` (`axiam-server/src/boot.rs` ~1297) and the `reqwest::Client::new()`
+> defaults in `axiam-api-rest/src/state/mod.rs` (~375, 834, 911, 1017) — handed
+> to the federation constructors but used only for the HIBP check;
+> `axiam-auth/src/policy.rs` ~197 (HIBP range API, fixed host); the Vault clients
+> in `axiam-pki/src/ca_key_store.rs` ~201, `axiam-auth/src/secrets.rs` ~274 and
+> `axiam-pki/src/vault_pki.rs` (operator-configured address); the local health
+> probe `axiam-server/src/healthcheck.rs` ~106. These keep env-proxy discovery.
+
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-pki/src/ssrf.rs` (`pinned_client`, 251–257).
 
@@ -405,6 +721,30 @@ any that does not in the `EXECUTED` block without fixing it. Add a line to the
 admin network documentation: guarded fetches do not use an egress proxy.
 
 ### SA-11 — SAML SP: mandatory Recipient and audience binding (N21, D-5)
+
+> **EXECUTED (2026-11-20, Sonnet 5.5). N21: reproduced.** In the form-ACS
+> argument shape (no expected destination), a correctly signed assertion with no
+> `AudienceRestriction` and a `Recipient` naming another SP was accepted; so was a
+> no-audience assertion with the correct `Recipient`: the audience check ran only
+> when the element was present. `saml.rs` now rejects `<Conditions>` with an
+> absent or empty `AudienceRestriction`, and still requires the SP entity ID among
+> the audiences (D-5, no opt-out). `saml_acs_form_public` passes
+> `login_state.idp_redirect_uri.as_deref()` (the ACS URL the SAML start stored, as
+> the JSON ACS already used), so `Response@Destination` and the signed
+> `SubjectConfirmationData@Recipient` are compared on both ACS paths.
+> Six tests in `saml::tests`: `form_acs_shape_rejects_no_audience_foreign_recipient_assertion`
+> and `assertion_without_audience_restriction_is_rejected` failed before and pass
+> after; `assertion_with_foreign_audience_is_rejected`,
+> `form_acs_with_expected_destination_{rejects_foreign_recipient,accepts_conformant_assertion}`
+> and `nameid_with_interior_comment_parses_to_full_text` (hardening notes) pin
+> behaviour that was already correct. `generate.sh` gained an audience-block
+> argument and three fixtures; the script mints a fresh key, so the whole fixture
+> set and `signing_cert.pem` were re-signed (content and audiences unchanged).
+> After: `axiam-federation` 418 lib tests; REST `federation_test` 87,
+> `sec095_federated_login_gate_test` 6, `saml_idp_e2e_test` 10,
+> `saml_idp_sso_test` 22, `saml_admin_test` 38; `axiam-server` `req5_saml_e2e` 9;
+> SAML-off `cargo check` clean. **Upgrade note for SA-50:** an IdP that omits
+> `AudienceRestriction` for the SP entity ID is now refused.
 
 - **Model:** Sonnet 5.5.
 - **Files:** `crates/axiam-federation/src/saml.rs` (636, 1483),
@@ -420,6 +760,38 @@ ID. Add the SAML test from the hardening notes: a NameID with an interior XML
 comment parses to its full text.
 
 ### SA-12 — RBAC on gRPC `UserService` (N4, D-2)
+
+> **EXECUTED (2026-11-20, Opus 5.5). N4: reproduced.** A same-tenant
+> `axiam:user` token whose subject held no grant read another user's username,
+> email and status through `GetUser`; `ValidateCredentials` answered
+> (`valid: true`) for a user token and for a service account with no permission,
+> and wrote no audit row. Now `GetUser` requires `users:get` (resource nil, as
+> REST) unless `claims.sub == user_id`. `ValidateCredentials` first refuses any
+> caller that is not a service account, by REST's own machine-principal rule
+> (`aud == axiam:m2m` **and** `sub_kind == ServiceAccount`, so a user token
+> narrowed to `axiam:m2m` by exchange is refused too), then requires the new
+> `users:validate_credentials`; both run before the lookup, the hash permit and
+> lockout accrual. Every answered call writes one `auth.credentials_validated`
+> row (Success/Failure, service-account actor, matched user as resource, peer
+> IP; the presented name is not recorded); refused callers write none.
+> The permission is registered in `permissions.rs` and listed in the new
+> `axiam_db::seeder::SEEDED_TO_NO_ROLE`, which both seeding and reconciliation
+> skip (an operator's explicit grant is kept). The engine is injected as a third
+> gRPC `AuthorizationEngine` built in `axiam-server/src/boot.rs` (not in the
+> file list; needed to wire it) through two trait objects,
+> `UserServiceAuthorizer` and `CredentialAuditSink`; no new crate edge, no proto
+> change. Tests: `grpc_auth_test` 4 new failing-before (another user's record,
+> user token, unpermitted service account, audit rows), `grpc_units`
+> `get_user_of_another_user_without_users_get_is_denied` (was the pinned-defect
+> case) and a rewritten `get_user_success` (self-read), `seeder_default_data_test`
+> `users_validate_credentials_is_granted_to_no_default_role`; all failed before
+> and pass after. After: `grpc_auth_test` 15, `grpc_server_test` 7, `grpc_units`
+> 55, seeder 22, REST `m2m_management_test` 16, `rbac_test` 12; workspace clippy,
+> fmt, layering, digest and registry checks clean.
+> **Upgrade note for SA-50:** gRPC `GetUser` of another user needs `users:get`;
+> `ValidateCredentials` accepts only a service account granted
+> `users:validate_credentials`, which no role holds after upgrade, so existing
+> SDK gRPC callers get `PERMISSION_DENIED` until an operator grants it.
 
 - **Model:** Opus 5.5. Adds a permission to the registry and wires the
   authorization engine into a service that has none.
@@ -438,6 +810,55 @@ crate layering check (`scripts/check-crate-layering.py`). Rewrite
 gRPC callers of these RPCs now need the permission.
 
 ### SA-13 — Enforce tenant suspension (N16, D-3)
+
+> **EXECUTED (2026-11-21, Opus 5.5). N16: reproduced.** A `suspended` tenant
+> kept issuing and accepting credentials: password login, refresh, OAuth2
+> token grants, token exchange, device authorization, WebAuthn, OIDC/social
+> first-time SSO, handoff redemption, SCIM bearer tokens, the REST extractor,
+> gRPC and AMQP authz all answered as for an active tenant, and existing
+> sessions survived the status change. The fix adds
+> `axiam_core::tenant_accepts_principals` and a `TenantAdmission` port, and
+> checks it at every door: `create_session_and_tokens` and `refresh`
+> (`axiam-auth`), `live_tenant` and token exchange (`axiam-oauth2`), login and
+> device auth, the REST auth extractor (`TenantScopeResolver::admit_principals`),
+> the SCIM token resolver, a new gRPC `tenant_admission` layer (fails **closed**
+> with `UNAVAILABLE` on a datastore error) and the AMQP `authz_consumer`.
+> Suspending a tenant deletes its sessions and revokes its refresh tokens in
+> the same transaction as the status write; the tombstone also revokes SCIM
+> tokens. New error `AxiamError::TenantSuspended` → REST 403 / OAuth2 400 /
+> gRPC `PERMISSION_DENIED` / AMQP `reason_code`, all `tenant_suspended`.
+>
+> Owner decisions taken during execution (binding):
+> - **OD-13a** — the Organization-kind tenant cannot be suspended: 409
+>   `organization_tenant_not_suspendable` (`AxiamError::OrganizationTenantNotSuspendable`),
+>   checked in the handler before any revocation and again in
+>   `SurrealTenantRepository::update`.
+> - **OD-13b** — on a suspended tenant, organization principals acting through
+>   the `X-Axiam-Tenant` header get reads and the status change only; any other
+>   write, including a tenant update that also changes name, slug or metadata,
+>   returns 403 `tenant_suspended`.
+> - **OD-13c** — path-scoped organization routes block writes and allow reads:
+>   signing-CA creation and `sign-csr` are refused, intermediate listing,
+>   tenant `GET`, `audit-export` and tenant `DELETE` stay allowed. Header-scoped
+>   read-only POSTs (`/authz/check`, `/authz/check/batch`, audit export,
+>   `saml/parse-sp-metadata`, `/pgp-keys/{id}/encrypt`, `/oauth2/userinfo`)
+>   count as reads; `email-config/test` and `/account/export` stay writes.
+>   Recorded in `docs/admin/organization-scope.md`, "Suspending a tenant".
+>
+> Tests: new `tenant_suspension_test` (15), plus additions to
+> `auth_service_test`, `webauthn_single_use_test`, `device_auth_test`,
+> `opaque_login_test`, `federation_first_time_sso_test`,
+> `federation_login_providers_test`, `authz_consumer_test` and the gRPC
+> admission layer; each failed before and passes after. Regression: REST lib
+> 333, `tenant_test` 30, `org_scope_gaps` 11, `tenant_scoped_roles` 15,
+> `tenant_issuer_paths` 22, `organization_scope_consistency` 8,
+> `certificate_test` 17, `auth_test` 33, `oauth2_flow_test` 49. fmt, layering,
+> spec digest, registry and workspace clippy clean. No OpenAPI-visible change.
+>
+> **Upgrade notes (SA-50):** suspending a tenant now ends its sessions and
+> refresh tokens immediately and is not undone by reactivation; the
+> organization's own tenant can no longer be suspended; clients must handle
+> `tenant_suspended` (and SA-17 carries both codes into CONTRACT.md).
 
 - **Model:** Opus 5.5. Every authentication door has to agree.
 - **Files:** `crates/axiam-db/src/repository/tenant.rs` (status update,

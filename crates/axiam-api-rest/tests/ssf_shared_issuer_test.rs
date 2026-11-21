@@ -92,7 +92,7 @@ async fn with_paths_off_and_two_tenants_turning_ssf_on_is_refused() {
         .await
         .unwrap();
     let app = app!(w.state(), w);
-    let token = w.admin_token();
+    let token = w.org_admin_token().await;
     let uri = format!("/api/v1/organizations/{}/settings", w.org_id);
 
     let mut on = off;
@@ -177,7 +177,7 @@ async fn with_paths_off_and_one_tenant_turning_ssf_on_is_accepted() {
         request(
             Method::PUT,
             &format!("/api/v1/organizations/{}/settings", w.org_id),
-            Some(&w.admin_token()),
+            Some(&w.org_admin_token().await),
         )
         .set_json(serde_json::to_value(&on).unwrap()),
     )

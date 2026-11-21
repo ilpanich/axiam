@@ -585,6 +585,7 @@ async fn audit_defect<C: Connection + Clone>(
                 "reason": defect.reason,
                 "window_secs": crate::network_decide_guard::INVALID_PROFILE_AUDIT_WINDOW.as_secs(),
             })),
+            organization_id: None,
         },
     )
     .await;
@@ -697,6 +698,7 @@ pub async fn decide<C: Connection + Clone>(
                     "reason": reason,
                     "status": 403,
                 })),
+                organization_id: None,
             },
         )
         .await;
@@ -852,6 +854,7 @@ pub async fn decide<C: Connection + Clone>(
                     outcome: AuditOutcome::Success,
                     ip_address: client_ip(&http_req),
                     metadata: Some(metadata),
+                    organization_id: None,
                 },
             )
             .await;
@@ -878,6 +881,7 @@ pub async fn decide<C: Connection + Clone>(
                     outcome: AuditOutcome::Denied,
                     ip_address: client_ip(&http_req),
                     metadata: Some(metadata),
+                    organization_id: None,
                 },
             )
             .await;

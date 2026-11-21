@@ -4,3 +4,4 @@ pub mod auth;
 pub mod drain_rejected;
 pub mod rate_limit;
 pub mod strict_revocation;
+pub mod tenant_admission;

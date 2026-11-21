@@ -1,6 +1,7 @@
 //! AXIAM REST API — HTTP extractors, authorization guards, server bootstrap,
 //! and error handling.
 
+pub mod audit_organization;
 pub mod authz;
 pub mod backchannel_logout;
 pub mod ciba_list_limiter;

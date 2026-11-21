@@ -251,6 +251,10 @@ pub async fn resolve_and_pick(
 pub fn pinned_client(host: &str, ip: IpAddr, port: u16) -> Result<reqwest::Client, SsrfError> {
     reqwest::Client::builder()
         .resolve(host, SocketAddr::new(ip, port))
+        // N13 / D-4: never traverse an environment proxy. Through one, the
+        // destination is named by hostname and re-resolved by the proxy, so
+        // the validated IP below would no longer decide where the socket goes.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
@@ -861,6 +865,59 @@ mod tests {
             .await;
         let result = guarded_fetch_no_redirect(&origin.uri(), true, |c, u| c.get(u)).await;
         assert!(matches!(result, Err(SsrfError::ResponseTooLarge(_))));
+    }
+
+    /// N13 / SA-10 — the pinned client must never traverse an environment
+    /// proxy. With `HTTPS_PROXY` pointing at a loopback CONNECT fixture, a
+    /// guarded request must not reach it: through a proxy the destination
+    /// would be named by hostname and re-resolved by the proxy, so the pinned
+    /// (validated) IP would no longer decide where the socket goes.
+    #[tokio::test]
+    async fn n13_pinned_client_ignores_environment_proxy() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = proxy.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut line = String::new();
+                    let _ = BufReader::new(sock).read_line(&mut line).await;
+                    let _ = tx.send(line);
+                });
+            }
+        });
+
+        // SAFETY: only `HTTPS_PROXY` is touched, and only `https://` requests
+        // consult it; every other test in this module talks plain `http://`.
+        let previous = std::env::var_os("HTTPS_PROXY");
+        unsafe { std::env::set_var("HTTPS_PROXY", format!("http://{proxy_addr}")) };
+
+        // 192.0.2.0/24 is TEST-NET-1: a "validated public" pin that is not
+        // routable, so a direct connection simply times out.
+        let client = pinned_client("rebind.example.test", "192.0.2.1".parse().unwrap(), 443);
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("HTTPS_PROXY", v) },
+            None => unsafe { std::env::remove_var("HTTPS_PROXY") },
+        }
+
+        let client = client.unwrap();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.get("https://rebind.example.test/").send(),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let seen = rx.try_recv().ok();
+        assert!(
+            seen.is_none(),
+            "pinned_client connected to the environment proxy and sent {seen:?}; \
+             the validated-IP pin was bypassed"
+        );
     }
 
     #[tokio::test]

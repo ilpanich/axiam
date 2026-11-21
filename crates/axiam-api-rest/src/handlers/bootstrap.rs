@@ -12,16 +12,17 @@
 //! inside the same transaction that creates the admin user means two concurrent
 //! first-run requests can create AT MOST ONE super-admin — the loser gets
 //! `AxiamError::AlreadyExists` (409) and its whole transaction rolls back.
-//! After the first admin is created, every subsequent call also hits the same
-//! `bootstrap_lock:global` uniqueness violation and is refused with 409.
-//! Additional organizations/tenants are created afterwards through the
-//! authenticated admin API.
+//! Once the deployment is bootstrapped, every later call is refused 403 by the
+//! gate, with the same reason as every other gate refusal (SA-01); 409 goes
+//! only to the loser of such a race. Additional organizations/tenants are
+//! created afterwards through the authenticated admin API.
 //!
-//! The endpoint is also gated (D-03a): a request is refused (fail-closed,
-//! no admin created) unless EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set and
-//! matches the request email, OR the request carries a valid one-time
-//! setup token (server-minted at first boot, logged once, consumed once —
-//! D-03b). An unset/absent gate never allows bootstrap.
+//! The endpoint is also gated (D-03a, SA-01): a request is refused (fail-closed,
+//! no admin created) unless it carries a valid, unconsumed one-time setup token
+//! (server-minted at first boot, logged once, consumed once — D-03b) and the
+//! deployment has not been bootstrapped yet. The token is always required.
+//! `AXIAM_BOOTSTRAP_ADMIN_EMAIL`, when set, is an additional restriction (the
+//! request email must also match it), never a substitute for the token.
 
 use actix_web::{HttpResponse, web};
 use axiam_auth::password;
@@ -84,8 +85,9 @@ pub struct BootstrapRequest {
     pub username: String,
     /// Admin password (hashed with Argon2id before storage).
     pub password: String,
-    /// One-time first-run setup token (D-03a/D-03b). Required when
-    /// `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored otherwise.
+    /// One-time first-run setup token (D-03a/D-03b), logged once at first
+    /// boot. Always required, including when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is
+    /// set (that variable only adds an email restriction).
     #[serde(default)]
     pub setup_token: Option<String>,
     /// OPAQUE policy to seed as the new organization's baseline. Omitted means
@@ -182,8 +184,18 @@ fn hash_setup_token(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Returns `Ok(true)` iff `token`'s hash exists in `bootstrap_setup_token`
-/// and has NOT already been consumed. This is a fast-fail pre-check only —
+/// Returns `Ok(true)` iff `token`'s hash exists in `bootstrap_setup_token`,
+/// has NOT already been consumed, and the deployment has not been
+/// bootstrapped (`bootstrap_lock:global` absent).
+///
+/// The last condition is what makes a call after bootstrap a gate refusal
+/// (403) in every case (SA-01 review QR2-1): a deployment first bootstrapped
+/// through the pre-SA-01 email-only gate still holds a minted token that was
+/// never consumed, and without it that token would pass here and reach the
+/// lock pre-check's 409. A race loser that passed this check before the
+/// winner committed still gets its 409 from the pre-check or the transaction.
+///
+/// This is a fast-fail pre-check only —
 /// the authoritative single-use guarantee is the `bootstrap_setup_token_consumed`
 /// CREATE inside the same atomic transaction that creates the admin user
 /// (Task 3): a replayed token still loses to a UNIQUE-index violation even
@@ -210,8 +222,18 @@ async fn setup_token_is_valid<C: Connection + Clone>(
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
         .take(0)
         .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+    if !consumed.is_empty() {
+        return Ok(false);
+    }
 
-    Ok(consumed.is_empty())
+    let bootstrapped: Vec<BootstrapLockRow> = db
+        .query("SELECT locked_at FROM type::record('bootstrap_lock', 'global')")
+        .await
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?
+        .take(0)
+        .map_err(|e| AxiamApiError(AxiamError::Internal(e.to_string())))?;
+
+    Ok(bootstrapped.is_empty())
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -228,6 +250,24 @@ pub struct BootstrapResponse {
 // Handler
 // -----------------------------------------------------------------------
 
+/// The one refusal every unsatisfied bootstrap gate answers (SA-01, Q-6/S-4).
+///
+/// One reason for a missing token, an unknown or consumed token and an email
+/// that does not match `AXIAM_BOOTSTRAP_ADMIN_EMAIL`: the reason is echoed to
+/// the client, and distinct texts would tell an unauthenticated caller whether
+/// the email restriction is set and whether a guessed address is the one
+/// configured.
+fn gate_refused() -> AxiamApiError {
+    AxiamApiError(AxiamError::AuthorizationDenied {
+        reason: "bootstrap gate not satisfied: a valid, unconsumed setup_token (the \
+                 one-time token logged at first boot) is required, and the email must \
+                 match AXIAM_BOOTSTRAP_ADMIN_EMAIL if that is set"
+            .into(),
+        action: None,
+        resource_id: None,
+    })
+}
+
 /// Serialises [`bootstrap`] within one process (step 2b).
 static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -236,14 +276,22 @@ static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 /// Creates the initial admin user with the super-admin role and seeds the
 /// default permission set. First-super-admin creation is atomic (SECHRD-04
 /// / D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same
-/// transaction means a second call — concurrent OR sequential — against a
-/// tenant that already has an admin is refused with 409 Conflict; no
-/// partial admin or orphan role RELATE can result. No token is issued —
-/// the user must authenticate via `/api/v1/auth/login` (D-11).
+/// transaction means at most one admin is ever created; no partial admin or
+/// orphan role RELATE can result. No token is issued — the user must
+/// authenticate via `/api/v1/auth/login` (D-11).
 ///
-/// Mandatory gate (D-03a): requires EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set
-/// and matching the request email (403 on mismatch), OR a valid setup_token
-/// (403 if missing/invalid/already consumed).
+/// Mandatory gate (D-03a, SA-01): ALWAYS requires a valid, unconsumed
+/// `setup_token`. When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set it is an additional
+/// restriction: the request email must match it. The email is not a
+/// credential and never replaces the token. The token is checked first, and
+/// every gate refusal is the same 403 with the same reason, so a caller
+/// without the token learns neither whether the email restriction is set nor
+/// whether a guessed address matches it.
+///
+/// A call after a successful bootstrap is refused 403 by the gate — the first
+/// call consumed the token, and the gate also refuses any token once
+/// `bootstrap_lock:global` exists; 409 is answered only to the loser of two
+/// calls racing with the same still-unconsumed token.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/bootstrap",
@@ -252,8 +300,8 @@ static BOOTSTRAP_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
     responses(
         (status = 201, description = "Organization, tenant and admin user created", body = BootstrapResponse),
         (status = 400, description = "Invalid request (missing required fields)"),
-        (status = 403, description = "Bootstrap gate not satisfied (email mismatch or invalid/missing setup token)"),
-        (status = 409, description = "Bootstrap already completed"),
+        (status = 403, description = "Bootstrap gate not satisfied: missing, invalid or consumed setup token, or email mismatch (one undifferentiated reason). Also the answer to any call after a successful bootstrap"),
+        (status = 409, description = "A concurrent bootstrap with the same setup token won the race"),
     )
 )]
 pub async fn bootstrap<C: Connection + Clone>(
@@ -262,62 +310,41 @@ pub async fn bootstrap<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let req = body.into_inner();
 
-    // 1. Mandatory fail-closed gate (SECHRD-04 / D-03a): EITHER
-    //    AXIAM_BOOTSTRAP_ADMIN_EMAIL must be set and match the request
-    //    email (D-10, existing behavior — preserved verbatim), OR the
-    //    request must carry a setup token whose hash is minted and not yet
-    //    consumed. Both unset/invalid => refuse. An unset gate never
-    //    allows bootstrap.
-    let mut consumed_token_hash: Option<String> = None;
+    // 1. Mandatory fail-closed gate (SECHRD-04 / D-03a, SA-01 / C1).
+    //
+    //    The one-time setup token is ALWAYS required. `AXIAM_BOOTSTRAP_ADMIN_EMAIL`
+    //    is a non-secret address, so it is never a credential: when set it is an
+    //    ADDITIONAL restriction (the request email must also match). Before SA-01
+    //    a matching email alone skipped the token, which made the setting
+    //    strictly weaken the gate.
+    //
+    //    The token is checked FIRST, and every refusal below is the same 403
+    //    with the same reason (`gate_refused`). The reason is echoed to the
+    //    client, so distinct texts — or an email check ahead of the token —
+    //    would let an unauthenticated caller learn whether the restriction is
+    //    set and confirm a guess at the first administrator's address.
+    let token_hash = req
+        .setup_token
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .map(hash_setup_token)
+        .ok_or_else(gate_refused)?;
+    if !setup_token_is_valid(&state.db.current(), &token_hash).await? {
+        return Err(gate_refused());
+    }
     // `.ok().filter(|s| !s.trim().is_empty())`, not a bare `var()`: Docker
-    // Compose sets a variable to the EMPTY STRING for
-    // `FOO: "${FOO:-}"`, and `Ok("")` taken as "gate set" compares the request
-    // email against nothing, answers 403 "email does not match
-    // AXIAM_BOOTSTRAP_ADMIN_EMAIL", and makes the setup-token path
-    // unreachable — so a deployment with a perfectly valid one-time token
-    // cannot bootstrap at all. An empty gate is not a gate; fall through to the
-    // token, which still has to be valid and unconsumed.
-    match std::env::var("AXIAM_BOOTSTRAP_ADMIN_EMAIL")
+    // Compose sets a variable to the EMPTY STRING for `FOO: "${FOO:-}"`, and
+    // `Ok("")` taken as "restriction set" would compare the request email
+    // against nothing and answer 403 for everyone. An empty value is no
+    // restriction.
+    if let Some(expected) = std::env::var("AXIAM_BOOTSTRAP_ADMIN_EMAIL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .ok_or(())
+        && req.email != expected
     {
-        Ok(expected) => {
-            // Env gate IS set — preserve the existing email-match behavior.
-            if req.email != expected {
-                return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-                    reason: "email does not match AXIAM_BOOTSTRAP_ADMIN_EMAIL".into(),
-                    action: None,
-                    resource_id: None,
-                }));
-            }
-        }
-        Err(_) => {
-            // Env gate NOT set — fall back to the one-time setup token.
-            let token = req.setup_token.as_deref().filter(|t| !t.is_empty());
-            let token_hash = match token {
-                Some(t) => hash_setup_token(t),
-                None => {
-                    return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-                        reason: "bootstrap gate not satisfied: set \
-                                 AXIAM_BOOTSTRAP_ADMIN_EMAIL or provide a valid \
-                                 setup_token"
-                            .into(),
-                        action: None,
-                        resource_id: None,
-                    }));
-                }
-            };
-            if !setup_token_is_valid(&state.db.current(), &token_hash).await? {
-                return Err(AxiamApiError(AxiamError::AuthorizationDenied {
-                    reason: "setup token is invalid, unknown, or already consumed".into(),
-                    action: None,
-                    resource_id: None,
-                }));
-            }
-            consumed_token_hash = Some(token_hash);
-        }
+        return Err(gate_refused());
     }
+    let consumed_token_hash = token_hash;
 
     // 2. Validate required fields and derive slugs.
     if req.organization_name.trim().is_empty()
@@ -355,10 +382,12 @@ pub async fn bootstrap<C: Connection + Clone>(
     let _serial = BOOTSTRAP_SERIAL.lock().await;
 
     // 3. Fast-fail one-shot gate: if the global bootstrap lock already exists
-    //    the system has been initialized. The authoritative guard is the
-    //    `bootstrap_lock:global` CREATE inside the atomic transaction below;
-    //    this pre-check just avoids creating a duplicate org on a call that is
-    //    going to be refused anyway.
+    //    the system has been initialized. A call arriving after that is
+    //    refused by the gate (step 1) with 403; only a request that passed the
+    //    gate before a concurrent winner committed gets here and answers 409.
+    //    The authoritative guard is the `bootstrap_lock:global` CREATE inside
+    //    the atomic transaction below; this pre-check just avoids creating a
+    //    duplicate org on a call that is going to be refused anyway.
     let existing_lock: Vec<BootstrapLockRow> = state
         .db
         .current()
@@ -623,13 +652,11 @@ pub async fn bootstrap<C: Connection + Clone>(
                 .to_string(),
         );
     }
-    if consumed_token_hash.is_some() {
-        txn_stmts.push(
-            "CREATE type::record('bootstrap_setup_token_consumed', $token_hash) \
-             SET consumed_at = time::now()"
-                .to_string(),
-        );
-    }
+    txn_stmts.push(
+        "CREATE type::record('bootstrap_setup_token_consumed', $token_hash) \
+         SET consumed_at = time::now()"
+            .to_string(),
+    );
     txn_stmts.push("COMMIT TRANSACTION".to_string());
     let txn_query = txn_stmts.join("; ");
 
@@ -644,9 +671,7 @@ pub async fn bootstrap<C: Connection + Clone>(
         .bind(("email", req.email))
         .bind(("password_hash", password_hash))
         .bind(("ph_id", ph_id_str));
-    if let Some(token_hash) = consumed_token_hash {
-        query = query.bind(("token_hash", token_hash));
-    }
+    query = query.bind(("token_hash", consumed_token_hash));
     if let Some(enrolled) = opaque_enrolment {
         let (memory_kib, iterations, parallelism, log_n, r, p) = match enrolled.ksf_params {
             OpaqueKsfParams::Argon2id {

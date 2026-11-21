@@ -108,6 +108,7 @@ fn sign_in(tenant_id: Uuid, outcome: AuditOutcome) -> AuditEvent {
             outcome,
             ip_address: Some("203.0.113.7".into()),
             metadata: None,
+            organization_id: None,
         },
         org_id: Uuid::new_v4(),
     }

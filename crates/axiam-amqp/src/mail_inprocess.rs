@@ -183,6 +183,7 @@ where
                 "next_retry_at": null,
                 "mail_type": format!("{:?}", msg.mail_type),
             })),
+            organization_id: None,
         };
         if let Err(e) = self.audit.append(entry).await {
             error!(error = %e, "failed to write email.delivery_failed audit event");

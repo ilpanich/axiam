@@ -96,6 +96,7 @@ async fn export_completeness() {
             outcome: AuditOutcome::Success,
             ip_address: Some("10.0.0.1".into()),
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -651,6 +652,7 @@ async fn deletion_pseudonymization() {
                     "username": user.username,
                     "email": user.email,
                 })),
+                organization_id: None,
             })
             .await
             .unwrap();

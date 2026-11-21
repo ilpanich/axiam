@@ -450,11 +450,7 @@ where
         // grant is already `Redeemed`, so the next poll is refused too. The
         // predicate is CIBA's (`crate::ciba::user_may_be_subject`), shared
         // rather than copied so the two backchannel-style grants cannot drift.
-        let refused = || {
-            OAuth2Error::InvalidGrant(
-                "the account this grant was issued for can no longer sign in".into(),
-            )
-        };
+        let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
         let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
             Ok(user) => user,
             Err(AxiamError::NotFound { .. }) => return Err(refused()),
@@ -468,14 +464,29 @@ where
             );
             return Err(refused());
         }
+        // SA-06 (SR17-1): an approval given before the user's last credential
+        // change is not redeemable after it. The grant records no approval
+        // time, so its creation is the bound: a change between the device's
+        // request and the user's approval refuses too (the grant is
+        // already redeemed, so the device starts a new flow with a new code).
+        // See `crate::credential_epoch`.
+        if crate::credential_epoch::changed_since(&user, redeemed.created_at) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "refusing a device-grant redemption: the user's credential changed at or after the grant was issued"
+            );
+            return Err(refused());
+        }
 
         let refresh_token = axiam_auth::token::generate_refresh_token();
+        let minted_hash = axiam_auth::token::hash_refresh_token(&refresh_token);
         self.refresh_token_repo
             .create(CreateRefreshToken {
                 tenant_id,
                 client_id: redeemed.client_id.clone(),
                 user_id: Some(user.id),
-                token_hash: axiam_auth::token::hash_refresh_token(&refresh_token),
+                token_hash: minted_hash.clone(),
                 scopes: redeemed.scopes.clone(),
                 // RFC 8628 has no browser session behind it: the device polls
                 // and the approval happened elsewhere, so there is no AXIAM
@@ -502,6 +513,18 @@ where
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        // SA-06 (SR17-1): re-read after the write; a later credential change
+        // revokes the token just minted.
+        crate::credential_epoch::recheck_after_mint(
+            &self.user_repo,
+            &self.refresh_token_repo,
+            tenant_id,
+            user.id,
+            redeemed.created_at,
+            &minted_hash,
+            crate::credential_epoch::REFUSED,
+        )
+        .await?;
 
         // RFC 8707 §2 — the audience is the resource the device named when it
         // started the flow, or `axiam:user` when it named none. `AUD_USER` is

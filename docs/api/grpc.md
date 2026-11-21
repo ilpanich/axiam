@@ -23,6 +23,14 @@ rather than hand-editing generated code.
 All request/response messages are tenant-scoped (`tenant_id` on every
 request) — see each `.proto` file for exact field lists and comments.
 
+`UserService` authorizes each call (SA-12, N4): `GetUser` answers a caller
+reading its own record and otherwise requires `users:get`, as REST's
+`GET /api/v1/users/{user_id}` does. `ValidateCredentials` answers only a
+service-account token (`aud = axiam:m2m`, `sub_kind = service_account`)
+whose account holds `users:validate_credentials` — a permission no default
+role carries — and records every answer as an `auth.credentials_validated`
+audit row. Any other caller gets `PERMISSION_DENIED`.
+
 ## Server
 
 The gRPC server is started by `axiam-server` alongside the REST/AMQP

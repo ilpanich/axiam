@@ -73,7 +73,12 @@ test.describe("Organization detail page", () => {
       await expect(
         page.getByRole("tab", { name: "CA Certificates" })
       ).toBeVisible();
-      await expect(page.getByRole("tab", { name: "Settings" })).toBeVisible();
+      // `loginAsAdmin` signs in as `tenant-admin`, a tenant's own
+      // administrator. The organization's Settings tab is drawn only for a
+      // principal that can act on the whole organization, because the server's
+      // organization settings handlers call `require_organization_principal`
+      // (SA-02, review QR9-1), so it is not offered here.
+      await expect(page.getByRole("tab", { name: "Settings" })).toHaveCount(0);
     } else {
       // Fallback: org card links may use a different element — page is accessible
       await expect(page.getByRole("navigation").first()).toBeVisible();

@@ -654,6 +654,109 @@ async fn a_user_deleted_after_approval_gets_no_tokens() {
     .await;
 }
 
+/// A credential change of the kind a reset or a password change makes: a new
+/// Argon2 hash, which the repository stamps with `credential_changed_at` and
+/// the credential version in the same statement.
+async fn change_credential(users: &SurrealUserRepository<TestDb>, tenant_id: Uuid, user_id: Uuid) {
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$replacement".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// QR18-1 — a credential change that lands AFTER the pre-check and AT the
+/// refresh-token write: a datastore event stamps the user's credential epoch
+/// (and bumps the version) in the very transaction that creates the refresh
+/// token, exactly what a reset committing in that window does. The pre-check has
+/// already passed, so only the post-mint re-read can see it.
+async fn change_credential_when_a_refresh_token_is_written(f: &Fixture) {
+    f.db.query(
+        "DEFINE EVENT qr18_1_race ON TABLE oauth2_refresh_token WHEN $event = 'CREATE' THEN { \
+             UPDATE type::record('user', $after.user_id) SET \
+                 credential_changed_at = time::now(), credential_version += 1; \
+         }",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+}
+
+/// Refresh-token rows that are not revoked.
+async fn live_refresh_token_rows(f: &Fixture) -> u64 {
+    use surrealdb::types::SurrealValue;
+
+    #[derive(SurrealValue)]
+    struct CountRow {
+        total: u64,
+    }
+    let mut res = f
+        .db
+        .query("SELECT count() AS total FROM oauth2_refresh_token WHERE revoked = false GROUP ALL")
+        .await
+        .unwrap();
+    let rows: Vec<CountRow> = res.take(0).unwrap();
+    rows.first().map(|r| r.total).unwrap_or(0)
+}
+
+/// SR17-1: an approval given before a password reset or change is not
+/// redeemable after it. Nothing minted, no refresh-token row, grant consumed.
+#[actix_web::test]
+async fn sr17_1_a_device_approval_given_before_a_credential_change_gets_no_tokens() {
+    assert_redemption_refused_after(|users, tenant_id, user_id| async move {
+        change_credential(&users, tenant_id, user_id).await;
+    })
+    .await;
+}
+
+/// The control: an approval given after the credential change still mints.
+#[actix_web::test]
+async fn sr17_1_a_device_approval_given_after_a_credential_change_still_mints() {
+    let f = setup().await;
+    let app = test_app!(f);
+    change_credential(
+        &SurrealUserRepository::new(f.db.clone()),
+        f.tenant_id,
+        f.user_id,
+    )
+    .await;
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 200, "poll returned {body:?}");
+    assert!(body["refresh_token"].is_string());
+    assert_eq!(refresh_token_rows(&f).await, 1);
+}
+
+/// QR18-1: the post-mint re-check on the device path. The pre-check passes (no
+/// change yet); the change lands with the refresh-token write; the re-read
+/// revokes the token just minted and answers `invalid_grant`, and no access
+/// token or refresh token reaches the device.
+#[actix_web::test]
+async fn qr18_1_a_credential_change_landing_with_the_refresh_token_write_revokes_it() {
+    let f = setup().await;
+    let app = test_app!(f);
+    change_credential_when_a_refresh_token_is_written(&f).await;
+    let (device_code, _) = seed_grant_with_interval(&f, DeviceGrantStatus::Approved, 600, 0).await;
+    let (status, body) = post_token!(app, f.tenant_id, poll_body(&f.client_id, &device_code));
+    assert_eq!(status, 400, "poll returned {body:?}");
+    assert_eq!(
+        body["error"], "invalid_grant",
+        "unexpected answer: {body:?}"
+    );
+    assert!(body.get("access_token").is_none(), "minted: {body:?}");
+    assert!(body.get("refresh_token").is_none(), "minted: {body:?}");
+    // The token WAS written (so the pre-check passed) and then revoked.
+    assert_eq!(refresh_token_rows(&f).await, 1, "the write happened");
+    assert_eq!(live_refresh_token_rows(&f).await, 0, "and was revoked");
+}
+
 // ---------------------------------------------------------------------------
 // #635 (R101W3-01) — the grant authenticates its client
 // ---------------------------------------------------------------------------

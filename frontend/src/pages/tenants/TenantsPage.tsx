@@ -26,7 +26,10 @@ import { downloadTextFile } from "@/lib/download";
 import { useToast } from "@/hooks/useToast";
 import { getApiErrorMessage } from "@/lib/apiError";
 import { invalidateEntity } from "@/lib/queryInvalidation";
-import { useCanActOnOrganization } from "@/lib/grantReach";
+import {
+  useCanActOnOrganization,
+  useOrganizationPrincipalReaches,
+} from "@/lib/grantReach";
 
 // ─── Enriched tenant type (includes org name for display) ─────────────────────
 
@@ -190,6 +193,7 @@ function EditTenantFields({
 export function TenantsPage() {
   const navigate = useNavigate();
   const canActOnOrganization = useCanActOnOrganization();
+  const reachesTenant = useOrganizationPrincipalReaches();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -461,15 +465,23 @@ export function TenantsPage() {
               <Pencil size={14} />
             </button>
           )}
-          <button
-            aria-label={`View ${row.name}`}
-            onClick={() =>
-              navigate(`/organizations/${row.organization_id}/tenants/${row.id}`)
-            }
-            className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Eye size={14} />
-          </button>
+          {/* The tenant record is the organization's, like the roster:
+              `GET /organizations/{org}/tenants/{tenant}` calls
+              `require_organization_principal_for_tenant`, which serves it to an
+              organization principal whose reach covers that tenant and answers
+              403 to everybody else, a tenant's own administrator for its own
+              tenant included (SA-02, reviews QR8-1 and QR9-2). */}
+          {reachesTenant(row.id) && (
+            <button
+              aria-label={`View ${row.name}`}
+              onClick={() =>
+                navigate(`/organizations/${row.organization_id}/tenants/${row.id}`)
+              }
+              className="p-1.5 rounded hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <Eye size={14} />
+            </button>
+          )}
           {canActOnOrganization && (
             <button
               aria-label={`Delete ${row.name}`}

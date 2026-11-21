@@ -9,6 +9,14 @@
 # docker/docker-compose.e2e.yml) and builds + starts THIS example's own MCP
 # server as a side effect (killed on exit).
 #
+# Two principals, because two different administrators own the two halves:
+#   - the organization administrator (E2E_ADMIN_EMAIL, signed in with no
+#     tenant, as examples/b6-organization-scope does) raises the organization
+#     baseline once. `/organizations/{id}/settings` requires an organization
+#     principal; a tenant administrator is refused 403 there by design.
+#   - the tenant administrator (E2E_TENANT_ADMIN_USERNAME) does everything
+#     else: users, OAuth2 clients and the tenant's own settings.
+#
 # Usage:
 #   AXIAM_URL=http://localhost:8090 ./walkthrough.sh
 #   MODE=pre-registered ./walkthrough.sh   # or: dcr | cimd | all (default)
@@ -25,6 +33,10 @@ ORG_SLUG="${E2E_ORG_SLUG:-test-org}"
 TENANT_SLUG="${E2E_TENANT_SLUG:-default}"
 ADMIN_EMAIL="${E2E_TENANT_ADMIN_USERNAME:-tenant-admin}"
 ADMIN_PASSWORD="${E2E_TENANT_ADMIN_PASSWORD:-${E2E_ADMIN_PASSWORD:-Test@Admin123!}}"
+# The organization-level super-admin scripts/e2e-bootstrap.sh seeds in the
+# organization's reserved scope. Used for the org-baseline step only.
+ORG_ADMIN_EMAIL="${E2E_ADMIN_EMAIL:-admin@axiam.dev}"
+ORG_ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-Test@Admin123!}"
 MCP_PORT="${MCP_PORT:-8091}"
 MCP_HOST="127.0.0.1"
 MCP_RESOURCE="http://${MCP_HOST}:${MCP_PORT}/mcp"
@@ -50,6 +62,7 @@ MODE="${MODE:-all}" # pre-registered | dcr | cimd | all
 RUN_ID="$(date +%s)-$$"
 
 ADMIN_JAR="$(mktemp)"
+ORG_JAR="$(mktemp)"
 USER_JAR="$(mktemp)"
 MCP_SERVER_LOG="$(mktemp)"
 MCP_SERVER_PID=""
@@ -63,7 +76,7 @@ fail() { printf '\033[31m[b7-mcp-server] FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
 cleanup() {
   if [ -n "${MCP_SERVER_PID}" ]; then kill "${MCP_SERVER_PID}" 2>/dev/null || true; fi
   if [ -n "${PUBLISHER_PID}" ]; then kill "${PUBLISHER_PID}" 2>/dev/null || true; fi
-  rm -f "${ADMIN_JAR}" "${USER_JAR}" "${MCP_SERVER_LOG}"
+  rm -f "${ADMIN_JAR}" "${ORG_JAR}" "${USER_JAR}" "${MCP_SERVER_LOG}"
   rm -rf "${PUBLISHER_DIR}"
 }
 trap cleanup EXIT
@@ -128,7 +141,8 @@ jwt_claim() {
 }
 
 # ---------------------------------------------------------------------------
-# 0. Wait for AXIAM, log in as the tenant admin, build + start the MCP server.
+# 0. Wait for AXIAM, log in as the tenant admin, raise the org baseline as the
+#    organization admin, build + start the MCP server.
 # ---------------------------------------------------------------------------
 log "waiting for ${AXIAM_URL}/health ..."
 for i in $(seq 1 30); do
@@ -161,19 +175,40 @@ TENANT_ID=$(printf '%s' "${ADMIN_LOGIN_BODY}" | jq -r '.user.tenant_id')
 # allows them. That refusal is the interlock working, not a bug: an operator
 # fronting an MCP server has to make this same decision at org level first.
 #
+# That decision belongs to an ORGANIZATION administrator. The org baseline
+# cascades to every sibling tenant, so `GET`/`PUT /organizations/{id}/settings`
+# require an organization principal (`require_organization_principal`, SA-02)
+# and refuse a tenant administrator with 403 even when one of its roles holds
+# `organizations:get_settings` / `organizations:update_settings`. This step
+# therefore signs in as the bootstrap super-admin with NO tenant -- the same
+# sign-in examples/b6-organization-scope uses -- and only this step uses it.
+#
 # PUT /organizations/{id}/settings takes the flat SetOrgSettings shape while
 # GET returns SecuritySettings grouped by policy, so the groups are merged
 # back into one object rather than a body being hand-written -- that way this
 # step carries every other baseline value through untouched.
 # ---------------------------------------------------------------------------
-ORG_ID=$(api_expect GET "${ADMIN_JAR}" "" /api/v1/organizations "" 200 \
-  | jq -r --arg slug "${ORG_SLUG}" '.items[] | select(.slug == $slug) | .id' | head -1)
+log "signing in as ${ORG_ADMIN_EMAIL} (organization admin, no tenant) for the org baseline"
+ORG_LOGIN_HEADERS="$(mktemp)"
+ORG_LOGIN_BODY=$(curl -sS -D "${ORG_LOGIN_HEADERS}" -c "${ORG_JAR}" \
+  -H "Content-Type: application/json" \
+  -d "{\"org_slug\":\"${ORG_SLUG}\",\"username_or_email\":\"${ORG_ADMIN_EMAIL}\",\"password\":\"${ORG_ADMIN_PASSWORD}\"}" \
+  "${AXIAM_URL}/api/v1/auth/login")
+ORG_CSRF=$(grep -i '^x-csrf-token:' "${ORG_LOGIN_HEADERS}" | tail -1 | tr -d '\r' | cut -d' ' -f2- || true)
+rm -f "${ORG_LOGIN_HEADERS}"
+[ -n "${ORG_CSRF}" ] || fail "no X-CSRF-Token on the organization admin's login response: ${ORG_LOGIN_BODY}"
+ORG_LEVEL=$(printf '%s' "${ORG_LOGIN_BODY}" | jq -r '.user.organization_level')
+[ "${ORG_LEVEL}" = "true" ] \
+  || fail "${ORG_ADMIN_EMAIL} is not an organization principal (organization_level=${ORG_LEVEL}); the org baseline needs one"
+
+ORG_ID=$(api_expect GET "${ORG_JAR}" "" /api/v1/organizations "" 200 \
+  | jq -r --arg slug "${ORG_SLUG}" '(if type == "array" then .[] else .items[] end) | select(.slug == $slug) | .id' | head -1)
 if [ -z "${ORG_ID}" ] || [ "${ORG_ID}" = "null" ]; then
   fail "could not resolve the organization id for slug ${ORG_SLUG}"
 fi
 
 log "raising the org baseline: anonymous registration, CIMD over plaintext loopback"
-ORG_BASELINE=$(api_expect GET "${ADMIN_JAR}" "" "/api/v1/organizations/${ORG_ID}/settings" "" 200 \
+ORG_BASELINE=$(api_expect GET "${ORG_JAR}" "" "/api/v1/organizations/${ORG_ID}/settings" "" 200 \
   | jq -c --arg res "${MCP_RESOURCE}" --arg pubhost "${CIMD_PUBLISHER_HOST}" '[.password, .mfa, .lockout, .token, .email, .certificate, .notification,
             .opaque, .privacy, .webauthn, .oidc] | add
            | .dynamic_registration = "anonymous"
@@ -181,7 +216,7 @@ ORG_BASELINE=$(api_expect GET "${ADMIN_JAR}" "" "/api/v1/organizations/${ORG_ID}
            | .cimd.enabled = true
            | .cimd.allow_http = true
            | .cimd.trusted_client_id_domains = [$pubhost]')
-api_expect PUT "${ADMIN_JAR}" "${ADMIN_CSRF}" "/api/v1/organizations/${ORG_ID}/settings" \
+api_expect PUT "${ORG_JAR}" "${ORG_CSRF}" "/api/v1/organizations/${ORG_ID}/settings" \
   "${ORG_BASELINE}" 200 >/dev/null
 ok "org baseline permits what the tenant settings below ask for"
 

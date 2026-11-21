@@ -11,6 +11,14 @@ use uuid::Uuid;
 // Notification event type enum
 // -----------------------------------------------------------------------
 
+/// The audit action of the row recorded when a password reset or change has
+/// stored the new credential but revoking the account's sessions failed
+/// (QR13-1, QR13-2). Unlike the request row, which records the 500 as a
+/// `Failure`, this row records the credential change as a `Success`, so the
+/// `password_changed` notification fires for it.
+pub const PASSWORD_CHANGED_REVOCATION_FAILED_ACTION: &str =
+    "auth.password_changed_revocation_failed";
+
 /// Events that can trigger an admin notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +128,17 @@ impl NotificationEventType {
                 vec![Self::UserUpdated]
             }
             ("POST /api/v1/auth/reset/confirm", "Success") => {
+                vec![Self::PasswordChanged]
+            }
+            // QR14-1: a successful self-service password change notifies as a
+            // reset does. The failed-revocation case is the row below.
+            ("POST /api/v1/auth/password/change", "Success") => {
+                vec![Self::PasswordChanged]
+            }
+            // QR13-1: the row a password reset or change writes when the
+            // credential committed but the session revocation failed (the
+            // request row of that response is a `Failure`).
+            (PASSWORD_CHANGED_REVOCATION_FAILED_ACTION, "Success") => {
                 vec![Self::PasswordChanged]
             }
             ("POST /api/v1/auth/reset", "Success") => {
@@ -548,6 +567,51 @@ mod tests {
                 "`{action}` ({outcome}) must map to {expected}"
             );
         }
+    }
+
+    #[test]
+    fn the_revocation_failure_row_is_a_password_changed_event_only_as_a_success() {
+        // QR13-1: the credential did change, so the row is a `Success`; the
+        // request row of the 500 (a `Failure`) maps to nothing.
+        assert_eq!(
+            NotificationEventType::from_audit_action(
+                PASSWORD_CHANGED_REVOCATION_FAILED_ACTION,
+                "Success"
+            ),
+            vec![NotificationEventType::PasswordChanged]
+        );
+        assert!(
+            NotificationEventType::from_audit_action(
+                PASSWORD_CHANGED_REVOCATION_FAILED_ACTION,
+                "Failure"
+            )
+            .is_empty()
+        );
+        assert!(
+            NotificationEventType::from_audit_action("POST /api/v1/auth/reset/confirm", "Failure")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_self_service_password_change_is_a_password_changed_event_only_as_a_success() {
+        // QR14-1: unlike the five unauthenticated routes above, this one needs
+        // a sign-in. A successful change notifies, as a reset does; the
+        // request row of a refused change (a `Failure`) maps to nothing.
+        assert_eq!(
+            NotificationEventType::from_audit_action(
+                "POST /api/v1/auth/password/change",
+                "Success"
+            ),
+            vec![NotificationEventType::PasswordChanged]
+        );
+        assert!(
+            NotificationEventType::from_audit_action(
+                "POST /api/v1/auth/password/change",
+                "Failure"
+            )
+            .is_empty()
+        );
     }
 
     #[test]

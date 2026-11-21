@@ -506,6 +506,7 @@ async fn audit<C: Connection + Clone>(
             outcome: AuditOutcome::Success,
             ip_address: client_ip(http_req),
             metadata: Some(metadata),
+            organization_id: None,
         })
         .await
     {

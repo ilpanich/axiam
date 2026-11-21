@@ -3,6 +3,7 @@
 use axiam_authz::AuthorizationEngine;
 use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::error::AxiamError;
+use axiam_core::models::tenant::TenantAdmission;
 use axiam_core::repository::{
     AmqpNonceRepository, GroupRepository, PermissionRepository, ResourceRepository, RoleRepository,
     ScopeRepository,
@@ -53,11 +54,18 @@ pub enum AuthzOutcome {
 /// [`AuthzOutcome::NackDrop`], matching the original `nack(requeue: false)`
 /// (and the two `nack(BasicNackOptions::default())`, whose `requeue` also
 /// defaults to `false`) branches exactly.
-pub async fn process_authz_request<R, P, Res, S, G, N>(
+///
+/// SA-13 (N16, D-3): `tenants` answers whether the request's tenant still
+/// admits its principals. A verified, fresh request for a suspended tenant is
+/// answered — published, so the caller is not left waiting for a timeout — as a
+/// denial with `reason_code` `tenant_suspended`, and the engine is not asked.
+#[allow(clippy::too_many_arguments)]
+pub async fn process_authz_request<R, P, Res, S, G, N, T>(
     raw: &[u8],
     engine: &AuthorizationEngine<R, P, Res, S, G>,
     master_signing_key: &[u8],
     nonce_repo: &N,
+    tenants: &T,
     replay_skew: chrono::Duration,
     now: chrono::DateTime<Utc>,
 ) -> AuthzOutcome
@@ -68,6 +76,7 @@ where
     S: ScopeRepository,
     G: GroupRepository,
     N: AmqpNonceRepository,
+    T: TenantAdmission + ?Sized,
 {
     // Deserialize request. Bad payload → nack requeue:false (not re-deliverable).
     let mut request: AuthzRequest = match serde_json::from_slice(raw) {
@@ -155,6 +164,55 @@ where
 
     let correlation_id = request.correlation_id;
 
+    // SA-13 (N16, D-3): a suspended tenant's principals are refused at every
+    // door, this one included — after the signature, freshness and replay
+    // checks (an unverified message learns nothing), before the engine.
+    match tenants.admit(tenant_id).await {
+        Ok(()) => {}
+        Err(AxiamError::TenantSuspended) => {
+            warn!(
+                tenant_id = %tenant_id,
+                correlation_id = %correlation_id,
+                "AuthzRequest for a suspended tenant — denying (SA-13)"
+            );
+            let response = AuthzResponse {
+                correlation_id,
+                allowed: false,
+                reason: Some(AxiamError::TenantSuspended.to_string()),
+                reason_code: Some("tenant_suspended".to_string()),
+            };
+            return match serde_json::to_vec(&response) {
+                Ok(p) => AuthzOutcome::Publish(p),
+                Err(e) => {
+                    error!(error = %e, "Failed to serialize authz response");
+                    AuthzOutcome::NackDrop
+                }
+            };
+        }
+        Err(e) => {
+            // The tenant could not be read: refused as an engine error is,
+            // since "I could not tell" must not read as an allow.
+            error!(
+                error = %e,
+                correlation_id = %correlation_id,
+                "Could not read the tenant of an authz request"
+            );
+            let response = AuthzResponse {
+                correlation_id,
+                allowed: false,
+                reason: Some("internal error".to_string()),
+                reason_code: None,
+            };
+            return match serde_json::to_vec(&response) {
+                Ok(p) => AuthzOutcome::Publish(p),
+                Err(e) => {
+                    error!(error = %e, "Failed to serialize authz response");
+                    AuthzOutcome::NackDrop
+                }
+            };
+        }
+    }
+
     // Build access request and evaluate.
     let access_request = AccessRequest {
         tenant_id: request.tenant_id,
@@ -229,11 +287,15 @@ where
 /// [`MIN_ACCEPTED_KEY_VERSION`], its `issued_at` is outside the ±`replay_skew`
 /// freshness window, or its `nonce` has already been consumed (a duplicate in
 /// the durable `nonce_repo` store is a replay). There is no v1 grace path.
-pub async fn start_authz_consumer<R, P, Res, S, G, N>(
+///
+/// SA-13 (N16): `tenants` is the tenant lifecycle check
+/// [`process_authz_request`] applies to every verified request.
+pub async fn start_authz_consumer<R, P, Res, S, G, N, T>(
     channel: Channel,
     engine: AuthorizationEngine<R, P, Res, S, G>,
     master_signing_key: Vec<u8>,
     nonce_repo: N,
+    tenants: T,
     replay_skew: chrono::Duration,
 ) where
     R: RoleRepository + 'static,
@@ -242,6 +304,7 @@ pub async fn start_authz_consumer<R, P, Res, S, G, N>(
     S: ScopeRepository + 'static,
     G: GroupRepository + 'static,
     N: AmqpNonceRepository + 'static,
+    T: TenantAdmission + 'static,
 {
     info!("Starting authorization AMQP consumer");
 
@@ -280,6 +343,7 @@ pub async fn start_authz_consumer<R, P, Res, S, G, N>(
             &engine,
             &master_signing_key,
             &nonce_repo,
+            &tenants,
             replay_skew,
             Utc::now(),
         )

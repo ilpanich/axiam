@@ -241,6 +241,11 @@ pub struct TenantScope {
     pub organization_id: Uuid,
     /// Whether this is the organization's own reserved tenant.
     pub is_organization: bool,
+    /// Whether the tenant admits principals
+    /// ([`axiam_core::models::tenant::tenant_accepts_principals`]): `false`
+    /// for a suspended tenant, on which an organization principal may only
+    /// read and change its status (SA-13, OD-13b).
+    pub accepts_principals: bool,
 }
 
 /// Object-safe tenant lookup for the authentication extractor.
@@ -263,6 +268,28 @@ pub trait TenantScopeResolver: Send + Sync {
         &'a self,
         tenant_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Option<TenantScope>> + Send + 'a>>;
+
+    /// SA-13 (N16, D-3): whether `tenant_id` — the tenant an authenticated
+    /// principal **lives in** — still admits its principals
+    /// ([`axiam_core::models::tenant::tenant_accepts_principals`]).
+    ///
+    /// `Err(TenantSuspended)` refuses the request; a tenant that is not stored
+    /// is `Ok` (a tombstoned tenant's sessions are gone and its clients
+    /// refused elsewhere); a datastore error is that error, so "could not
+    /// tell" never reads as an admission. The default admits: a resolver that
+    /// cannot tell (a test double) changes nothing.
+    ///
+    /// One tenant read per authenticated request, uncached: the only tenant
+    /// cache in the process (`tenant_org_cache`) holds the organization
+    /// mapping, which never changes, and a suspension must take effect at the
+    /// next request on every replica.
+    fn admit_principals<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AxiamError>> + Send + 'a>> {
+        let _ = tenant_id;
+        Box::pin(async { Ok(()) })
+    }
 }
 
 impl<C: Connection> TenantScopeResolver for axiam_db::SurrealTenantRepository<C> {
@@ -275,8 +302,34 @@ impl<C: Connection> TenantScopeResolver for axiam_db::SurrealTenantRepository<C>
             self.get_by_id(tenant_id).await.ok().map(|t| TenantScope {
                 organization_id: t.organization_id,
                 is_organization: t.is_organization_scope(),
+                accepts_principals: axiam_core::models::tenant::tenant_accepts_principals(&t),
             })
         })
+    }
+
+    fn admit_principals<'a>(
+        &'a self,
+        tenant_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AxiamError>> + Send + 'a>> {
+        axiam_core::models::tenant::TenantAdmission::admit(self, tenant_id)
+    }
+}
+
+/// SA-13 (N16, D-3): refuse a principal whose own tenant is suspended.
+///
+/// Asked of the tenant the principal **lives in** (`principal_tenant_id`), not
+/// the one a request acts on: an organization principal acting on a suspended
+/// tenant through [`ACTIVE_TENANT_HEADER`] lives in the organization's own
+/// tenant and keeps reading it, and can set it back (D-3). Without a registered
+/// resolver nothing is asked, as the session check is skipped without a
+/// validator; the composition root registers both.
+async fn admit_principal_tenant(
+    tenants: Option<&Arc<dyn TenantScopeResolver>>,
+    principal_tenant_id: Uuid,
+) -> Result<(), AxiamApiError> {
+    match tenants {
+        Some(tenants) => Ok(tenants.admit_principals(principal_tenant_id).await?),
+        None => Ok(()),
     }
 }
 
@@ -414,6 +467,18 @@ impl AuthenticatedUser {
     pub fn minted_for_client(&self) -> bool {
         self.claims.0.client_id.is_some()
     }
+
+    /// Refuse a token AXIAM minted for an OAuth2 client, with the same `403`
+    /// [`ConsoleSignIn`] answers. For a handler whose first-party-sign-in
+    /// requirement depends on the target (SR4-1 "Own account only": the MFA
+    /// removal and reset routes demand it only when the caller acts on their
+    /// own account).
+    pub fn require_console_sign_in(&self) -> Result<(), AxiamApiError> {
+        if self.minted_for_client() {
+            return Err(console_sign_in_required());
+        }
+        Ok(())
+    }
 }
 
 impl actix_web::FromRequest for AuthenticatedUser {
@@ -433,8 +498,13 @@ impl actix_web::FromRequest for AuthenticatedUser {
 /// An [`AuthenticatedUser`] whose token is a console sign-in's: one AXIAM did
 /// **not** mint for an OAuth2 client (T-447, #681).
 ///
-/// For an approval surface — the device verification page — which is the
-/// person's own act. A token from the code, refresh, CIBA or device grant is
+/// For an approval surface — the device verification page, the OIDC
+/// scope-consent grant and withdraw (`/account/consents/oidc-scopes`, S-3),
+/// and the GDPR export request, export download and erasure request
+/// (`/account/export`, `/account/export/{token}`, `/account/delete`, S-3b), and
+/// the credential-management routes (WebAuthn registration start and finish,
+/// MFA enroll and confirm, password change) — which is the person's own act.
+/// The full list is CONTRACT §34.11 (a). A token from the code, refresh, CIBA or device grant is
 /// refused `403 authorization_denied`, and refused **before** the session
 /// check: the refusal rests on [`AuthenticatedUser::minted_for_client`], which
 /// every such token answers, and not on whether the token happens to name a
@@ -487,6 +557,8 @@ struct RequestScopeHandles {
     tenants: Option<Arc<dyn TenantScopeResolver>>,
     reach: Option<Arc<dyn PrincipalReachResolver>>,
     requested_tenant: Option<Uuid>,
+    /// SA-13 (OD-13b): what the request would do to the tenant it acts on.
+    request_kind: RequestKind,
     /// RFC 9449 §11.1 — the proof `extract_user` verified, and the guard that
     /// makes it single-use. Lifted here for the same reason everything else
     /// is: the recording is an `await`, and the request is only borrowed on
@@ -520,6 +592,7 @@ impl RequestScopeHandles {
                 .get(ACTIVE_TENANT_HEADER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| Uuid::parse_str(v.trim()).ok()),
+            request_kind: RequestKind::of(req),
             // Read AFTER `extract_user` has run, which is the order
             // `from_request` establishes — the stash does not exist before it.
             dpop: req.extensions().get::<PendingDpopProof>().cloned(),
@@ -539,6 +612,7 @@ impl RequestScopeHandles {
             tenants,
             reach,
             requested_tenant,
+            request_kind,
             dpop,
             replay_guard,
             request,
@@ -548,7 +622,16 @@ impl RequestScopeHandles {
         // credential itself, so its refusal is recorded on the request for the
         // shared rate-limit counter's refund. The active-tenant decision below
         // is about a principal already admitted, and is not.
-        if let Err(refusal) = admit_credential(&user, admit, dpop, replay_guard, validator).await {
+        if let Err(refusal) = admit_credential(
+            &user,
+            admit,
+            dpop,
+            replay_guard,
+            validator,
+            tenants.as_ref(),
+        )
+        .await
+        {
             return Err(refused(&request, refusal));
         }
         request
@@ -559,6 +642,7 @@ impl RequestScopeHandles {
             user.principal_tenant_id,
             user.user_id,
             requested_tenant,
+            request_kind,
             tenants.as_ref(),
             reach.as_ref(),
         )
@@ -582,6 +666,7 @@ async fn admit_credential(
     dpop: Option<PendingDpopProof>,
     replay_guard: Option<Arc<dyn DpopReplayGuard>>,
     validator: Option<Arc<dyn SessionValidator>>,
+    tenants: Option<&Arc<dyn TenantScopeResolver>>,
 ) -> Result<(), AxiamApiError> {
     // RFC 9449 §11.1, first: it is the credential check, and a replayed
     // proof should be refused before the session store is consulted on its
@@ -593,15 +678,8 @@ async fn admit_credential(
     // T-447 / #681 — an approval surface refuses a client's token on what
     // it is, before the session store is asked about it: see
     // [`ConsoleSignIn`].
-    if admit == Admit::ConsoleSignInOnly && user.minted_for_client() {
-        return Err(AxiamError::AuthorizationDenied {
-            reason: "a console sign-in is required; this token was minted for an OAuth2 \
-                         client"
-                .into(),
-            action: None,
-            resource_id: None,
-        }
-        .into());
+    if admit == Admit::ConsoleSignInOnly {
+        user.require_console_sign_in()?;
     }
 
     // REQ-7 / D-15: reject access tokens whose session has been revoked
@@ -625,6 +703,11 @@ async fn admit_credential(
         .into());
     }
 
+    // SA-13 (N16, D-3): and the principal's tenant still admits it — a session
+    // written by a sign-in that raced the suspension, or a token whose session
+    // check is not registered, is refused here.
+    admit_principal_tenant(tenants, user.principal_tenant_id).await?;
+
     Ok(())
 }
 
@@ -633,7 +716,7 @@ async fn admit_credential(
 /// `Some(target)` when the request named a tenant other than the caller's own
 /// **and** the caller was verified to be allowed to act on it: its own tenant is
 /// the organization scope, the target is in the same organization
-/// ([`resolve_active_tenant_for`]), and — for a principal whose roles name the
+/// ([`resolve_active_tenant_scope`]), and — for a principal whose roles name the
 /// tenants they reach — the target is one of them. `None` when the request named
 /// no other tenant. An error otherwise.
 ///
@@ -646,13 +729,14 @@ async fn act_on_requested_tenant(
     home_tenant_id: Uuid,
     subject_id: Uuid,
     requested_tenant: Option<Uuid>,
+    request_kind: RequestKind,
     tenants: Option<&Arc<dyn TenantScopeResolver>>,
     reach: Option<&Arc<dyn PrincipalReachResolver>>,
 ) -> Result<Option<Uuid>, AxiamApiError> {
     let Some(target) = requested_tenant.filter(|t| *t != home_tenant_id) else {
         return Ok(None);
     };
-    let target = resolve_active_tenant_for(home_tenant_id, target, tenants).await?;
+    let scope = resolve_active_tenant_scope(home_tenant_id, target, tenants).await?;
     // ...and, for a principal whose roles name the tenants they reach, that the
     // tenant named is one of them. See [`PrincipalReachResolver`] for why this
     // is a courtesy refusal rather than the enforcement.
@@ -666,6 +750,13 @@ async fn act_on_requested_tenant(
             resource_id: None,
         }
         .into());
+    }
+    // SA-13 (OD-13b): on a suspended tenant an organization principal reads
+    // and changes its status, and nothing else. Decided here, once, for every
+    // route that acts on a tenant through the header — after the checks above,
+    // so only a caller that may act on the tenant learns it is suspended.
+    if !scope.accepts_principals && !request_kind.allowed_on_suspended(target) {
+        return Err(AxiamError::TenantSuspended.into());
     }
     // Reached only when the resolution above confirmed the caller's own tenant
     // is the organization scope — it refuses otherwise.
@@ -762,9 +853,16 @@ impl actix_web::FromRequest for AuthenticatedServiceAccount {
         let replay_guard = req
             .app_data::<web::Data<Arc<dyn DpopReplayGuard>>>()
             .map(|d| d.get_ref().clone());
+        let tenants = req
+            .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
+            .map(|d| d.get_ref().clone());
         Box::pin(async move {
             let account = account?;
             record_verified_proof(dpop, replay_guard)
+                .await
+                .map_err(|e| mark_refused(&request, e))?;
+            // SA-13 (N16, D-3): a suspended tenant's machine token is refused.
+            admit_principal_tenant(tenants.as_ref(), account.tenant_id)
                 .await
                 .map_err(|e| mark_refused(&request, e))?;
             Ok(account)
@@ -775,6 +873,29 @@ impl actix_web::FromRequest for AuthenticatedServiceAccount {
 // ---------------------------------------------------------------------------
 // Shared token extraction
 // ---------------------------------------------------------------------------
+
+/// The refusal of a client-minted token where a console sign-in is required.
+fn console_sign_in_required() -> AxiamApiError {
+    AxiamError::AuthorizationDenied {
+        reason: "a console sign-in is required; this token was minted for an OAuth2 client".into(),
+        action: None,
+        resource_id: None,
+    }
+    .into()
+}
+
+/// The refusal a request carrying no credential at all gets: `401
+/// authentication_failed`, "missing authentication credentials".
+///
+/// Shared so that a caller which must answer "as if anonymous" — the
+/// authorization endpoint treating a client-minted token as no sign-in (SA-04,
+/// N6) — produces the anonymous answer byte for byte instead of a look-alike.
+pub(crate) fn missing_credentials() -> AxiamApiError {
+    AxiamError::AuthenticationFailed {
+        reason: "missing authentication credentials".into(),
+    }
+    .into()
+}
 
 /// Decode and validate the JWT from the request — shared between the
 /// extractors. Does not apply audience narrowing.
@@ -802,12 +923,7 @@ pub(crate) fn parse_validated_claims(req: &HttpRequest) -> Result<ValidatedClaim
             }
             .into());
         }
-        None => {
-            return Err(AxiamError::AuthenticationFailed {
-                reason: "missing authentication credentials".into(),
-            }
-            .into());
-        }
+        None => return Err(missing_credentials()),
     };
 
     validate_presented_token(req, &token, config)
@@ -1017,11 +1133,27 @@ async fn resolve_active_tenant(
 /// organization scope is the only thing standing between "acting on another
 /// tenant" and "asserting another tenant's grants". One implementation, two
 /// callers, no room for the two to drift.
+// Since SA-13 its production caller is [`resolve_active_tenant_scope`], which
+// also hands back the target's scope; the unit tests keep asking this one.
+#[cfg(test)]
 async fn resolve_active_tenant_for(
     home_tenant_id: Uuid,
     target: Uuid,
     tenants: Option<&Arc<dyn TenantScopeResolver>>,
 ) -> Result<Uuid, AxiamApiError> {
+    resolve_active_tenant_scope(home_tenant_id, target, tenants)
+        .await
+        .map(|_| target)
+}
+
+/// [`resolve_active_tenant_for`], returning the target's [`TenantScope`] as
+/// well — read by the same lookup — so [`act_on_requested_tenant`] can ask
+/// whether it is suspended without reading it again (SA-13, OD-13b).
+async fn resolve_active_tenant_scope(
+    home_tenant_id: Uuid,
+    target: Uuid,
+    tenants: Option<&Arc<dyn TenantScopeResolver>>,
+) -> Result<TenantScope, AxiamApiError> {
     let deny = |reason: &str| -> AxiamApiError {
         AxiamError::AuthorizationDenied {
             reason: reason.to_string(),
@@ -1058,7 +1190,98 @@ async fn resolve_active_tenant_for(
         ));
     }
 
-    Ok(target)
+    Ok(scope)
+}
+
+/// What a request would do to the tenant it acts on, for the one decision that
+/// depends on it: an organization principal acting on a **suspended** tenant
+/// through [`ACTIVE_TENANT_HEADER`] (SA-13, owner decision OD-13b).
+///
+/// Read from the method and the matched route, never from the body, which the
+/// extractor has not read: the tenant update handler makes the body half of
+/// the decision (it accepts a suspended tenant's update only when the body
+/// changes nothing but `status`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestKind {
+    /// `GET` or `HEAD`, or a `POST` on one of
+    /// [`Self::READ_ONLY_POST_ROUTES`]: a read, allowed on a suspended tenant.
+    Read,
+    /// `PUT /organizations/{org_id}/tenants/{tenant_id}` for this tenant: its
+    /// status change (the un-suspend), allowed on a suspended tenant.
+    TenantUpdate(Uuid),
+    /// Anything else: refused on a suspended tenant.
+    Write,
+}
+
+impl RequestKind {
+    /// The route pattern of the tenant update, as actix reports it under any
+    /// scope prefix.
+    const TENANT_UPDATE_ROUTE: &'static str = "/organizations/{org_id}/tenants/{tenant_id}";
+
+    /// The `POST` routes that only read (SA-13, owner decision OD-13c), by the
+    /// suffix of the matched route pattern. Each was checked to write nothing
+    /// into the tenant beyond the audit row a read leaves:
+    ///
+    /// * `/authz/check`, `/authz/check/batch` — an access decision;
+    /// * `/organizations/{org_id}/tenants/{tenant_id}/audit-export` — streams
+    ///   the trail; its receipt is the audit of that read;
+    /// * `/tenants/{tenant_id}/saml/parse-sp-metadata` — parses an SP's
+    ///   metadata into a draft the caller may then save (the save is a write);
+    /// * `/pgp-keys/{id}/encrypt` — encrypts the body for one of the tenant's
+    ///   keys and returns it;
+    /// * `/oauth2/userinfo` — the `POST` form of the userinfo read (RFC 6750
+    ///   §2.2).
+    ///
+    /// Not here, though no row of the tenant changes: `/tenants/{tenant_id}/
+    /// email-config/test` (it sends mail through the tenant's relay) and
+    /// `/account/export` (it queues an export job). A `POST` added later is a
+    /// write until it is listed.
+    const READ_ONLY_POST_ROUTES: &'static [&'static str] = &[
+        "/authz/check",
+        "/authz/check/batch",
+        "/organizations/{org_id}/tenants/{tenant_id}/audit-export",
+        "/tenants/{tenant_id}/saml/parse-sp-metadata",
+        "/pgp-keys/{id}/encrypt",
+        "/oauth2/userinfo",
+    ];
+
+    fn of(req: &HttpRequest) -> Self {
+        use actix_web::http::Method;
+        let method = req.method();
+        if *method == Method::GET || *method == Method::HEAD {
+            return Self::Read;
+        }
+        if *method == Method::POST
+            && req.match_pattern().is_some_and(|p| {
+                Self::READ_ONLY_POST_ROUTES
+                    .iter()
+                    .any(|route| p.ends_with(route))
+            })
+        {
+            return Self::Read;
+        }
+        if *method == Method::PUT
+            && req
+                .match_pattern()
+                .is_some_and(|p| p.ends_with(Self::TENANT_UPDATE_ROUTE))
+            && let Some(tenant) = req
+                .match_info()
+                .get("tenant_id")
+                .and_then(|t| Uuid::parse_str(t).ok())
+        {
+            return Self::TenantUpdate(tenant);
+        }
+        Self::Write
+    }
+
+    /// Whether this request may act on `target` while it is suspended.
+    fn allowed_on_suspended(self, target: Uuid) -> bool {
+        match self {
+            Self::Read => true,
+            Self::TenantUpdate(tenant) => tenant == target,
+            Self::Write => false,
+        }
+    }
 }
 
 /// The audit middleware's cached identity, with the check a cache must not skip.
@@ -1661,10 +1884,17 @@ impl actix_web::FromRequest for AuthenticatedPrincipal {
                     // No session check: a service-account token has no session
                     // row. Revoking a machine is disabling the account, which
                     // the token-issuing paths check.
+                    //
+                    // SA-13 (N16, D-3): suspending its tenant is the other way,
+                    // and it is checked here, on every request.
+                    admit_principal_tenant(handles.tenants.as_ref(), principal.principal_tenant_id)
+                        .await
+                        .map_err(|e| mark_refused(&request, e))?;
                     if let Some(target) = act_on_requested_tenant(
                         principal.principal_tenant_id,
                         principal.subject_id,
                         handles.requested_tenant,
+                        handles.request_kind,
                         handles.tenants.as_ref(),
                         handles.reach.as_ref(),
                     )
@@ -1742,6 +1972,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
             session_validation_cache_ttl_secs: 0,
+            require_access_token_typ: true,
         }
     }
 
@@ -1797,7 +2028,10 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             ext: None,
         };
         let key = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes()).unwrap();
-        let header = Header::new(Algorithm::EdDSA);
+        // Typed as an access token (SA-03), so what these tests exercise is
+        // the absent `aud` and nothing else.
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some(axiam_auth::token::TYP_ACCESS_TOKEN.into());
         jsonwebtoken::encode(&header, &claims, &key).unwrap()
     }
 
@@ -2045,6 +2279,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: true,
+                    accepts_principals: true,
                 },
             ),
             (
@@ -2052,6 +2287,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: false,
+                    accepts_principals: true,
                 },
             ),
         ])) as Arc<dyn TenantScopeResolver>;
@@ -2088,6 +2324,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: true,
+                    accepts_principals: true,
                 },
             ),
             (
@@ -2095,6 +2332,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: false,
+                    accepts_principals: true,
                 },
             ),
         ])) as Arc<dyn TenantScopeResolver>;
@@ -2122,6 +2360,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: false,
+                    accepts_principals: true,
                 },
             ),
             (
@@ -2129,6 +2368,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: false,
+                    accepts_principals: true,
                 },
             ),
         ])) as Arc<dyn TenantScopeResolver>;
@@ -2186,6 +2426,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: false,
+                    accepts_principals: true,
                 },
             ),
             (
@@ -2193,6 +2434,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: org,
                     is_organization: false,
+                    accepts_principals: true,
                 },
             ),
         ])) as Arc<dyn TenantScopeResolver>;
@@ -2221,6 +2463,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: mine,
                     is_organization: true,
+                    accepts_principals: true,
                 },
             ),
             (
@@ -2228,6 +2471,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 TenantScope {
                     organization_id: theirs,
                     is_organization: false,
+                    accepts_principals: true,
                 },
             ),
         ])) as Arc<dyn TenantScopeResolver>;
@@ -2267,6 +2511,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
             TenantScope {
                 organization_id: org,
                 is_organization: true,
+                accepts_principals: true,
             },
         )])) as Arc<dyn TenantScopeResolver>;
 

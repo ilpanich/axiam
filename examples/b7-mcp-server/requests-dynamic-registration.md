@@ -31,7 +31,7 @@ empty.
 
 ```bash
 curl -sS -X PUT "$AXIAM/api/v1/organizations/$ORG_ID/settings" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Authorization: Bearer $ORG_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
         \"dynamic_registration\": \"anonymous\",
@@ -42,6 +42,14 @@ curl -sS -X PUT "$AXIAM/api/v1/organizations/$ORG_ID/settings" \
         \"dcr_unused_client_ttl_days\": 30
       }"
 ```
+
+> **Who runs this.** `/organizations/{id}/settings` is the organization
+> baseline every tenant inherits, so `$ORG_ADMIN_TOKEN` must belong to an
+> **organization administrator** (a principal of the organization's own
+> scope, such as the bootstrap super-admin); a tenant administrator is
+> refused `403`. The tenant then opts in with the same fields on
+> `PUT /api/v1/tenants/$TENANT/settings`, which its own tenant administrator
+> may call — `examples/b7-mcp-server/walkthrough.sh` does both.
 
 > The body also carries every existing settings field; they are elided here.
 > `dcr_allowed_redirect_hosts` is empty on purpose: the loopback hosts are

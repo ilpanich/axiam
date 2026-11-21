@@ -166,7 +166,10 @@ services:
       # scripts/e2e-mtls-native-check.sh — which sends no header at all and is
       # unaffected by this setting.
       AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT: "true"
-      # Bootstrap guard: only requests with this email are accepted by /admin/bootstrap.
+      # Bootstrap restriction: only requests with this email are accepted by
+      # /admin/bootstrap, and they must ALSO carry the one-time setup token from
+      # this container's first-boot log (scripts/e2e-bootstrap.sh reads it via
+      # scripts/first-boot-token.sh). The email alone is not a credential.
       # NOTE: the bootstrap handler reads this via `std::env::var` directly (NOT
       # through the `AXIAM__`-prefixed config layer), so the OS env var name must
       # be exactly AXIAM_BOOTSTRAP_ADMIN_EMAIL (single underscore). A double

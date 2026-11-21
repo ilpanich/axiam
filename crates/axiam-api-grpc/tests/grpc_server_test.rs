@@ -214,6 +214,8 @@ async fn boot(
         std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
             axiam_auth::lockout::policy_from_config(&test_auth_config()),
         )),
+        // SA-12: `UserService`'s own engine (the type is not `Clone`).
+        make_engine(&db),
         tls,
         axiam_core::models::deployment::DeploymentProfile::Full,
         shutdown,

@@ -632,18 +632,28 @@ where
                 )));
             }
 
-            // Validate audience restriction matches our SP entity ID.
-            if let Some(audience_restrictions) = &conditions.audience_restrictions {
-                let sp_entity_id = &config.client_id;
-                let audience_matches = audience_restrictions
-                    .iter()
-                    .any(|ar| ar.audience.iter().any(|aud| aud == sp_entity_id));
-                if !audience_matches {
-                    return Err(FederationError::SamlResponseFailed(format!(
-                        "Audience restriction does not match \
-                             SP entity ID: {sp_entity_id}"
-                    )));
-                }
+            // Audience restriction is MANDATORY and must list our SP entity ID
+            // (Web-Browser-SSO profile; SA-11/N21, D-5). An absent restriction
+            // is a rejection, not a pass: nothing else would bind the assertion
+            // to this SP.
+            let sp_entity_id = &config.client_id;
+            let audience_restrictions = conditions
+                .audience_restrictions
+                .as_deref()
+                .filter(|ars| !ars.is_empty())
+                .ok_or_else(|| {
+                    FederationError::SamlResponseFailed(
+                        "Assertion Conditions missing required AudienceRestriction".into(),
+                    )
+                })?;
+            let audience_matches = audience_restrictions
+                .iter()
+                .any(|ar| ar.audience.iter().any(|aud| aud == sp_entity_id));
+            if !audience_matches {
+                return Err(FederationError::SamlResponseFailed(format!(
+                    "Audience restriction does not match \
+                         SP entity ID: {sp_entity_id}"
+                )));
             }
         }
 
@@ -1466,11 +1476,8 @@ fn check_bearer_confirmation_data(
 
     // --- @Recipient — this assertion must have been minted for THIS SP. ------
     // Presence is REQUIRED unconditionally (§4.1.4.2). The value is compared
-    // whenever the caller knows its own ACS URL; the only caller that does not
-    // is the public first-time-SSO path, whose AuthnRequest carries no
-    // AssertionConsumerServiceURL and whose login-state row has no column for
-    // one — closing that needs a schema addition, tracked as the SEC-005
-    // residual in claude_dev/security-audit.md §7 (SAML-01).
+    // whenever the caller knows its own ACS URL. Both ACS call sites (the
+    // authenticated one and the public form ACS) now supply it (SA-11/N21).
     let recipient = data
         .recipient
         .as_deref()
@@ -2436,6 +2443,8 @@ pub(crate) mod tests {
                 phone_number_verified_at: None,
                 address: None,
                 directory_external_id: None,
+                credential_changed_at: None,
+                credential_version: 0,
                 metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -2592,6 +2601,8 @@ pub(crate) mod tests {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: None,
+            credential_version: 0,
             metadata: serde_json::Value::Null,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -3047,6 +3058,118 @@ pub(crate) mod tests {
             ),
             "expected SamlResponseFailed naming SubjectConfirmation, got: {err:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // SA-11 / N21 — the assertion must be bound to THIS SP (D-5).
+    //
+    // `form_acs_response` drives `handle_saml_response_for` with the argument
+    // shape the public form ACS used before the fix: a stored request id, NO
+    // expected destination, `require_in_response_to = false`.
+    // -----------------------------------------------------------------------
+
+    async fn form_acs_response(
+        fixture: &str,
+        expected_destination: Option<&str>,
+    ) -> Result<FederationCallbackResult, FederationError> {
+        let cfg = acs_config();
+        let svc = make_acs_service(
+            Some(cfg.clone()),
+            RecordingLinkRepo::provisioning(),
+            RecordingUserRepo::provisioning(),
+        );
+        svc.handle_saml_response_for(
+            &cfg,
+            Uuid::new_v4(),
+            &scd_fixture_b64(fixture),
+            Some("relay-state"),
+            Some("_axiam-req-1"),
+            expected_destination,
+            false,
+        )
+        .await
+    }
+
+    /// N21 report fixture: no `<AudienceRestriction>` and a signed `@Recipient`
+    /// naming another SP, posted in the form-ACS shape (no expected
+    /// destination). Must be rejected by the SP itself.
+    #[tokio::test]
+    async fn form_acs_shape_rejects_no_audience_foreign_recipient_assertion() {
+        let err = form_acs_response("scd_no_audience_foreign_recipient_response.xml", None)
+            .await
+            .expect_err("an assertion bound to neither this SP's audience nor Recipient must fail");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(_)),
+            "got: {err:?}"
+        );
+    }
+
+    /// The audience is mandatory on its own: correct `@Recipient`, but the
+    /// `<Conditions>` carries no `<AudienceRestriction>` (Web-SSO profile).
+    #[tokio::test]
+    async fn assertion_without_audience_restriction_is_rejected() {
+        let err = form_acs_response("scd_no_audience_response.xml", Some(TEST_ACS_URL))
+            .await
+            .expect_err("a missing AudienceRestriction must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Audience")),
+            "expected SamlResponseFailed(Audience), got: {err:?}"
+        );
+    }
+
+    /// An `<AudienceRestriction>` that does not list the SP entity ID is
+    /// rejected even when `@Recipient` is correct.
+    #[tokio::test]
+    async fn assertion_with_foreign_audience_is_rejected() {
+        let err = form_acs_response("scd_foreign_audience_response.xml", Some(TEST_ACS_URL))
+            .await
+            .expect_err("an audience that omits the SP entity ID must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Audience")),
+            "expected SamlResponseFailed(Audience), got: {err:?}"
+        );
+    }
+
+    /// With the form ACS URL supplied (what the handler now passes), a foreign
+    /// `@Recipient` is rejected on the Recipient comparison.
+    #[tokio::test]
+    async fn form_acs_with_expected_destination_rejects_foreign_recipient() {
+        let err = form_acs_response(
+            "scd_no_audience_foreign_recipient_response.xml",
+            Some(TEST_ACS_URL),
+        )
+        .await
+        .expect_err("foreign Recipient must be rejected");
+        assert!(
+            matches!(err, FederationError::SamlResponseFailed(_)),
+            "got: {err:?}"
+        );
+    }
+
+    /// A conformant assertion (audience = SP entity ID, Recipient = form ACS)
+    /// still signs in through the form-ACS shape once the destination is passed.
+    #[tokio::test]
+    async fn form_acs_with_expected_destination_accepts_conformant_assertion() {
+        form_acs_response("scd_valid_response.xml", Some(TEST_ACS_URL))
+            .await
+            .expect("conformant assertion must be accepted");
+    }
+
+    /// Hardening note (h06-federation-sp): a `NameID` with an interior XML
+    /// comment parses, through samael, to its full concatenated text. A
+    /// truncated value would let `alice<!---->@evil` and `alice@evil` diverge
+    /// between the signed (exc-c14n, comments dropped) and the consumed text.
+    #[test]
+    fn nameid_with_interior_comment_parses_to_full_text() {
+        let xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="a1" Version="2.0" IssueInstant="2099-01-01T00:00:00Z">
+  <saml:Issuer>https://idp.example.com</saml:Issuer>
+  <saml:Subject>
+    <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">user@<!-- injected -->example.com</saml:NameID>
+  </saml:Subject>
+</saml:Assertion>"#;
+        let assertion = samael::schema::Assertion::from_str(xml).expect("assertion should parse");
+        let claims = extract_assertion_claims(&assertion).expect("claims should extract");
+        assert_eq!(claims.name_id, "user@example.com");
     }
 
     // ----- handle_saml_response: config guard clauses -----

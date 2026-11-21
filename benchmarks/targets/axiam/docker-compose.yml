@@ -194,9 +194,9 @@ services:
       # non-zero TTL (5) or the cell measures nothing new. The server logs a
       # WARN naming the active TTL at startup; its absence means it is off.
       AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS: "${AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS:-0}"
-      # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so
-      # runner/seed.sh can POST /api/v1/admin/bootstrap without a setup_token.
-      # Bench-only; the production compose deliberately does not preset this.
+      # First-run bootstrap restriction: only this email may bootstrap. It is an
+      # ADDITIONAL restriction — runner/seed.sh still sends the setup token it
+      # reads from this container's first-boot log. Bench-only.
       AXIAM_BOOTSTRAP_ADMIN_EMAIL: "${BENCH_ADMIN_EMAIL:-admin@bench.dev}"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?required}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?required}"

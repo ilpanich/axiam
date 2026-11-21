@@ -2481,8 +2481,11 @@ async fn client_auth_failure_system_rows(
     db: &Surreal<TestDb>,
 ) -> Vec<axiam_core::models::audit::AuditLogEntry> {
     use axiam_core::repository::{AuditLogFilter, AuditLogRepository};
+    // The whole partition: a row for an unknown tenant records no
+    // organization, so no organization's `list_system` returns it (SA-02, N1).
     axiam_db::SurrealAuditLogRepository::new(db.clone())
-        .list_system(
+        .list(
+            uuid::Uuid::nil(),
             AuditLogFilter {
                 action: Some("oauth2.client_auth_failed".into()),
                 ..Default::default()

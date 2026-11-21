@@ -15,7 +15,7 @@ use webauthn_rs_proto::{
 };
 
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::ConsoleSignIn;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
     HEADER_CSRF, access_cookie, csrf_cookie, generate_csrf_token, refresh_cookie,
@@ -276,13 +276,14 @@ fn peek_tenant_id(state_token: &str) -> Result<Uuid, AxiamApiError> {
         (status = 200, description = "Registration challenge",
          body = StartRegistrationResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
         (status = 503, description = "Attestation policy requires attestation but no \
             FIDO metadata is available (W2-D3 fail-closed)"),
     ),
     security(("bearer" = []))
 )]
 pub async fn start_registration<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let user_name = user.user_id.to_string();
@@ -416,12 +417,14 @@ async fn enforce_mds_freshness<C: Connection + Clone>(
          body = CredentialResponse),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Denied by the tenant's attestation policy \
-            (this security key model is not permitted by your organization)"),
+            (this security key model is not permitted by your organization), or \
+            `authorization_denied`: a console sign-in is required and this token was \
+            minted for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn finish_registration<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<FinishRegistrationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -551,6 +554,7 @@ async fn setup_token_registration_context<C: Connection + Clone>(
     let (user_id, tenant_id, org_id) = state
         .auth_service
         .decode_setup_token(setup_token)
+        .await
         .map_err(AxiamApiError)?;
 
     let existing = state
@@ -848,9 +852,10 @@ pub async fn start_authentication<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<StartAuthenticationRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
-    let (user_id, tenant_id, org_id) = state
+    let (user_id, tenant_id, org_id, challenge_issued_at, credential_version) = state
         .auth_service
-        .decode_mfa_challenge_ids(&body.challenge_token)
+        .decode_mfa_challenge_ids_at(&body.challenge_token)
+        .await
         .map_err(|e| AxiamApiError(e.into()))?;
 
     // Second-factor authentication follows the tenant's policy. Relaxing it
@@ -866,7 +871,16 @@ pub async fn start_authentication<C: Connection + Clone>(
     let (challenge, state_token) = state
         .webauthn
         .webauthn_service
-        .start_authentication(tenant_id, org_id, user_id, user_verification)
+        // The state token carries the challenge's issue time: the finish
+        // refuses a ceremony whose challenge predates a credential change.
+        .start_authentication_for_challenge(
+            tenant_id,
+            org_id,
+            user_id,
+            user_verification,
+            Some(challenge_issued_at),
+            credential_version,
+        )
         .await?;
 
     Ok(HttpResponse::Ok().json(StartAuthenticationResponse {
@@ -1091,6 +1105,9 @@ pub async fn finish_discoverable_authentication<C: Connection + Clone>(
             user_agent(&req),
             // X7.2 — see `discoverable_authentication_amr`.
             AuthenticationEvidence::now(discoverable_authentication_amr()),
+            // SR10-1: the version of the user row read after the assertion
+            // verified; the session write refuses if a reset moved it since.
+            Some(user.credential_version),
         )
         .await?;
 
@@ -1130,22 +1147,22 @@ pub async fn finish_authentication<C: Connection + Clone>(
     let b = body.into_inner();
     let tenant_id = peek_tenant_id(&b.state_token)?;
 
-    let (user_id, org_id) = state
-        .webauthn
-        .webauthn_service
-        .finish_authentication(tenant_id, &b.state_token, &b.response)
-        .await?;
-
+    // SA-06 (SR2-1): refuses a ceremony whose challenge predates a credential
+    // change, with the answer an invalid state token gets, then finishes it.
+    // The finish and the session write are one `AuthService` call
+    // (`complete_webauthn_second_factor`), so the credential version the
+    // ceremony was checked under is the one the session write compares (SR10-1).
     let out = state
         .auth_service
-        .create_session_and_tokens(
-            user_id,
+        .complete_webauthn_second_factor(
+            &state.webauthn.webauthn_service,
             tenant_id,
-            org_id,
-            client_ip(&req),
-            user_agent(&req),
+            &b.state_token,
+            &b.response,
             // X7.2 — see `authentication_amr`.
             AuthenticationEvidence::now(authentication_amr()),
+            client_ip(&req),
+            user_agent(&req),
         )
         .await?;
 

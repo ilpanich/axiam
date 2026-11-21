@@ -177,6 +177,11 @@ fn signed_request(
     serde_json::to_vec(&req).unwrap()
 }
 
+/// The tenant lifecycle check the consumer applies (SA-13).
+fn tenants(db: &Surreal<Db>) -> SurrealTenantRepository<Db> {
+    SurrealTenantRepository::new(db.clone())
+}
+
 fn skew() -> Duration {
     Duration::seconds(300)
 }
@@ -226,7 +231,16 @@ async fn valid_request_with_grant_publishes_allow() {
         Uuid::new_v4(),
     );
 
-    let outcome = process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), now).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     match outcome {
         AuthzOutcome::Publish(payload) => {
             assert!(allowed_field(&payload), "granted access must be allowed");
@@ -254,7 +268,16 @@ async fn valid_request_without_grant_publishes_deny() {
         Uuid::new_v4(),
     );
 
-    let outcome = process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), now).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     match outcome {
         AuthzOutcome::Publish(payload) => {
             assert!(!allowed_field(&payload), "ungranted access must be denied");
@@ -273,6 +296,7 @@ async fn malformed_json_is_nackdropped() {
         &engine,
         MASTER,
         &nonce_repo,
+        &tenants(&db),
         skew(),
         Utc::now(),
     )
@@ -301,8 +325,16 @@ async fn unsigned_request_is_nackdropped() {
     raw_val.as_object_mut().unwrap().remove("hmac_signature");
     let raw = serde_json::to_vec(&raw_val).unwrap();
 
-    let outcome =
-        process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), Utc::now()).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        Utc::now(),
+    )
+    .await;
     assert!(matches!(outcome, AuthzOutcome::NackDrop));
 }
 
@@ -327,8 +359,16 @@ async fn wrong_signature_is_nackdropped() {
     raw_val["hmac_signature"] = serde_json::Value::String("deadbeef".into());
     let raw = serde_json::to_vec(&raw_val).unwrap();
 
-    let outcome =
-        process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), Utc::now()).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        Utc::now(),
+    )
+    .await;
     assert!(matches!(outcome, AuthzOutcome::NackDrop));
 }
 
@@ -352,7 +392,16 @@ async fn key_version_below_minimum_is_nackdropped() {
         Uuid::new_v4(),
     );
 
-    let outcome = process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), now).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     assert!(matches!(outcome, AuthzOutcome::NackDrop));
 }
 
@@ -376,7 +425,16 @@ async fn stale_issued_at_is_nackdropped() {
 
     // Evaluate with a clock one hour ahead → outside the ±300s window.
     let now = issued + Duration::hours(1);
-    let outcome = process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), now).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     assert!(matches!(outcome, AuthzOutcome::NackDrop));
 }
 
@@ -398,7 +456,16 @@ async fn future_issued_at_is_nackdropped() {
         Uuid::new_v4(),
     );
     let now = Utc::now();
-    let outcome = process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), now).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     assert!(matches!(outcome, AuthzOutcome::NackDrop));
 }
 
@@ -423,11 +490,29 @@ async fn duplicate_nonce_replay_is_nackdropped() {
     );
 
     // First delivery consumes the nonce and publishes.
-    let first = process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), now).await;
+    let first = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     assert!(matches!(first, AuthzOutcome::Publish(_)));
 
     // Exact same signed bytes again → replay → NackDrop.
-    let second = process_authz_request(&raw, &engine, MASTER, &nonce_repo, skew(), now).await;
+    let second = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     assert!(matches!(second, AuthzOutcome::NackDrop));
 }
 
@@ -450,7 +535,90 @@ async fn nonce_store_error_is_nackdropped() {
 
     // A non-replay nonce-store error must also reject (dead-letter), never
     // fall through to evaluation.
-    let outcome =
-        process_authz_request(&raw, &engine, MASTER, &FailingNonceRepo, skew(), now).await;
+    let outcome = process_authz_request(
+        &raw,
+        &engine,
+        MASTER,
+        &FailingNonceRepo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
     assert!(matches!(outcome, AuthzOutcome::NackDrop));
+}
+
+/// SA-13 (N16, D-3): a verified, fresh request for a suspended tenant is
+/// answered as a denial with `reason_code` `tenant_suspended`, whatever the
+/// subject holds; un-suspending restores the engine's own answer.
+#[tokio::test]
+async fn a_suspended_tenants_request_is_denied_tenant_suspended() {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let db = setup_db().await;
+    let (tenant_id, user_id) = seed_tenant_user(&db).await;
+    let resource_id = grant(&db, tenant_id, user_id, "read").await;
+    let engine = make_engine(&db);
+    let nonce_repo = SurrealAmqpNonceRepository::new(db.clone());
+    let set_status = |status| UpdateTenant {
+        status: Some(status),
+        ..Default::default()
+    };
+    let request = |now| {
+        signed_request(
+            tenant_id,
+            user_id,
+            resource_id,
+            "read",
+            CURRENT_KEY_VERSION,
+            now,
+            Uuid::new_v4(),
+        )
+    };
+
+    tenants(&db)
+        .update(tenant_id, set_status(TenantStatus::Suspended))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let outcome = process_authz_request(
+        &request(now),
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
+    match outcome {
+        AuthzOutcome::Publish(payload) => {
+            let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(v["allowed"], false, "a suspended tenant is denied: {v}");
+            assert_eq!(v["reason_code"], "tenant_suspended", "{v}");
+        }
+        other => panic!("expected a published denial, got {other:?}"),
+    }
+
+    tenants(&db)
+        .update(tenant_id, set_status(TenantStatus::Active))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let outcome = process_authz_request(
+        &request(now),
+        &engine,
+        MASTER,
+        &nonce_repo,
+        &tenants(&db),
+        skew(),
+        now,
+    )
+    .await;
+    match outcome {
+        AuthzOutcome::Publish(payload) => {
+            assert!(allowed_field(&payload), "un-suspending restores the grant");
+        }
+        other => panic!("expected Publish(Allow), got {other:?}"),
+    }
 }

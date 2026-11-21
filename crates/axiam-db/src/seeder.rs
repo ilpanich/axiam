@@ -418,9 +418,11 @@ const fn network_half(scope: Option<bool>) -> NetworkHalf {
 /// This is the second of two layers. `require_organization_principal` in
 /// `axiam-api-rest` is the load-bearing one and refuses such a caller whatever
 /// grants it holds; withholding the grant means the two layers agree instead of
-/// one quietly contradicting the other. The `viewer` role is untouched — every
-/// organization-level action is a mutation and viewer is seeded only with
-/// `:list` and `:get`.
+/// one quietly contradicting the other. The `viewer` role is untouched by
+/// construction: it is seeded only with actions ending exactly in `:list` or
+/// `:get`, and no organization-level action does. Most are mutations; the
+/// reads among them (`audit_logs:list_system`, `organizations:get_settings`)
+/// carry a longer verb, so the viewer was never seeded with them either.
 pub async fn seed_default_roles<C: Connection>(
     db: &Surreal<C>,
     tenant_id: Uuid,
@@ -527,7 +529,7 @@ pub async fn seed_default_roles<C: Connection>(
     let withheld = |action: &str| !may_hold_org_actions && is_organization_level_action(action);
 
     for perm in &permissions.items {
-        if withheld(&perm.action) {
+        if withheld(&perm.action) || seeded_to_no_role(&perm.action) {
             continue;
         }
 
@@ -594,6 +596,22 @@ pub async fn seed_default_roles<C: Connection>(
 fn super_admin_may_hold(action: &str, ordinary_tenant: bool) -> bool {
     !is_network_action(action)
         || (ordinary_tenant && SEEDED_SUPER_ADMIN_NETWORK_ACTIONS.contains(&action))
+}
+
+/// Permissions in the registry that **no** seeded role is given, by the
+/// bootstrap seeding or by the boot-time reconcile (SA-12, N4, D-2).
+///
+/// `users:validate_credentials` admits a service account to gRPC
+/// `UserService/ValidateCredentials`, a password oracle over every account in
+/// the tenant. It is granted by an operator to the one service account that
+/// needs it, never by default. The reconcile gives super-admin "every
+/// permission" on each boot, which is how a new registry entry would otherwise
+/// reach every existing tenant on upgrade. Nothing is revoked: a grant an
+/// operator made deliberately is left alone.
+pub const SEEDED_TO_NO_ROLE: &[&str] = &["users:validate_credentials"];
+
+fn seeded_to_no_role(action: &str) -> bool {
+    SEEDED_TO_NO_ROLE.contains(&action)
 }
 
 /// Whether the seeded `admin` may hold `action`: everything but
@@ -744,6 +762,7 @@ async fn audit_network_revocation<C: Connection>(
             "permission_id": permission_id.to_string(),
             "reason": "the seeded role may not hold this network: permission in this tenant",
         })),
+        organization_id: None,
     };
     if let Err(e) = SurrealAuditLogRepository::new(db.clone())
         .append(entry)
@@ -913,6 +932,9 @@ pub async fn reconcile_default_role_grants<C: Connection>(
 
     let mut outcome = ReconcileOutcome::default();
     for perm in &permissions.items {
+        if seeded_to_no_role(&perm.action) {
+            continue;
+        }
         if is_organization_level_action(&perm.action) && organization_half == OrganizationHalf::Skip
         {
             continue;

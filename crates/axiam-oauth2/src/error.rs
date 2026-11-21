@@ -59,6 +59,17 @@ pub enum OAuth2Error {
     ParRequired(String),
     #[error("unsupported_grant_type: grant type is not supported")]
     UnsupportedGrantType,
+    /// SA-13 (N16, D-3) — the client authenticated, and its tenant is
+    /// suspended: no grant is answered with a token.
+    ///
+    /// An extension error code (RFC 6749 §8.5) rather than `invalid_client`,
+    /// which a tombstoned tenant gets on purpose (it must not be an oracle for
+    /// a deleted tenant): this is raised only **after** the client proved its
+    /// credential, so it tells the client nothing it may not know, and it is
+    /// the one answer it can act on — ask an organization administrator, not
+    /// rotate a secret that works. HTTP 400, like the other grant refusals.
+    #[error("tenant_suspended: this tenant is suspended")]
+    TenantSuspended,
     #[error("server_error: {0}")]
     ServerError(String),
 
@@ -223,6 +234,7 @@ impl OAuth2Error {
             Self::InvalidRedirectUri(_) => "invalid_request",
             Self::ParRequired(_) => "invalid_request",
             Self::UnsupportedGrantType => "unsupported_grant_type",
+            Self::TenantSuspended => "tenant_suspended",
             Self::ServerError(_) => "server_error",
             Self::AuthorizationPending => "authorization_pending",
             Self::SlowDown => "slow_down",

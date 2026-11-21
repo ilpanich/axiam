@@ -114,6 +114,7 @@ impl AuditLogRepository for FailingAuditRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _f: AuditLogFilter,
         _p: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -151,6 +152,7 @@ impl AuditLogRepository for CountingAuditRepo {
             ip_address: input.ip_address,
             metadata: input.metadata.unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         })
     }
     async fn list(
@@ -163,6 +165,7 @@ impl AuditLogRepository for CountingAuditRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _f: AuditLogFilter,
         _p: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -815,6 +818,7 @@ async fn a_server_written_row_has_no_ingested_via() {
             outcome: axiam_core::models::audit::AuditOutcome::Success,
             ip_address: None,
             metadata: Some(serde_json::json!({"source": "sync"})),
+            organization_id: None,
         })
         .await
         .unwrap();

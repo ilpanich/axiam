@@ -32,6 +32,7 @@ fn entry(
             None => serde_json::json!({}),
         },
         timestamp: Utc::now(),
+        organization_id: None,
     }
 }
 
@@ -103,6 +104,7 @@ impl AuditLogRepository for AuditTrail {
 
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _filter: AuditLogFilter,
         _pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {

@@ -11,8 +11,8 @@ use std::pin::Pin;
 
 use axiam_core::models::scim_token::ScimToken;
 use axiam_core::models::user::UserStatus;
-use axiam_core::repository::{ScimTokenRepository, UserRepository};
-use axiam_db::{SurrealScimTokenRepository, SurrealUserRepository};
+use axiam_core::repository::{ScimTokenRepository, TenantRepository, UserRepository};
+use axiam_db::{SurrealScimTokenRepository, SurrealTenantRepository, SurrealUserRepository};
 use chrono::Utc;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -65,11 +65,33 @@ pub trait ScimTokenResolver: Send + Sync {
 pub struct SurrealScimTokenResolver<C: Connection + Clone> {
     tokens: SurrealScimTokenRepository<C>,
     users: SurrealUserRepository<C>,
+    tenants: SurrealTenantRepository<C>,
 }
 
 impl<C: Connection + Clone> SurrealScimTokenResolver<C> {
-    pub fn new(tokens: SurrealScimTokenRepository<C>, users: SurrealUserRepository<C>) -> Self {
-        Self { tokens, users }
+    pub fn new(
+        tokens: SurrealScimTokenRepository<C>,
+        users: SurrealUserRepository<C>,
+        tenants: SurrealTenantRepository<C>,
+    ) -> Self {
+        Self {
+            tokens,
+            users,
+            tenants,
+        }
+    }
+
+    /// SA-13 (N16, D-3): the token's tenant must still be there and still
+    /// admit its principals. A tombstoned tenant's tokens are revoked by the
+    /// tombstone itself; this also refuses one that predates that, and every
+    /// token of a suspended tenant, which keeps its tokens (un-suspending
+    /// restores them). Checked on every request, for the reason the bound
+    /// user is.
+    async fn tenant_admits(&self, tenant_id: Uuid) -> bool {
+        match self.tenants.get_by_id(tenant_id).await {
+            Ok(tenant) => axiam_core::models::tenant::tenant_accepts_principals(&tenant),
+            Err(_) => false,
+        }
     }
 
     /// The bound user must still be able to log in.
@@ -108,6 +130,18 @@ impl<C: Connection + Clone + 'static> ScimTokenResolver for SurrealScimTokenReso
                     token_id = %token.id,
                     revoked = token.revoked_at.is_some(),
                     "provisioning token is revoked or expired"
+                );
+                return None;
+            }
+
+            if !self.tenant_admits(token.tenant_id).await {
+                tracing::info!(
+                    target: "axiam::audit",
+                    event = "scim.token_rejected",
+                    tenant_id = %token.tenant_id,
+                    token_id = %token.id,
+                    reason = "tenant_suspended",
+                    "provisioning token's tenant is suspended or deleted"
                 );
                 return None;
             }

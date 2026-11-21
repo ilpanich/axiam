@@ -10,7 +10,7 @@
       "name": "Apache-2.0"
     },
     "version": "1.3.1",
-    "x-axiam-spec-digest": "sha256:cd2e3ed76153e3cb91a9b82a66e01b63827912f557a58d2206031da04bf0a86d"
+    "x-axiam-spec-digest": "sha256:badfb4802f3189b92b95677cc6b5f5b3cbbe1aa8d7d3b106313d1d3a3fcd59ca"
   },
   "paths": {
     "/.well-known/oauth-authorization-server": {
@@ -302,7 +302,7 @@
           "gdpr"
         ],
         "summary": "`POST /api/v1/account/consents/oidc-scopes` — record a scope-release consent.",
-        "description": "What the SPA's consent screen calls when the end user says yes. Everything\nit accepts is checked against the registration rather than taken on trust,\nbecause a consent record is the thing UserInfo releases personal data on\nthe strength of:\n\n* the scopes must be sensitive ones — nothing else belongs in this\n  namespace, and a record naming `openid` would be a record that never\n  matches and never expires;\n* the client must exist in the caller's tenant;\n* the client must have every named scope **registered**, so a consent\n  cannot be recorded for a release the client could never have been\n  authorised for;\n* the tenant switch must be on, so consent collected while the capability\n  is off cannot sit waiting for somebody to turn it on.\n\nIdempotent: the `(tenant, user, type, version)` index makes a repeated\ngrant the same grant, and a second call is answered `200` rather than a\nconflict. A consent screen the user double-submits has consented once.",
+        "description": "What the SPA's consent screen calls when the end user says yes. Everything\nit accepts is checked against the registration rather than taken on trust,\nbecause a consent record is the thing UserInfo releases personal data on\nthe strength of:\n\n* the scopes must be sensitive ones — nothing else belongs in this\n  namespace, and a record naming `openid` would be a record that never\n  matches and never expires;\n* the client must exist in the caller's tenant;\n* the client must have every named scope **registered**, so a consent\n  cannot be recorded for a release the client could never have been\n  authorised for;\n* the tenant switch must be on, so consent collected while the capability\n  is off cannot sit waiting for somebody to turn it on.\n\nIdempotent: the `(tenant, user, type, version)` index makes a repeated\ngrant the same grant, and a second call is answered `200` rather than a\nconflict. A consent screen the user double-submits has consented once.\n\n**The person's own act (T-447, SA-04 review S-3).** Takes a\n[`ConsoleSignIn`]: a token AXIAM minted for an OAuth2 client is refused\n`403`. `/oauth2/authorize` reads exactly these records to skip the consent\nscreen, and the CSRF middleware exempts bearer-only requests, so a relying\nparty holding one of its user's tokens could otherwise record consent for\nanother client in the user's name and have a code issued silently.",
         "operationId": "grant_oidc_scope_consent",
         "requestBody": {
           "content": {
@@ -323,6 +323,9 @@
           },
           "401": {
             "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"
           }
         },
         "security": [
@@ -338,7 +341,7 @@
           "gdpr"
         ],
         "summary": "`DELETE /api/v1/account/consents/oidc-scopes/{client_id}` — withdraw.",
-        "description": "Art. 7(3): as easy to withdraw as to give. One call, no grace period, no\nconfirmation step, and it takes effect on the **next UserInfo call with the\ntoken the relying party already holds** — not on the next token. That is\nthe property T8.4 asserts, and it is why the release gate re-reads the\nrecord on every call rather than trusting the one taken at authorization.\n\nWithdraws every scope set consented to for this relying party, not one of\nthem: a subject saying \"stop giving my address to this app\" does not mean\n\"stop giving it under the two-scope record but carry on under the\none-scope one\".\n\nAnswers `200` whether or not anything was there, and says how many records\nwent. A subject who withdraws twice is not told off, and an attacker who\nguesses `client_id`s learns nothing from the status code — though they\nwould have to be the subject to ask at all.",
+        "description": "Art. 7(3): as easy to withdraw as to give. One call, no grace period, no\nconfirmation step, and it takes effect on the **next UserInfo call with the\ntoken the relying party already holds** — not on the next token. That is\nthe property T8.4 asserts, and it is why the release gate re-reads the\nrecord on every call rather than trusting the one taken at authorization.\n\nWithdraws every scope set consented to for this relying party, not one of\nthem: a subject saying \"stop giving my address to this app\" does not mean\n\"stop giving it under the two-scope record but carry on under the\none-scope one\".\n\nAnswers `200` whether or not anything was there, and says how many records\nwent. A subject who withdraws twice is not told off, and an attacker who\nguesses `client_id`s learns nothing from the status code — though they\nwould have to be the subject to ask at all.\n\nA [`ConsoleSignIn`], like the grant: withdrawing is the person's own act\ntoo, and a relying party holding one of its user's tokens must not be able\nto strip a consent the user gave another client (T-447, S-3).",
         "operationId": "withdraw_oidc_scope_consent",
         "parameters": [
           {
@@ -357,6 +360,9 @@
           },
           "401": {
             "description": "Not authenticated"
+          },
+          "403": {
+            "description": "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"
           }
         },
         "security": [
@@ -372,7 +378,7 @@
           "gdpr"
         ],
         "summary": "`POST /api/v1/account/delete`",
-        "description": "Initiates Art. 17 erasure: immediately disables the account, revokes all\nsessions, emails a single-use cancel link, and schedules purge at +30 d\n(D-07/D-08/D-09).\n\nSelf-service (own account) or admin with `users:erase` permission.",
+        "description": "Initiates Art. 17 erasure: immediately disables the account, revokes all\nsessions, emails a single-use cancel link, and schedules purge at +30 d\n(D-07/D-08/D-09).\n\nSelf-service (own account) or admin with `users:erase` permission.\n\nA [`ConsoleSignIn`] (S-3b): a token AXIAM minted for an OAuth2 client is\nrefused `403`. Erasure is the person's own act, and the route is\nbearer-only and so CSRF-exempt: a relying party holding one of its user's\ntokens must not be able to disable the account and schedule its purge.",
         "operationId": "request_account_delete",
         "requestBody": {
           "content": {
@@ -386,8 +392,11 @@
           "200": {
             "description": "Deletion scheduled"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
           "403": {
-            "description": "Forbidden"
+            "description": "Forbidden: the token is not a console sign-in's (AXIAM minted it for an OAuth2 client), or the caller lacks the permission to act for another user"
           }
         },
         "security": [
@@ -403,7 +412,7 @@
           "gdpr"
         ],
         "summary": "`POST /api/v1/account/export`",
-        "description": "Enqueues an async GDPR Art. 15 data-export job.  Returns immediately with\n`{\"queued\": true}`; the cleanup sweep generates the encrypted JSON, stores\nit, and emails a single-use 24 h download link (D-12).\n\nSelf-service (own account) or admin with `gdpr:export` permission.",
+        "description": "Enqueues an async GDPR Art. 15 data-export job.  Returns immediately with\n`{\"queued\": true}`; the cleanup sweep generates the encrypted JSON, stores\nit, and emails a single-use 24 h download link (D-12).\n\nSelf-service (own account) or admin with `gdpr:export` permission.\n\n**The person's own act (SA-04 review S-3b).** Takes a [`ConsoleSignIn`]:\na token AXIAM minted for an OAuth2 client is refused `403`. The route is\nbearer-only and so CSRF-exempt, and a relying party holding one of its\nuser's tokens must not be able to have the user's personal data exported.",
         "operationId": "request_account_export",
         "requestBody": {
           "content": {
@@ -417,8 +426,11 @@
           "200": {
             "description": "Export job enqueued"
           },
+          "401": {
+            "description": "Not authenticated"
+          },
           "403": {
-            "description": "Forbidden"
+            "description": "Forbidden: the token is not a console sign-in's (AXIAM minted it for an OAuth2 client), or the caller lacks the permission to act for another user"
           }
         },
         "security": [
@@ -434,7 +446,7 @@
           "gdpr"
         ],
         "summary": "`GET /api/v1/account/export/{token}`",
-        "description": "Single-use download of the GDPR export blob (D-13).  Looks up the job by\nSHA-256(token), verifies it is ready and not expired/used, decrypts the\nblob, marks it as downloaded, and deletes the record.\n\nRequires authentication (self or admin with `gdpr:export`).",
+        "description": "Single-use download of the GDPR export blob (D-13).  Looks up the job by\nSHA-256(token), verifies it is ready and not expired/used, decrypts the\nblob, marks it as downloaded, and deletes the record.\n\nRequires authentication (self or admin with `gdpr:export`).\n\nA [`ConsoleSignIn`], like the request (S-3b): a token AXIAM minted for an\nOAuth2 client is refused `403` before the token is looked up, so a relying\nparty cannot spend the person's download link.",
         "operationId": "download_account_export",
         "parameters": [
           {
@@ -450,6 +462,12 @@
         "responses": {
           "200": {
             "description": "Export JSON"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Forbidden: the token is not a console sign-in's (AXIAM minted it for an OAuth2 client), the caller may not download another user's export, or the export was already used or has expired"
           },
           "404": {
             "description": "Token not found or expired"
@@ -468,7 +486,7 @@
           "admin"
         ],
         "summary": "`POST /api/v1/admin/bootstrap` — first-run admin setup.",
-        "description": "Creates the initial admin user with the super-admin role and seeds the\ndefault permission set. First-super-admin creation is atomic (SECHRD-04\n/ D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same\ntransaction means a second call — concurrent OR sequential — against a\ntenant that already has an admin is refused with 409 Conflict; no\npartial admin or orphan role RELATE can result. No token is issued —\nthe user must authenticate via `/api/v1/auth/login` (D-11).\n\nMandatory gate (D-03a): requires EITHER `AXIAM_BOOTSTRAP_ADMIN_EMAIL` set\nand matching the request email (403 on mismatch), OR a valid setup_token\n(403 if missing/invalid/already consumed).",
+        "description": "Creates the initial admin user with the super-admin role and seeds the\ndefault permission set. First-super-admin creation is atomic (SECHRD-04\n/ D-03c): a uniqueness-invariant `bootstrap_lock` CREATE inside the same\ntransaction means at most one admin is ever created; no partial admin or\norphan role RELATE can result. No token is issued — the user must\nauthenticate via `/api/v1/auth/login` (D-11).\n\nMandatory gate (D-03a, SA-01): ALWAYS requires a valid, unconsumed\n`setup_token`. When `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set it is an additional\nrestriction: the request email must match it. The email is not a\ncredential and never replaces the token. The token is checked first, and\nevery gate refusal is the same 403 with the same reason, so a caller\nwithout the token learns neither whether the email restriction is set nor\nwhether a guessed address matches it.\n\nA call after a successful bootstrap is refused 403 by the gate — the first\ncall consumed the token, and the gate also refuses any token once\n`bootstrap_lock:global` exists; 409 is answered only to the loser of two\ncalls racing with the same still-unconsumed token.",
         "operationId": "bootstrap",
         "requestBody": {
           "content": {
@@ -495,10 +513,10 @@
             "description": "Invalid request (missing required fields)"
           },
           "403": {
-            "description": "Bootstrap gate not satisfied (email mismatch or invalid/missing setup token)"
+            "description": "Bootstrap gate not satisfied: missing, invalid or consumed setup token, or email mismatch (one undifferentiated reason). Also the answer to any call after a successful bootstrap"
           },
           "409": {
-            "description": "Bootstrap already completed"
+            "description": "A concurrent bootstrap with the same setup token won the race"
           }
         }
       }
@@ -669,6 +687,14 @@
                             ]
                           },
                           "metadata": {},
+                          "organization_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid",
+                            "description": "The organization a **system-partition** row (nil `tenant_id`) concerns,\nrecorded only where the server resolved it with certainty (SA-02, N1):\na deleted tenant's organization, a verified SCIM token's tenant's, or an\norganization or tenant the request's path names and that exists.\n`GET /api/v1/audit-logs/system` returns a row only to an organization\nprincipal of this organization, and a row without one to nobody.\n\nAlways `None` on a tenant's own rows, whose organization is their\ntenant's, and on every system row written before the field existed.\nOmitted from the serialized form when `None`, so an existing row's\nexport line and dead-letter line are what they were."
+                          },
                           "outcome": {
                             "$ref": "#/components/schemas/AuditOutcome"
                           },
@@ -724,7 +750,7 @@
           "audit"
         ],
         "summary": "`GET /api/v1/audit-logs/system`",
-        "description": "Returns audit entries for unauthenticated/system requests (nil tenant_id).\nRequires authentication — only logged-in users can query system audit logs.",
+        "description": "Returns audit entries for unauthenticated/system requests (nil tenant_id).\n\nOf the caller's organization only (SA-02, N1): the partition is\ndeployment-wide, and this returns the entries whose recorded\n`organization_id` is the caller's own. The server records one on a new\nentry only where it resolved it with certainty — a deleted tenant's\norganization, a verified SCIM token's tenant's, an organization or tenant\nthe request's path names and that exists. An entry with none, every entry\nwritten before the field existed among them, is returned to nobody.\n\nOrganization-level: requires `audit_logs:list_system` and a caller whose\nown record lives in the organization's scope tenant and whose role\nassignments are not restricted to particular tenants. A tenant\nadministrator is refused `403` whatever its role holds, and so is an\norganization-level principal whose roles name particular tenants: the\npartition belongs to the organization as a whole.",
         "operationId": "list_system",
         "parameters": [
           {
@@ -836,7 +862,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Paginated system audit log entries",
+            "description": "Paginated system audit log entries of the caller's organization",
             "content": {
               "application/json": {
                 "schema": {
@@ -885,6 +911,14 @@
                             ]
                           },
                           "metadata": {},
+                          "organization_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "format": "uuid",
+                            "description": "The organization a **system-partition** row (nil `tenant_id`) concerns,\nrecorded only where the server resolved it with certainty (SA-02, N1):\na deleted tenant's organization, a verified SCIM token's tenant's, or an\norganization or tenant the request's path names and that exists.\n`GET /api/v1/audit-logs/system` returns a row only to an organization\nprincipal of this organization, and a row without one to nobody.\n\nAlways `None` on a tenant's own rows, whose organization is their\ntenant's, and on every system row written before the field existed.\nOmitted from the serialized form when `None`, so an existing row's\nexport line and dead-letter line are what they were."
+                          },
                           "outcome": {
                             "$ref": "#/components/schemas/AuditOutcome"
                           },
@@ -925,6 +959,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `audit_logs:list_system`"
           }
         },
         "security": [
@@ -1426,6 +1463,9 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "403": {
+            "description": "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"
           }
         },
         "security": [
@@ -1455,6 +1495,9 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "403": {
+            "description": "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"
           }
         },
         "security": [
@@ -1720,6 +1763,9 @@
           },
           "401": {
             "description": "Wrong current password or unauthenticated"
+          },
+          "403": {
+            "description": "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"
           },
           "422": {
             "description": "New password violates policy"
@@ -2106,7 +2152,7 @@
             "description": "Unauthorized"
           },
           "403": {
-            "description": "Denied by the tenant's attestation policy (this security key model is not permitted by your organization)"
+            "description": "Denied by the tenant's attestation policy (this security key model is not permitted by your organization), or `authorization_denied`: a console sign-in is required and this token was minted for an OAuth2 client"
           }
         },
         "security": [
@@ -2137,6 +2183,9 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "403": {
+            "description": "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"
           },
           "503": {
             "description": "Attestation policy requires attestation but no FIDO metadata is available (W2-D3 fail-closed)"
@@ -7038,6 +7087,9 @@
               }
             }
           },
+          "403": {
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `email_config:read`"
+          },
           "404": {
             "description": "No email configuration set for this organization"
           }
@@ -7089,6 +7141,9 @@
           },
           "400": {
             "description": "Validation error, or the outbound address policy refuses the provider's host"
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `email_config:write`"
           }
         },
         "security": [
@@ -7118,6 +7173,9 @@
         "responses": {
           "204": {
             "description": "Organization email configuration deleted"
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `email_config:write`"
           }
         },
         "security": [
@@ -7203,6 +7261,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `organizations:get_settings`"
           }
         },
         "security": [
@@ -7252,6 +7313,9 @@
           },
           "400": {
             "description": "Settings are internally inconsistent, enable OPAQUE on a server holding no OPAQUE keys, or turn ssf_enabled on while the deployment holds more than one tenant and serves no per-tenant issuers (D-55)"
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, is one whose role assignments are restricted to particular tenants, or lacks `organizations:update_settings`"
           },
           "409": {
             "description": "opaque_mode `required` would coexist with an enabled directory (LDAP / Active Directory); or a tenant's directory or opaque_mode changed after this request read them, so nothing was written — reload and retry"
@@ -7502,6 +7566,9 @@
               }
             }
           },
+          "403": {
+            "description": "The caller is not an organization-level principal, or one whose reach does not cover the tenant, or lacks `tenants:get`"
+          },
           "404": {
             "description": "Tenant not found"
           }
@@ -7657,6 +7724,9 @@
             "content": {
               "application/x-ndjson": {}
             }
+          },
+          "403": {
+            "description": "The caller is not an organization-level principal, or one whose reach does not cover the tenant, or lacks `tenants:export_audit`"
           },
           "404": {
             "description": "Tenant not found"
@@ -7865,6 +7935,9 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "The path names another organization, or a tenant other than the caller's own that the caller, an organization-level principal, does not reach"
           }
         },
         "security": [
@@ -13947,6 +14020,9 @@
               }
             }
           },
+          "403": {
+            "description": "Missing `users:update` on another user, or `authorization_denied`: a console sign-in is required and the caller is updating their own account with a token minted for an OAuth2 client"
+          },
           "404": {
             "description": "User not found"
           }
@@ -13979,6 +14055,9 @@
         "responses": {
           "204": {
             "description": "User deleted; their sessions and `User` certificates revoked"
+          },
+          "403": {
+            "description": "A token minted for an OAuth2 client deleting the caller's own account (SR6-1: a first-party sign-in is required), or the caller lacks `users:delete`"
           },
           "404": {
             "description": "User not found"
@@ -14048,7 +14127,7 @@
           "users"
         ],
         "summary": "`DELETE /api/v1/users/{user_id}/mfa-methods/{method_id}`",
-        "description": "Remove a specific MFA method. Returns 400 if it is the last\nmethod and MFA is enabled.",
+        "description": "Remove a specific MFA method. Returns 400 if it is the last\nmethod and MFA is enabled.\n\n**The person's own act (SR4-1).** On the caller's OWN account a token AXIAM\nminted for an OAuth2 client is refused `403` (a console sign-in is required);\nan administrator with `users:admin` acting on another user is not.",
         "operationId": "delete_mfa_method",
         "parameters": [
           {
@@ -14082,7 +14161,7 @@
             "description": "Unauthorized"
           },
           "403": {
-            "description": "Cannot delete another user's MFA methods"
+            "description": "Cannot delete another user's MFA methods, or `authorization_denied`: a console sign-in is required and the caller is acting on their own account with a token minted for an OAuth2 client"
           },
           "404": {
             "description": "Method not found"
@@ -14101,7 +14180,7 @@
           "users"
         ],
         "summary": "`POST /api/v1/users/{user_id}/reset-mfa`",
-        "description": "Reset MFA for a user — evicts **every** factor: the WebAuthn credentials\nas well as the TOTP secret, clears `mfa_enabled`, and revokes all existing\nsessions (T-34). Requires `users:admin` (caller must be in the same\ntenant), or that the caller is the target.\n\nA caller resetting their **own** account is refused with `403\nmfa_enforced` where their tenant's effective policy enforces MFA (D-1,\nT-267): the reset is otherwise the one self-service path below the floor\nan administrator set. `users:admin` is unaffected — an administrator\nresetting a locked-out user is what the endpoint exists for.",
+        "description": "Reset MFA for a user — evicts **every** factor: the WebAuthn credentials\nas well as the TOTP secret, clears `mfa_enabled`, and revokes all existing\nsessions (T-34). Requires `users:admin` (caller must be in the same\ntenant), or that the caller is the target.\n\nA caller resetting their **own** account is refused with `403\nmfa_enforced` where their tenant's effective policy enforces MFA (D-1,\nT-267): the reset is otherwise the one self-service path below the floor\nan administrator set. `users:admin` is unaffected — an administrator\nresetting a locked-out user is what the endpoint exists for.\n\n**The person's own act (SR4-1).** On the caller's own account a token AXIAM\nminted for an OAuth2 client is refused `403`; an administrator acting on\nanother user keeps accepting one.",
         "operationId": "reset_mfa",
         "parameters": [
           {
@@ -14123,7 +14202,7 @@
             "description": "Unauthorized"
           },
           "403": {
-            "description": "Forbidden — cross-tenant access, or `mfa_enforced`: the caller is resetting their own account and their tenant enforces MFA, so only an administrator may reset it"
+            "description": "Forbidden — cross-tenant access, `mfa_enforced`: the caller is resetting their own account and their tenant enforces MFA, so only an administrator may reset it, or `authorization_denied`: the caller is resetting their own account with a token minted for an OAuth2 client (a console sign-in is required)"
           },
           "404": {
             "description": "User not found"
@@ -17060,6 +17139,14 @@
             ]
           },
           "metadata": {},
+          "organization_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The organization a **system-partition** row (nil `tenant_id`) concerns,\nrecorded only where the server resolved it with certainty (SA-02, N1):\na deleted tenant's organization, a verified SCIM token's tenant's, or an\norganization or tenant the request's path names and that exists.\n`GET /api/v1/audit-logs/system` returns a row only to an organization\nprincipal of this organization, and a row without one to nobody.\n\nAlways `None` on a tenant's own rows, whose organization is their\ntenant's, and on every system row written before the field existed.\nOmitted from the serialized form when `None`, so an existing row's\nexport line and dead-letter line are what they were."
+          },
           "outcome": {
             "$ref": "#/components/schemas/AuditOutcome"
           },
@@ -17343,7 +17430,7 @@
               "string",
               "null"
             ],
-            "description": "One-time first-run setup token (D-03a/D-03b). Required when\n`AXIAM_BOOTSTRAP_ADMIN_EMAIL` is not set; ignored otherwise."
+            "description": "One-time first-run setup token (D-03a/D-03b), logged once at first\nboot. Always required, including when `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is\nset (that variable only adds an email restriction)."
           },
           "tenant_name": {
             "type": [

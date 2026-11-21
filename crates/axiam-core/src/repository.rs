@@ -267,6 +267,41 @@ pub trait UserRepository: Send + Sync {
     /// may outlive it (the atomicity audit's item A). Every writer inherits
     /// this — self-service, an administrator, SCIM — because it is decided
     /// here, against the stored value, and not by the caller.
+    ///
+    /// A write that sets `password_hash` also, **in the same transaction**
+    /// (SA-06, N7; SR4-2):
+    ///
+    /// - retires the user's OPAQUE record, the verifier of the *previous*
+    ///   password, which must not keep authenticating. With
+    ///   [`UpdateUser::opaque_record`] set, the new record replaces it; with
+    ///   none, the existing record is deleted;
+    /// - stamps the user's credential epoch, `credential_changed_at`;
+    /// - bumps the user's `credential_version`.
+    ///
+    /// A caller that has a new OPAQUE record for the new password passes it as
+    /// [`UpdateUser::opaque_record`]. It must **never** write the hash here and
+    /// then store the record separately (for example through
+    /// [`OpaqueCredentialRepository::upsert`]): a concurrent writer's hash could
+    /// commit between the two writes and end up beside this writer's record.
+    /// The epoch and the version are what refuse the short-lived artefacts of
+    /// the old credential — an MFA challenge or setup token, the WebAuthn state
+    /// token, an in-flight OPAQUE login — issued before the change. Every
+    /// writer of the hash inherits all of this (reset, self-service change,
+    /// SCIM); a caller that cannot supply a record, such as SCIM, must not
+    /// write a password for a tenant whose OPAQUE mode is `required`.
+    ///
+    /// A write that sets `password_hash` (with or without
+    /// [`UpdateUser::opaque_record`]) is **refused** for a directory account,
+    /// one whose [`User::directory_external_id`] is set: its password belongs
+    /// to the tenant's directory (G-3), and a local hash or OPAQUE record would
+    /// be a second credential the directory never sees. The refusal is a
+    /// `Validation` error with the message of the auth layer's
+    /// `DirectoryAccountPassword`, decided inside the write's transaction, and
+    /// nothing is written (SA-06, QR6-1). Callers that refuse a directory
+    /// account first keep doing so; this holds the rule for any that forgets.
+    ///
+    /// A credential write for a user that does not exist in `tenant_id` is
+    /// `NotFound` and writes nothing — in particular no OPAQUE record (QR6-4).
     fn update(
         &self,
         tenant_id: Uuid,
@@ -1205,6 +1240,44 @@ pub trait ServiceAccountRepository: Send + Sync {
 
 pub trait SessionRepository: Send + Sync {
     fn create(&self, input: CreateSession) -> impl Future<Output = AxiamResult<Session>> + Send;
+    /// SA-06 (N7, SR10-1): [`Self::create`] for a sign-in that has just
+    /// verified a credential, refused when that credential has since changed.
+    ///
+    /// `expected_credential_version` is the [`User::credential_version`] read
+    /// together with the credential that was verified. The user's stored
+    /// version (absent counts as 0) is compared with it **in the same
+    /// transaction as the write**, so a password reset or change that commits
+    /// between the verification and this call cannot be survived by the
+    /// session: nothing is created (and a session row is also the refresh
+    /// token, so no refresh token exists either).
+    ///
+    /// A mismatch is answered `AxiamError::AuthenticationFailed` with the
+    /// reason `"invalid credentials"`, exactly what a wrong password gets, so
+    /// the refusal discloses nothing new. No implementation may fall back to a
+    /// check-then-create: that is the race this method exists to close.
+    ///
+    /// The method also **stores** `expected_credential_version` on the new row
+    /// ([`Session::credential_version`]). Refresh rotation depends on it: the
+    /// next rotation of the row compares that stored version with the user's.
+    /// An implementation that checks but does not store breaks rotation.
+    ///
+    /// [`Session::credential_version`]: crate::models::session::Session::credential_version
+    ///
+    /// SR13-1: this guarantee is only as strong as the datastore's isolation.
+    /// SurrealDB 4 transactions are SNAPSHOT: a concurrent credential write is
+    /// not detected as a conflict with the transaction that read the user, so a
+    /// reset that commits and revokes between that read and this commit can be
+    /// followed by the row committing anyway. The check here is therefore
+    /// necessary but not sufficient; the caller must re-read the user's
+    /// version after this returns and, if it moved, delete the returned session
+    /// (`AuthService::create_session_and_tokens` does) before issuing any token.
+    ///
+    /// [`User::credential_version`]: crate::models::user::User::credential_version
+    fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> impl Future<Output = AxiamResult<Session>> + Send;
     fn get_by_id(
         &self,
         tenant_id: Uuid,
@@ -1339,7 +1412,15 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate all sessions for a user except one (e.g., on password
     /// change — preserve the caller's current session).
     ///
+    /// The kept session is **re-stamped** with the user's current credential
+    /// version ([`Session::credential_version`]) in the same transaction that
+    /// deletes the other sessions, so it can still rotate after the credential
+    /// change that prompted this call. An implementation that only deletes
+    /// would compile and silently stop the kept session from rotating.
+    ///
     /// Returns the number of sessions deleted.
+    ///
+    /// [`Session::credential_version`]: crate::models::session::Session::credential_version
     fn invalidate_user_sessions_except(
         &self,
         tenant_id: Uuid,
@@ -1624,9 +1705,16 @@ pub trait AuditLogRepository: Send + Sync {
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;
-    /// List audit logs for unauthenticated/system requests (nil tenant_id).
+    /// List the system partition's entries (nil `tenant_id`) that record
+    /// `organization_id` as their organization (SA-02, N1).
+    ///
+    /// A system entry whose organization was not resolved — every one written
+    /// before [`AuditLogEntry::organization_id`] existed among them — is
+    /// returned for no organization. The whole partition is `list(Uuid::nil(), …)`,
+    /// which no handler calls.
     fn list_system(
         &self,
+        organization_id: Uuid,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;

@@ -6,9 +6,10 @@ use axiam_auth::service::{LoginInput, LoginOutput, RefreshInput, VerifyMfaInput}
 use axiam_auth::token::{CnfClaim, issue_service_account_token, validate_access_token};
 use axiam_core::error::AxiamError;
 use axiam_core::models::certificate::DeviceAuthResponse;
+use axiam_core::models::user::UserStatus;
 use axiam_core::repository::{
-    OrganizationRepository, PermissionRepository, RoleRepository, SettingsRepository,
-    TenantRepository, UserRepository,
+    OrganizationRepository, PermissionRepository, RoleRepository, ServiceAccountRepository,
+    SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::{SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository};
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_tenant};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::{AuthenticatedUser, ConsoleSignIn};
 use crate::extractors::cert_auth::CertificateAuthenticated;
 use crate::extractors::client_info::{client_ip, user_agent};
 use crate::middleware::csrf::{
@@ -548,6 +549,13 @@ pub async fn login<C: Connection + Clone>(
             reason: "invalid credentials".into(),
         }));
     }
+    // SA-13 (N16, D-3): a suspended tenant's users do not sign in. Asked of the
+    // tenant just loaded — no second read — and before the password is
+    // stretched; `create_session_and_tokens` asks again where every sign-in
+    // ends, which is what covers the MFA and setup-token completions.
+    if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+        return Err(AxiamError::TenantSuspended.into());
+    }
     let org_id = tenant.organization_id;
 
     // Tell the audit middleware which tenant this request is about.
@@ -623,6 +631,7 @@ pub async fn login<C: Connection + Clone>(
             if let Ok((user_id, tenant_id, _org_id)) = state
                 .auth_service
                 .decode_mfa_challenge_ids(&challenge.challenge_token)
+                .await
                 && let Ok(types) = state
                     .mfa_method_service
                     .available_method_types(tenant_id, user_id)
@@ -817,11 +826,12 @@ pub async fn refresh<C: Connection + Clone>(
     responses(
         (status = 200, description = "MFA enrollment initiated", body = MfaEnrollResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn enroll_mfa<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
 ) -> Result<HttpResponse, AxiamApiError> {
     // The caller's OWN account, so the tenant is the one the caller lives in,
@@ -847,11 +857,12 @@ pub async fn enroll_mfa<C: Connection + Clone>(
     responses(
         (status = 200, description = "MFA confirmed", body = MfaConfirmResponse),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn confirm_mfa<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<MfaConfirmRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -911,6 +922,41 @@ pub async fn verify_mfa<C: Connection + Clone>(
     .await
 }
 
+/// Q-10 / SA-05: an explicit audit row for a refused device sign-in, naming the
+/// service account (actor), the failure outcome, its status and the reason.
+/// Fire-and-forget: a failed append is logged, never turned into another error.
+async fn append_device_refusal_audit<C: Connection + Clone>(
+    state: &AppState<C>,
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    service_account_id: Uuid,
+    reason: &str,
+    status: &str,
+) {
+    use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
+    use axiam_core::repository::AuditLogRepository;
+
+    let entry = CreateAuditLogEntry {
+        tenant_id,
+        actor_id: service_account_id,
+        actor_type: ActorType::ServiceAccount,
+        action: "auth.device.refused".into(),
+        resource_id: Some(service_account_id),
+        outcome: AuditOutcome::Failure,
+        ip_address: client_ip(req),
+        metadata: Some(serde_json::json!({ "reason": reason, "status": status })),
+        organization_id: None,
+    };
+    if let Err(error) = state.audit_repo.append(entry).await {
+        tracing::error!(
+            %tenant_id,
+            %service_account_id,
+            %error,
+            "device auth: the refusal audit row could not be written"
+        );
+    }
+}
+
 /// `POST /api/v1/auth/device`
 ///
 /// Authenticate a device via its client certificate (mTLS).
@@ -939,6 +985,70 @@ pub async fn device_auth<C: Connection + Clone>(
 
     // Resolve org_id from the tenant
     let tenant = state.tenant_repo.get_by_id(cert_auth.tenant_id).await?;
+
+    // Attribute the audit row to the tenant the certificate proved, so a
+    // refusal below is recorded under it rather than under a nil tenant.
+    req.extensions_mut().insert(axiam_audit::AuditAttribution {
+        tenant_id: cert_auth.tenant_id,
+        org_id: tenant.organization_id,
+    });
+
+    // SA-13 (N16, D-3): a suspended tenant's devices get no token, however
+    // valid the certificate and its account. The tenant is already loaded.
+    if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+        return Err(AxiamError::TenantSuspended.into());
+    }
+
+    // N5 / SA-05: the certificate binding says *which* service account this
+    // device is, not that the account may still sign in. Disabling an account
+    // only updates its status; the binding and the certificate stay usable, so
+    // the status is checked here, as `client_credentials` and `network_decide`
+    // do. A non-Active account (or one that cannot be loaded) is refused
+    // without a token.
+    const NOT_ACTIVE: &str = "the service account bound to this certificate is not active";
+    let account = match state
+        .service_account_repo
+        .get_by_id(cert_auth.tenant_id, cert_auth.service_account_id)
+        .await
+    {
+        Ok(account) => account,
+        Err(error) => {
+            // Q-10: a lookup failure (including a database outage) is still
+            // answered 401, but is no longer silent.
+            tracing::warn!(
+                tenant_id = %cert_auth.tenant_id,
+                service_account_id = %cert_auth.service_account_id,
+                %error,
+                "device auth: the bound service account could not be loaded; refusing"
+            );
+            append_device_refusal_audit(
+                &state,
+                &req,
+                cert_auth.tenant_id,
+                cert_auth.service_account_id,
+                "service_account_lookup_failed",
+                "unknown",
+            )
+            .await;
+            return Err(AxiamApiError(AxiamError::AuthenticationFailed {
+                reason: NOT_ACTIVE.into(),
+            }));
+        }
+    };
+    if account.status != UserStatus::Active {
+        append_device_refusal_audit(
+            &state,
+            &req,
+            cert_auth.tenant_id,
+            cert_auth.service_account_id,
+            "service_account_not_active",
+            &format!("{:?}", account.status).to_lowercase(),
+        )
+        .await;
+        return Err(AxiamApiError(AxiamError::AuthenticationFailed {
+            reason: NOT_ACTIVE.into(),
+        }));
+    }
 
     // S-3 / DF-014: bind the token to the certificate that obtained it
     // (RFC 8705 §3.1). The device has just proved possession of a private key;
@@ -1040,7 +1150,8 @@ pub async fn setup_confirm_mfa<C: Connection + Clone>(
     // G-5 (D-52): the first factor of a forced enrolment, a TOTP authenticator.
     // The token was just accepted above, so decoding it again names the same
     // account; a failure here is not the request's failure.
-    if let Ok((user_id, tenant_id, _org_id)) = state.auth_service.decode_setup_token(&b.setup_token)
+    if let Ok((user_id, tenant_id, _org_id)) =
+        state.auth_service.decode_setup_token(&b.setup_token).await
     {
         state
             .ssf
@@ -1278,6 +1389,10 @@ pub async fn me<C: Connection + Clone>(
 /// T-267): the reset is otherwise the one self-service path below the floor
 /// an administrator set. `users:admin` is unaffected — an administrator
 /// resetting a locked-out user is what the endpoint exists for.
+///
+/// **The person's own act (SR4-1).** On the caller's own account a token AXIAM
+/// minted for an OAuth2 client is refused `403`; an administrator acting on
+/// another user keeps accepting one.
 #[utoipa::path(
     post,
     path = "/api/v1/users/{user_id}/reset-mfa",
@@ -1290,10 +1405,12 @@ pub async fn me<C: Connection + Clone>(
         (status = 401, description = "Unauthorized"),
         (
             status = 403,
-            description = "Forbidden — cross-tenant access, or `mfa_enforced`: \
+            description = "Forbidden — cross-tenant access, `mfa_enforced`: \
                            the caller is resetting their own account and their \
                            tenant enforces MFA, so only an administrator may \
-                           reset it"
+                           reset it, or `authorization_denied`: the caller is \
+                           resetting their own account with a token minted for an \
+                           OAuth2 client (a console sign-in is required)"
         ),
         (status = 404, description = "User not found"),
         (status = 500, description = "The reset did not complete: a step (removing the \
@@ -1314,6 +1431,10 @@ pub async fn reset_mfa<C: Connection + Clone>(
 ) -> Result<HttpResponse, AxiamApiError> {
     let target_user_id = path.into_inner();
     if is_own_resource(&caller, target_user_id) {
+        // SR4-1 "Own account only": resetting one's own factors is the person's
+        // own act, so a token minted for an OAuth2 client is refused; an
+        // administrator acting on another user (the `else` arm) is not.
+        caller.require_console_sign_in()?;
         // D-1 / T-267. The reset is the one self-service path that takes an
         // account *below* the floor its tenant sets: sessions are revoked, but
         // the next password login hands out a setup token and whoever holds
@@ -1427,6 +1548,7 @@ pub async fn reset_mfa<C: Connection + Clone>(
     responses(
         (status = 204, description = "Password changed; other sessions revoked"),
         (status = 401, description = "Wrong current password or unauthenticated"),
+        (status = 403, description = "`authorization_denied`: a console sign-in is required; this token was minted for an OAuth2 client"),
         (status = 422, description = "New password violates policy"),
         (status = 429, description = "`rate_limit_exceeded`: the per-address limiter; honour `Retry-After`"),
         (status = 503, description = "`service_unavailable`: the password-hash gate gave no permit within the bounded wait. Retry later"),
@@ -1435,7 +1557,8 @@ pub async fn reset_mfa<C: Connection + Clone>(
 )]
 #[allow(clippy::too_many_arguments)] // Actix DI extractors
 pub async fn change_password<C: Connection + Clone>(
-    user: AuthenticatedUser,
+    http_req: HttpRequest,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<ChangePasswordRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -1483,9 +1606,17 @@ pub async fn change_password<C: Connection + Clone>(
     // G-5 (D-52): the password change revokes the account's other sessions; the
     // `credential-change` and those `session-revoked` events are one cause.
     with_cause(Some(InitiatingEntity::User), async {
-        state
+        // SA-06 / N7 (SR4-2): the new OPAQUE record, if any, is written by the
+        // same transaction as the hash, so a concurrent credential write cannot
+        // land between them.
+        //
+        // QR13-2: `Err` means the credential was NOT written. `Ok(Some(_))`
+        // means it was and revoking the other sessions failed afterwards; the
+        // credential-change event goes out all the same and the error is
+        // answered after it, as a password reset does.
+        let revocation = state
             .auth_service
-            .change_password(
+            .change_password_reporting_revocation(
                 tenant_id,
                 user.user_id,
                 user.session_id,
@@ -1494,16 +1625,9 @@ pub async fn change_password<C: Connection + Clone>(
                 &settings.password,
                 &state.password_history_repo,
                 Some(&state.http_client),
+                enrolled,
             )
             .await?;
-
-        crate::handlers::opaque_enrollment::store_credential(
-            &state,
-            tenant_id,
-            user.user_id,
-            enrolled,
-        )
-        .await?;
 
         state
             .ssf
@@ -1517,7 +1641,16 @@ pub async fn change_password<C: Connection + Clone>(
                 CredentialDetail::default(),
             )
             .await;
-        Ok::<(), AxiamApiError>(())
+        match revocation {
+            Some(error) => {
+                crate::handlers::password_reset::record_credential_written_revocation_failed(
+                    &http_req,
+                    user.user_id,
+                );
+                Err(AxiamApiError::from(error))
+            }
+            None => Ok::<(), AxiamApiError>(()),
+        }
     })
     .await?;
 

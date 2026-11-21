@@ -4,18 +4,20 @@
 #
 # WHY THIS IS NOT OPENTOFU. There is no AXIAM provider, and a generic REST
 # provider would be the wrong shape for what these two calls are.
-# `POST /api/v1/admin/bootstrap` is ONE-SHOT — a `bootstrap_lock:global`
-# uniqueness invariant means a second call answers 409 — and fail-closed: it
-# refuses unless AXIAM_BOOTSTRAP_ADMIN_EMAIL matches the request, or the request
-# carries a one-time setup token the server printed once, at first boot, in its
-# log. That is the opposite of a resource that converges. A script that reads
-# the token out of the pod log and posts twice is honest about what it is.
+# `POST /api/v1/admin/bootstrap` is ONE-SHOT and fail-closed: it always
+# requires the one-time setup token the server printed once, at first boot, in
+# its log (AXIAM_BOOTSTRAP_ADMIN_EMAIL, if set, only adds an email check). Once
+# the deployment is bootstrapped every later call answers 403, with the same
+# reason as any other gate refusal; 409 goes only to the loser of two calls
+# racing with the same still-unconsumed token. That is the opposite of a
+# resource that converges. A script that reads the token out of the pod log and
+# posts twice is honest about what it is.
 #
 # IDEMPOTENT, and by asking rather than inferring: it signs in first, and skips
-# the bootstrap if the super-admin already authenticates. With a setup token the
-# 409 branch is unreachable — the token is consumed by the first success, so a
-# second call is refused by the GATE (403) before anything checks whether the
-# system is initialised.
+# the bootstrap if the super-admin already authenticates. A 403 cannot tell
+# "already bootstrapped" from "wrong token" (the server deliberately does not
+# say which), which is why the sign-in probe comes first. The 409 branch is
+# reached only by a concurrent run of this script.
 #
 # Usage:
 #   AXIAM_ADMIN_PASSWORD='...' ./03-axiam-bootstrap.sh
@@ -26,7 +28,7 @@
 #   AXIAM_ORG_NAME        (default: Home Lab)
 #   AXIAM_ORG_SLUG        (default: homelab)
 #   AXIAM_ADMIN_EMAIL     must match AXIAM_BOOTSTRAP_ADMIN_EMAIL in the overlay,
-#                         unless a setup token is used
+#                         (the setup token is required either way)
 #   AXIAM_ADMIN_USERNAME  (default: admin)
 #   AXIAM_ADMIN_PASSWORD  REQUIRED. Pass it through the environment, not as an
 #                         argument — arguments are in /proc and in your history.
@@ -89,23 +91,34 @@ case "$probe" in
         # -----------------------------------------------------------------
         # 2. The setup token, from the FIRST-BOOT log
         # -----------------------------------------------------------------
-        # Only needed when the ConfigMap's AXIAM_BOOTSTRAP_ADMIN_EMAIL does not
-        # match; harmless to send when it does, since the handler ignores the
-        # field then. Read from the log because that is the only place it is
-        # ever written — it is minted once and never stored.
+        # ALWAYS required (SA-01): AXIAM_BOOTSTRAP_ADMIN_EMAIL only restricts the
+        # email; it never replaces the token. Read from the log because that is
+        # the only place it is ever written — it is minted once and never stored.
+        # The extraction itself is scripts/first-boot-token.sh, the one place
+        # the token is parsed out of a log (it also requires the
+        # "first-run bootstrap setup token minted" message, so an unrelated
+        # `setup_token` field — an MFA setup token, say — is never picked up).
         say "Looking for the one-time setup token in the server's log"
-        setup_token="$(kubectl -n "$NS" logs deploy/axiam-server --tail=-1 2>/dev/null \
-            | grep -o '"setup_token":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+        setup_token="${AXIAM_SETUP_TOKEN:-}"
+        first_boot_token="$HERE/../../../scripts/first-boot-token.sh"
+        [[ -x "$first_boot_token" ]] || die "Cannot find $first_boot_token.
+  Run this script from a checkout of the axiam repository, or pass the token
+  yourself:  AXIAM_SETUP_TOKEN=... $0"
+        for prev in "" "--previous"; do
+            [[ -n "$setup_token" ]] && break
+            # shellcheck disable=SC2086  # $prev is deliberately unquoted: empty or one flag
+            setup_token="$(kubectl -n "$NS" logs deploy/axiam-server --tail=-1 $prev 2>/dev/null \
+                | "$first_boot_token" - 2>/dev/null || true)"
+        done
         if [[ -n "$setup_token" ]]; then
             ok "Found a setup token in the log."
         else
-            warn "No setup token in the current log. That is expected if the pod
-  has restarted since first boot — the line is printed ONCE and Kubernetes keeps
-  only the current container's output. Falling back to the email gate, which
-  works as long as AXIAM_BOOTSTRAP_ADMIN_EMAIL matches:
-      $ADMIN_EMAIL
-  If it does not, and the token is gone, the log of the PREVIOUS container may
-  still have it:  kubectl -n $NS logs deploy/axiam-server --previous"
+            die "No setup token in the current or the previous container's log.
+  The line is printed ONCE at first boot and Kubernetes keeps only recent
+  output. The email alone is NOT enough to bootstrap. If nobody has bootstrapped
+  yet, mint a new token:
+      kubectl -n $NS exec deploy/axiam-server -- axiam-server setup-token --remint
+  and re-run with it:  AXIAM_SETUP_TOKEN=... $0"
         fi
 
         body="$(jq -nc \
@@ -124,10 +137,12 @@ case "$probe" in
         case "$status" in
             201) ok "Bootstrapped. Organization '$ORG_SLUG', its organization-scope
   tenant, the permission and role seed, and the super-admin all exist." ;;
-            409) ok "Already initialised (409)." ;;
-            403) die "403 — the bootstrap gate is not satisfied. Either
-  AXIAM_BOOTSTRAP_ADMIN_EMAIL does not match '$ADMIN_EMAIL', or the setup token
-  has already been consumed. $(cat "$resp")" ;;
+            409) ok "Already initialised by a concurrent bootstrap (409)." ;;
+            403) die "403 — the bootstrap gate is not satisfied. Either the setup
+  token is invalid or has already been consumed, the deployment is already
+  bootstrapped, or AXIAM_BOOTSTRAP_ADMIN_EMAIL does not match '$ADMIN_EMAIL'
+  (the server deliberately does not say which).
+  $(cat "$resp")" ;;
             *) die "Bootstrap returned $status: $(cat "$resp")" ;;
         esac
         ;;

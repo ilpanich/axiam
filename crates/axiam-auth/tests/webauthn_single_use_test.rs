@@ -14,6 +14,10 @@
 //! (`create_session_and_tokens`), so "one session" is counted, not assumed.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[path = "read_then_bump_support/mod.rs"]
+mod read_then_bump_support;
 
 use axiam_auth::config::AuthConfig;
 use axiam_auth::service::AuthService;
@@ -280,28 +284,21 @@ async fn start(w: &World) -> (String, String) {
     (challenge, state_token)
 }
 
-/// What `POST /auth/webauthn/authenticate/finish` does: the ceremony's finish,
-/// then — only if it succeeded — a session.
+/// What `POST /auth/webauthn/authenticate/finish` does: the ceremony's finish
+/// and, only if it succeeded, the session, as one `AuthService` call.
 async fn finish(w: &World, state_token: &str, assertion: &PublicKeyCredential) -> bool {
-    let Ok((user_id, org_id)) = w
-        .webauthn
-        .finish_authentication(w.tenant_id, state_token, assertion)
-        .await
-    else {
-        return false;
-    };
     w.auth
-        .create_session_and_tokens(
-            user_id,
+        .complete_webauthn_second_factor(
+            &w.webauthn,
             w.tenant_id,
-            org_id,
-            None,
-            None,
+            state_token,
+            assertion,
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            None,
+            None,
         )
         .await
-        .unwrap();
-    true
+        .is_ok()
 }
 
 async fn sessions(w: &World) -> usize {
@@ -445,4 +442,473 @@ async fn a_replayed_discoverable_assertion_is_refused() {
             .await
             .is_err()
     );
+}
+
+// ---------------------------------------------------------------------------
+// SA-03 (N10): a ceremony state token is not an access token
+// ---------------------------------------------------------------------------
+//
+// Both ceremonies' state tokens are signed with the access-token key and,
+// before SA-03, carried every claim `AccessTokenClaims` requires (`sub`,
+// `tenant_id`, `org_id`, `iss`, `iat`, `exp`, `jti`) and no `aud` — so
+// `validate_access_token` admitted them, and every verifier with no session
+// check (the gRPC interceptor and `ValidateToken`, RFC 8693 `subject_token`,
+// UMA `claim_token`) took the discoverable token's nil `sub` or the
+// second-factor token's real `sub` as an authenticated principal.
+
+/// The `typ` every ceremony state token carries.
+const STATE_TYP: &str = "axiam-webauthn-state+jwt";
+
+fn assert_not_an_access_token(token: &str, ceremony: &str) {
+    let decoded = axiam_auth::token::validate_access_token(token, &config());
+    assert!(
+        decoded.is_err(),
+        "the {ceremony} state token was accepted as an access token: {:?}",
+        decoded.map(|c| (c.0.sub, c.0.tenant_id, c.0.aud))
+    );
+    assert!(
+        axiam_auth::token::decode_access_token_any_audience(token, &config()).is_err(),
+        "introspection must not describe the {ceremony} state token as an access token"
+    );
+    let header = jsonwebtoken::decode_header(token).unwrap();
+    assert_eq!(header.typ.as_deref(), Some(STATE_TYP));
+    // S-8: a state token names no JWKS key.
+    assert_eq!(
+        header.kid, None,
+        "the {ceremony} state token must carry no kid"
+    );
+}
+
+/// N10 variant (b): `start_authentication` (`sub` = the user, obtainable with
+/// the password factor alone).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn n10_a_second_factor_state_token_is_not_an_access_token() {
+    let w = world().await;
+    let (_, token) = start(&w).await;
+    assert_not_an_access_token(&token, "second-factor");
+}
+
+/// N10 variant (a): `start_discoverable_authentication` (public route,
+/// `sub` = the nil UUID).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn n10_a_discoverable_state_token_is_not_an_access_token() {
+    let w = world().await;
+    let (_, token) = w
+        .webauthn
+        .start_discoverable_authentication(w.tenant_id, w.org_id)
+        .await
+        .unwrap();
+    assert_not_an_access_token(&token, "discoverable");
+}
+
+/// The claims of a genuine ceremony state token — `purpose`, encrypted
+/// `state` and all — re-signed with the deployment key under the header an
+/// access token carries (`typ: at+jwt` and the JWKS `kid`). Only the header
+/// differs from the token the ceremony issued, so only a `typ` check can tell
+/// them apart.
+fn resigned_as_access_token(state_token: &str) -> String {
+    let payload = state_token.split('.').nth(1).expect("a compact JWS");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+    assert!(claims.get("purpose").is_some() && claims.get("state").is_some());
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    header.typ = Some(axiam_auth::token::TYP_ACCESS_TOKEN.into());
+    header.kid = axiam_auth::token::ed25519_jwk_kid(TEST_PUBLIC_KEY);
+    jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_ed_pem(TEST_PRIVATE_KEY.as_bytes()).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The other direction: a token typed `at+jwt` is refused where a ceremony
+/// state token is expected, by both finish entry points, even when its claims
+/// are a genuine state token's. The untouched token then still finishes, so
+/// the refusal was the header's doing and spent nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_access_token_is_not_a_ceremony_state_token() {
+    let w = world().await;
+
+    // Second factor.
+    let (challenge, state_token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let forged = resigned_as_access_token(&state_token);
+    let refused = w
+        .webauthn
+        .finish_authentication(w.tenant_id, &forged, &assertion)
+        .await;
+    assert!(
+        refused.is_err(),
+        "an at+jwt token with state claims finished the second-factor ceremony: {refused:?}"
+    );
+    assert!(finish(&w, &state_token, &assertion).await);
+
+    // Usernameless.
+    let (rcr, state_token) = w
+        .webauthn
+        .start_discoverable_authentication(w.tenant_id, w.org_id)
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 2, w.user_id);
+    let forged = resigned_as_access_token(&state_token);
+    let refused = w
+        .webauthn
+        .finish_discoverable_authentication(w.tenant_id, &forged, &assertion)
+        .await;
+    assert!(
+        refused.is_err(),
+        "an at+jwt token with state claims finished the usernameless ceremony: {refused:?}"
+    );
+    assert_eq!(
+        w.webauthn
+            .finish_discoverable_authentication(w.tenant_id, &state_token, &assertion)
+            .await
+            .unwrap(),
+        (w.user_id, w.org_id)
+    );
+    assert_eq!(
+        sessions(&w).await,
+        1,
+        "only the genuine second-factor finish"
+    );
+}
+
+// ---------------------------------------------------------------------
+// SR2-1 — the second-factor finish honours the credential epoch.
+// ---------------------------------------------------------------------
+
+/// The finish exactly as `POST /auth/webauthn/authenticate/finish` runs it,
+/// keeping the error.
+async fn finish_like_the_handler(
+    w: &World,
+    state_token: &str,
+    assertion: &PublicKeyCredential,
+) -> axiam_core::error::AxiamResult<(Uuid, Uuid)> {
+    w.auth
+        .finish_webauthn_authentication(&w.webauthn, w.tenant_id, state_token, assertion)
+        .await
+        .map(|(user_id, org_id, _credential_version)| (user_id, org_id))
+}
+
+/// A password reset, as the reset handler writes it: a new hash.
+async fn reset_the_password(w: &World) {
+    SurrealUserRepository::new(w.db.clone())
+        .update(
+            w.tenant_id,
+            w.user_id,
+            axiam_core::models::user::UpdateUser {
+                password_hash: Some(
+                    axiam_auth::password::hash_password("A-brand-new-Passw0rd!", None).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// SR2-1: a ceremony started before a password reset cannot finish after it.
+/// The refusal is the answer an invalid state token gets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr2_1_a_ceremony_started_before_a_reset_cannot_finish_after_it() {
+    let w = world().await;
+    let (challenge, state_token) = start(&w).await;
+    reset_the_password(&w).await;
+
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let err = finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect_err("a ceremony that predates the reset must not finish");
+    assert!(
+        matches!(
+            &err,
+            axiam_core::error::AxiamError::AuthenticationFailed { reason }
+                if *reason == axiam_auth::error::AuthError::WebauthnStateInvalid.to_string()
+        ),
+        "expected the invalid-state-token answer, got {err:?}"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was opened");
+    assert_eq!(
+        stored_sign_count(&w).await.unwrap_or(0),
+        0,
+        "the refusal happened before the assertion was accepted"
+    );
+}
+
+/// SR3-1: a ceremony descending from an MFA challenge built from the
+/// credential a reset replaced cannot finish, even though the challenge's issue
+/// time is after the epoch: the state token carries the challenge's credential
+/// version, and the user's has moved on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr3_1_a_ceremony_from_a_challenge_of_the_replaced_credential_cannot_finish() {
+    let w = world().await;
+    // The credential version the challenge was built under (a user nobody has
+    // changed: 0), then the reset moves it, and the epoch is put before the
+    // challenge's issue time, as the race leaves it.
+    reset_the_password(&w).await;
+    w.db.query("UPDATE type::record('user', $id) SET credential_changed_at = time::now() - 1h")
+        .bind(("id", w.user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let (rcr, state_token) = w
+        .webauthn
+        .start_authentication_for_challenge(
+            w.tenant_id,
+            w.org_id,
+            w.user_id,
+            WebauthnUserVerification::Required,
+            Some(chrono::Utc::now()),
+            Some(0),
+        )
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let err = finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect_err("a ceremony of the replaced credential must not finish");
+    assert!(
+        matches!(
+            &err,
+            axiam_core::error::AxiamError::AuthenticationFailed { reason }
+                if *reason == axiam_auth::error::AuthError::WebauthnStateInvalid.to_string()
+        ),
+        "expected the invalid-state-token answer, got {err:?}"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was opened");
+
+    // Control: the same ceremony under the user's current version finishes.
+    let (rcr, state_token) = w
+        .webauthn
+        .start_authentication_for_challenge(
+            w.tenant_id,
+            w.org_id,
+            w.user_id,
+            WebauthnUserVerification::Required,
+            Some(chrono::Utc::now()),
+            Some(1),
+        )
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect("a ceremony under the current credential version finishes");
+}
+
+/// SR2-1 control: with no reset in between, the same ceremony finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr2_1_control_a_ceremony_with_no_reset_still_finishes() {
+    let w = world().await;
+    let (challenge, state_token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect("no credential change: the ceremony finishes");
+}
+
+/// SR2-1 control: a ceremony started *after* the reset finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr2_1_control_a_ceremony_started_after_a_reset_finishes() {
+    let w = world().await;
+    reset_the_password(&w).await;
+    let (challenge, state_token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    finish_like_the_handler(&w, &state_token, &assertion)
+        .await
+        .expect("started after the reset: the ceremony finishes");
+}
+
+/// SA-06 (N7, QR11-2 / QR12-1): `complete_webauthn_second_factor` — the call
+/// `POST /auth/webauthn/authenticate/finish` makes — carries the version the
+/// ceremony was checked under into the session write. The password is replaced
+/// right after the finish's own read of the user (in the user repository), so a
+/// path that re-read the user before the session write would see the new
+/// version, pass it, and open a session; this must not. A ceremony started
+/// after the reset finishes and opens one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_finish() {
+    let w = world().await;
+    let (challenge, state_token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+
+    let armed = Arc::new(AtomicBool::new(false));
+    let raced: AuthService<_, _, _, _> = AuthService::new(
+        read_then_bump_support::ReadThenBumpUserRepo {
+            inner: SurrealUserRepository::new(w.db.clone()),
+            armed: armed.clone(),
+        },
+        SurrealSessionRepository::new(w.db.clone()),
+        SurrealFederationLinkRepository::new(w.db.clone()),
+        SurrealRefreshTokenRepository::new(w.db.clone()),
+        config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    );
+    armed.store(true, Ordering::SeqCst);
+
+    let err = raced
+        .complete_webauthn_second_factor(
+            &w.webauthn,
+            w.tenant_id,
+            &state_token,
+            &assertion,
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            None,
+            None,
+        )
+        .await
+        .expect_err("a sign-in checked under the replaced credential must not mint a session");
+    assert!(
+        matches!(
+            &err,
+            axiam_core::error::AxiamError::AuthenticationFailed { reason }
+                if reason == "invalid credentials"
+        ),
+        "answered exactly like a wrong password, got {err:?}"
+    );
+    assert!(
+        !armed.load(Ordering::SeqCst),
+        "the race must have been exercised"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was opened");
+
+    // Control: a ceremony started after the reset finishes and opens one.
+    let (challenge, state_token) = start(&w).await;
+    assert!(
+        finish(
+            &w,
+            &state_token,
+            &w.authenticator.assert(&challenge, 2, w.user_id)
+        )
+        .await
+    );
+    assert_eq!(sessions(&w).await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// SA-13 (N16, D-3): the WebAuthn door refuses a suspended tenant
+// ---------------------------------------------------------------------------
+
+/// Suspend or reactivate the world's tenant.
+async fn set_tenant_status(w: &World, status: axiam_core::models::tenant::TenantStatus) {
+    use axiam_core::models::tenant::UpdateTenant;
+    SurrealTenantRepository::new(w.db.clone())
+        .update(
+            w.tenant_id,
+            UpdateTenant {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The service as the composition root builds it: with the tenant check.
+fn gated(w: &World) -> Auth {
+    w.auth
+        .clone()
+        .with_tenant_admission(Arc::new(SurrealTenantRepository::new(w.db.clone())))
+}
+
+/// Both WebAuthn sign-ins — the second factor (`/auth/webauthn/authenticate/
+/// finish`, `complete_webauthn_second_factor`) and the passkey-first
+/// discoverable one (`finish_discoverable_authentication`, then the session the
+/// handler mints) — are refused `TenantSuspended` with a valid assertion, and
+/// write no session; un-suspending restores them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_webauthn_sign_in_to_a_suspended_tenant_is_refused() {
+    use axiam_core::error::AxiamError;
+    use axiam_core::models::tenant::TenantStatus;
+
+    let w = world().await;
+    let auth = gated(&w);
+    set_tenant_status(&w, TenantStatus::Suspended).await;
+
+    // Second factor.
+    let (challenge, token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    let refused = auth
+        .complete_webauthn_second_factor(
+            &w.webauthn,
+            w.tenant_id,
+            &token,
+            &assertion,
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            None,
+            None,
+        )
+        .await
+        .expect_err("second factor for a suspended tenant");
+    assert!(
+        matches!(refused, AxiamError::TenantSuspended),
+        "{refused:?}"
+    );
+
+    // Discoverable (passkey-first): the ceremony verifies, the session does not.
+    let (rcr, token) = w
+        .webauthn
+        .start_discoverable_authentication(w.tenant_id, w.org_id)
+        .await
+        .unwrap();
+    let challenge = serde_json::to_value(&rcr).unwrap()["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assertion = w.authenticator.assert(&challenge, 2, w.user_id);
+    let (user_id, org_id) = w
+        .webauthn
+        .finish_discoverable_authentication(w.tenant_id, &token, &assertion)
+        .await
+        .unwrap();
+    let refused = auth
+        .create_session_and_tokens(
+            user_id,
+            w.tenant_id,
+            org_id,
+            None,
+            None,
+            AuthenticationEvidence::now(vec![Amr::Hwk]),
+            None,
+        )
+        .await
+        .expect_err("discoverable sign-in for a suspended tenant");
+    assert!(
+        matches!(refused, AxiamError::TenantSuspended),
+        "{refused:?}"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was written");
+
+    set_tenant_status(&w, TenantStatus::Active).await;
+    let (challenge, token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 3, w.user_id);
+    assert!(
+        auth.complete_webauthn_second_factor(
+            &w.webauthn,
+            w.tenant_id,
+            &token,
+            &assertion,
+            AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Hwk, Amr::Mfa]),
+            None,
+            None,
+        )
+        .await
+        .is_ok(),
+        "un-suspending restores WebAuthn sign-in"
+    );
+    assert_eq!(sessions(&w).await, 1);
 }

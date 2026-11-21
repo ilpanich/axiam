@@ -22,6 +22,12 @@ on a workstation.
 just prod-up
 ```
 
+First-admin bootstrap needs the one-time setup token the server logs once at
+first boot: `docker compose -f docker/docker-compose.prod.yml logs axiam-server`
+(or `scripts/first-boot-token.sh <container>`). It is always required, even
+if `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set (that only restricts the email), and the
+first-boot log is secret until bootstrap completes.
+
 For a single node that does not need a message broker there is a smaller
 stack, [`docker/docker-compose.minimal.yml`](../../docker/docker-compose.minimal.yml)
 (`just minimal-up`): SurrealDB and `axiam-server` only, with
@@ -100,6 +106,13 @@ The Kubernetes manifests live under [`k8s/`](../../k8s/) and are assembled by
 ```bash
 kubectl apply -k k8s/
 ```
+
+First-admin bootstrap needs the one-time setup token the server logs once at
+first boot: `kubectl -n axiam logs deploy/axiam-server | scripts/first-boot-token.sh -`
+(add `--previous` after a pod restart; mint a new one before bootstrap with
+`axiam-server setup-token --remint`). It is always required, even if
+`AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set (that only restricts the email), and the
+first-boot log is secret until bootstrap completes.
 
 Key manifests:
 
@@ -466,6 +479,108 @@ for the tenants that inherit it) that would make `required` true for a tenant wi
 an enabled directory. A disabled configuration may coexist; enabling it is then
 the refused write.
 
+**A credential change ends the artefacts of the old credential (SA-06).** Every write of a
+user's password hash, and every write or deletion of the user's OPAQUE record, stamps
+`user.credential_changed_at` in the same transaction (schema v117: one optional column, no
+backfill). An MFA challenge token, an MFA setup token or an in-flight OPAQUE login
+(`login/start` already answered, `login/finish` not yet sent) issued before that instant is
+refused with the response an invalid or expired one gets, so a reset also stops a login the
+holder of the old password had in flight. A user whose credential has not changed since the
+upgrade has no stamp and is refused nothing. The two MFA tokens (and the WebAuthn
+second-factor state token, which carries the challenge's issue time and is checked again when the
+ceremony finishes) carry a sub-second issue time, `iat_ns`, and are compared with the stamp at full
+precision, as the OPAQUE exchange is: a token minted after the change, even in the same second, is
+accepted. A token minted without the claim (during a rolling upgrade) is compared by its
+whole-second `iat`, and one minted in the same second as a later change is refused.
+
+**The credential version (schema v118).** Next to the stamp, every user carries a counter,
+`credential_version`, bumped in the same transaction as every password-hash write and every
+OPAQUE record write or delete (a delete that removes no row bumps nothing). It is embedded in the
+MFA challenge and setup tokens (`cv`), the WebAuthn second-factor state token and the in-flight
+OPAQUE login (`SealedLogin`), and each is refused when its version differs from the user's
+current one. This compares no clock, so it holds whatever the replicas' skew; the stamp check
+below is the fallback only for artefacts that carry no version, which the previous release
+minted during a rolling upgrade.
+
+*The session write.* A sign-in that verified a credential (password with or without a second
+factor, OPAQUE finish, a WebAuthn or MFA second factor, MFA setup completion) carries the version
+it read together with that credential into the session write. The write compares it with the
+user's current version inside its own transaction and, when a reset or change committed in
+between, refuses as a wrong password is refused (invalid credentials), creating no session and
+no refresh token. A federated sign-in has no AXIAM credential behind it and carries no version.
+SurrealDB transactions are snapshot-isolated, so that in-transaction comparison alone does not
+abort against a concurrent credential write. The sign-in therefore also re-reads the user's
+credential version after its session row has committed and before it builds any token: if the
+version moved, it deletes that session row (which is also the refresh token) and answers invalid
+credentials. A password reset, a password change and a SCIM password write each write the
+credential first and revoke the user's sessions and refresh tokens afterwards, so a session that
+committed before the revocation is removed by it, and one that commits after it is caught by the
+re-read. If deleting the refused row fails, the sign-in still answers invalid credentials and no
+token is returned; the row is left to expire. The refused row is removed through the logout path
+(`session_repo.invalidate`), so its id appears on the revocation feed and, with an SSF sink
+configured, on the `session-revoked` stream, for a session that no client ever held.
+*Refresh rotation.* A refresh is a session mint and has the same protection. Sessions written by
+a sign-in that carried a credential version store it (`session.credential_version`, schema v119,
+optional, no backfill). The rotation consumes the presented session, then writes its successor
+under the version the consumed row carries: the write is refused when the user's version has
+moved, and the successor takes the same stored version. After the successor commits, the rotation
+re-reads the user's version exactly as a sign-in does; if it moved, the successor is deleted
+through the logout path and the rotation is refused with the answer an unknown or already-used
+refresh token gets. A reset, a password change or a SCIM password write that revokes sessions
+between the rotation's consume and its create therefore cannot leave a session behind. The session
+a password change deliberately keeps (including a change that carries a new OPAQUE record, which is
+written in the credential's own transaction) is stamped with the user's new version inside
+`invalidate_user_sessions_except`, in the same transaction that deletes the user's other sessions,
+so it can still rotate; this stamp is not part of the credential write itself. A session row written
+before schema v119 has no stored version: it rotates only if the user's `credential_changed_at`
+is strictly earlier than the row's `created_at` (a change at or after the row's creation, a tie
+included, refuses, as everywhere; so an upgrade logs nobody out, and a legacy row that predates a
+reset is refused), and its successor stores the user's current version. A
+credential write that does not revoke sessions would make the user's existing sessions unable to
+rotate (they must sign in again); today no route writes an OPAQUE record or removes one for an
+existing user other than a password change or reset, so none does. An OAuth2
+`refresh_token` grant has no stored version; after writing the successor it re-reads the user and
+refuses, revoking the successor, when the user's `credential_changed_at` is at or after the
+presented refresh token's `created_at`. The same rule covers every other OAuth2 route that turns a
+short-lived grant into a refresh token: an authorization code, a device-flow approval and a CIBA
+approval issued before a credential change are refused with `invalid_grant` when redeemed after it
+(compared with the code's `created_at`, the device grant's `created_at` and the CIBA request's
+`decided_at`, so a device approval is also refused when the change falls between the device's
+request and the user's approval; the grant is already redeemed, so the device must start a new
+device authorization, with a new device code and user code, and the user approves that one). A
+credential change at the very instant of the grant's time refuses too (a tie fails closed, here and
+for session rotation: one rule, `User::credential_changed_since`). After the refresh token is
+written the user is re-read once more; a change that landed in between revokes the token just
+minted and answers `invalid_grant`, and a failed read revokes it and answers a server error.
+
+**One clock.** `credential_changed_at` is written with the datastore's clock (`time::now()` inside
+the write), as the `created_at` of sessions, refresh tokens, codes and approvals is, so every
+comparison of the stamp with a stored row uses one clock whatever the replicas' skew. The one
+comparison that still sets the stamp against an application-replica time is the one for artefacts
+that are minted by a replica and carry their own issue time (MFA challenge and setup tokens,
+the WebAuthn state token, an in-flight OPAQUE login); those are covered by the credential version
+above, and the stamp is their fallback only.
+*Clock assumption (artefacts without a version).* The stamp is the datastore's clock, as above; it is
+not written from an application replica's clock. The residual skew is between that datastore stamp and
+the `iat` / `issued_at` that the minting replica put on an MFA, WebAuthn or OPAQUE artefact that carries
+no credential version. Run the replicas (and, for a remote cluster, the datastore) NTP-synchronised, as
+JWT `exp` handling already requires. A skew of delta shifts the refusal window by delta: if the minting
+replica runs delta ahead of the datastore, an artefact without a version minted up to delta before the
+change is still accepted (every artefact of this release carries one and is refused regardless); if it
+runs delta behind, one minted up to delta after the change is refused and the person signs in again.
+Normal NTP keeps delta in the milliseconds.
+
+If revoking the sessions fails after a password reset or a self-service password change has
+written the new password, it still emits the SSF `credential-change` event (the password has
+changed, so receivers must be told) and then answers the error (500); both revocations are
+attempted either way, for a reset and a change alike. The request's own audit row records that 500 as a `Failure`, so the
+server also records, beside it and in the tenant's own audit log, a row with action
+`auth.password_changed_revocation_failed`, outcome `Success` and metadata
+`{"credential_written": true, "revocation": "failed"}`; the `password_changed` notification rule
+matches that row, as it matches a successful reset's request row and a successful change's
+request row (`POST /api/v1/auth/password/change`). A successful reset or change writes no such
+row.
+
 **Accounts whose entry has no usable e-mail address cannot be provisioned.** A
 local account must have an e-mail address, and AXIAM does not invent one: a
 placeholder would be released as the user's e-mail `NameID` and as the OIDC
@@ -682,6 +797,62 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 [`k8s/rabbitmq/secret.yml`](../../k8s/rabbitmq/secret.yml)) into
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
+
+## Access-token type (`typ: at+jwt`) and upgrading
+
+Every access token AXIAM mints carries the JOSE header `typ: at+jwt`
+(RFC 9068 §2.1) and a `kid`. The other JWTs signed with the same key each name
+their own kind, and every verifier requires its own:
+
+| Token | `typ` | `kid` |
+|---|---|---|
+| Access token (every grant, RPT, token exchange) | `at+jwt` | yes |
+| OIDC ID token | `JWT` | yes |
+| WebAuthn ceremony state | `axiam-webauthn-state+jwt` | no |
+| MFA challenge (after the password factor) | `axiam-mfa-challenge+jwt` | no |
+| MFA setup (MFA enforced, none enrolled) | `axiam-mfa-setup+jwt` | no |
+| Back-channel logout token | `logout+jwt` | no |
+| SSF Security Event Token | `secevent+jwt` | yes |
+
+The ceremony tokens (WebAuthn state, MFA challenge and setup) are only ever
+read back by AXIAM itself, which verifies them with its own key rather than
+by JWKS lookup, so they name no JWKS key: a relying party that selects keys
+strictly by `kid` finds none for them.
+
+An access-token verifier (REST, gRPC interceptor and `ValidateToken`,
+introspection, RFC 8693 `subject_token`, UMA `claim_token`) also refuses any
+token whose claims carry `purpose`, whatever its `typ`. An `id_token_hint`
+(end-session, `/oauth2/authorize`, CIBA) is accepted only with `typ: JWT` or
+no `typ`, and only if its claims carry none of `jti`, `purpose`, `scope` or
+`client_id`, which no ID token has ever carried; an access token or any other
+kind above is refused as a hint, including an access token minted by a
+release before this one (`typ: JWT`), however old.
+
+| Variable | Purpose |
+|---|---|
+| `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` | Default **`true`**: an access token without `typ: at+jwt` is refused. `false`, `0`, `no` or `off` (any case) relax it; an unrecognised value stops the server at startup with a configuration error. |
+| `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` | Default **`false`**: an access token without `aud` is refused on user routes and on gRPC. Enabled only by `true`, `1` or `yes` (any case). `false`, `0`, `no`, `off` and also `on` leave it disabled. Like every `AXIAM__*` boolean, any other value — empty, padded with whitespace, a typo — stops the server at startup with a configuration error. |
+
+**What the default costs on upgrade.** Releases before this change minted
+access tokens with the generic `typ: JWT`. With
+`AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=true` those tokens are refused as soon
+as a replica runs the new release, so every signed-in user has to sign in
+again, or refresh, within one access-token lifetime
+(`AXIAM__AUTH__ACCESS_TOKEN_LIFETIME_SECS`, 15 minutes by default). Refresh
+tokens are opaque and unaffected: a client that refreshes on a 401 gets a typed
+token and carries on. An MFA or WebAuthn ceremony in flight at the moment of
+the upgrade (at most `mfa_challenge_lifetime_secs`, 5 minutes) has to be
+started again.
+
+**Relaxing it for one rolling upgrade.** While old and new replicas serve
+together, set `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` on the new
+replicas. An untyped token is then accepted only if its claims carry no
+`purpose`; acceptances are logged at `warn` at most once a minute per process,
+each line giving how many were accepted since the last one, and the server
+logs a `warn` at startup. The MFA and WebAuthn verifiers likewise accept the previous
+release's untyped tokens of their own kind. Set it back to `true` (or unset
+it) once every replica runs the new release and one access-token lifetime has
+passed. A token of any other `typ` is refused in both modes.
 
 ## Recovering the bootstrap setup token
 
@@ -2311,7 +2482,7 @@ source docker/.secrets/minimal-credentials.env   # the datastore credentials
 # a distroless image has no shell, so read the volume rather than the container:
 docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
 
-jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
+jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), organization_id = \($e.organization_id // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
     gdpr-audit-dlq.jsonl \
   | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
       --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
@@ -2343,7 +2514,12 @@ recoverable: the recipe carries the line's `occurred_at` and `reason` into the
 row's `metadata` as `occurred_at` and `dead_lettered_reason`, so the trail can
 be read in the order things happened (a line from before 1.0.1 has neither, and
 its replayed row carries neither; the `axiam.audit.dlq` log event then dates a
-GDPR record, so keep the log with the file). Like every audit row, it can
+GDPR record, so keep the log with the file). A system-partition line (nil
+`tenant_id`) may carry `organization_id` — a `tenants.deleted` or
+`tenants.purged` record, or a request row whose organization was resolved — and
+the recipe writes it back, so `GET /api/v1/audit-logs/system` returns the
+replayed row to that organization; a line without one replays with none and is
+returned to nobody, exactly as it would have been written. Like every audit row, it can
 neither be updated nor deleted afterwards, so **replay each line once**. Note how many lines you
 replayed (`wc -l gdpr-audit-dlq.jsonl`) and start the next replay after them
 (`tail -n +N`). Do not rename or delete the file while the server runs: the
@@ -2543,6 +2719,15 @@ no suffix matching, no CIDRs. Unset (the default) means no exceptions at all.
 The exception applies to the first hop only; redirect targets are always
 validated strictly, and cloud metadata endpoints stay unreachable even for an
 allowlisted host. Every use is logged.
+
+**Guarded fetches do not use an egress proxy.** These fetches ignore
+`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` (and their lowercase forms) even
+when the server process has them set. The guard validates one resolved address
+and connects to exactly that address; through a proxy the destination would be
+named by hostname and re-resolved by the proxy, so the validated address would
+no longer decide where the connection goes. If the network only permits egress
+via a proxy, allow these fetches at the network layer instead (for example a
+firewall rule or a transparent egress gateway).
 
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).

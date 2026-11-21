@@ -330,8 +330,13 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER",
-            "Compatibility switch — treat a token with no audience claim as a user token. Default `true` (this row used to read as if it were off); set `false` to refuse such a token with a `401`.",
+            "Compatibility switch — treat a token with no audience claim as a user token. Default `false`: such a token is refused with a `401`. Enabled only by `true`, `1` or `yes` (any case); `false`, `0`, `no`, `off` and also `on` leave it off. Like every `AXIAM__*` boolean, any other value — empty, padded with whitespace, a typo — stops the server at startup with a configuration error.",
             "false",
+          ],
+          [
+            "AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP",
+            "Refuse an access token whose JOSE header is not `typ: at+jwt`. Default `true`. With the default, every access token minted by a release before the one that introduced it (`typ: JWT`) is refused, so every signed-in user signs in again, or refreshes, within one access-token lifetime (15 minutes by default). Set `false` (or `0`, `no`, `off`) for one rolling upgrade only, while old and new replicas serve together, then set it back. Any other value stops the server at startup. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#access-token-type-typ-atjwt-and-upgrading).",
+            "true",
           ],
         ],
       },

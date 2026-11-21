@@ -352,10 +352,34 @@ pub struct AuthConfig {
     #[serde(skip)]
     pub opaque_setup_key: Option<[u8; 32]>,
     /// When `true`, access tokens decoded without an `aud` claim are treated as
-    /// `axiam:user`. Enables a back-compat window during the Phase 4 rollout
-    /// while pre-Phase-4 tokens are still circulating. Default: `true`.
-    #[serde(default = "default_true")]
+    /// `axiam:user`. Was a back-compat window for the Phase 4 rollout, while
+    /// pre-Phase-4 tokens were still circulating.
+    ///
+    /// Default: **`false`** since SA-03 (N10): every token AXIAM has minted
+    /// since Phase 4 carries `aud`, and an absent one is what a token that was
+    /// never an access token looks like. Set from
+    /// `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER`.
+    #[serde(default)]
     pub allow_missing_aud_as_user: bool,
+    /// SA-03 (N10, D-7): require the JOSE header `typ: at+jwt` (RFC 9068) on
+    /// every access token. Default: **`true`**.
+    ///
+    /// With it on, an access token without that `typ` — every token minted
+    /// by a release before SA-03, which wrote the generic `JWT` — is refused,
+    /// so upgrading signs every user out within one access-token lifetime
+    /// (15 minutes by default): each must sign in again, or refresh, which
+    /// mints a typed token.
+    ///
+    /// An operator may set it to `false` for **one rolling upgrade**, while
+    /// old and new replicas serve together. An untyped token is then accepted
+    /// only if its claims carry no `purpose` (which is what distinguishes the
+    /// previous release's WebAuthn state and MFA tokens), and each acceptance
+    /// is logged at `warn`. Purpose-token verifiers likewise accept the
+    /// previous release's untyped MFA and WebAuthn tokens. Set it back to
+    /// `true` once the upgrade completes. A token with any other `typ` is
+    /// refused either way. Set from `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP`.
+    #[serde(default = "default_true")]
+    pub require_access_token_typ: bool,
     /// When `true` (default), all auth cookies are marked `Secure` and are
     /// therefore sent only over HTTPS. Set `AXIAM__AUTH__COOKIE_SECURE=false`
     /// **only** in local HTTP development (e.g. http://localhost) — **never**
@@ -736,7 +760,10 @@ impl Default for AuthConfig {
             opaque_session_key: None,
             opaque_setup_key: None,
             federation_encryption_key: None,
-            allow_missing_aud_as_user: true,
+            // SA-03 (N10): off. See the field docs.
+            allow_missing_aud_as_user: false,
+            // SA-03 (N10, D-7): strict from the first release that ships it.
+            require_access_token_typ: true,
             cookie_secure: true,
             mfa_challenge_lifetime_secs: 300,
             totp_issuer: "AXIAM".into(),

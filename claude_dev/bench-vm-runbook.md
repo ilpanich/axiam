@@ -8,6 +8,8 @@
   The AXIAM-only improvement passes (the NEW cells, `rl=prod`, the minimal profile, the
   §12.11 investigations of the run-6 runbook) are deferred to a later session on the same VM;
   §11 lists them so nothing is silently dropped.
+- **Run 6b** (§13, added 2026-11-21): the same comparison with every server and database cap raised
+  from 2 to 4 CPUs, on AXIAM 1.3.1 with the competitors and SurrealDB 4.0.1 pinned to run 6's digests.
 - **Relationship to the run-6 runbook**: this file covers *the machine*.
   [`run6-runbook.md`](run6-runbook.md) remains the reference for *the run* — what each cell
   measures, the labels, the reporting rules. Where this file says "run6 §12.x", the commands
@@ -549,3 +551,265 @@ run6 specifies): the 15 NEW AXIAM cells (run6 §12.8), the `rl=prod` pass and `r
   GitHub read token — scope them minimally and revoke them after (§11).
 - Membership of the `docker` group is root-equivalent; acceptable on a single-purpose VM, not
   on a shared one.
+
+---
+
+## 13. Run 6b — the comparison with raised caps, on AXIAM 1.3.1
+
+Written 2026-11-21 from the run-6 archive (`results-2026-11-21.tar.xz`, VM `a16-ram64-disk80-perf1`,
+16 vCPU AMD EPYC-Genoa, steal 0 %). **Same scope as run 6** — the cross-system comparison only; the
+improvement passes of §11 stay deferred.
+
+### 13.1 Why: run 6 measured the 2-CPU caps, not the products
+
+In run 6 nearly every comparison cell stopped at a **2-CPU cap of one container** while the host had
+more than half its CPU free. Per-container CPU, p0-plaintext, median of the three repeats
+(`res.csv`):
+
+| Target | The container at its 2.0-core cap | The rest of the stack |
+|---|---|---|
+| AXIAM 1.3.0 | **SurrealDB, 2.02–2.04 cores in 9 of 11 cells** (every cell that touches the datastore) | server 0.27–0.82 (1.81 in password login, 1.31 in JWKS); RabbitMQ ~0.2 |
+| Keycloak 26.8.1 | **server, 2.01 in 6 of 6** | PostgreSQL 0.01–0.51 |
+| Zitadel v4.19.5 | **server ~2.0** (client credentials, login, refresh, introspection) **or PostgreSQL ~2.0** (JWKS, introspection, userinfo) | the other one |
+| authentik 2026.8.5 | **PostgreSQL 2.0** (JWKS, introspection, userinfo; 1.8–1.9 elsewhere) | server ≤ 1.85, worker ≤ 0.64 |
+
+The two exceptions were not cap-bound at all: AXIAM's JWKS (43 640 req/s, closed loop at 0.8 ms p50,
+k6 at 7.5 cores) and AXIAM's password login (Argon2id, server 1.81). The load generator was nowhere
+near its limit elsewhere (k6 ≤ 1.8 cores outside AXIAM's JWKS).
+
+So the run-6 table answers "what does each product do with 2 cores in its busiest container?" — a
+fair question, but not the capacity of the products. Run 6b asks the next one, under the same rules.
+
+### 13.2 The rule: raise every role by the same amount — never "uncap"
+
+Comparable resources means **the same cap per role for every target**, which is the rule run 6 already
+used (run6 §2.3). Run 6b moves both roles together:
+
+| Role | Run 6 | **Run 6b** | Variable |
+|---|---|---|---|
+| every server container (AXIAM, Keycloak, Zitadel, authentik server) | 2 CPU / 2 048 MiB | **4 CPU** / 2 048 MiB | `BENCH_CPUS` |
+| authentik worker | = server cap | **= server cap (4 CPU)**, as run 6 (D-79) | `BENCH_AUTHENTIK_WORKER_CPUS` defaults to `BENCH_CPUS` |
+| every database (SurrealDB, PostgreSQL ×3) | 2 CPU / 1 024 MiB | **4 CPU** / 1 024 MiB | `BENCH_DB_CPUS` |
+| RabbitMQ (AXIAM only, off the request path: ~0.2 cores) | 1 CPU / 512 MiB | unchanged | `BENCH_MQ_CPUS` |
+
+Why this and not something else:
+
+- **Not `dbcaps=uncapped`.** That switch raises the database role only (4 CPU / 2 GiB). It would lift
+  the DB-bound products (AXIAM, Zitadel's reads, authentik) and leave Keycloak — server-bound in every
+  cell — exactly where it was: an asymmetric change dressed as a fair one.
+- **Not "no caps".** Uncapped, a stack takes whatever the host gives it, so a product with more
+  containers gets more of the machine, and the stacks compete with k6 for the same 16 vCPUs.
+  Neither is a comparable resource.
+- **Why 4 and not 8.** 8/8 would put AXIAM's configured ceiling at 17 CPUs on a 16-vCPU host. At 4/4
+  the ceilings are Keycloak and Zitadel **8**, AXIAM **9** (with RabbitMQ), authentik **12** (server +
+  worker + database), and k6 keeps headroom on every stack (§13.3). It doubles the cap that bound
+  run 6, which is the step that answers "was it the cap?".
+- **Memory unchanged — one variable at a time.** No container came near its memory cap in run 6
+  (largest: Keycloak's server at about 1.1 GiB of 2 GiB). Raising memory would also change
+  Keycloak's configuration (its JVM heap is sized as 70 % of the container limit), so a throughput
+  change could no longer be attributed to CPU. If a run-6b cell does reach its memory cap, that is a
+  finding, and memory is the next, separate pass.
+- **Efficiency is still per measured core.** `thr/core` and `cpu_ms/req` divide by the cores each
+  stack actually used, not by its ceiling, so the differing ceilings (8 / 9 / 12) do not favour anyone;
+  the report must still state them.
+
+### 13.3 The load generator still fits
+
+`report.py` flags a cell `generator_saturated` when k6 uses more than `0.8 × (16 − stack ceiling)`:
+
+| Stack ceiling at 4/4 | k6 headroom | flagged above | k6 in run 6 (busiest cell) |
+|---|---|---|---|
+| Keycloak, Zitadel — 8 | 8 | 6.4 cores | 1.8 (Keycloak JWKS) |
+| AXIAM — 9 | 7 | 5.6 cores | **7.5 (JWKS)**; 1.2 otherwise |
+| authentik — 12 | 4 | 3.2 cores | 0.03 |
+
+Even at twice run 6's throughput, every cell but one stays under its threshold. **AXIAM's JWKS cell
+will be flagged**, and correctly so: it was not cap-bound in run 6 (no container near 95 %), so a
+raised cap cannot speed it up — it only shrinks k6's share of the box. Quote AXIAM's JWKS from run 6,
+and read its run-6b cell as a generator-bound control.
+
+### 13.4 Two variables for AXIAM — so one control pass
+
+AXIAM changes **release** (1.3.0 → 1.3.1) *and* caps; the competitors change caps only (the same
+images, by digest). Without a control, an AXIAM delta could not be split between the two. 1.3.1 is
+dependency bumps and test fixes (`CHANGELOG.md` `[1.3.1]`: webauthn-rs 0.5 → 0.6, minor-patch groups,
+base images; no performance change is listed), and **nothing under `benchmarks/` changed between the
+tags**, so the expected version delta is near zero — the control is what shows it rather than
+assumes it.
+
+| Pass | Targets | Caps | Tree | Answers |
+|---|---|---|---|---|
+| **A — control** | AXIAM 1.3.1 | run 6's 2/2 | `results/run6b/axiam-1.3.1-caps-2x2` | 1.3.0 → 1.3.1 at equal caps (against run 6) |
+| **B — raised caps** | all four | 4/4 | `results/run6b/caps-4x4` | each product's gain from the caps (against run 6; AXIAM against pass A), and the head-to-head at 4/4 |
+
+Both at **p0-plaintext** (run 6 already measured the TLS cost, which was small and is a separate
+question), the **CORE** scenario set, `repeat=3`. Every non-AXIAM image — **SurrealDB 4.0.1**,
+RabbitMQ, Keycloak, Zitadel, authentik, PostgreSQL — is pinned to the **digest run 6 recorded**, so
+the competitors and the datastore are byte-for-byte what run 6 measured.
+
+**Same VM, or a control for everyone.** Run 6's numbers are the competitors' control only on the
+**same instance** (the same hypervisor host). If the VM was destroyed and recreated since, run pass A
+for all four targets (`targets="axiam keycloak zitadel authentik"`) — about 5.5 h more — and re-run
+`05-qualify.sh` first; otherwise a host difference reads as a cap effect.
+
+### 13.5 Duration
+
+From run 6 on this VM (15.6 h for 252 cells, ≈ 3.7 min per cell including bring-ups):
+
+| Pass | Cells per repeat | × 3 | Wall clock |
+|---|---|---|---|
+| A — AXIAM 1.3.1 at 2/2 | 11 | 33 | ≈ 2 h |
+| B — four targets at 4/4 | 30 (AXIAM 11, Keycloak 6, Zitadel 7, authentik 6) | 90 | ≈ 5.5 h |
+| **Total** | | | **≈ 7.5 h** |
+
+### 13.6 Commands
+
+From your PC, push the updated scripts (they include `pin-images-from-run.py`):
+
+```bash
+git pull && ./run.sh push
+```
+
+On the VM, in `tmux`. First the checkout: restore the C# bench file (§5.1) so the tree is clean, then
+move to the 1.3.1 tag (the SDK checkouts are only fetched, not moved; `versions.env` now defaults to
+`v1.3.1`, the variable just makes the choice visible):
+
+```bash
+git -C ~/bench/axiam checkout -- benchmarks/sdk/csharp/axiam-sdk-bench.csproj
+```
+
+```bash
+AXIAM_TAG=v1.3.1 ~/bench-vm/scripts/03-checkouts.sh
+```
+
+```bash
+AXIAM_TAG=v1.3.1 ~/bench-vm/scripts/04-verify.sh
+```
+
+`04-verify.sh` must show `axiam checkout v1.3.1` and `AXIAM image ghcr.io/ilpanich/axiam/server:1.3.1`.
+
+```bash
+cd ~/bench/axiam/benchmarks && mkdir -p results/run6b/provenance
+```
+
+Pin every image except AXIAM's to run 6's digests, add the 1.3.1 server, pull and record them all:
+
+```bash
+eval "$(python3 -I ~/bench-vm/scripts/pin-images-from-run.py results/run-1 --except BENCH_AXIAM_IMAGE)" && export BENCH_AXIAM_IMAGE=ghcr.io/ilpanich/axiam/server:1.3.1
+```
+
+```bash
+bash runner/pull-pinned-images.sh results/run6b/provenance && source results/run6b/provenance/pinned-images.sh
+```
+
+```bash
+grep -E 'SURREALDB|AXIAM' results/run6b/provenance/images.txt      # SurrealDB = run 6's 4.0.1 digest; AXIAM = 1.3.1
+```
+
+```bash
+bash runner/record-provenance.sh -run6b
+```
+
+The steal log for the whole round:
+
+```bash
+vmstat -n -t 10 > results/run6b/provenance/vmstat-steal.txt &
+```
+
+The CORE set, for both passes:
+
+```bash
+export BENCH_SCENARIO_ONLY="jwks_fetch.js oauth2_client_credentials.js oauth2_password_login.js token_introspection.js token_refresh.js userinfo.js zitadel_userinfo_grpc.js userinfo_grpc.js authz_check_rest.js authz_check_grpc.js authz_batch_rest.js authz_batch_grpc.js"
+```
+
+**Pass A** — AXIAM 1.3.1 at run 6's caps (the defaults; make sure no cap variable is set):
+
+```bash
+unset BENCH_CPUS BENCH_MEM BENCH_DB_CPUS BENCH_DB_MEM BENCH_AUTHENTIK_WORKER_CPUS BENCH_AUTHENTIK_WORKER_MEM
+```
+
+```bash
+BENCH_RESULTS_DIR="$PWD/results/run6b/axiam-1.3.1-caps-2x2" just targets="axiam" profiles="p0-plaintext" repeat=3 bench-matrix 2>&1 | tee ~/bench/logs/run6b-pass-a.log
+```
+
+**Pass B** — all four targets at 4/4 (environment variables before `just`, §9.6):
+
+```bash
+BENCH_CPUS=4 BENCH_DB_CPUS=4 BENCH_RESULTS_DIR="$PWD/results/run6b/caps-4x4" just targets="axiam keycloak zitadel authentik" profiles="p0-plaintext" repeat=3 bench-matrix 2>&1 | tee ~/bench/logs/run6b-pass-b.log
+```
+
+While pass B runs, check in another pane that the caps took — server and database `4000000000`
+nano-CPUs, RabbitMQ `1000000000`, memory unchanged (`2147483648` server, `1073741824` database):
+
+```bash
+docker inspect -f '{{.Name}} cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}}' $(docker ps -q)
+```
+
+Afterwards, the same from the records (every cell's `containers[].cpu_cap`, read off the running
+container):
+
+```bash
+jq -r '[.target, .scenario, (.containers | map("\(.role)=\(.cpu_cap)") | join(" "))] | @tsv' results/run6b/caps-4x4/run-1/*/p0-plaintext/*.meta.json | sort -u
+```
+
+Close the round:
+
+```bash
+pkill -f 'vmstat -n -t 10'; unset BENCH_SCENARIO_ONLY; bash runner/record-provenance.sh -run6b-after
+```
+
+`bench-matrix` writes `report.md` into each pass's tree; `just bench-report` (run 6's tree) is not
+affected, because `report.py` does not walk into `results/run6b/`. Then pack and fetch as in §9.7 and
+§11 — `bench-pack` includes `results/run6b/**`:
+
+```bash
+just bench-pack
+```
+
+```bash
+./run.sh fetch ~/axiam-results-run6b        # on your PC
+```
+
+### 13.7 Reading run 6b — what the report must say
+
+1. **The caps, per role, and the ceilings** (§13.2), in the opening: 4 CPU per server and per
+   database for every target; memory as run 6; ceilings 8 / 9 / 12; authentik's worker carries the
+   server cap.
+2. **Run 6b cells are never medianed with run 6 cells.** They are a labelled sensitivity pass — the
+   same matrix with one variable moved — not a fourth repeat.
+3. **Per target, the scaling factor** `thr(4/4) ÷ thr(2/2)` cell by cell, and **where the bottleneck
+   moved** (the `bottleneck` column). A target that doubles and stays bound in the same container was
+   simply cap-limited; one that gains little while no container is at 95 % has a limit that is not
+   CPU (a lock, a pool, a serial path) — that is the finding the pass exists for.
+4. **AXIAM's version delta** first (pass A against run 6), then its cap delta (pass B against pass A).
+   A version delta outside run-to-run noise (run 6's `±thr%` column) is reported, not absorbed.
+5. **SurrealDB 4.0.1's per-statement cost.** surrealdb/surrealdb#7667 (open; "every write statement
+   costs ~350 µs of CPU in `exec::ir`, 10–17× slower than 3.3.5", unchanged in 4.0.1) and #7716 (open;
+   `DEFINE EVENT` bodies re-planned on every write) both describe CPU spent per statement on the
+   executing path, not lock contention. Neither issue measures whether more cores help — an inference,
+   not a finding: if SurrealDB runs statements in parallel, AXIAM's throughput should rise with the
+   database cap while each request's latency does not fall. Run 6b measures which; say that the
+   datastore build is a known-regressed one wherever AXIAM's numbers appear.
+6. **The labels of run 6 still apply**: authentik's login is `protocol-variant`, authentik's and
+   Zitadel's refresh are `fallback-op`, Zitadel's userinfo uses a client-credentials token, and the
+   cells run 6 marked invalid (authentik's six, Zitadel's login and refresh) are reported as such
+   again unless they become valid.
+7. **AXIAM's JWKS at 4/4 is generator-bound** (§13.3); the head-to-head quotes run 6's.
+
+### 13.8 What to send back
+
+The archive from `just bench-pack` (it carries `results/run6b/**` next to run 6), and these lines added
+to `results/RUN-NOTES.md`:
+
+```text
+## Run 6b
+- Same VM instance as run 6?  yes / no (if no: pass A ran for all four targets, 05-qualify.sh re-run)
+- AXIAM:              v1.3.1 @ <commit>; image digest from results/run6b/provenance/images.txt
+- Pinned from run 6:  SurrealDB 4.0.1, RabbitMQ, Keycloak 26.8.1, Zitadel v4.19.5, authentik 2026.8.5, PostgreSQL 16 (digests in images.txt)
+- Caps:               pass A 2/2 (run 6); pass B BENCH_CPUS=4 BENCH_DB_CPUS=4, memory unchanged
+- docker inspect:     caps confirmed 4/4 during pass B (yes / what differed)
+- Steal during run:   mean <x> %; periods above 5 %: <when>
+- Start / end, interruptions, anything re-run:
+```
+
+I will then write the scaling comparison (run 6 → pass A → pass B, per target and cell) from it.

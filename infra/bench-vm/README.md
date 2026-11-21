@@ -23,6 +23,7 @@ infra/bench-vm/
     ├── 01-docker-k6.sh       Docker Engine >= 25, Compose >= 2.24, log rotation, pinned k6 and just
     ├── 02-sdk-toolchains.sh  the eleven SDK toolchains
     ├── go-toolchain.py       Go from the module proxy, verified against sum.golang.org (02's fallback)
+    ├── pin-images-from-run.py  export lines pinning a past run's images by digest (run 6b, runbook §13)
     ├── 03-checkouts.sh       axiam at the release tag, the eleven SDKs beside it
     ├── 04-verify.sh          read-only PASS/WARN/FAIL table; exit status = number of FAILs
     └── 05-qualify.sh         sysbench consistency and steal under load; go / watch / recreate

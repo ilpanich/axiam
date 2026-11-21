@@ -438,7 +438,16 @@ bigger than the G-box, but the caps — not the box — define the comparison.
 
 ### 9.6 The SDK pass — run6 §12.13, unchanged (with §5.1 applied)
 
-At p0, `repeat=3`, `SDK_BENCH_CONCURRENCY=16`. Restore the C# project file afterwards.
+At p0, `repeat=3`, `SDK_BENCH_CONCURRENCY=16`, with the stack up and seeded (run6 §12.13).
+`SDK_BENCH_CONCURRENCY` is an **environment** variable, so it goes before `just`; `repeat` is a
+justfile variable and goes after it. Placed after `just`, the first is refused (`variable
+\`SDK_BENCH_CONCURRENCY\` overridden on the command line but not present in justfile`):
+
+```bash
+SDK_BENCH_CONCURRENCY=16 just target=axiam profile=p0-plaintext repeat=3 sdk-bench-all
+```
+
+Restore the C# project file afterwards (§5.1).
 
 ### 9.7 Report and pack
 

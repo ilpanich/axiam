@@ -669,7 +669,9 @@ timings to this). Put every `AXIAM__…`/`RUST_LOG` export **before `bench-up`**
 `BENCH_REQUIRE_ENV="NAME …"` on `bench-run` asserts the names off `docker inspect` before the first cell.
 
 **Rule 2 — `just` variables go before the recipe name.** `target=`, `profile=`, `rl=`, `dbcaps=`, `deploy=`, `repeat=`, `scenario=`,
-`targets=`, `profiles=` are `just` variables, not environment variables:
+`targets=`, `profiles=` are `just` variables, not environment variables. The reverse holds too: an environment
+variable such as `SDK_BENCH_CONCURRENCY` or `BENCH_RESULTS_DIR` goes **before** `just`; placed after it, `just` refuses
+it (`variable … overridden on the command line but not present in justfile`):
 
 ```bash
 just target=axiam profile=p2-tls13 bench-run     # correct
@@ -940,7 +942,7 @@ Zitadel's login is bcrypt-dominated (default cost 14). `BENCH_ZITADEL_HASHER_COS
 just target=axiam profile=p0-plaintext bench-up
 just target=axiam bench-seed
 just target=axiam profile=p0-plaintext sdk-dry-run                                  # every SDK builds and completes its four ops (SKIP = no toolchain, never FAIL)
-just target=axiam profile=p0-plaintext repeat=3 SDK_BENCH_CONCURRENCY=16 sdk-bench-all
+SDK_BENCH_CONCURRENCY=16 just target=axiam profile=p0-plaintext repeat=3 sdk-bench-all   # an ENVIRONMENT variable: before `just`, not after
 just target=axiam bench-down
 ```
 

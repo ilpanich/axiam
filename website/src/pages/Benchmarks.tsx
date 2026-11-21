@@ -438,6 +438,9 @@ function MemoryCapChart() {
   );
 }
 
+/** Open upstream issue behind the database-tier regression (run 6). */
+const SURREALDB_BUG_URL = "https://github.com/surrealdb/surrealdb/issues/7667";
+
 /* ---- headline stat cards ---------------------------------------------- */
 
 const HEADLINES = [
@@ -480,7 +483,7 @@ const FINDINGS = [
   },
   {
     title: "Database-bound cells fell 43–75% against run 5; the database-free cell rose 64%",
-    body: "Against run 5 on the laptop: client credentials 2,804 → 1,610, introspection 4,504 → 1,582, userinfo 4,752 → 1,411, gRPC userinfo 12,307 → 3,078, single authorization checks 1,032 → 492 — while JWKS went from 26,680 to 43,640. The competitors are the control for the change of host: Keycloak moved +3% to +21% on the same cells and Zitadel −14% to −1%. A host effect cannot produce opposite movements on AXIAM's database-bound and database-free cells; something in the database tier changed. Run 6 is the first on SurrealDB 4.0 (AXIAM 1.3.0 requires it), and SurrealDB has an open performance issue (surrealdb/surrealdb#7667). What this run cannot do is split the regression between the engine and the way AXIAM 1.3's queries run on it — that needs a same-host A/B, listed below.",
+    body: "Against run 5 on the laptop: client credentials 2,804 → 1,610, introspection 4,504 → 1,582, userinfo 4,752 → 1,411, gRPC userinfo 12,307 → 3,078, single authorization checks 1,032 → 492 — while JWKS went from 26,680 to 43,640. The competitors are the control for the change of host: Keycloak moved +3% to +21% on the same cells and Zitadel −14% to −1%. A host effect cannot produce opposite movements on AXIAM's database-bound and database-free cells; something in the database tier changed. Run 6 is the first on SurrealDB 4.0 (AXIAM 1.3.0 requires it), and SurrealDB has an open upstream bug (surrealdb/surrealdb#7667, highlighted at the top of this page): write statements cost 10–17× more CPU than in 3.3.5, unchanged in 4.0.1. That bug is the leading suspect. This run cannot show how much of the regression it accounts for, and how much comes from the way AXIAM 1.3's queries run on 4.0. The re-run on a fixed SurrealDB release will answer that, and a same-host A/B is listed below.",
   },
   {
     title: "Native mTLS still costs nothing measurable — partly because the server is not the ceiling",
@@ -524,8 +527,8 @@ const CAVEATS = [
 ];
 
 const NEXT = [
+  "Re-run the database-bound cells on this VM once surrealdb/surrealdb#7667 is fixed in a SurrealDB release",
   "A same-VM A/B — AXIAM 1.2.x on SurrealDB 3 against 1.3.0 on SurrealDB 4 — to split the database-tier regression between engine and queries",
-  "Track surrealdb/surrealdb#7667 and re-run the database-bound cells when it closes",
   "The database-ceiling pass (uncapped SurrealDB) on this VM",
   "The deferred passes: production rate-limit table, minimal profile, new-feature cells",
   "Refresh stage timings",
@@ -607,6 +610,46 @@ export default function Benchmarks() {
         AXIAM's lead narrowed — it now loses two head-to-head cells to
         Keycloak. Both are charted below, with the reasons.
       </p>
+
+      {/* ---- Upstream SurrealDB 4 bug ---- */}
+      <div
+        className="glass-card"
+        style={{
+          padding: "18px 22px",
+          borderColor: "rgba(255,189,46,.4)",
+          background: "rgba(255,189,46,.08)",
+          marginBottom: 44,
+          marginTop: -20,
+        }}
+      >
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#ffd98a", marginBottom: 6 }}>
+          Known upstream bug: SurrealDB 4 write statements
+        </div>
+        <p style={{ margin: 0, fontSize: 14, lineHeight: 1.65, color: "#e2e8f0" }}>
+          <a
+            href={SURREALDB_BUG_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "#67e8f9" }}
+          >
+            surrealdb/surrealdb#7667
+          </a>{" "}
+          reports that in SurrealDB 4.0.0 every write statement costs about
+          350&nbsp;µs of CPU in the query executor, 10–17× more than in 3.3.5,
+          and about 2–3× more per round trip over the server. A later comment
+          on the issue says 4.0.1, the version this run used, is unchanged. The
+          issue is open and no fix has been merged upstream. It is the leading
+          suspect for the drop on AXIAM's database-bound cells, which are
+          marked on the charts below. Whether it explains all of them,
+          read-heavy cells included, is not yet established.{" "}
+          <strong>
+            Those cells will be re-measured on the same VM once a fixed
+            SurrealDB release ships
+          </strong>
+          , and this page will be updated with the result. JWKS, password login
+          and the competitors' figures do not depend on SurrealDB.
+        </p>
+      </div>
 
       {/* ---- Headline numbers ---- */}
       <div style={{ marginBottom: 52 }} className="ax-grid-3">

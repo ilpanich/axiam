@@ -1692,6 +1692,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "AXIAM issues 3.9× the tokens/s of Keycloak and 3.8× those of Zitadel, at a 15 ms p50 against their 99–109 ms, and holds within 2% under TLS 1.3 and mutual TLS. The lead is half what run 5 measured (7.9×): AXIAM's server used 0.70 of its 2 cores while SurrealDB sat at its 2-core cap, so this cell now measures the database tier, not the token service.",
+    note: "SurrealDB 4 bug #7667 open — re-run pending",
   },
   {
     id: "introspection",
@@ -1705,6 +1706,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "Keycloak wins this cell: 1,940 against AXIAM's 1,582 req/s, with a lower p50 (5.4 vs 15.2 ms) though a higher p95 (85 vs 69 ms). AXIAM led by 2.4× in run 5. Its server was at 0.67 cores with SurrealDB pegged, and server-only AXIAM still spends the least CPU per request (0.42 cpu·ms against Keycloak's 1.04) — but throughput is what a client sees, and on throughput this is a loss.",
+    note: "SurrealDB 4 bug #7667 open — re-run pending",
   },
   {
     id: "jwks",
@@ -1731,7 +1733,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "Keycloak serves 2.7× AXIAM's userinfo reads (3,862 vs 1,411 req/s); AXIAM still leads Zitadel by 1.6×. Keycloak answers this endpoint without touching PostgreSQL (0.01 cores), whereas AXIAM reads SurrealDB on every call and SurrealDB is pegged. Server-only, AXIAM costs 0.42 cpu·ms per request against Keycloak's 0.52, so the gap is the database round trip, not the server.",
-    note: "Zitadel: token minted via client_credentials in setup()",
+    note: "SurrealDB 4 bug #7667 open · Zitadel token via client_credentials",
   },
   {
     id: "userinfo_grpc",
@@ -1743,6 +1745,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "3,078 identity reads/s at a 59 ms p95 — 2.2× AXIAM's own REST path and 12.6× Zitadel's gRPC userinfo, which runs 71% below Zitadel's REST cell (its gRPC surface is a management API, which is fair). Keycloak and authentik expose no gRPC equivalent. Run 5 measured 12,307/s here; the same pegged database explains the fall.",
+    note: "SurrealDB 4 bug #7667 open — re-run pending",
   },
   {
     id: "password_login",
@@ -1768,7 +1771,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "Informational, not a like-for-like race: AXIAM has no ROPC/password grant by design, so its cell measures session-cookie refresh (CSRF double-submit, single-use rotation) while Keycloak's measures the OAuth2 refresh-token grant. Keycloak is ahead this run; AXIAM's server sat at 0.27 cores with SurrealDB pegged, and refresh is three database round trips. Zitadel's and authentik's cells are fallback operations and are excluded.",
-    note: "protocol-variant",
+    note: "protocol-variant · SurrealDB 4 bug #7667 open",
   },
 ];
 
@@ -1803,7 +1806,7 @@ export const BENCH_AUTHZ: BenchScenario = {
   ],
   takeaway:
     "gRPC delivers 31% more single checks than REST at a lower p95 (100 vs 153 ms), and a batch of five turns 485 REST operations/s into 2,425 checks/s — 4.9× singles, the same amplification run 5 measured. The absolute figures are half or less of run 5's (1,032 / 1,268 / 5,130 / 4,640): on every authorization cell SurrealDB used 2.02 of its 2 cores while AXIAM's server used 0.38–0.43. These are database-tier numbers; the cache-on sensitivity pass was not part of this run.",
-  note: "AXIAM-only — no competitor exposes an equivalent decision endpoint",
+  note: "AXIAM-only · SurrealDB 4 bug #7667 open — re-run pending",
 };
 
 /**

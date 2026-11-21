@@ -892,6 +892,52 @@ Tests: one per door, plus un-suspend restores sign-in (new session required).
 
 ### SA-14 — Signed envelope on mail and outbound queues (N3)
 
+> **EXECUTED (2026-11-21, Opus 5.5). N3: reproduced.** An unsigned message on
+> the mail queue with a nil `user_id` was mailed, tenant-branded, to the
+> `to_address` and link the publisher chose; an unsigned SSF-push or webhook
+> message on the outbound queues reached its deliverer; and `deliver_once`
+> POSTed to a disabled webhook and for an event it did not subscribe to.
+> The fix adds `axiam_amqp::internal_envelope`: `InternalEnvelope`
+> (`purpose`, `key_version`, `nonce`, `issued_at`, `body`, `hmac_signature`)
+> sealed with a **server-only** key derived by HKDF-SHA256 from the AMQP master
+> key under `info = "axiam-amqp-internal-v1" || key_version || purpose`, so no
+> tenant subkey can sign it and a key is bound to one queue family.
+> `InternalQueueGate::open` checks shape, signature presence, purpose, HMAC,
+> key version, freshness (`replay_skew`) and the durable nonce store; every
+> refusal is nacked to the DLQ and writes an `amqp.internal_message_rejected`
+> row to the nil-tenant system audit log (metadata `{queue, reason}` only).
+> Mail, webhook and outbound publishers seal; the mail, webhook and outbound
+> consumers open. Retry copies are re-sealed; outbound retries carry
+> `issued_at` = TTL expiry so the 1 h backoff is not refused as stale. New
+> setting `amqp.internal_queues.require_signature` (default `true`). The
+> `to_address` fallback is removed for non-Notification mail (an unresolvable
+> user sends nothing), and `deliver_once` refuses disabled webhooks and
+> unsubscribed events as terminal (dead-letter, no retry).
+>
+> Tests: `sa14_unsigned_outbound_messages_never_reach_the_deliverer` (lib),
+> `sa14_an_unresolvable_user_is_not_mailed_at_the_messages_address`,
+> `sa14_a_disabled_webhook_is_not_delivered_to`,
+> `sa14_an_unsubscribed_event_is_not_delivered` failed before and pass after;
+> plus envelope unit and integration tests (replay, unsigned, foreign/tenant
+> key, stale, flag off). The report's SSF test was moved from the oauth2
+> deliverer to the consumer seam, where the guard sits (layering forbids
+> `axiam-amqp` → `axiam-oauth2`). §1.2 rewrites:
+> `user_lookup_failure_falls_back_to_advisory_address` →
+> `user_lookup_failure_sends_nothing`; mail consumer/template/in-process tests
+> now seed a real user. Regression: `axiam-amqp` all green (lib 210), REST lib
+> 333, `webhook_test` 28, `webhook_outbound_test` 6,
+> `outbound_supervisor_single_copy` 5. fmt, layering, digest, registry and
+> workspace clippy clean. No OpenAPI change; AsyncAPI documents the envelope.
+>
+> **Upgrade notes (SA-50):** old replicas cannot read the new envelope, so
+> roll producers and consumers together; drain the mail, webhook and outbound
+> queues before upgrading, or set `require_signature = false` for one
+> deployment. Messages already in a DLQ are in the old shape and replay only
+> with the flag off; a message dead-lettered after the upgrade is refused as
+> stale if replayed more than `REPLAY_SKEW_SECS` after it was published.
+> Mail to an unknown user and deliveries to disabled or unsubscribed webhooks
+> are no longer sent.
+
 - **Model:** Opus 5.5. New wire envelope, producer and consumer must roll over
   together.
 - **Files:** `crates/axiam-amqp/src/mail_consumer.rs` (508),

@@ -1769,6 +1769,65 @@ TLS supplies the confidentiality. It does not supply HMAC's property, because
 TLS terminates at the broker and the broker then re-sends — only an end-to-end
 signature survives that hop. **Run both.**
 
+### The server-internal queues are signed too (SA-14)
+
+`axiam.mail.outbound` and the outbound kinds' queues (`axiam.webhook`,
+`axiam.ssf_push`, `axiam.scim_push`, `axiam.ciba_ping`, and each one's `.retry`
+queue) have no SDK producer: AXIAM writes them and AXIAM reads them. What it
+does with a message there is its most trusted output — tenant-branded mail
+through the tenant's provider, webhook POSTs signed with the webhook's secret,
+Security Event Tokens signed with the deployment key — so a message on them is
+now accepted only inside a signed envelope:
+
+```json
+{"purpose":"mail","key_version":2,"nonce":"…","issued_at":"…","body":{…},"hmac_signature":"…"}
+```
+
+`body` is the message exactly as these queues carried it before. The HMAC key
+is derived from `AXIAM__AMQP__SIGNING_KEY` under an HKDF label of its own
+(`axiam-amqp-internal-v1`, plus the queue family), **not** from a tenant's
+subkey: the subkey a tenant's producers hold for `axiam.authz.request` and
+`axiam.audit.events` cannot sign a message here. The nonce goes to the same
+durable replay store, and `issued_at` must lie within
+`AXIAM__AMQP__REPLAY_SKEW_SECS` of the consumer's clock (a retry copy carries
+the time its retry-queue TTL expires, so a long backoff is not mistaken for a
+stale message). An unsigned, tampered, stale or replayed message is
+dead-lettered and recorded in the system audit log as
+`amqp.internal_message_rejected`, with the queue and the reason.
+
+Two delivery rules changed with it. Mail of every type except a notification
+rule's is sent only to the address of the user record the message names; when
+that user cannot be read, nothing is sent (the message's own `to_address` was
+used before). And a queued webhook delivery is dropped, not retried, when the
+webhook has since been disabled or no longer subscribes to the event.
+
+#### Upgrading: drain the queues, or relax the check for one deployment
+
+A replica of an earlier version writes unsigned messages and cannot read the
+envelope. Do one of these when you upgrade:
+
+1. **Drain.** Stop the old replicas' producers (or wait for a quiet period),
+   let `axiam.mail.outbound`, `axiam.webhook`, `axiam.ssf_push`,
+   `axiam.scim_push`, `axiam.ciba_ping` **and their `.retry` queues** empty,
+   then deploy. Nothing is rejected.
+2. **Relax for one deployment.** Deploy with
+   `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false`: the new replicas
+   still sign everything they publish and still reject any envelope that fails
+   to verify, but also accept a message in the old, unsigned shape (each one is
+   logged as a warning). Once no old replica is left and the retry queues have
+   turned over — the longest retry TTL, an hour by default — remove the
+   variable (the default is `true`) and redeploy.
+
+   The flag cannot help an *old* replica: it does not know the envelope, so
+   a signed message it happens to consume is dead-lettered. Keep the overlap
+   short, or stop the old replicas' consumers first.
+
+Messages already in a `.dlq` when you upgrade are in the old shape; replaying
+one into its primary queue needs option 2. A message dead-lettered after the
+upgrade carries its original `issued_at`, so replaying it later than
+`AXIAM__AMQP__REPLAY_SKEW_SECS` after it was published is rejected as stale —
+the DLQ keeps it for inspection, and the event is re-sent from its source.
+
 ### Compose
 
 `just prod-up` handles it. It calls `just prod-broker-certs`, which generates a
@@ -1955,6 +2014,7 @@ configure and it is not covered here.
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
 | `AXIAM__AMQP__CONNECT_TIMEOUT_MS` | `30000` | Budget for one connection attempt. lapin has none of its own, so without this a broker whose port is published but whose TLS listener never answers leaves the connect pending forever — no error, no retry, no log line. Raise it for a broker behind a slow link; do not disable it. |
+| `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE` | `true` | Whether the mail and outbound consumers refuse a message without the signed envelope ([SA-14](#the-server-internal-queues-are-signed-too-sa-14)). Set `false` for **one** rolling deployment only. A failing envelope is refused either way. |
 
 ## Minimal profile (no broker)
 

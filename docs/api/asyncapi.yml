@@ -22,6 +22,14 @@ info:
     exact convention); webhook delivery uses a nack-no-requeue dead-letter
     chain with no silent message loss.
 
+    **Server-internal queues (SA-14).** `axiam.mail.outbound` and every
+    outbound kind's queues (`axiam.webhook`, `axiam.ssf_push`,
+    `axiam.scim_push`, `axiam.ciba_ping`, their `.retry` and `.dlq` queues)
+    carry each message documented below as the `body` of an
+    `InternalEnvelope` (see that schema), HMAC-signed with a server-only key
+    no SDK or tenant holds. These queues have no external producer; the
+    message schemas below describe the envelope's `body`.
+
     **Minimal profile.** A server running with `AXIAM__AMQP__ENABLED=false`
     reads none of these queues. A broker confirm for a message published to
     `axiam.authz.request` or `axiam.audit.events` never means AXIAM decided the
@@ -559,6 +567,39 @@ components:
         $ref: '#/components/schemas/WebhookMessage'
 
   schemas:
+    InternalEnvelope:
+      type: object
+      description: >-
+        The signed envelope of the server-internal queues (SA-14, source:
+        crates/axiam-amqp/src/internal_envelope.rs). `hmac_signature` is
+        HMAC-SHA256 (hex) over this object serialized in field order without
+        `hmac_signature`, keyed by HKDF-SHA256 of the AMQP master key with
+        info `axiam-amqp-internal-v1 || key_version || purpose` — never a
+        per-tenant subkey. Consumers reject an unsigned, tampered, stale
+        (`issued_at` outside the replay skew) or replayed (`nonce` seen)
+        envelope, dead-letter it and audit `amqp.internal_message_rejected`.
+        Unknown fields are refused.
+      required: [purpose, key_version, nonce, issued_at, body, hmac_signature]
+      additionalProperties: false
+      properties:
+        purpose:
+          type: string
+          description: "`mail`, or `outbound.<kind>` (`outbound.webhook`, `outbound.ssf_push`, `outbound.scim_push`, `outbound.ciba_ping`)."
+        key_version:
+          type: integer
+          minimum: 2
+        nonce:
+          type: string
+          format: uuid
+        issued_at:
+          type: string
+          format: date-time
+          description: Publish time; for an outbound retry copy, the time its retry-queue TTL expires.
+        body:
+          type: object
+          description: The queue's message (`OutboundMailMessage`, `WebhookMessage`, or the shared outbound message of the other kinds).
+        hmac_signature:
+          type: string
     AuthzRequest:
       type: object
       description: >-

@@ -29,7 +29,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Fixed application-level salt for HKDF tenant-key derivation. HKDF salts
 /// are not secret; domain separation comes from the `info` parameter below.
-const APP_SALT: &[u8] = b"axiam-amqp-hkdf-salt-v1";
+pub(crate) const APP_SALT: &[u8] = b"axiam-amqp-hkdf-salt-v1";
 
 /// Fixed domain-separation tag mixed into HKDF's `info` parameter so a
 /// derived AMQP signing subkey can never collide with a subkey derived for

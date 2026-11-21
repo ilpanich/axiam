@@ -598,11 +598,6 @@ where
         );
         None
     };
-    // The transport of the four outbound kinds, chosen with the profile.
-    let mut outbound = match &amqp {
-        Some(amqp) => OutboundTransport::amqp(Arc::clone(amqp)),
-        None => OutboundTransport::in_process(),
-    };
 
     // LIVE pooled-connection reference — registered in `AppState` so handlers
     // that need direct access (e.g. /api/v1/admin/bootstrap) resolve the
@@ -1276,6 +1271,35 @@ where
     // NEW-4: durable AMQP nonce store for replay protection, shared by the
     // authz + audit consumers and swept by the periodic cleanup task.
     let amqp_nonce_repo = SurrealAmqpNonceRepository::new(pool.handle_for_repo());
+    // SA-14 (N3): the server-internal queues (mail and the four outbound
+    // kinds) carry a signed envelope under a server-only key derived from the
+    // AMQP master key. Built here, where the key and the nonce store both exist.
+    let internal_queues = amqp_signing_key.as_ref().map(|key| {
+        (
+            axiam_amqp::InternalSigner::new(key.clone()),
+            axiam_amqp::InternalQueueGate::new(
+                key.clone(),
+                config.amqp.internal_queues.require_signature,
+                config.amqp.replay_skew(),
+                amqp_nonce_repo.clone(),
+            ),
+        )
+    });
+    if !config.amqp.internal_queues.require_signature && amqp.is_some() {
+        tracing::warn!(
+            "AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false: unsigned messages on the \
+             mail and outbound queues are accepted. Use this for one rolling deployment \
+             only (SA-14)."
+        );
+    }
+    // The transport of the four outbound kinds, chosen with the profile.
+    let mut outbound = match (&amqp, &internal_queues) {
+        (Some(amqp), Some((signer, gate))) => {
+            OutboundTransport::amqp(Arc::clone(amqp), signer.clone(), gate.clone())
+        }
+        (Some(_), None) => unreachable!("the broker profile resolves the AMQP signing key"),
+        (None, _) => OutboundTransport::in_process(),
+    };
     let federation_login_state_repo =
         SurrealFederationLoginStateRepository::new(pool.handle_for_repo());
     let sso_handoff_code_repo = SurrealSsoHandoffCodeRepository::new(pool.handle_for_repo());
@@ -2259,7 +2283,10 @@ where
                 .await
                 .expect("Failed to create AMQP mail outbound publisher channel");
             (
-                MailTransportPublisher::Amqp(MailOutboundPublisher::new(mail_pub_channel)),
+                MailTransportPublisher::Amqp(MailOutboundPublisher::new(
+                    mail_pub_channel,
+                    internal_signer(&internal_queues),
+                )),
                 None,
             )
         }
@@ -2481,9 +2508,14 @@ where
                 .await
                 .expect("Failed to create AMQP mail consumer channel");
             let died = fatal_stop.clone();
+            let (mail_signer, mail_gate) = internal_queues
+                .clone()
+                .expect("the broker profile resolves the AMQP signing key");
             tokio::spawn(async move {
                 axiam_amqp::start_mail_consumer(
                     mail_channel,
+                    mail_gate,
+                    mail_signer,
                     mail_egress,
                     mail_email_config_repo,
                     mail_audit_repo,
@@ -2960,7 +2992,10 @@ where
                 .create_publisher_channel()
                 .await
                 .expect("Failed to create AMQP cleanup mail channel");
-            MailTransportPublisher::Amqp(MailOutboundPublisher::new(cleanup_mail_pub_channel))
+            MailTransportPublisher::Amqp(MailOutboundPublisher::new(
+                cleanup_mail_pub_channel,
+                internal_signer(&internal_queues),
+            ))
         }
         // The same in-process channel the rest of the process publishes to.
         None => mail_outbound_publisher.clone(),
@@ -3731,6 +3766,17 @@ pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
     audit: Duration::from_secs(3),
     cleanup: Duration::from_secs(2),
 };
+
+/// The internal-queue signer of the broker profile (SA-14). Only called where
+/// the broker is enabled, which resolves the AMQP signing key.
+fn internal_signer(
+    internal_queues: &Option<(axiam_amqp::InternalSigner, axiam_amqp::InternalQueueGate)>,
+) -> axiam_amqp::InternalSigner {
+    internal_queues
+        .as_ref()
+        .map(|(signer, _)| signer.clone())
+        .expect("the broker profile resolves the AMQP signing key")
+}
 
 /// Wait for the cleanup task for at most `bound` (#598); past it, abort the task
 /// — it is cut at the await it is in — and say so. Then wait, until the same

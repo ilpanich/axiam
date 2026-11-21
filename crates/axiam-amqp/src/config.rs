@@ -171,6 +171,32 @@ pub struct AmqpConfig {
     /// [`crate::messages::DEFAULT_FRESHNESS_SKEW_SECS`] (5 minutes).
     #[serde(default = "default_replay_skew_secs")]
     pub replay_skew_secs: u64,
+    /// The server-internal queues' signed envelope (SA-14, N3):
+    /// `AXIAM__AMQP__INTERNAL_QUEUES__*`.
+    #[serde(default)]
+    pub internal_queues: InternalQueuesConfig,
+}
+
+/// The server-internal queues (`axiam.mail.outbound` and the outbound kinds'
+/// queues) carry a signed envelope ([`crate::internal_envelope`]). Their
+/// consumers always verify an envelope; this decides what they do with a
+/// message in the pre-SA-14, unsigned shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct InternalQueuesConfig {
+    /// `true` (the default): an unsigned message is rejected, dead-lettered
+    /// and audited. `false`: it is accepted with a warning — for one rolling
+    /// deployment while replicas of an earlier version still publish, never
+    /// as a steady state. `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE`.
+    pub require_signature: bool,
+}
+
+impl Default for InternalQueuesConfig {
+    fn default() -> Self {
+        Self {
+            require_signature: true,
+        }
+    }
 }
 
 impl std::fmt::Debug for AmqpConfig {
@@ -189,6 +215,7 @@ impl std::fmt::Debug for AmqpConfig {
             .field("reconnect_delay_ms", &self.reconnect_delay_ms)
             .field("max_retries", &self.max_retries)
             .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("internal_queues", &self.internal_queues)
             .field(
                 "signing_key",
                 &self.signing_key.as_ref().map(|_| "<redacted>"),
@@ -237,6 +264,7 @@ impl Default for AmqpConfig {
             connect_timeout_ms: 30_000,
             signing_key: None,
             replay_skew_secs: default_replay_skew_secs(),
+            internal_queues: InternalQueuesConfig::default(),
         }
     }
 }
@@ -365,6 +393,20 @@ mod tests {
         assert!(!off.enabled);
         // The Debug rendering states the profile (the boot log prints it).
         assert!(format!("{off:?}").contains("enabled: false"));
+    }
+
+    /// SA-14: the internal queues require a signature unless an operator says
+    /// otherwise, and an absent section keeps it required.
+    #[test]
+    fn internal_queues_require_a_signature_by_default() {
+        assert!(AmqpConfig::default().internal_queues.require_signature);
+        let empty: AmqpConfig = serde_json::from_str("{}").unwrap();
+        assert!(empty.internal_queues.require_signature);
+        let partial: AmqpConfig = serde_json::from_str(r#"{"internal_queues": {}}"#).unwrap();
+        assert!(partial.internal_queues.require_signature);
+        let off: AmqpConfig =
+            serde_json::from_str(r#"{"internal_queues": {"require_signature": false}}"#).unwrap();
+        assert!(!off.internal_queues.require_signature);
     }
 
     #[test]

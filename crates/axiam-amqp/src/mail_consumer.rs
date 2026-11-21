@@ -11,6 +11,10 @@
 //! PII-minimal `email.delivery_failed` audit event is appended (D-16).
 
 use crate::connection::queues;
+use crate::internal_envelope::{
+    InternalQueueGate, InternalSigner, MAIL_PURPOSE, Rejection, rejection_audit_entry,
+};
+use crate::mail_publisher::seal_mail;
 use crate::messages::{MailType, OutboundMailMessage};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::email_template::TemplateKind;
@@ -207,10 +211,10 @@ where
 /// included in audit metadata (D-16).
 ///
 /// # SEC-055: Recipient resolution
-/// The `to_address` field in `OutboundMailMessage` is treated as advisory.
-/// The actual recipient email is always resolved from `user_id` + `tenant_id`
-/// via the user repository, preventing recipient hijacking if a message is
-/// intercepted and tampered with in transit.
+/// The `to_address` field in `OutboundMailMessage` is ignored for every type
+/// but `Notification`. The recipient is the address of the user `user_id` +
+/// `tenant_id` names; when that user cannot be read the call returns
+/// [`SendError`] and nothing is sent (SA-14).
 #[allow(clippy::too_many_arguments)]
 pub async fn send_with_retry_and_audit<E, A, U, T, N, O>(
     msg: &OutboundMailMessage,
@@ -318,21 +322,31 @@ where
     //    authoritative value to prefer over the message's. What protects it is
     //    that only `NotificationDispatcher` produces `MailType::Notification`, and
     //    it reads the address straight from the rule row.
+    //
+    //    SA-14 (N3): for every other type the user record's address is the
+    //    only recipient. There used to be a fallback to `to_address` when the
+    //    lookup failed — a nil or unknown `user_id` — which handed the choice
+    //    of recipient straight back to the message and defeated SEC-055. Every
+    //    production publisher of those types names a real user, so a lookup
+    //    that fails is refused as a send error: nothing is sent.
     let resolved_address = if msg.mail_type == MailType::Notification {
         msg.to_address.clone()
     } else {
-        user_repo
-            .get_by_id(msg.tenant_id, msg.user_id)
-            .await
-            .map(|u| u.email)
-            .unwrap_or_else(|_| {
+        match user_repo.get_by_id(msg.tenant_id, msg.user_id).await {
+            Ok(user) => user.email,
+            Err(e) => {
                 warn!(
                     user_id = %msg.user_id,
                     tenant_id = %msg.tenant_id,
-                    "SEC-055: could not resolve user email — falling back to message to_address"
+                    mail_type = ?msg.mail_type,
+                    error = %e,
+                    "SEC-055/SA-14: recipient user not found — not sending"
                 );
-                msg.to_address.clone()
-            })
+                return Err(SendError(
+                    "SEC-055: the recipient user could not be resolved".into(),
+                ));
+            }
+        }
     };
 
     // 6. Render HTML-safe email (D-18).
@@ -444,6 +458,46 @@ fn error_class_for(error_msg: &str) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Admission (SA-14, N3)
+// ---------------------------------------------------------------------------
+
+/// Admit one delivery taken off `axiam.mail.outbound`: verify its signed
+/// envelope through `gate` and decode the [`OutboundMailMessage`] inside.
+///
+/// Returns `None` — the caller nacks without requeue, which dead-letters it —
+/// for an unsigned, tampered, stale or replayed message, or a body that is not
+/// a mail message, after appending an `amqp.internal_message_rejected` row to
+/// the system audit log. Broker-free so it can be tested directly.
+pub async fn open_mail_delivery<A>(
+    raw: &[u8],
+    gate: &InternalQueueGate,
+    audit_repo: &A,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<OutboundMailMessage>
+where
+    A: AuditLogRepository,
+{
+    let rejection = match gate.open(MAIL_PURPOSE, raw, now).await {
+        Ok(opened) => match serde_json::from_value(opened.into_body()) {
+            Ok(msg) => return Some(msg),
+            Err(_) => Rejection::MalformedBody,
+        },
+        Err(rejection) => rejection,
+    };
+    warn!(
+        reason = rejection.as_str(),
+        "mail message refused by the internal-queue gate — dead-lettering (SA-14)"
+    );
+    if let Err(e) = audit_repo
+        .append(rejection_audit_entry(queues::MAIL_OUTBOUND, rejection))
+        .await
+    {
+        error!(error = %e, "failed to write the internal-queue rejection audit row");
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // AMQP consumer loop
 // ---------------------------------------------------------------------------
 
@@ -458,9 +512,14 @@ fn error_class_for(error_msg: &str) -> &'static str {
 /// SEC-055: The `user_repo` is used to resolve the actual recipient email
 /// address from `user_id + tenant_id`, preventing recipient hijacking via
 /// a tampered `to_address` field in the AMQP message.
+///
+/// SA-14 (N3): every delivery passes [`open_mail_delivery`] first (`gate`),
+/// and a retry copy is re-sealed with `signer` — fresh nonce and `issued_at`.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_mail_consumer<E, A, U, T, N, O>(
     channel: Channel,
+    gate: InternalQueueGate,
+    signer: InternalSigner,
     egress: EmailEgress,
     email_config_repo: E,
     audit_repo: A,
@@ -505,15 +564,19 @@ pub async fn start_mail_consumer<E, A, U, T, N, O>(
 
         let tag = delivery.delivery_tag;
 
-        // Deserialize. Bad payload → nack requeue:false (not re-deliverable).
-        let msg: OutboundMailMessage = match serde_json::from_slice(&delivery.data) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    delivery_tag = tag,
-                    "Invalid mail message payload, nacking"
-                );
+        // Verify and decode. A refused message → nack requeue:false (DLQ);
+        // the refusal is already audited.
+        let msg: OutboundMailMessage = match open_mail_delivery(
+            &delivery.data,
+            &gate,
+            &audit_repo,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Some(m) => m,
+            None => {
+                warn!(delivery_tag = tag, "Mail message refused, nacking");
                 let _ = delivery
                     .acker
                     .nack(BasicNackOptions {
@@ -558,7 +621,7 @@ pub async fn start_mail_consumer<E, A, U, T, N, O>(
                 );
                 tokio::time::sleep(default_retry_delay(retry_msg.attempt_count)).await;
 
-                match serde_json::to_vec(&retry_msg) {
+                match seal_mail(&signer, &retry_msg) {
                     Ok(payload) => {
                         let publish_result = channel
                             .basic_publish(

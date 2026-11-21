@@ -12,7 +12,7 @@
 //! | `Retry`, or a deliverer `Err`, with attempts left | republish to the retry queue with TTL [`backoff_ttl_ms`]`(attempt + 1)`, then `ack` the original | `delivery_attempt` (failure) |
 //! | `Retry` / `Err` with no attempts left | `nack(requeue = false)`, which dead-letters to the DLQ | `delivery_failed` (failure) |
 //! | `DeadLetter` | as the line above, immediately | `delivery_failed` (failure) |
-//! | undecodable bytes | `nack(requeue = false)`; the deliverer is not called | none |
+//! | refused by the signed-envelope gate (unsigned, tampered, stale, replayed, wrong queue) or an undecodable body | `nack(requeue = false)`; the deliverer is not called | `amqp.internal_message_rejected` (denied, system log; SA-14) |
 //!
 //! If the retry copy cannot be published the original is **not** acked: it is
 //! requeued so the broker redelivers it (acking would drop the delivery with
@@ -50,6 +50,9 @@ use super::retry::OutboundRetryConfig;
 use super::topology::OutboundTopology;
 use super::wire;
 use crate::connection::AmqpManager;
+use crate::internal_envelope::{
+    InternalQueueGate, Rejection, outbound_purpose, rejection_audit_entry,
+};
 
 /// Why a consumer could not be set up (or a deliverer registered).
 #[derive(Debug, thiserror::Error)]
@@ -208,6 +211,10 @@ impl<A: AuditLogRepository> AuditSink for RepoAuditSink<'_, A> {
 ///
 /// `channel` should come from `AmqpManager::create_channel` (QoS applied). The
 /// queues must already exist: call `AmqpManager::declare_outbound_topology`.
+///
+/// `gate` verifies each delivery's signed envelope (SA-14, N3) before anything
+/// else looks at it.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_outbound_consumer<A>(
     channel: Channel,
     kind: OutboundKind,
@@ -215,6 +222,7 @@ pub async fn run_outbound_consumer<A>(
     publisher: &AmqpOutboundPublisher,
     audit_repo: &A,
     cfg: OutboundRetryConfig,
+    gate: &InternalQueueGate,
 ) -> Result<(), OutboundConsumerError>
 where
     A: AuditLogRepository,
@@ -254,6 +262,8 @@ where
             publisher,
             &audit,
             &cfg,
+            gate,
+            chrono::Utc::now(),
         )
         .await;
     }
@@ -284,16 +294,34 @@ pub(crate) async fn process_delivery<S, R, A>(
     retry: &R,
     audit: &A,
     cfg: &OutboundRetryConfig,
+    gate: &InternalQueueGate,
+    now: chrono::DateTime<chrono::Utc>,
 ) where
     S: Settlement,
     R: RetryPublisher,
     A: AuditSink,
 {
-    // Bad payload: nack requeue=false (not re-deliverable, not retried forever).
-    let msg = match wire::decode(kind, data) {
+    // SA-14 (N3): the signed envelope first. A refused message — or a body
+    // that is not this kind's message — is never retried and never reaches
+    // the deliverer: nack requeue=false (the DLQ) and a rejection row.
+    let decoded = match gate.open(&outbound_purpose(kind), data, now).await {
+        Ok(opened) => wire::decode_body(kind, opened.into_body()).map_err(|e| {
+            warn!(%kind, error = %e, delivery_tag, "Invalid outbound message body");
+            Rejection::MalformedBody
+        }),
+        Err(rejection) => Err(rejection),
+    };
+    let msg = match decoded {
         Ok(m) => m,
-        Err(e) => {
-            warn!(%kind, error = %e, delivery_tag, "Invalid outbound message payload, nacking");
+        Err(rejection) => {
+            warn!(
+                %kind,
+                reason = rejection.as_str(),
+                delivery_tag,
+                "Outbound message refused by the internal-queue gate, nacking (SA-14)"
+            );
+            let queue = OutboundTopology::for_kind(kind).primary;
+            record(audit, rejection_audit_entry(&queue, rejection)).await;
             let _ = settle.nack(false).await;
             return;
         }
@@ -376,7 +404,8 @@ fn next_supervisor_backoff(current: Duration) -> Duration {
 /// it). Every log line carries the kind slug.
 ///
 /// `publisher` is the kind's publisher, used for the TTL-delayed retry
-/// republish; clone it from the one the producers hold.
+/// republish; clone it from the one the producers hold. `gate` verifies every
+/// delivery's signed envelope (SA-14).
 pub fn spawn_outbound_consumer<A>(
     amqp: Arc<AmqpManager>,
     kind: OutboundKind,
@@ -384,6 +413,7 @@ pub fn spawn_outbound_consumer<A>(
     publisher: AmqpOutboundPublisher,
     audit_repo: A,
     cfg: OutboundRetryConfig,
+    gate: InternalQueueGate,
 ) -> JoinHandle<()>
 where
     A: AuditLogRepository + 'static,
@@ -401,6 +431,7 @@ where
                         &publisher,
                         &audit_repo,
                         cfg,
+                        &gate,
                     )
                     .await
                     {
@@ -427,6 +458,7 @@ mod tests {
     use super::super::outcome::table;
     use super::super::retry::backoff_ttl_ms;
     use super::*;
+    use crate::internal_envelope::tests as envelope_tests;
     use axiam_core::models::audit::AuditOutcome;
     use axiam_core::outbound::{DeliveryOutcome, OutboundError, OutboundFuture};
     use std::sync::Mutex;
@@ -555,6 +587,7 @@ mod tests {
         settle: FakeSettle,
         retry: FakeRetry,
         audit: FakeAudit,
+        gate: InternalQueueGate,
     }
     impl Rig {
         fn new() -> Self {
@@ -562,15 +595,20 @@ mod tests {
                 settle: FakeSettle::default(),
                 retry: FakeRetry::default(),
                 audit: FakeAudit::default(),
+                gate: envelope_tests::gate(true),
             }
         }
         async fn run(&self, msg: &OutboundMessage, deliverer: &Scripted) {
-            let bytes = wire::encode(msg).unwrap();
+            let bytes = wire::seal(&envelope_tests::signer(), msg, chrono::Utc::now()).unwrap();
             self.run_bytes(&bytes, deliverer).await;
         }
         async fn run_bytes(&self, bytes: &[u8], deliverer: &Scripted) {
+            self.run_kind_bytes(OutboundKind::Webhook, bytes, deliverer)
+                .await;
+        }
+        async fn run_kind_bytes(&self, kind: OutboundKind, bytes: &[u8], deliverer: &Scripted) {
             process_delivery(
-                OutboundKind::Webhook,
+                kind,
                 bytes,
                 7,
                 deliverer,
@@ -578,6 +616,8 @@ mod tests {
                 &self.retry,
                 &self.audit,
                 &CFG,
+                &self.gate,
+                chrono::Utc::now(),
             )
             .await;
         }
@@ -790,7 +830,132 @@ mod tests {
 
         assert_eq!(d.calls.load(Ordering::SeqCst), 0);
         assert_eq!(rig.settle.calls(), ["nack(requeue=false)"]);
-        assert!(rig.audit.entries().is_empty());
+        // SA-14: every refusal of the gate is recorded.
+        let entries = rig.audit.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "amqp.internal_message_rejected");
+        assert_eq!(
+            entries[0].metadata,
+            Some(serde_json::json!({"queue": "axiam.webhook", "reason": "malformed"}))
+        );
+    }
+
+    /// SA-14 (N3), report validation test 2 at the seam the fix guards. An
+    /// unsigned SSF push message — a hand-built `SsfPendingEvent` with a
+    /// publisher-chosen `sub_id` — and an unsigned webhook message, each in
+    /// the plain JSON the producers used to write, must never reach the
+    /// deliverer (which signs whatever it is given with the deployment key or
+    /// the webhook secret). They are dead-lettered and audited.
+    #[tokio::test]
+    async fn sa14_unsigned_outbound_messages_never_reach_the_deliverer() {
+        let ssf = serde_json::to_vec(&OutboundMessage {
+            kind: OutboundKind::SsfPush,
+            tenant_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            delivery_id: Uuid::new_v4(),
+            event_type: "https://schemas.openid.net/secevent/caep/event-type/session-revoked"
+                .into(),
+            payload: serde_json::json!({
+                "sub_id": {"format": "email", "email": "victim@example.com"},
+                "event": {"event_timestamp": 0},
+                "event_uri": "https://schemas.openid.net/secevent/caep/event-type/session-revoked",
+                "jti": Uuid::new_v4(),
+            }),
+            attempt: 0,
+        })
+        .unwrap();
+        let webhook = serde_json::to_vec(&crate::messages::WebhookMessage {
+            webhook_id: Uuid::new_v4(),
+            delivery_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            event_type: "user.created".into(),
+            payload: serde_json::json!({"forged": true}),
+            attempt: 0,
+        })
+        .unwrap();
+
+        for (kind, bytes) in [
+            (OutboundKind::SsfPush, ssf),
+            (OutboundKind::Webhook, webhook),
+        ] {
+            let rig = Rig::new();
+            let d = Scripted::new(Ok(DeliveryOutcome::Delivered {
+                response_status: Some(202),
+            }));
+            rig.run_kind_bytes(kind, &bytes, &d).await;
+
+            assert_eq!(
+                d.calls.load(Ordering::SeqCst),
+                0,
+                "{kind}: an unsigned message must not reach the deliverer"
+            );
+            assert_eq!(rig.settle.calls(), ["nack(requeue=false)"], "{kind}");
+            let entries = rig.audit.entries();
+            assert_eq!(entries.len(), 1, "{kind}: the rejection is audited");
+            assert_eq!(entries[0].action, "amqp.internal_message_rejected");
+        }
+    }
+
+    /// SA-14: a signed message is delivered once; the same bytes again are a
+    /// replay, refused and audited, and the deliverer is not called twice.
+    #[tokio::test]
+    async fn sa14_a_replayed_signed_message_is_refused() {
+        let rig = Rig::new();
+        let d = Scripted::new(Ok(DeliveryOutcome::Delivered {
+            response_status: Some(200),
+        }));
+        let bytes = wire::seal(&envelope_tests::signer(), &message(0), chrono::Utc::now()).unwrap();
+        rig.run_bytes(&bytes, &d).await;
+        rig.run_bytes(&bytes, &d).await;
+        assert_eq!(d.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rig.settle.calls(), ["ack", "nack(requeue=false)"]);
+        let entries = rig.audit.entries();
+        assert_eq!(entries[1].action, "amqp.internal_message_rejected");
+        assert_eq!(entries[1].metadata.as_ref().unwrap()["reason"], "replay");
+    }
+
+    /// SA-14: a message signed for one kind's queue is refused on another's,
+    /// and a stale one is refused.
+    #[tokio::test]
+    async fn sa14_a_message_is_bound_to_its_kind_and_its_freshness() {
+        let signer = envelope_tests::signer();
+        let webhook = wire::seal(&signer, &message(0), chrono::Utc::now()).unwrap();
+        let stale = wire::seal(
+            &signer,
+            &message(0),
+            chrono::Utc::now() - chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        for (kind, bytes, reason) in [
+            (OutboundKind::SsfPush, webhook, "wrong_purpose"),
+            (OutboundKind::Webhook, stale, "stale"),
+        ] {
+            let rig = Rig::new();
+            let d = Scripted::new(Ok(DeliveryOutcome::Delivered {
+                response_status: None,
+            }));
+            rig.run_kind_bytes(kind, &bytes, &d).await;
+            assert_eq!(d.calls.load(Ordering::SeqCst), 0, "{reason}");
+            assert_eq!(
+                rig.audit.entries()[0].metadata.as_ref().unwrap()["reason"],
+                reason
+            );
+        }
+    }
+
+    /// SA-14 rolling upgrade: with `require_signature = false` an old
+    /// replica's unsigned message is still delivered.
+    #[tokio::test]
+    async fn sa14_unsigned_messages_are_admitted_only_when_signatures_are_optional() {
+        let mut rig = Rig::new();
+        rig.gate = envelope_tests::gate(false);
+        let d = Scripted::new(Ok(DeliveryOutcome::Delivered {
+            response_status: None,
+        }));
+        let legacy = serde_json::to_vec(&wire::encode_body(&message(0)).unwrap()).unwrap();
+        rig.run_bytes(&legacy, &d).await;
+        assert_eq!(d.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rig.settle.calls(), ["ack"]);
     }
 
     /// G-8: this loop and the in-process dispatcher share `outcome::decide`.

@@ -890,8 +890,17 @@ mod tests {
             }
         });
 
-        // SAFETY: only `HTTPS_PROXY` is touched, and only `https://` requests
-        // consult it; every other test in this module talks plain `http://`.
+        // SAFETY (QR1-10): reqwest reads the proxy variables when a client is
+        // *built* (`ClientBuilder::build` calls `Matcher::from_system()`), for
+        // every scheme, not when an `https://` request is sent. So the window
+        // below — set, build, restore — is short, but a client another test
+        // of this binary builds on another thread inside it would read the
+        // fixture proxy, and `set_var` racing a concurrent `getenv` is the
+        // undefined behaviour `unsafe` marks. No other test here mutates the
+        // environment and this crate has no environment lock to serialize on;
+        // the residual risk is a spuriously proxied client in a concurrent
+        // test, not a false pass here: the variable is read at build time and
+        // not cached, so this test still fails without `.no_proxy()`.
         let previous = std::env::var_os("HTTPS_PROXY");
         unsafe { std::env::set_var("HTTPS_PROXY", format!("http://{proxy_addr}")) };
 

@@ -290,11 +290,27 @@ fn publish_signed(
 /// [`queues::AUTHZ_RESPONSE`] queue, as before. Either way the response is
 /// signed and bound to its request (see [`AuthzResponse`]), so the route is not
 /// what a requester trusts.
+///
+/// SR1-5: a `reply_to` naming one of the server's own queues
+/// ([`is_server_internal_queue`]) is not honoured — the decision goes to the
+/// shared queue, as for a request without one. Publishing there with the
+/// server's broker credentials would let any requester write into the mail,
+/// outbound, audit or authz queues (and their retry and dead-letter queues),
+/// where each such message is refused and audited: cheap noise that buries
+/// real alerts. The shared queue rather than no answer, so a misconfigured but
+/// honest requester still gets its (signed) decision; nothing else about the
+/// name is restricted, since integrators may use named reply queues.
 pub fn response_routing_key(reply_to: Option<&str>) -> &str {
     match reply_to {
-        Some(queue) if !queue.is_empty() => queue,
+        Some(queue) if !queue.is_empty() && !is_server_internal_queue(queue) => queue,
         _ => queues::AUTHZ_RESPONSE,
     }
+}
+
+/// Whether `queue` is one of the server's own queues: every queue AXIAM
+/// declares is named `axiam.…`.
+pub fn is_server_internal_queue(queue: &str) -> bool {
+    queue.starts_with("axiam.")
 }
 
 /// Start consuming authorization requests from the `axiam.authz.request` queue.
@@ -393,14 +409,24 @@ pub async fn start_authz_consumer<R, P, Res, S, G, N, T>(
 
         // SA-15 (N2): answer on the request's `reply_to` queue when it names
         // one, otherwise on the shared response queue as before.
-        let routing_key = response_routing_key(
-            delivery
-                .properties
-                .reply_to()
-                .as_ref()
-                .map(|queue| queue.as_str()),
-        )
-        .to_owned();
+        let reply_to = delivery
+            .properties
+            .reply_to()
+            .as_ref()
+            .map(|queue| queue.as_str().to_owned());
+        if let Some(queue) = reply_to.as_deref()
+            && is_server_internal_queue(queue)
+        {
+            // SR1-5: logged, not audited — an audit row per refused
+            // `reply_to` would be the very noise the refusal prevents.
+            warn!(
+                delivery_tag = tag,
+                reply_to = queue,
+                "authz request names a server-internal queue as reply_to; \
+                 answering on the shared response queue instead (SR1-5)"
+            );
+        }
+        let routing_key = response_routing_key(reply_to.as_deref()).to_owned();
 
         let confirm = match channel
             .basic_publish(

@@ -218,6 +218,7 @@ fn gate(db: &Surreal<Db>, require_signature: bool) -> InternalQueueGate {
         MASTER.to_vec(),
         require_signature,
         chrono::Duration::seconds(300),
+        chrono::Duration::hours(24),
         SurrealAmqpNonceRepository::new(db.clone()),
     )
 }
@@ -253,10 +254,10 @@ async fn sa14_a_sealed_mail_message_is_admitted_once() {
     let msg = mail();
     let raw = seal_mail(&InternalSigner::new(MASTER.to_vec()), &msg).unwrap();
 
-    let opened = open_mail_delivery(&raw, &g, &audit, Utc::now()).await;
+    let opened = open_mail_delivery(&raw, &g, &audit, Utc::now(), false).await;
     assert_eq!(opened.map(|m| m.user_id), Some(msg.user_id));
     assert!(
-        open_mail_delivery(&raw, &g, &audit, Utc::now())
+        open_mail_delivery(&raw, &g, &audit, Utc::now(), false)
             .await
             .is_none()
     );
@@ -272,7 +273,7 @@ async fn sa14_an_unsigned_mail_message_is_refused_and_audited() {
     let raw = serde_json::to_vec(&mail()).unwrap();
 
     assert!(
-        open_mail_delivery(&raw, &gate(&db, true), &audit, Utc::now())
+        open_mail_delivery(&raw, &gate(&db, true), &audit, Utc::now(), false)
             .await
             .is_none()
     );
@@ -280,7 +281,7 @@ async fn sa14_an_unsigned_mail_message_is_refused_and_audited() {
 
     // During a rolling upgrade (`require_signature = false`) it is admitted.
     assert!(
-        open_mail_delivery(&raw, &gate(&db, false), &audit, Utc::now())
+        open_mail_delivery(&raw, &gate(&db, false), &audit, Utc::now(), false)
             .await
             .is_some()
     );
@@ -298,7 +299,7 @@ async fn sa14_a_foreign_or_stale_mail_message_is_refused() {
         .seal(MAIL_PURPOSE, &mail(), Utc::now())
         .unwrap();
     assert!(
-        open_mail_delivery(&foreign, &g, &audit, Utc::now())
+        open_mail_delivery(&foreign, &g, &audit, Utc::now(), false)
             .await
             .is_none()
     );
@@ -307,11 +308,12 @@ async fn sa14_a_foreign_or_stale_mail_message_is_refused() {
         .seal(
             MAIL_PURPOSE,
             &mail(),
-            Utc::now() - chrono::Duration::hours(1),
+            // Past the 24 h maximum age (one hour before QR1-2).
+            Utc::now() - chrono::Duration::hours(25),
         )
         .unwrap();
     assert!(
-        open_mail_delivery(&stale, &g, &audit, Utc::now())
+        open_mail_delivery(&stale, &g, &audit, Utc::now(), false)
             .await
             .is_none()
     );
@@ -319,4 +321,52 @@ async fn sa14_a_foreign_or_stale_mail_message_is_refused() {
     let mut reasons = rejection_reasons(&audit).await;
     reasons.sort();
     assert_eq!(reasons, ["bad_signature", "stale"]);
+}
+
+/// QR1-2 / SR1-2, against the durable nonce store: a password-reset mail that
+/// sat in the queue for an hour — a consumer outage, well past the 5-minute
+/// replay skew — is still delivered, and its nonce is kept for the maximum age,
+/// so the same bytes published again are a replay. SR1-1: the broker's
+/// redelivery of it is admitted.
+#[tokio::test]
+async fn sa14_a_backlogged_mail_is_delivered_and_its_redelivery_admitted() {
+    let db = setup_db().await;
+    let audit = SurrealAuditLogRepository::new(db.clone());
+    let g = gate(&db, true);
+    let msg = mail();
+    let issued_at = Utc::now() - chrono::Duration::hours(1);
+    let raw = InternalSigner::new(MASTER.to_vec())
+        .seal(MAIL_PURPOSE, &msg, issued_at)
+        .unwrap();
+
+    let opened = open_mail_delivery(&raw, &g, &audit, Utc::now(), false).await;
+    assert_eq!(
+        opened.map(|m| m.user_id),
+        Some(msg.user_id),
+        "backlogged mail delivered"
+    );
+    let redelivered = open_mail_delivery(&raw, &g, &audit, Utc::now(), true).await;
+    assert_eq!(
+        redelivered.map(|m| m.user_id),
+        Some(msg.user_id),
+        "redelivery admitted"
+    );
+    assert!(
+        open_mail_delivery(&raw, &g, &audit, Utc::now(), false)
+            .await
+            .is_none()
+    );
+    assert_eq!(rejection_reasons(&audit).await, ["replay"]);
+
+    let mut rows = db
+        .query("SELECT VALUE time::unix(expires_at) FROM amqp_nonce_replay WHERE tenant_id = $t")
+        .bind(("t", Uuid::nil().to_string()))
+        .await
+        .unwrap();
+    let expiries: Vec<i64> = rows.take(0).unwrap();
+    assert_eq!(expiries.len(), 1);
+    assert!(
+        expiries[0] >= (issued_at + chrono::Duration::hours(24)).timestamp() - 1,
+        "the nonce is kept for the maximum age: {expiries:?}"
+    );
 }

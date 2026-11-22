@@ -279,6 +279,7 @@ async fn webhook_consumer_retries_then_dlqs_and_audits_end_to_end() {
         master,
         true,
         chrono::Duration::seconds(300),
+        chrono::Duration::hours(24),
         axiam_db::repository::SurrealAmqpNonceRepository::new(db.clone()),
     );
 

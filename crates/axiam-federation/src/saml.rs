@@ -3131,18 +3131,17 @@ pub(crate) mod tests {
     }
 
     /// With the form ACS URL supplied (what the handler now passes), a foreign
-    /// `@Recipient` is rejected on the Recipient comparison.
+    /// `@Recipient` is rejected on the Recipient comparison. The fixture's
+    /// audience is this SP's, so nothing before Step 2b refuses it: without
+    /// the comparison it would be accepted (QR1-4).
     #[tokio::test]
     async fn form_acs_with_expected_destination_rejects_foreign_recipient() {
-        let err = form_acs_response(
-            "scd_no_audience_foreign_recipient_response.xml",
-            Some(TEST_ACS_URL),
-        )
-        .await
-        .expect_err("foreign Recipient must be rejected");
+        let err = form_acs_response("scd_wrong_recipient_response.xml", Some(TEST_ACS_URL))
+            .await
+            .expect_err("foreign Recipient must be rejected");
         assert!(
-            matches!(err, FederationError::SamlResponseFailed(_)),
-            "got: {err:?}"
+            matches!(err, FederationError::SamlResponseFailed(ref m) if m.contains("Recipient")),
+            "expected SamlResponseFailed naming Recipient, got: {err:?}"
         );
     }
 

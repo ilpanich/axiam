@@ -79,8 +79,13 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE",
-            "Whether the server-internal queues — transactional mail, webhooks, SSF push, outbound SCIM and CIBA ping, and their retry queues — refuse a message without the signed envelope AXIAM now puts on them (default `true`). Set `false` for **one** rolling-upgrade deployment only, or to replay a pre-upgrade dead-lettered message: unsigned, old-shape messages are then accepted (each logged as a warning), while everything is still signed on publish and an envelope that fails to verify is refused either way. Remove it once no old replica is left and the retry queues have turned over. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#the-server-internal-queues-are-signed-too-sa-14).",
+            "Whether the server-internal queues — transactional mail, webhooks, SSF push, outbound SCIM and CIBA ping, and their retry queues — refuse a message without the signed envelope AXIAM now puts on them (default `true`). Set `false` for **one** rolling-upgrade deployment only, or to replay a pre-upgrade dead-lettered message — and only where broker ACLs already deny other principals write access to those queues, because while it is `false` anyone who can publish to them can inject unsigned messages, exactly as before the envelope existed: unsigned, old-shape messages are then accepted (each logged as a warning), while everything is still signed on publish and an envelope that fails to verify is refused either way. Remove it once no old replica is left and the retry queues have turned over. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#the-server-internal-queues-are-signed-too-sa-14).",
             "false",
+          ],
+          [
+            "AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS",
+            "How long a signed message may wait in the server-internal queues (mail, webhooks, SSF push, outbound SCIM, CIBA ping, and their retry queues) before it is refused as stale, and how long its nonce is kept against replay (default `86400`, 24 hours). These are durable work queues, so a consumer outage or a backlog must not cost queued mail: the default covers the longest retry schedule (a one-hour backoff ceiling, plus head-of-line waiting in a retry queue), the mail consumer's in-process backoff and a day-long consumer outage. A future-dated message is still refused beyond the 5-minute replay skew; a value below that skew is raised to it. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#the-server-internal-queues-are-signed-too-sa-14).",
+            "86400",
           ],
           [
             "AXIAM__SERVER__HOST",

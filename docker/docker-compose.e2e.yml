@@ -29,7 +29,12 @@ services:
     depends_on:
       surrealdb-init:
         condition: service_completed_successfully
-    command: start --user root --pass root --log info surrealkv:/data/axiam.db
+    # Credentials travel as environment variables, not `--user`/`--pass`: a flag
+    # lands in argv, readable via /proc/<pid>/cmdline; `surreal start` reads these.
+    command: start --log info surrealkv:/data/axiam.db
+    environment:
+      SURREAL_USER: root
+      SURREAL_PASS: root
     ports:
       - "8000:8000"
     volumes:
@@ -119,7 +124,7 @@ services:
       retries: 5
 
   # axiam-server — BUILT FROM PR SOURCE (build: key instead of stale registry image).
-  # Using image: ghcr.io/axiamhq/axiam/server:latest is deliberately absent here:
+  # Using image: ghcr.io/ilpanich/axiam/server:latest is deliberately absent here:
   # that tag is stale/absent for PR branches and would produce false-green E2E (W8).
   # COOKIE_SECURE=false so auth cookies work over plain http:// in CI (D-18).
   # NEVER set AXIAM__AUTH__COOKIE_SECURE=false in staging or production.

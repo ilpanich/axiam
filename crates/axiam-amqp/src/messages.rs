@@ -87,6 +87,38 @@ pub fn is_fresh(issued_at: DateTime<Utc>, now: DateTime<Utc>, skew: chrono::Dura
     now.signed_duration_since(issued_at).abs() <= skew
 }
 
+/// The trailing member every signed message the server writes ends with.
+const SIGNATURE_MEMBER: &[u8] = b",\"hmac_signature\":\"";
+
+/// Split a signed JSON message **as received** into the bytes its HMAC covers
+/// and the signature: `raw` with its trailing `,"hmac_signature":"<hex>"`
+/// member removed, and the hex (QR1-9, SR1-6).
+///
+/// Verifying over these bytes, rather than over a re-serialization of the
+/// parsed message, is what makes the check independent of how a JSON library
+/// prints what it parsed: serde_json's default float parsing is best-effort,
+/// and encoders in other languages escape strings differently. `None` when
+/// `raw` does not end in exactly that member with a hex value (a message the
+/// server did not write, or one re-encoded on the way): the caller refuses it.
+pub fn split_trailing_signature(raw: &[u8]) -> Option<(Vec<u8>, &str)> {
+    let start = raw
+        .windows(SIGNATURE_MEMBER.len())
+        .rposition(|w| w == SIGNATURE_MEMBER)?;
+    let rest = &raw[start + SIGNATURE_MEMBER.len()..];
+    let end = rest.iter().position(|&b| b == b'"')?;
+    if &rest[end..] != b"\"}" {
+        return None;
+    }
+    let signature = std::str::from_utf8(&rest[..end]).ok()?;
+    if signature.is_empty() || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut canonical = Vec::with_capacity(start + 1);
+    canonical.extend_from_slice(&raw[..start]);
+    canonical.push(b'}');
+    Some((canonical, signature))
+}
+
 /// Derive a per-tenant AMQP signing subkey from the shared master key
 /// (SECHRD-08 / D-05a/b, T-25-19).
 ///

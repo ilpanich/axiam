@@ -990,7 +990,7 @@ jobs:
 
       - name: Start backend services (built from PR source)
         # --build forces the server image to be built from this PR's source code.
-        # Using a pre-built registry image (ghcr.io/axiamhq/axiam/server:latest)
+        # Using a pre-built registry image (ghcr.io/ilpanich/axiam/server:latest)
         # would produce false-green results on PR branches (W8 — stale image).
         run: |
           # load_config() asserts the JWT signing keypair is non-empty, else the

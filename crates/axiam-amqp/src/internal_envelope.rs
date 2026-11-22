@@ -25,6 +25,23 @@
 //! (`OutboundMailMessage`, `WebhookMessage`, `OutboundMessage`), so the
 //! envelope adds authentication without redefining any message.
 //!
+//! Three things differ from the SDK-facing queues because these are durable
+//! **work** queues, where a message waits for reasons that are not tampering:
+//!
+//! * **Age, not skew.** A message is admitted while `issued_at` is at most
+//!   `max_age` (`AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS`, 24 h by
+//!   default) in the past — a consumer outage, a backlog or head-of-line
+//!   blocking in a retry queue must not dead-letter queued mail — and at most
+//!   the replay skew in the future (QR1-2, SR1-2). Its nonce is kept for
+//!   `max_age`.
+//! * **A redelivery is not a replay.** A nonce already recorded is admitted
+//!   when the broker marks the delivery redelivered — a consumer crashed
+//!   before it settled, or requeued the original on purpose (CQ-B49) — a flag
+//!   only the broker sets (SR1-1). A republished copy is a replay.
+//! * **The received bytes are verified** ([`split_trailing_signature`]), not a
+//!   re-serialization of the parsed body, whose floats serde_json does not
+//!   guarantee to reprint identically (QR1-9).
+//!
 //! **Rolling upgrade.** A consumer verifies every envelope it receives. What it
 //! does with a message in the old, un-enveloped shape is
 //! `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE`: `true` (the default)
@@ -47,7 +64,8 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::messages::{
-    APP_SALT, CURRENT_KEY_VERSION, MIN_ACCEPTED_KEY_VERSION, is_fresh, sign_payload, verify_payload,
+    APP_SALT, CURRENT_KEY_VERSION, MIN_ACCEPTED_KEY_VERSION, sign_payload,
+    split_trailing_signature, verify_payload,
 };
 
 /// HKDF `info` prefix of the server-only key. Distinct from the per-tenant
@@ -167,13 +185,16 @@ pub enum Rejection {
     Unsigned,
     /// An envelope for another queue family.
     WrongPurpose,
-    /// The signature does not verify under the server-only key.
+    /// The signature does not verify under the server-only key, or the bytes
+    /// do not end in the signature member the server writes.
     BadSignature,
     /// A `key_version` below [`MIN_ACCEPTED_KEY_VERSION`].
     KeyVersion,
-    /// `issued_at` outside the freshness window.
+    /// `issued_at` more than the maximum age in the past, or more than the
+    /// replay skew in the future.
     Stale,
-    /// The nonce was already consumed.
+    /// The nonce was already consumed, and the broker did not mark this
+    /// delivery as a redelivery.
     Replay,
     /// The nonce could not be recorded; refused rather than risk a replay.
     NonceStore,
@@ -258,6 +279,7 @@ pub struct InternalQueueGate {
     master: Arc<Vec<u8>>,
     require_signature: bool,
     skew: chrono::Duration,
+    max_age: chrono::Duration,
     nonces: Arc<dyn NonceSink>,
 }
 
@@ -266,18 +288,22 @@ impl std::fmt::Debug for InternalQueueGate {
         f.debug_struct("InternalQueueGate")
             .field("require_signature", &self.require_signature)
             .field("skew", &self.skew)
+            .field("max_age", &self.max_age)
             .finish_non_exhaustive()
     }
 }
 
 impl InternalQueueGate {
-    /// A gate over the AMQP master key, the freshness `skew`
-    /// (`AmqpConfig::replay_skew`) and the durable nonce store.
-    /// `require_signature` is `amqp.internal_queues.require_signature`.
+    /// A gate over the AMQP master key, the future-dating `skew`
+    /// (`AmqpConfig::replay_skew`), the maximum message age `max_age`
+    /// (`AmqpConfig::internal_queue_max_age`, raised to `skew` if lower) and
+    /// the durable nonce store. `require_signature` is
+    /// `amqp.internal_queues.require_signature`.
     pub fn new<N>(
         master: Vec<u8>,
         require_signature: bool,
         skew: chrono::Duration,
+        max_age: chrono::Duration,
         nonces: N,
     ) -> Self
     where
@@ -287,8 +313,16 @@ impl InternalQueueGate {
             master: Arc::new(master),
             require_signature,
             skew,
+            max_age: max_age.max(skew),
             nonces: Arc::new(RepoNonceSink(nonces)),
         }
+    }
+
+    /// Whether `issued_at` is current at `now`: at most `max_age` old, and at
+    /// most `skew` in the future.
+    fn is_current(&self, issued_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+        let age = now.signed_duration_since(issued_at);
+        age <= self.max_age && -age <= self.skew
     }
 
     /// Whether a message in the pre-SA-14 shape is refused.
@@ -296,16 +330,33 @@ impl InternalQueueGate {
         self.require_signature
     }
 
-    /// Admit `raw`, taken off a queue of family `purpose`, at `now`.
-    ///
-    /// The checks run in the order of the authz consumer's: parse, signature,
-    /// key version, freshness, then the nonce, so a message that fails any
-    /// earlier check never consumes a nonce.
+    /// Admit `raw`, delivered for the first time off a queue of family
+    /// `purpose`, at `now`. [`Self::open_delivery`] with `redelivered = false`.
     pub async fn open(
         &self,
         purpose: &str,
         raw: &[u8],
         now: DateTime<Utc>,
+    ) -> Result<Opened, Rejection> {
+        self.open_delivery(purpose, raw, now, false).await
+    }
+
+    /// Admit `raw`, taken off a queue of family `purpose`, at `now`.
+    /// `redelivered` is the broker's flag on the delivery.
+    ///
+    /// The checks run in the order of the authz consumer's: parse, signature,
+    /// key version, age, then the nonce, so a message that fails any earlier
+    /// check never consumes a nonce. A nonce already recorded is a replay
+    /// unless `redelivered` is set: the broker sets it only on a message it
+    /// delivered before and got back unsettled (a consumer that crashed, or
+    /// one that requeued the original because its retry copy could not be
+    /// published), and a publisher cannot set it (SR1-1).
+    pub async fn open_delivery(
+        &self,
+        purpose: &str,
+        raw: &[u8],
+        now: DateTime<Utc>,
+        redelivered: bool,
     ) -> Result<Opened, Rejection> {
         let value: serde_json::Value =
             serde_json::from_slice(raw).map_err(|_| Rejection::Malformed)?;
@@ -333,7 +384,16 @@ impl InternalQueueGate {
         if envelope.purpose != purpose {
             return Err(Rejection::WrongPurpose);
         }
-        let canonical = serde_json::to_vec(&envelope).map_err(|_| Rejection::Malformed)?;
+        // QR1-9: the HMAC covers the bytes as received, minus the trailing
+        // signature member — never a re-serialization of `body`, whose floats
+        // serde_json does not promise to reprint digit for digit. The member
+        // stripped must be the one that parsed (no second, smuggled one).
+        let Some((canonical, received)) = split_trailing_signature(raw) else {
+            return Err(Rejection::BadSignature);
+        };
+        if received != signature {
+            return Err(Rejection::BadSignature);
+        }
         let key = derive_internal_key(&self.master, envelope.key_version, purpose);
         if !verify_payload(&key, &canonical, &signature) {
             return Err(Rejection::BadSignature);
@@ -341,15 +401,22 @@ impl InternalQueueGate {
         if envelope.key_version < MIN_ACCEPTED_KEY_VERSION {
             return Err(Rejection::KeyVersion);
         }
-        if !is_fresh(envelope.issued_at, now, self.skew) {
+        if !self.is_current(envelope.issued_at, now) {
             return Err(Rejection::Stale);
         }
         match self
             .nonces
-            .record(envelope.nonce, envelope.issued_at + self.skew)
+            .record(envelope.nonce, envelope.issued_at + self.max_age)
             .await
         {
             Ok(()) => Ok(Opened::Verified(envelope.body)),
+            Err(AxiamError::ReplayDetected) if redelivered => {
+                tracing::info!(
+                    purpose,
+                    "redelivered internal-queue message admitted (nonce already recorded)"
+                );
+                Ok(Opened::Verified(envelope.body))
+            }
             Err(AxiamError::ReplayDetected) => Err(Rejection::Replay),
             Err(e) => {
                 tracing::error!(error = %e, purpose, "could not record an internal-queue nonce");
@@ -368,16 +435,27 @@ pub(crate) mod tests {
 
     /// An in-memory nonce store with the durable one's contract.
     #[derive(Clone, Default)]
-    pub(crate) struct MemNonces(Arc<Mutex<HashSet<(Uuid, Uuid)>>>);
+    pub(crate) struct MemNonces(
+        Arc<Mutex<HashSet<(Uuid, Uuid)>>>,
+        Arc<Mutex<Vec<DateTime<Utc>>>>,
+    );
+
+    impl MemNonces {
+        /// The `expires_at` of every nonce recorded, in order.
+        pub(crate) fn expiries(&self) -> Vec<DateTime<Utc>> {
+            self.1.lock().unwrap().clone()
+        }
+    }
 
     impl AmqpNonceRepository for MemNonces {
         async fn insert_nonce(
             &self,
             tenant_id: Uuid,
             nonce: Uuid,
-            _expires_at: DateTime<Utc>,
+            expires_at: DateTime<Utc>,
         ) -> AxiamResult<()> {
             if self.0.lock().unwrap().insert((tenant_id, nonce)) {
+                self.1.lock().unwrap().push(expires_at);
                 Ok(())
             } else {
                 Err(AxiamError::ReplayDetected)
@@ -390,11 +468,16 @@ pub(crate) mod tests {
 
     pub(crate) const MASTER: &[u8] = b"sa14-test-master-key";
 
+    /// The replay skew and the maximum age the test gates use.
+    pub(crate) const SKEW: chrono::Duration = chrono::Duration::seconds(300);
+    pub(crate) const MAX_AGE: chrono::Duration = chrono::Duration::seconds(3600);
+
     pub(crate) fn gate(require_signature: bool) -> InternalQueueGate {
         InternalQueueGate::new(
             MASTER.to_vec(),
             require_signature,
-            chrono::Duration::seconds(300),
+            SKEW,
+            MAX_AGE,
             MemNonces::default(),
         )
     }
@@ -460,12 +543,14 @@ pub(crate) mod tests {
         );
     }
 
+    /// Past the maximum age, or future-dated beyond the replay skew. (Before
+    /// QR1-2 the past bound was the skew too, and this test used 301 s.)
     #[tokio::test]
     async fn a_stale_or_future_message_is_refused() {
         let now = Utc::now();
         for issued_at in [
-            now - chrono::Duration::seconds(301),
-            now + chrono::Duration::seconds(301),
+            now - MAX_AGE - chrono::Duration::seconds(1),
+            now + SKEW + chrono::Duration::seconds(1),
         ] {
             let raw = signer().seal(MAIL_PURPOSE, &body(), issued_at).unwrap();
             assert_eq!(
@@ -540,6 +625,104 @@ pub(crate) mod tests {
         assert_eq!(
             gate(true).open(MAIL_PURPOSE, &raw, Utc::now()).await,
             Err(Rejection::KeyVersion)
+        );
+    }
+
+    /// QR1-2 / SR1-2: a message that waited in its durable queue longer than
+    /// the 5-minute replay skew — a consumer outage, a backlog, head-of-line
+    /// blocking in a retry queue — is still admitted while it is younger than
+    /// the internal queues' maximum age; older than that it is stale.
+    #[tokio::test]
+    async fn a_backlogged_message_is_admitted_until_its_maximum_age() {
+        let now = Utc::now();
+        let backlogged = signer()
+            .seal(MAIL_PURPOSE, &body(), now - chrono::Duration::seconds(301))
+            .unwrap();
+        assert!(matches!(
+            gate(true).open(MAIL_PURPOSE, &backlogged, now).await,
+            Ok(Opened::Verified(_))
+        ));
+        let expired = signer()
+            .seal(
+                MAIL_PURPOSE,
+                &body(),
+                now - MAX_AGE - chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(
+            gate(true).open(MAIL_PURPOSE, &expired, now).await,
+            Err(Rejection::Stale)
+        );
+    }
+
+    /// QR1-2 / SR1-2: the nonce is kept for as long as the message would be
+    /// admitted, so a copy published again inside the maximum age is a replay.
+    #[tokio::test]
+    async fn the_nonce_is_kept_for_the_maximum_age() {
+        let nonces = MemNonces::default();
+        let g = InternalQueueGate::new(MASTER.to_vec(), true, SKEW, MAX_AGE, nonces.clone());
+        let issued_at = Utc::now();
+        let raw = signer().seal(MAIL_PURPOSE, &body(), issued_at).unwrap();
+        assert!(g.open(MAIL_PURPOSE, &raw, Utc::now()).await.is_ok());
+        assert_eq!(nonces.expiries(), [issued_at + MAX_AGE]);
+    }
+
+    /// QR1-9: the HMAC is checked over the bytes received, not over a
+    /// re-serialization of them: serde_json's default float parsing is
+    /// best-effort, and this float does not survive a parse and re-print.
+    #[tokio::test]
+    async fn a_body_whose_float_does_not_round_trip_still_verifies() {
+        let hard = serde_json::json!({"payload": {"f": 1.0715660391465826e-75_f64}});
+        let printed = serde_json::to_string(&hard).unwrap();
+        let reprinted =
+            serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&printed).unwrap())
+                .unwrap();
+        assert_ne!(printed, reprinted, "the fixture float must not round-trip");
+        let raw = signer().seal(MAIL_PURPOSE, &hard, Utc::now()).unwrap();
+        assert!(matches!(
+            gate(true).open(MAIL_PURPOSE, &raw, Utc::now()).await,
+            Ok(Opened::Verified(_))
+        ));
+    }
+
+    /// SR1-1: a broker redelivery of an admitted message — the consumer crashed
+    /// before it settled, or requeued it on purpose — is the same bytes again,
+    /// flagged by the broker, and is admitted. The same bytes published again
+    /// (no flag) are still a replay, and a redelivery still has to verify.
+    #[tokio::test]
+    async fn a_redelivery_of_an_admitted_message_is_admitted() {
+        let g = gate(true);
+        let raw = signer().seal(MAIL_PURPOSE, &body(), Utc::now()).unwrap();
+        assert!(g.open(MAIL_PURPOSE, &raw, Utc::now()).await.is_ok());
+        assert!(matches!(
+            g.open_delivery(MAIL_PURPOSE, &raw, Utc::now(), true).await,
+            Ok(Opened::Verified(_))
+        ));
+        assert_eq!(
+            g.open_delivery(MAIL_PURPOSE, &raw, Utc::now(), false).await,
+            Err(Rejection::Replay)
+        );
+        let mut env: InternalEnvelope = serde_json::from_slice(&raw).unwrap();
+        env.body["n"] = serde_json::json!(2);
+        let tampered = serde_json::to_vec(&env).unwrap();
+        assert_eq!(
+            g.open_delivery(MAIL_PURPOSE, &tampered, Utc::now(), true)
+                .await,
+            Err(Rejection::BadSignature)
+        );
+    }
+
+    /// QR1-9: bytes that do not end in the signature member the server writes
+    /// — reformatted, or with the member moved — are refused, not re-encoded.
+    #[tokio::test]
+    async fn bytes_not_ending_in_the_signature_member_are_refused() {
+        let raw = signer().seal(MAIL_PURPOSE, &body(), Utc::now()).unwrap();
+        let pretty =
+            serde_json::to_vec_pretty(&serde_json::from_slice::<serde_json::Value>(&raw).unwrap())
+                .unwrap();
+        assert_eq!(
+            gate(true).open(MAIL_PURPOSE, &pretty, Utc::now()).await,
+            Err(Rejection::BadSignature)
         );
     }
 

@@ -264,6 +264,7 @@ where
             &cfg,
             gate,
             chrono::Utc::now(),
+            delivery.redelivered,
         )
         .await;
     }
@@ -296,6 +297,7 @@ pub(crate) async fn process_delivery<S, R, A>(
     cfg: &OutboundRetryConfig,
     gate: &InternalQueueGate,
     now: chrono::DateTime<chrono::Utc>,
+    redelivered: bool,
 ) where
     S: Settlement,
     R: RetryPublisher,
@@ -304,7 +306,13 @@ pub(crate) async fn process_delivery<S, R, A>(
     // SA-14 (N3): the signed envelope first. A refused message — or a body
     // that is not this kind's message — is never retried and never reaches
     // the deliverer: nack requeue=false (the DLQ) and a rejection row.
-    let decoded = match gate.open(&outbound_purpose(kind), data, now).await {
+    // SR1-1: `redelivered` is the broker's flag. A redelivery of a message
+    // already admitted — the requeue below, or a consumer that died before it
+    // settled — is admitted again rather than refused as a replay of itself.
+    let decoded = match gate
+        .open_delivery(&outbound_purpose(kind), data, now, redelivered)
+        .await
+    {
         Ok(opened) => wire::decode_body(kind, opened.into_body()).map_err(|e| {
             warn!(%kind, error = %e, delivery_tag, "Invalid outbound message body");
             Rejection::MalformedBody
@@ -607,6 +615,20 @@ mod tests {
                 .await;
         }
         async fn run_kind_bytes(&self, kind: OutboundKind, bytes: &[u8], deliverer: &Scripted) {
+            self.deliver(kind, bytes, deliverer, false).await;
+        }
+        /// The broker's redelivery of `bytes` (its `redelivered` flag set).
+        async fn run_redelivered(&self, bytes: &[u8], deliverer: &Scripted) {
+            self.deliver(OutboundKind::Webhook, bytes, deliverer, true)
+                .await;
+        }
+        async fn deliver(
+            &self,
+            kind: OutboundKind,
+            bytes: &[u8],
+            deliverer: &Scripted,
+            redelivered: bool,
+        ) {
             process_delivery(
                 kind,
                 bytes,
@@ -618,6 +640,7 @@ mod tests {
                 &CFG,
                 &self.gate,
                 chrono::Utc::now(),
+                redelivered,
             )
             .await;
         }
@@ -896,8 +919,10 @@ mod tests {
         }
     }
 
-    /// SA-14: a signed message is delivered once; the same bytes again are a
-    /// replay, refused and audited, and the deliverer is not called twice.
+    /// SA-14: a signed message is delivered once; the same bytes again — a
+    /// copy published again, which the broker does not flag as redelivered —
+    /// are a replay, refused and audited, and the deliverer is not called
+    /// twice.
     #[tokio::test]
     async fn sa14_a_replayed_signed_message_is_refused() {
         let rig = Rig::new();
@@ -914,6 +939,32 @@ mod tests {
         assert_eq!(entries[1].metadata.as_ref().unwrap()["reason"], "replay");
     }
 
+    /// SR1-1: CQ-B49's recovery path. A retry copy that cannot be published
+    /// requeues the original; the broker redelivers it, and the redelivery is
+    /// delivered — not refused as a replay of itself.
+    #[tokio::test]
+    async fn sr1_1_a_requeued_original_is_delivered_when_the_broker_redelivers_it() {
+        let mut rig = Rig::new();
+        rig.retry.fail = true;
+        let bytes = wire::seal(&envelope_tests::signer(), &message(0), chrono::Utc::now()).unwrap();
+        let first = Scripted::new(Ok(DeliveryOutcome::Retry {
+            reason: "down".into(),
+        }));
+        rig.run_bytes(&bytes, &first).await;
+        assert_eq!(rig.settle.calls(), ["nack(requeue=true)"]);
+
+        let second = Scripted::new(Ok(DeliveryOutcome::Delivered {
+            response_status: Some(200),
+        }));
+        rig.run_redelivered(&bytes, &second).await;
+        assert_eq!(
+            second.calls.load(Ordering::SeqCst),
+            1,
+            "the redelivery is delivered"
+        );
+        assert_eq!(rig.settle.calls(), ["nack(requeue=true)", "ack"]);
+    }
+
     /// SA-14: a message signed for one kind's queue is refused on another's,
     /// and a stale one is refused.
     #[tokio::test]
@@ -923,7 +974,9 @@ mod tests {
         let stale = wire::seal(
             &signer,
             &message(0),
-            chrono::Utc::now() - chrono::Duration::minutes(10),
+            // Past the gate's maximum age (it was the 5-minute skew, and
+            // this test used 10 minutes, before QR1-2).
+            chrono::Utc::now() - envelope_tests::MAX_AGE - chrono::Duration::minutes(1),
         )
         .unwrap();
         for (kind, bytes, reason) in [

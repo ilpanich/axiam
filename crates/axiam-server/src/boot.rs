@@ -1281,6 +1281,9 @@ where
                 key.clone(),
                 config.amqp.internal_queues.require_signature,
                 config.amqp.replay_skew(),
+                // QR1-2 / SR1-2: the work queues' own age bound, not the
+                // 5-minute skew of the SDK-facing queues.
+                config.amqp.internal_queue_max_age(),
                 amqp_nonce_repo.clone(),
             ),
         )

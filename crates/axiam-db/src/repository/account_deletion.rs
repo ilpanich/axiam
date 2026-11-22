@@ -370,6 +370,12 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
         // SA-09 (N11): the account returns to the status it had before the
         // request (`prior_status`, schema v120). A request written before v120
         // has none and restores `Active`, as every cancel did before.
+        //
+        // SR1-3: only while the account still carries the status the request
+        // parked it in (`Inactive`). An administrator or SCIM may change it
+        // while the request is pending — lock an account found compromised —
+        // and a cancel, which the mailbox holder can trigger, must not undo
+        // that decision with the older value.
         let query = format!(
             "BEGIN TRANSACTION; \
              LET $row = (SELECT status, purge_claimed_at, scheduled_purge_at, user_id, \
@@ -382,7 +388,8 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
              UPDATE type::record('account_deletion', $id) SET status = 'cancelled'; \
              LET $user = (UPDATE type::record('user', $row[0].user_id) SET \
                  deletion_pending = false, scheduled_purge_at = NONE, \
-                 status = $row[0].prior_status ?? 'Active', \
+                 status = IF status = 'Inactive' THEN ($row[0].prior_status ?? 'Active') \
+                     ELSE status END, \
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id AND deletion_pending = true \
                  RETURN VALUE meta::id(id)); \
@@ -1267,14 +1274,17 @@ mod tests {
     async fn status_after_erasure_cancel(
         prior: axiam_core::models::user::UserStatus,
     ) -> axiam_core::models::user::UserStatus {
-        status_after_erasure_cancel_with(prior, false).await
+        status_after_erasure_cancel_with(prior, false, None).await
     }
 
     /// As [`status_after_erasure_cancel`]; `legacy` blanks the row's
     /// `prior_status`, as a request written before schema v120 reads.
+    /// `meanwhile`, when set, is a status an administrator (or SCIM) writes
+    /// while the request is pending, before the cancel.
     async fn status_after_erasure_cancel_with(
         prior: axiam_core::models::user::UserStatus,
         legacy: bool,
+        meanwhile: Option<axiam_core::models::user::UserStatus>,
     ) -> axiam_core::models::user::UserStatus {
         use crate::repository::{
             SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
@@ -1359,6 +1369,19 @@ mod tests {
                 .check()
                 .unwrap();
         }
+        if let Some(status) = meanwhile {
+            user_repo
+                .update(
+                    tenant.id,
+                    user.id,
+                    axiam_core::models::user::UpdateUser {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
         let outcome = repo.cancel_pending(tenant.id, deletion.id).await.unwrap();
         assert_eq!(outcome, CancelOutcome::Cancelled);
         let after = user_repo.get_by_id(tenant.id, user.id).await.unwrap();
@@ -1405,8 +1428,23 @@ mod tests {
     async fn cancel_of_a_legacy_row_without_prior_status_restores_active() {
         use axiam_core::models::user::UserStatus;
         assert_eq!(
-            status_after_erasure_cancel_with(UserStatus::Locked, true).await,
+            status_after_erasure_cancel_with(UserStatus::Locked, true, None).await,
             UserStatus::Active
+        );
+    }
+
+    /// SR1-3 (N11) — an administrator locks the account while its erasure
+    /// request is pending (it was found compromised); the cancel — which a
+    /// mailbox holder can trigger — must not undo that: the account stays
+    /// `Locked`. The status the request parked it in (`Inactive`) is the only
+    /// one a cancel replaces.
+    #[tokio::test]
+    async fn cancel_keeps_a_status_an_administrator_set_while_pending() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel_with(UserStatus::Active, false, Some(UserStatus::Locked))
+                .await,
+            UserStatus::Locked
         );
     }
 

@@ -323,7 +323,7 @@ impl<C: Connection> TenantScopeResolver for axiam_db::SurrealTenantRepository<C>
 /// tenant and keeps reading it, and can set it back (D-3). Without a registered
 /// resolver nothing is asked, as the session check is skipped without a
 /// validator; the composition root registers both.
-async fn admit_principal_tenant(
+pub(crate) async fn admit_principal_tenant(
     tenants: Option<&Arc<dyn TenantScopeResolver>>,
     principal_tenant_id: Uuid,
 ) -> Result<(), AxiamApiError> {
@@ -331,6 +331,21 @@ async fn admit_principal_tenant(
         Some(tenants) => Ok(tenants.admit_principals(principal_tenant_id).await?),
         None => Ok(()),
     }
+}
+
+/// SA-13 / SR1-7: [`admit_principal_tenant`] for an extractor that holds only
+/// the request — the UMA Protection API's and the SSF receiver's, whose OAuth2
+/// client tokens no session backs, so the session check never refuses them.
+/// The resolver is the one the composition root registers for
+/// `AuthenticatedUser`; without one nothing is asked, as there.
+pub(crate) async fn admit_token_tenant(
+    req: &HttpRequest,
+    tenant_id: Uuid,
+) -> Result<(), AxiamApiError> {
+    let tenants = req
+        .app_data::<web::Data<Arc<dyn TenantScopeResolver>>>()
+        .map(|d| d.get_ref().clone());
+    admit_principal_tenant(tenants.as_ref(), tenant_id).await
 }
 
 /// Object-safe lookup of how far a principal's roles reach across the tenants
@@ -1206,16 +1221,19 @@ enum RequestKind {
     /// `GET` or `HEAD`, or a `POST` on one of
     /// [`Self::READ_ONLY_POST_ROUTES`]: a read, allowed on a suspended tenant.
     Read,
-    /// `PUT /organizations/{org_id}/tenants/{tenant_id}` for this tenant: its
-    /// status change (the un-suspend), allowed on a suspended tenant.
-    TenantUpdate(Uuid),
+    /// `PUT` or `DELETE /organizations/{org_id}/tenants/{tenant_id}` for this
+    /// tenant: its status change (the un-suspend) or its deletion, the two
+    /// lifecycle acts allowed on a suspended tenant (OD-13b, OD-13c; QR1-1 —
+    /// the `DELETE` was refused here, through the header the admin UI sends,
+    /// although the docs and the contract allow it).
+    TenantLifecycle(Uuid),
     /// Anything else: refused on a suspended tenant.
     Write,
 }
 
 impl RequestKind {
-    /// The route pattern of the tenant update, as actix reports it under any
-    /// scope prefix.
+    /// The route pattern of the tenant update and delete, as actix reports it
+    /// under any scope prefix.
     const TENANT_UPDATE_ROUTE: &'static str = "/organizations/{org_id}/tenants/{tenant_id}";
 
     /// The `POST` routes that only read (SA-13, owner decision OD-13c), by the
@@ -1260,7 +1278,7 @@ impl RequestKind {
         {
             return Self::Read;
         }
-        if *method == Method::PUT
+        if (*method == Method::PUT || *method == Method::DELETE)
             && req
                 .match_pattern()
                 .is_some_and(|p| p.ends_with(Self::TENANT_UPDATE_ROUTE))
@@ -1269,7 +1287,7 @@ impl RequestKind {
                 .get("tenant_id")
                 .and_then(|t| Uuid::parse_str(t).ok())
         {
-            return Self::TenantUpdate(tenant);
+            return Self::TenantLifecycle(tenant);
         }
         Self::Write
     }
@@ -1278,7 +1296,7 @@ impl RequestKind {
     fn allowed_on_suspended(self, target: Uuid) -> bool {
         match self {
             Self::Read => true,
-            Self::TenantUpdate(tenant) => tenant == target,
+            Self::TenantLifecycle(tenant) => tenant == target,
             Self::Write => false,
         }
     }

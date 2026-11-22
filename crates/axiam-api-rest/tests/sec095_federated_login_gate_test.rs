@@ -714,6 +714,113 @@ mod saml {
         }
     }
 
+    /// The SP ACS URL every `scd_*` fixture's signed `@Recipient` (and its
+    /// `Response/@Destination`) names.
+    const FIXTURE_ACS_URL: &str = "https://sp.example.com/api/v1/federation/saml/acs";
+
+    /// Post `fixture_name` to the public form ACS (`/saml/acs/form`) — the
+    /// endpoint a real IdP posts to — after seeding the login-state row a
+    /// sign-in started with `FIXTURE_ACS_URL` writes. The status.
+    async fn run_saml_acs_form(fixture_name: &str) -> u16 {
+        let (db, _org_id, tenant_id) = setup_db().await;
+        let auth = test_auth_config();
+
+        let config_id = Uuid::new_v4();
+        db.query(
+            "CREATE type::record('federation_config', $id) SET \
+             tenant_id = $tenant_id, provider = 'test-saml-idp', protocol = 'Saml', \
+             metadata_url = 'https://idp.example.com/metadata', client_id = $client_id, \
+             client_secret = '', attribute_map = {}, enabled = true, \
+             allowed_algorithms = ['RS256'], idp_signing_cert_pem = $cert, \
+             created_at = time::now(), updated_at = time::now()",
+        )
+        .bind(("id", config_id.to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .bind(("client_id", FIXTURE_SP_ENTITY_ID.to_string()))
+        .bind(("cert", fixture("signing_cert.pem")))
+        .await
+        .expect("insert federation_config")
+        .check()
+        .expect("check insert");
+
+        let (g, _seen) = gate(ReactorOutcome::Allow);
+        let state = state_with_gate(
+            &db,
+            &auth,
+            g,
+            Arc::new(JwksCache::new_allow_private_networks()),
+        );
+        let relay_state = "qr1-4-relay-state";
+        state
+            .federation
+            .federation_login_state_repo
+            .insert(&FederationLoginState {
+                state: relay_state.into(),
+                nonce: String::new(),
+                tenant_id,
+                federation_config_id: config_id,
+                redirect_uri: "https://spa.example.com/callback".into(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(10),
+                request_id: FIXTURE_REQUEST_ID.into(),
+                code_verifier: None,
+                // The ACS URL the sign-in was started with: what the form ACS
+                // compares `@Destination` and the signed `@Recipient` to.
+                idp_redirect_uri: Some(FIXTURE_ACS_URL.into()),
+                browser_binding_hash: Some(hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+                    BINDING.as_bytes(),
+                ))),
+                reauthenticate_after: None,
+            })
+            .await
+            .expect("seed federation_login_state");
+
+        let app = app_for!(auth, state);
+        let form = format!(
+            "SAMLResponse={}&RelayState={relay_state}",
+            urlencoding_component(&STANDARD.encode(fixture(fixture_name)))
+        );
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .cookie(actix_web::cookie::Cookie::new("axiam_fed_bind", BINDING))
+            .cookie(actix_web::cookie::Cookie::new(
+                "__Host-axiam_fed_bind",
+                BINDING,
+            ))
+            .uri("/api/v1/auth/federation/saml/acs/form")
+            .insert_header(("content-type", "application/x-www-form-urlencoded"))
+            .set_payload(form)
+            .to_request();
+        test::call_service(&app, req).await.status().as_u16()
+    }
+
+    /// Percent-encode the base64 alphabet's `+`, `/` and `=` for a form body.
+    fn urlencoding_component(value: &str) -> String {
+        value
+            .replace('%', "%25")
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D")
+    }
+
+    /// QR1-4 (SA-11, N21): the public form ACS compares the signed
+    /// `@Recipient` to the ACS URL stored with the sign-in. An assertion with a
+    /// valid audience whose `@Recipient` names another SP is refused there; a
+    /// conformant one signs in (303). This fails if the handler passes `None`
+    /// as the expected destination again.
+    #[actix_rt::test]
+    async fn the_form_acs_refuses_an_assertion_for_another_recipient() {
+        assert_eq!(
+            run_saml_acs_form("scd_valid_response.xml").await,
+            303,
+            "precondition: a conformant assertion signs in through the form ACS"
+        );
+        let status = run_saml_acs_form("scd_wrong_recipient_response.xml").await;
+        assert!(
+            status == 400 || status == 401,
+            "an assertion whose Recipient names another SP must be refused, got {status}"
+        );
+    }
+
     #[actix_rt::test]
     async fn an_allowing_reactor_leaves_a_saml_acs_sign_in_unchanged() {
         let out = run_saml_acs(ReactorOutcome::Allow).await;

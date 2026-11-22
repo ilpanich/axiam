@@ -10,7 +10,8 @@
 //! the contract.
 
 use axiam_amqp::messages::{
-    AuthzResponse, CURRENT_KEY_VERSION, derive_tenant_key, verify_tenant_signature,
+    AuthzResponse, CURRENT_KEY_VERSION, derive_tenant_key, split_trailing_signature,
+    verify_tenant_signature,
 };
 use uuid::Uuid;
 
@@ -54,6 +55,17 @@ const VECTORS: &[Vector] = &[
         canonical: r#"{"correlation_id":"22222222-2222-2222-2222-222222222222","allowed":false,"reason":"an explicit deny rule refuses action 'documents:read'","reason_code":"denied_by_rule","tenant_id":"11111111-1111-1111-1111-111111111111","nonce":"55555555-5555-5555-5555-555555555555"}"#,
         signature: "4bfc2ce9a035bd4a028ee2a5cb75a08832915c60cd2b176c8d4bf28910a61adc",
     },
+    // SR1-6: a `reason` echoing a requester-chosen action with the characters
+    // JSON encoders escape differently (`&`, `<`, `>`, `"`, `/`, non-ASCII).
+    // serde_json writes `"` as `\"` and everything else here raw.
+    Vector {
+        name: "deny_escaping",
+        allowed: false,
+        reason: Some("no permission grants action 'docs:a&b</\"c\">/\u{e9}\u{20ac}'"),
+        reason_code: Some("no_grant"),
+        canonical: CANON4,
+        signature: SIG4,
+    },
 ];
 
 fn master_key() -> Vec<u8> {
@@ -83,6 +95,11 @@ fn the_subkey_is_pinned() {
     );
     assert_eq!(hex::encode(subkey), SUBKEY_HEX);
 }
+
+/// Vector 4's canonical bytes (`deny_escaping`).
+const CANON4: &str = r#"{"correlation_id":"22222222-2222-2222-2222-222222222222","allowed":false,"reason":"no permission grants action 'docs:a&b</\"c\">/é€'","reason_code":"no_grant","tenant_id":"11111111-1111-1111-1111-111111111111","nonce":"55555555-5555-5555-5555-555555555555"}"#;
+/// Vector 4's signature.
+const SIG4: &str = "5194142df4bf66b07e9e8d516caf6be099af025219ab12deb26fea39e93490ff";
 
 const SUBKEY_HEX: &str = "919e125ec83799c1e113a27707cac5008a2608d0557e00dfe1b3a316abed4b89";
 
@@ -116,8 +133,14 @@ fn signed_authz_response_vectors_are_byte_exact() {
             v.name
         );
 
+        // CONTRACT §8: a verifier strips the trailing signature member from
+        // the received bytes and gets the canonical bytes back exactly.
+        let (stripped, sig_hex) = split_trailing_signature(wire.as_bytes()).unwrap();
+        assert_eq!(stripped, canonical, "{}", v.name);
+        assert_eq!(sig_hex, v.signature, "{}", v.name);
+
         // A verifier that parses the wire form and re-serializes it without the
-        // signature reproduces the canonical bytes and verifies.
+        // signature (with serde_json) reproduces the canonical bytes and verifies.
         let parsed: AuthzResponse = serde_json::from_str(&wire).unwrap();
         assert_eq!(parsed.canonical_bytes(), canonical, "{}", v.name);
         assert!(parsed.verify(&master, KEY_VERSION), "{}", v.name);

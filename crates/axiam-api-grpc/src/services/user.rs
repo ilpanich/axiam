@@ -16,7 +16,9 @@
 //!   axiam:m2m` *and* `sub_kind = service_account`, the definition REST's
 //!   machine-principal extractor uses) holding
 //!   [`VALIDATE_CREDENTIALS_PERMISSION`], which the seeder gives to no role.
-//!   Every answer is audited as [`CREDENTIALS_VALIDATED_ACTION`].
+//!   Every answer is audited as [`CREDENTIALS_VALIDATED_ACTION`] — the
+//!   `PERMISSION_DENIED` refusals of a caller that is not such a principal
+//!   included (outcome `Denied`).
 //!
 //! Before this, the only check was that the body's `tenant_id` matched the
 //! token's, so any same-tenant user token read any user's username, email and
@@ -61,7 +63,8 @@ pub const GET_USER_PERMISSION: &str = "users:get";
 pub const VALIDATE_CREDENTIALS_PERMISSION: &str = "users:validate_credentials";
 
 /// The audit action every `ValidateCredentials` answer is recorded under —
-/// `Success` for a valid credential, `Failure` for any refusal.
+/// `Success` for a valid credential, `Failure` for a refused credential,
+/// `Denied` for a caller refused `PERMISSION_DENIED` before any lookup.
 pub const CREDENTIALS_VALIDATED_ACTION: &str = "auth.credentials_validated";
 
 /// A boxed, sendable future — the shape the two object-safe seams below
@@ -259,6 +262,34 @@ impl<U: UserRepository> UserServiceImpl<U> {
             })
             .await;
     }
+
+    /// Record one `ValidateCredentials` call refused `PERMISSION_DENIED` —
+    /// not a service account, or one without the permission (QR1-13). The
+    /// row names the caller and no account: nothing was looked up.
+    async fn audit_credential_denial(
+        &self,
+        tenant_id: Uuid,
+        caller_id: Uuid,
+        actor_type: ActorType,
+        ip_address: Option<String>,
+    ) {
+        self.audit
+            .record(CreateAuditLogEntry {
+                tenant_id,
+                actor_id: caller_id,
+                actor_type,
+                action: CREDENTIALS_VALIDATED_ACTION.into(),
+                resource_id: None,
+                outcome: AuditOutcome::Denied,
+                ip_address,
+                metadata: Some(serde_json::json!({
+                    "transport": "grpc",
+                    "rpc": "axiam.v1.UserService/ValidateCredentials",
+                })),
+                organization_id: None,
+            })
+            .await;
+    }
 }
 
 /// Whether `claims` name a **service account** — the machine principal
@@ -386,13 +417,28 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         // decided before the lookup, the hash permit and the lockout
         // accrual, so a refused caller can neither probe nor lock anyone.
         if !is_service_account(&claims) {
+            self.audit_credential_denial(claims_tenant_id, caller_id, ActorType::User, ip_address)
+                .await;
             return Err(Status::permission_denied(
                 "ValidateCredentials is restricted to service-account (axiam:m2m) principals",
             ));
         }
-        self.authorizer
+        if let Err(status) = self
+            .authorizer
             .require(claims_tenant_id, caller_id, VALIDATE_CREDENTIALS_PERMISSION)
-            .await?;
+            .await
+        {
+            if status.code() == tonic::Code::PermissionDenied {
+                self.audit_credential_denial(
+                    claims_tenant_id,
+                    caller_id,
+                    ActorType::ServiceAccount,
+                    ip_address,
+                )
+                .await;
+            }
+            return Err(status);
+        }
 
         let invalid = Response::new(ValidateCredentialsResponse {
             valid: false,

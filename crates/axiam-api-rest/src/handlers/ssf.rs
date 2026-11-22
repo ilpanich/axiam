@@ -262,15 +262,26 @@ fn extract_receiver(req: &HttpRequest) -> Result<SsfReceiverToken, AxiamApiError
 
 impl actix_web::FromRequest for SsfReceiverToken {
     type Error = AxiamApiError;
-    type Future = std::future::Ready<Result<Self, Self::Error>>;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, Self::Error>>>>;
 
     fn from_request(
         req: &actix_web::HttpRequest,
         _payload: &mut actix_web::dev::Payload,
     ) -> Self::Future {
-        std::future::ready(
-            extract_receiver(req).map_err(|e| crate::extractors::auth::mark_refused(req, e)),
-        )
+        let req = req.clone();
+        Box::pin(async move {
+            let admitted = async {
+                let receiver = extract_receiver(&req)?;
+                // SA-13 / SR1-7: an OAuth2 client's token has no session for a
+                // suspension to revoke, so its tenant is asked here, on every
+                // request: a suspended tenant's token is refused
+                // `403 tenant_suspended` for the rest of its lifetime.
+                crate::extractors::auth::admit_token_tenant(&req, receiver.tenant_id).await?;
+                Ok(receiver)
+            }
+            .await;
+            admitted.map_err(|e| crate::extractors::auth::mark_refused(&req, e))
+        })
     }
 }
 

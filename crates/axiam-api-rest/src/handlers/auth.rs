@@ -549,13 +549,15 @@ pub async fn login<C: Connection + Clone>(
             reason: "invalid credentials".into(),
         }));
     }
-    // SA-13 (N16, D-3): a suspended tenant's users do not sign in. Asked of the
-    // tenant just loaded — no second read — and before the password is
-    // stretched; `create_session_and_tokens` asks again where every sign-in
-    // ends, which is what covers the MFA and setup-token completions.
-    if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
-        return Err(AxiamError::TenantSuspended.into());
-    }
+    // SA-13 (N16, D-3): a suspended tenant's users do not sign in — but the
+    // refusal comes only AFTER the credential verified (QR1-3, SR1-8). Asked
+    // here, before the password, it answered `403 tenant_suspended` to any
+    // username and password, and faster (no Argon2): an anonymous oracle for
+    // which tenants are suspended. A wrong password now gets the same `401`
+    // as on an active tenant; a right one is refused by
+    // `create_session_and_tokens` (a direct sign-in) or below (an MFA
+    // challenge or setup token, which the completion refuses again).
+    let tenant_accepts_principals = axiam_core::models::tenant::tenant_accepts_principals(&tenant);
     let org_id = tenant.organization_id;
 
     // Tell the audit middleware which tenant this request is about.
@@ -614,6 +616,15 @@ pub async fn login<C: Connection + Clone>(
     };
 
     let result = state.auth_service.login(input).await?;
+
+    // The credential verified: only now may the caller learn the tenant is
+    // suspended. A direct success never gets here suspended —
+    // `create_session_and_tokens` refused it inside `login` — so this covers
+    // the MFA challenge and the setup token, which are refused rather than
+    // handed out for a sign-in that cannot complete.
+    if !tenant_accepts_principals && !matches!(result, axiam_auth::LoginResult::Success(_)) {
+        return Err(AxiamError::TenantSuspended.into());
+    }
 
     match result {
         axiam_auth::LoginResult::Success(out) => {

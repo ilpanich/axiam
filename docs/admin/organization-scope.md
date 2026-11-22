@@ -300,11 +300,16 @@ PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}
 
 A suspended tenant keeps all of its data, and admits none of its own
 principals: sign-in (every method), the token endpoint for every grant, refresh,
-device mTLS, SCIM provisioning tokens, REST, gRPC and AMQP authorization
-requests all answer `tenant_suspended` (REST `403`, OAuth2 `400`). The
-suspension revokes the tenant's sessions and refresh tokens in the same
-transaction as the status write, so setting it back to `Active` restores
-sign-in through a **new** session only.
+device mTLS, SCIM provisioning tokens, REST (the UMA Protection API and the SSF
+stream-management API included), gRPC and AMQP authorization requests all
+answer `tenant_suspended` (REST `403`, OAuth2 `400`). A password sign-in says so
+only once the password verified: a wrong password answers the usual `401`, so
+the code tells an anonymous caller nothing. AMQP **audit ingestion** is not
+refused: a suspended tenant's signed audit events are still recorded, so its
+trail loses nothing. The suspension revokes the tenant's sessions and refresh
+tokens in the same transaction as the status write — nothing is revoked when
+that write fails (a slug conflict, say) — so setting it back to `Active`
+restores sign-in through a **new** session only.
 
 Two further rules apply to it:
 
@@ -321,7 +326,8 @@ Two further rules apply to it:
 
   * **Through `X-Axiam-Tenant`.** Decided once, where the extractor resolves
     the tenant the request acts on. Admitted: `GET`/`HEAD`; the tenant-update
-    request above for that same tenant; and the `POST`s that only read —
+    request above and the tenant `DELETE`, for that same tenant; and the
+    `POST`s that only read —
     `/authz/check`, `/authz/check/batch`,
     `/organizations/{org_id}/tenants/{tenant_id}/audit-export`,
     `/tenants/{tenant_id}/saml/parse-sp-metadata`, `/pgp-keys/{id}/encrypt`
@@ -332,7 +338,8 @@ Two further rules apply to it:
   * **By path, under `/api/v1/organizations/{org_id}/tenants/{tenant_id}`.**
     Decided once, in the per-tenant organization guard
     (`require_organization_principal_for_tenant`) from what the route declares
-    it does; the tenant update checks its own body:
+    it does; a datastore error while reading the tenant refuses the write
+    rather than letting it through; the tenant update checks its own body:
 
     | Route | On a suspended tenant |
     |---|---|

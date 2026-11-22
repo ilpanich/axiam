@@ -1788,12 +1788,56 @@ is derived from `AXIAM__AMQP__SIGNING_KEY` under an HKDF label of its own
 (`axiam-amqp-internal-v1`, plus the queue family), **not** from a tenant's
 subkey: the subkey a tenant's producers hold for `axiam.authz.request` and
 `axiam.audit.events` cannot sign a message here. The nonce goes to the same
-durable replay store, and `issued_at` must lie within
-`AXIAM__AMQP__REPLAY_SKEW_SECS` of the consumer's clock (a retry copy carries
-the time its retry-queue TTL expires, so a long backoff is not mistaken for a
-stale message). An unsigned, tampered, stale or replayed message is
-dead-lettered and recorded in the system audit log as
+durable replay store. The HMAC is checked over the bytes as received (with the
+trailing `hmac_signature` member removed), never over a re-serialization, so a
+payload carrying a number JSON cannot round-trip still verifies.
+
+**How old a message may be.** These are durable work queues: a message waits in
+them for reasons that have nothing to do with tampering — every consumer down
+for a deploy or a crash, a burst backing up the queue, a short-TTL retry copy
+held behind a long one in a `.retry` queue (the broker releases an expired
+message only from the head). So their freshness bound is not the 5-minute
+`AXIAM__AMQP__REPLAY_SKEW_SECS` of the SDK-facing queues but
+`AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS`, **86400 (24 h) by default**: a
+message is admitted while `issued_at` is no more than that in the past, and
+refused as stale after it. An `issued_at` in the *future* is still refused
+beyond `AXIAM__AMQP__REPLAY_SKEW_SECS` (clock skew, not dwell time). Each
+nonce is kept in the replay store for the maximum age, so a copy published
+again at any time inside it is a replay. A value below
+`AXIAM__AMQP__REPLAY_SKEW_SECS` is raised to it.
+
+The default covers, with room to spare:
+
+- **the outbound kinds' retries** — the longest single retry TTL is the
+  backoff ceiling (`AXIAM__<KIND>__BACKOFF_CEILING_MS`, 1 h by default), and
+  head-of-line blocking in a `.retry` queue can hold a copy for up to another
+  ceiling; a retry copy carries the time its TTL expires as `issued_at`, so its
+  own backoff never counts against it;
+- **the mail consumer's in-process backoff** — it sleeps before republishing a
+  failed send (10 s, then 20 s: three attempts, 30 s in all per message), one
+  message at a time, and the retry copy is re-sealed with a fresh `issued_at`.
+  What ages a queued mail is the sleeps of the failing messages ahead of it, at
+  most 20 s each; 24 h is about 4,300 of them back to back, far beyond any
+  realistic relay outage;
+- **a consumer outage** of most of a day.
+
+Raise it if your mail or outbound consumers can be down longer than that, or
+you raise `MAX_ATTEMPTS` or the backoff ceiling a long way; the cost is one
+replay-store row per message for that long. An unsigned, tampered, stale or
+replayed message is dead-lettered and recorded in the system audit log as
 `amqp.internal_message_rejected`, with the queue and the reason.
+
+**A redelivery is not a replay.** RabbitMQ delivers at least once: a consumer
+that crashes before it settles a message, or that requeues the original
+because its retry copy could not be published, gets the same bytes back. A
+message whose nonce is already recorded is therefore admitted when — and only
+when — the broker marks the delivery *redelivered*, a flag a publisher cannot
+set; its signature, purpose, key version and age are checked as for any other.
+A copy *published* again is never marked so, and is refused as a replay. The
+delivery is at-least-once as before (a consumer killed after it sent a mail
+but before the ack sends it again); a principal that can both publish to and
+consume from these queues can replay through a requeue, which is one more
+reason the broker must not grant SDK principals either on them.
 
 Two delivery rules changed with it. Mail of every type except a notification
 rule's is sent only to the address of the user record the message names; when
@@ -1804,13 +1848,20 @@ webhook has since been disabled or no longer subscribes to the event.
 #### Upgrading: drain the queues, or relax the check for one deployment
 
 A replica of an earlier version writes unsigned messages and cannot read the
-envelope. Do one of these when you upgrade:
+envelope. Do one of these when you upgrade; **draining is the default** and the
+only one that loses nothing and opens nothing:
 
-1. **Drain.** Stop the old replicas' producers (or wait for a quiet period),
+1. **Drain (recommended).** Stop the old replicas' producers (or wait for a quiet period),
    let `axiam.mail.outbound`, `axiam.webhook`, `axiam.ssf_push`,
    `axiam.scim_push`, `axiam.ciba_ping` **and their `.retry` queues** empty,
    then deploy. Nothing is rejected.
-2. **Relax for one deployment.** Deploy with
+2. **Relax for one deployment** — only with broker ACLs confirmed. **While the
+   flag is `false`, the N3 hole is open again for its duration:** any principal
+   with broker write access to these queues can inject an unsigned mail,
+   webhook, SSF, SCIM or CIBA message and the consumers will act on it, exactly
+   as before SA-14. Use it only where the broker already denies every
+   non-AXIAM principal write access to those queues, and keep the window as
+   short as the rollout. Deploy with
    `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false`: the new replicas
    still sign everything they publish and still reject any envelope that fails
    to verify, but also accept a message in the old, unsigned shape (each one is
@@ -1824,9 +1875,11 @@ envelope. Do one of these when you upgrade:
 
 Messages already in a `.dlq` when you upgrade are in the old shape; replaying
 one into its primary queue needs option 2. A message dead-lettered after the
-upgrade carries its original `issued_at`, so replaying it later than
-`AXIAM__AMQP__REPLAY_SKEW_SECS` after it was published is rejected as stale —
-the DLQ keeps it for inspection, and the event is re-sent from its source.
+upgrade keeps its nonce and its original `issued_at`: a message the consumer
+admitted before dead-lettering it (a delivery that exhausted its attempts) is
+refused as a replay when it is published back, and any message is refused as
+stale once `AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS` has passed — the DLQ
+keeps it for inspection, and the event is re-sent from its source.
 
 ### Compose
 
@@ -2015,6 +2068,7 @@ configure and it is not covered here.
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
 | `AXIAM__AMQP__CONNECT_TIMEOUT_MS` | `30000` | Budget for one connection attempt. lapin has none of its own, so without this a broker whose port is published but whose TLS listener never answers leaves the connect pending forever — no error, no retry, no log line. Raise it for a broker behind a slow link; do not disable it. |
 | `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE` | `true` | Whether the mail and outbound consumers refuse a message without the signed envelope ([SA-14](#the-server-internal-queues-are-signed-too-sa-14)). Set `false` for **one** rolling deployment only. A failing envelope is refused either way. |
+| `AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS` | `86400` | How long a signed message may wait in the mail and outbound queues before it is refused as stale, and how long its nonce is kept ([SA-14](#the-server-internal-queues-are-signed-too-sa-14)). Covers the longest retry schedule and a day-long consumer outage; raised to `AXIAM__AMQP__REPLAY_SKEW_SECS` if set lower. A future-dated `issued_at` is still bounded by the replay skew. |
 
 ## Minimal profile (no broker)
 

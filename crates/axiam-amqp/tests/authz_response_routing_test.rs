@@ -27,3 +27,29 @@ fn without_reply_to_the_response_goes_to_the_shared_queue() {
     assert_eq!(response_routing_key(Some("")), queues::AUTHZ_RESPONSE);
     assert_eq!(queues::AUTHZ_RESPONSE, "axiam.authz.response");
 }
+
+/// SR1-5: a `reply_to` naming one of the server's own queues (`axiam.` — the
+/// mail and outbound work queues, their retry and dead-letter queues, the
+/// audit and authz queues) is not honoured: the response goes to the shared
+/// queue instead. Any other name is an integrator's and is honoured.
+#[test]
+fn a_reply_to_naming_a_server_internal_queue_is_not_honoured() {
+    for queue in [
+        "axiam.mail.outbound",
+        "axiam.webhook",
+        "axiam.webhook.retry",
+        "axiam.ssf_push.dlq",
+        "axiam.audit.events",
+        "axiam.authz.request",
+    ] {
+        assert_eq!(
+            response_routing_key(Some(queue)),
+            queues::AUTHZ_RESPONSE,
+            "{queue}"
+        );
+    }
+    assert_eq!(
+        response_routing_key(Some("billing.authz-replies")),
+        "billing.authz-replies"
+    );
+}

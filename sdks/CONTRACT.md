@@ -316,15 +316,22 @@ caller learns nothing about the user or the password. No SDK operation wraps eit
 application calling them through the vendored `proto/` sees the status change.
 
 **`tenant_suspended` (contract 1.68, informative; SA-13, N16).** A tenant whose `status` is
-`Suspended` admits none of its own principals, at every door: sign-in by every method, the token
-endpoint for every grant, refresh, the mTLS device login, SCIM provisioning tokens, REST, gRPC and
-AMQP. Suspending one also ends its sessions and revokes its refresh tokens, so reactivating it
-restores sign-in through a **new** session only. The refusal names itself on every transport, and
-maps by the rules already in this section:
+`Suspended` admits none of its own principals at these doors: sign-in by every method, the token
+endpoint for every grant, refresh, the mTLS device login, SCIM provisioning tokens, every
+authenticated REST route under `/api/v1/*`, the UMA Protection API (`/uma2/*`, a resource
+server's PAT) and the SSF stream-management API (`/ssf/v1/*`, a receiver's token), gRPC, and AMQP
+authorization requests (`axiam.authz.request`). **AMQP audit ingestion (`axiam.audit.events`) is
+not one of them**: a suspended tenant's signed audit events are still verified and recorded, so
+its audit trail loses nothing while it is suspended. Suspending a tenant also ends its sessions and
+revokes its refresh tokens, so reactivating it restores sign-in through a **new** session only.
+A sign-in says `tenant_suspended` only to a caller whose credential verified: a wrong password on
+a suspended tenant answers the same `401` as on an active one, so the code is no oracle for an
+unauthenticated caller. The refusal names itself on every transport, and maps by the rules already
+in this section:
 
 | Where | Answer | §2 type |
 |---|---|---|
-| REST (`/api/v1/*`, the sign-in routes, the mTLS device login) | `403`, `error` `tenant_suspended` | `AuthzError` |
+| REST (`/api/v1/*`, the sign-in routes after the credential verified, the mTLS device login, `/uma2/*` and `/ssf/v1/*`) | `403`, `error` `tenant_suspended` | `AuthzError` |
 | SCIM (`/scim/v2/*`) with a suspended tenant's provisioning token | the same `401` as an unknown or revoked token: SCIM does not say why | `AuthError` |
 | `/oauth2/*` (the token endpoint for every grant, and the client-authenticated introspection, revocation, PAR and backchannel-authentication endpoints, for a suspended tenant's client) | `400` `OAuth2ErrorResponse`, `error` `tenant_suspended` | `OAuthProtocolError` (the `/oauth2/*` row) |
 | gRPC | `PERMISSION_DENIED`, message beginning `tenant_suspended:` | `AuthzError` |
@@ -335,9 +342,9 @@ None of them is retryable under [§16](#§16-retry-policy-d5), and an SDK MUST N
 refresh or a re-login: only an organization administrator can lift a suspension. An SDK MAY
 surface the `tenant_suspended` code on its error so an application can say so. While a tenant is
 suspended an organization-level principal ([§5.2](#§52-organization-level-principals-contract-131))
-acting on it may read it, change its `status`, and delete it; any other state-changing request on
-it, a tenant update that changes anything besides `status` included, answers `403`
-`tenant_suspended`. Operator detail: `docs/admin/organization-scope.md`, "Suspending a tenant".
+acting on it may read it, change its `status`, and delete it — whether the request names the
+tenant by path or through `X-Axiam-Tenant`; any other state-changing request on it, a tenant
+update that changes anything besides `status` included, answers `403` `tenant_suspended`. Operator detail: `docs/admin/organization-scope.md`, "Suspending a tenant".
 
 **A replay store that cannot answer is a `NetworkError` (contract 1.60).** When §32.7's receiver
 helper asks its replay store about a `jti` and the store cannot answer, `verify_set` raises
@@ -1199,6 +1206,28 @@ inject `allowed: true` for a `correlation_id` it had learned. The server now sig
 response and binds it to the request, and answers on the requester's own queue when the request
 names one.
 
+**What the signature proves, and what it does not (trust boundary, normative).** The key is the
+tenant's own subkey, which every producer of that tenant holds. A valid signature therefore
+proves that the response came from **a holder of the tenant's subkey** — the server, or any of
+the tenant's own producers — and nothing narrower. It closes injection by principals of other
+tenants and by anyone without the subkey. It does **not** close injection by another service of
+the **same** tenant: such a service can compute a valid signature for any response, and if it
+can learn a request's `correlation_id` and `nonce` (by reading `axiam.authz.request`, or the
+shared `axiam.authz.response`) and publish to the requester's response queue, it can forge
+`allowed: true` that passes rules 1–3 below. So:
+
+- Where **more than one service of a tenant** publishes AMQP authorization requests, each MUST
+  set `reply_to` to an **exclusive** queue only it consumes (a broker-named `amq.gen-…` queue
+  declared `exclusive`, or `amq.rabbitmq.reply-to`), and MUST NOT read its answers from the
+  shared `axiam.authz.response`.
+- The broker's own access control is the boundary between same-tenant services, and operators
+  SHOULD configure it: deny every SDK principal read (consume) access on `axiam.authz.request`,
+  and write (publish) access on the response queues, `axiam.authz.response` included. Only the
+  server needs either.
+- A deployment that cannot separate same-tenant services at the broker treats them as one trust
+  domain for AMQP authorization, or uses REST or gRPC, whose answers are bound to the caller's
+  own connection.
+
 **Wire shape (additive).** `AuthzResponse` gains three members; the four it had keep their
 meaning, so a consumer that reads only `allowed` decodes it as before:
 
@@ -1233,9 +1262,20 @@ correlation_id, allowed, reason?, reason_code?, tenant_id, nonce
 
 `reason` and `reason_code` are omitted (not `null`) when absent. UUIDs are lower-case,
 hyphenated strings; `allowed` is a JSON boolean. The wire form is the canonical form with
-`,"hmac_signature":"<hex>"` appended as the last member, so an SDK may either rebuild the
-canonical form from the parsed members or strip `hmac_signature` from the received bytes
-order-preservingly, exactly as for the request.
+`,"hmac_signature":"<hex>"` appended as the **last** member.
+
+**An SDK MUST verify over the received bytes** (contract 1.68): the canonical bytes are the
+bytes the broker delivered, unchanged, with that trailing member removed — that is, with the
+final `,"hmac_signature":"` + 64 hex digits + `"` taken out of the closing `}`. An SDK MUST NOT
+rebuild the canonical form by re-serializing the parsed members: `reason` echoes the requested
+action, which the requester chooses, and JSON encoders disagree on string escaping (Go's
+`encoding/json` escapes `<`, `>`, `&`, U+2028 and U+2029; Python's `json.dumps` escapes every
+non-ASCII character by default), so a re-serialization fails to verify the genuine answer
+whenever `reason` contains one of them. A response whose bytes do not end in that member is
+discarded under rule 1. *(Informative: the server writes the members with serde_json — `"` and
+`\` escaped as `\"` and `\\`, the short escapes `\b \f \n \r \t`, every other control
+character below U+0020 as `\u00XX` with lower-case hex, and everything else, `/`, `<`, `>`, `&`
+and all non-ASCII included, as raw UTF-8. Vector 4 below exercises it.)*
 
 **Consumer obligations (normative).** An SDK that publishes `AuthzRequest` and reads its
 answer:
@@ -1245,7 +1285,8 @@ answer:
    discarded, and it is never an allow.
 2. **Verifies the signature with the tenant subkey.** The subkey is derived from the
    requester's **own** `tenant_id` and the `key_version` it sent — never from a value the
-   response alone supplies. `HMAC-SHA256(subkey, canonical)` MUST equal `hmac_signature`,
+   response alone supplies. `HMAC-SHA256(subkey, canonical)` — `canonical` being the received
+   bytes with the trailing signature member removed, as above — MUST equal `hmac_signature`,
    compared in constant time.
 3. **Checks the binding.** `tenant_id` MUST equal the requester's own tenant, and
    `correlation_id` **and** `nonce` MUST both match one request the requester still has
@@ -1257,11 +1298,18 @@ answer:
    either — the genuine answer may still arrive.
 5. **Routes its answers to itself.** The server answers a request whose AMQP `reply_to` basic
    property is non-empty on the default exchange with routing key = `reply_to` (an exclusive,
-   broker-named `amq.gen-…` queue, or `amq.rabbitmq.reply-to`), and a request without one on the
-   shared `axiam.authz.response` queue, as before. An SDK SHOULD set `reply_to` to a queue only
-   it consumes. `reply_to` is a broker property outside the signed request body: the route is a
-   delivery and confidentiality convenience, the signature is the authenticity guarantee, and an
-   SDK MUST verify a response whichever queue delivered it.
+   broker-named `amq.gen-…` queue, `amq.rabbitmq.reply-to`, or a named queue of the
+   integrator's), and a request without one on the shared `axiam.authz.response` queue, as
+   before. **The server does not honour a `reply_to` that names one of its own queues** — any
+   name beginning `axiam.` (its mail, outbound, audit and authz queues and their retry and
+   dead-letter queues): it answers such a request on the shared `axiam.authz.response` queue
+   instead and logs a warning, so a requester cannot make the server write into a queue it
+   consumes itself. An SDK SHOULD set `reply_to` to a queue only it consumes, and MUST where the
+   trust-boundary clause above says so. `reply_to` is a broker property outside the signed
+   request body: the route is a delivery and confidentiality convenience that, with an
+   exclusive queue, also keeps other same-tenant services from seeing the answer; the signature
+   authenticates the answer to holders of the tenant subkey; and an SDK MUST verify a response
+   whichever queue delivered it.
 
 **Against a server older than 1.68.** Such a server publishes no `tenant_id`, `nonce` or
 `hmac_signature`, so its responses fail rule 1. **The default is to refuse them.** An SDK MAY
@@ -1317,7 +1365,22 @@ server's own `AuthzResponse::sign`. Common inputs — the `AuthzRequest` vector 
 
 `hmac_signature`: `4bfc2ce9a035bd4a028ee2a5cb75a08832915c60cd2b176c8d4bf28910a61adc`.
 
-**Required tests, per SDK with an AMQP transport.** The three vectors verify. And each of these
+*Vector 4 — deny (`no_grant`), a `reason` with characters encoders escape differently (contract
+1.68, SR1-6).* The requested action was `docs:a&b</"c">/é€`; `reason` echoes it. In the
+canonical bytes below `"` is escaped as `\"` and `&`, `<`, `>`, `/`, `é` (U+00E9) and `€`
+(U+20AC) are raw UTF-8 — an SDK that re-encoded them (`\u0026`, `\u003c`, `\u00e9`, …) would
+compute a different HMAC, which is why rule 2 verifies the received bytes. Canonical bytes:
+
+```
+{"correlation_id":"22222222-2222-2222-2222-222222222222","allowed":false,"reason":"no permission grants action 'docs:a&b</\"c\">/é€'","reason_code":"no_grant","tenant_id":"11111111-1111-1111-1111-111111111111","nonce":"55555555-5555-5555-5555-555555555555"}
+```
+
+`hmac_signature`: `5194142df4bf66b07e9e8d516caf6be099af025219ab12deb26fea39e93490ff`. The wire
+JSON is the canonical bytes with `,"hmac_signature":"5194142df4bf66b07e9e8d516caf6be099af025219ab12deb26fea39e93490ff"`
+inserted before the closing `}`.
+
+**Required tests, per SDK with an AMQP transport.** The four vectors verify, each over its wire
+JSON with the trailing signature member removed. And each of these
 is discarded, never an allow, never a completed request: the vector 1 canonical bytes under the
 subkey of tenant `99999999-9999-9999-9999-999999999999`; under `key_version` `3`; vector 1 with
 `allowed` flipped to `false` (and vector 2 with it flipped to `true`) and the signature kept; a
@@ -4988,14 +5051,16 @@ recorded here until one exists.
   `roles` claim and fails closed without it, never `scope`, and the new `require_scope` reads
   `scope` (§11.1, §11.2 rule 11, §10's identity `roles`; every SDK shipping `require_role`, the
   defect in Java, Kotlin and PHP); the requester verifies the now-signed `AuthzResponse` — tenant
-  subkey, `tenant_id`, `correlation_id` and `nonce` — with three byte-exact vectors, and refuses an
-  unsigned one unless an explicit opt-out is set (§8; Rust, TypeScript, Python, Java, C#, PHP,
-  Go); and §3a's inbound double-submit check, restated for every guard that accepts the
+  subkey, `tenant_id`, `correlation_id` and `nonce`, over the received bytes — with four byte-exact
+  vectors, reads its answers from an exclusive `reply_to` queue where several services of a tenant
+  use AMQP authorization, and refuses an unsigned one unless an explicit opt-out is set (§8; Rust,
+  TypeScript, Python, Java, C#, PHP, Go); and §3a's inbound double-submit check, restated for every guard that accepts the
   `axiam_access` cookie (§3a; all eleven; the defect in Kotlin's Ktor plugin). Informative: the
   `roles` scope and claim the server now issues (§11.2 rule 11 (e)); gRPC `GetUser` and
   `ValidateCredentials` authorize each call (§2); tenant suspension and its `tenant_suspended` and
-  `organization_tenant_not_suspendable` codes on every transport (§2). `openapi.json`, `proto/`
-  and the registry are unchanged.
+  `organization_tenant_not_suspendable` codes on every transport (§2). `proto/` is unchanged;
+  `openapi.json` changed one description only, which moves its digest and the registry's
+  `spec_digest` (§34.12).
 - **2026-11-17 (security audit 2026-11-14, Wave 1; contract 1.67)** — **no new operation and no
   request change; one additive response member; status changes on existing operations, which break
   callers that relied on the old answer; new JOSE `typ` values on access and logout tokens.** Recorded in **§34.11**, marked *contract 1.67* inline where each operation is
@@ -15062,8 +15127,11 @@ one's own id) check the session first: a token whose session has been revoked ge
 
 Contract 1.68 records the SDK-side rules of Wave 2 of the security-audit remediation
 (2026-11-21) and the SDK-visible results of its server fixes. **It adds no operation, removes
-none, and changes no REST request or response schema**: `openapi.json`, `proto/` and the
-registry are unchanged (the registry's `spec_digest` included). Two things change on the wire:
+none, and changes no REST request or response schema**, and `proto/` is unchanged. `openapi.json`
+did change, in one operation's description only: the summary of `delete_mfa_method` was put back
+ahead of a note added in Wave 1 (no wording, schema or operation changed), which moves the spec's
+`x-axiam-spec-digest` and with it the registry's `spec_digest`. An SDK that vendors the spec and
+the registry re-syncs both; its generated surface does not change. Two things change on the wire:
 the AMQP `AuthzResponse` gains three members and a signature ((f)), and an access token can
 carry a new `roles` claim when the new `roles` scope is granted ((e)). Everything else is a
 verifier rule, a helper rule or a glue rule that the SDKs implement in Wave 3 of the
@@ -15113,23 +15181,36 @@ remediation, each marked *contract 1.68* where it lives.
   break is the fix.
 - **(f) Signed authz responses (N2).** Every `AuthzResponse` carries `tenant_id`, `nonce` and
   `hmac_signature` (HMAC-SHA256 under the request's tenant subkey and `key_version`, over a
-  fixed-order canonical form, three byte-exact vectors), and is published to the request's
-  `reply_to` when it names one. A requester verifies the signature, checks `tenant_id`,
+  fixed-order canonical form, four byte-exact vectors), and is published to the request's
+  `reply_to` when it names one — unless that names one of the server's own `axiam.` queues,
+  which is answered on the shared queue instead. A requester verifies the signature over the
+  **received bytes** with the trailing signature member removed (never a re-serialization;
+  vector 4 carries the characters encoders escape differently), checks `tenant_id`,
   `correlation_id` and `nonce` against its own outstanding request, and discards a response
-  that fails. Against a server older than 1.68, whose responses are unsigned, the default is to
+  that fails. The signature authenticates the answer to holders of the tenant subkey only — the
+  server or any of the tenant's producers — so where several services of a tenant use AMQP
+  authorization each MUST read its answers from an exclusive `reply_to` queue, and broker ACLs
+  SHOULD deny SDK principals read access on `axiam.authz.request` and write access on response
+  queues. Against a server older than 1.68, whose responses are unsigned, the default is to
   refuse; an explicit integrator opt-out MAY admit an unsigned response for one rolling upgrade.
 - **(g) Inbound CSRF (N12).** No new rule: the §3a double-submit check binds every guard that
   can admit a request on the `axiam_access` cookie, and each guard carries the four-case test.
 - **(h), (i) Server status changes (informative).** `GetUser` needs `users:get` for anyone but
   the caller itself; `ValidateCredentials` answers only a service account holding
   `users:validate_credentials` (seeded to no role); both refuse with `PERMISSION_DENIED`. A
-  suspended tenant admits none of its principals on any transport — REST `403`, OAuth2 `400`,
-  gRPC `PERMISSION_DENIED` (`tenant_suspended:`), AMQP `reason_code`, all `tenant_suspended` —
-  and its sessions and refresh tokens are revoked when it is suspended; the organization's own
-  tenant cannot be suspended (`409` `organization_tenant_not_suspendable`); an organization
-  principal may only read, re-status or delete a suspended tenant. The server's internal mail
-  and outbound queues are now signed too (SA-14); no SDK produces or consumes them, so nothing
-  here changes for an SDK.
+  suspended tenant admits none of its principals at the doors §2 lists — REST (the UMA
+  Protection and SSF stream-management APIs included) `403`, OAuth2 `400`, gRPC
+  `PERMISSION_DENIED` (`tenant_suspended:`), AMQP authorization `reason_code`, all
+  `tenant_suspended`; AMQP audit ingestion keeps recording its events — and its sessions and
+  refresh tokens are revoked when it is suspended (only once the status write succeeded); a
+  sign-in reveals the suspension only after the credential verified (a wrong password is the
+  usual `401`); the organization's own tenant cannot be suspended (`409`
+  `organization_tenant_not_suspendable`); an organization principal may only read, re-status
+  or delete a suspended tenant, by path or through `X-Axiam-Tenant`. `ValidateCredentials`
+  audits its `PERMISSION_DENIED` refusals too. The server's internal mail and outbound queues
+  are now signed too (SA-14), with their own maximum message age
+  (`AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS`, 24 h) and broker redeliveries admitted; no SDK
+  produces or consumes them, so nothing here changes for an SDK.
 
 **Conformance statements.** None changes wording. §12.8 is part of §12, and §11.2 rule 11 of
 §11, deliberately: unlike §12.7 (see the Conformance Statement), these close security defects

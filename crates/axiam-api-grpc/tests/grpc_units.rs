@@ -1492,7 +1492,17 @@ async fn validate_credentials_refuses_a_user_token() {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
     assert!(authz.asked().is_empty());
-    assert!(audit.rows().is_empty(), "a refused caller is not an answer");
+    // QR1-13: a refusal is an answer too, and is audited — `Denied`, naming
+    // the caller and no account. (This asserted no row before the fix.)
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 2, "one row per refused call");
+    for row in &rows {
+        assert_eq!(row.action, "auth.credentials_validated");
+        assert_eq!(row.tenant_id, tenant);
+        assert_eq!(row.outcome, AuditOutcome::Denied);
+        assert_eq!(row.actor_type, ActorType::User);
+        assert_eq!(row.resource_id, None);
+    }
 }
 
 /// D-2: a service account the authorizer denies is refused.
@@ -1501,6 +1511,7 @@ async fn validate_credentials_refuses_a_service_account_without_the_permission()
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let authz = Arc::new(ScriptedAuthorizer::denying());
+    let audit = Arc::new(RecordingAudit::default());
     let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo {
             user: Some(active_user(tenant, hash)),
@@ -1508,13 +1519,23 @@ async fn validate_credentials_refuses_a_service_account_without_the_permission()
         auth_config(),
         test_crypto_gate(),
         authz.clone(),
-        Arc::new(RecordingAudit::default()),
+        audit.clone(),
     );
+    let claims = m2m_claims_for(tenant);
+    let caller: Uuid = claims.0.sub.parse().unwrap();
     let mut req = Request::new(validate_request(tenant, test_password()));
-    req.extensions_mut().insert(m2m_claims_for(tenant));
+    req.extensions_mut().insert(claims);
     let err = svc.validate_credentials(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
     assert_eq!(authz.asked(), ["users:validate_credentials"]);
+    // QR1-13: the refusal is audited.
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, "auth.credentials_validated");
+    assert_eq!(rows[0].outcome, AuditOutcome::Denied);
+    assert_eq!(rows[0].actor_id, caller);
+    assert_eq!(rows[0].actor_type, ActorType::ServiceAccount);
+    assert_eq!(rows[0].resource_id, None);
 }
 
 /// Every answer — valid, wrong password, unknown name — writes one

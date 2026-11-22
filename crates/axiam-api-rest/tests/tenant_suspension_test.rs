@@ -1069,6 +1069,38 @@ async fn audit_export_and_delete_stay_open_on_a_suspended_tenant() {
         assert_eq!(status, 200, "audit export ({act_on:?}): {body}");
     }
 
+    // QR1-1: the DELETE with `X-Axiam-Tenant` naming the suspended tenant —
+    // what the admin UI sends while the tenant is selected — is allowed too.
+    let (status, body) = send(
+        &app,
+        Method::DELETE,
+        &tenant_path,
+        &admin_token,
+        Some(fx.tenant),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status, 204,
+        "deleting a suspended tenant with the header naming it: {body}"
+    );
+
+    // And by path alone, on a second suspended tenant.
+    let fx = fixture().await;
+    let admin_token = session_backed_token(&fx.db, &auth, fx.admin, fx.org_tenant, fx.org_id).await;
+    let app = app!(fx.db, auth);
+    let tenant_path = format!("/api/v1/organizations/{}/tenants/{}", fx.org_id, fx.tenant);
+    set_status!(app, fx, admin_token, "Suspended");
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        &format!("{tenant_path}/audit-export"),
+        &admin_token,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "audit export: {body}");
     let (status, body) = send(&app, Method::DELETE, &tenant_path, &admin_token, None, None).await;
     assert_eq!(status, 204, "deleting a suspended tenant: {body}");
 }
@@ -1144,4 +1176,267 @@ async fn signing_ca_creation_on_an_active_tenant_still_succeeds() {
     .await;
     assert_eq!(status, 201, "signing CA for an active tenant: {body}");
     assert_eq!(count(&fx.db, TENANT_CAS, fx.tenant).await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2 review gate, round 2
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/auth/login` as `alice` with `password`: the status and body.
+async fn login_status(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    fx: &Fixture,
+    password: String,
+) -> (u16, serde_json::Value) {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse().unwrap())
+        .uri("/api/v1/auth/login")
+        .set_json(serde_json::json!({
+            "tenant_id": fx.tenant,
+            "org_id": fx.org_id,
+            "username_or_email": "alice",
+            "password": password,
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let bytes = test::read_body(resp).await;
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// QR1-3 / SR1-8: password login on a suspended tenant says `tenant_suspended`
+/// only to a caller whose credential verified. A wrong password gets the
+/// uniform `401` an unknown tenant or user gets, so an anonymous caller cannot
+/// probe which tenants are suspended. It answered `403 tenant_suspended`
+/// before the fix.
+#[actix_rt::test]
+async fn sign_in_reveals_a_suspension_only_after_the_password_verifies() {
+    let fx = fixture().await;
+    let auth = test_auth_config();
+    let admin_token = session_backed_token(&fx.db, &auth, fx.admin, fx.org_tenant, fx.org_id).await;
+    let app = app!(fx.db, auth);
+
+    set_status!(app, fx, admin_token, "Suspended");
+
+    let (status, body) = login_status(&app, &fx, "not-the-password".into()).await;
+    assert_eq!(status, 401, "wrong password on a suspended tenant: {body}");
+    assert_ne!(body["error"], "tenant_suspended", "{body}");
+
+    let (status, body) = login_status(&app, &fx, axiam_test_support::test_password()).await;
+    assert_eq!(status, 403, "right password on a suspended tenant: {body}");
+    assert_eq!(body["error"], "tenant_suspended", "{body}");
+}
+
+/// QR1-5: a suspend that fails — here on a slug another tenant holds, `409` —
+/// leaves the tenant `Active` and its sessions and refresh tokens intact. They
+/// were revoked before the failing write before the fix.
+#[actix_rt::test]
+async fn a_failed_suspend_revokes_nothing() {
+    use actix_web::http::Method;
+
+    let fx = fixture().await;
+    let auth = test_auth_config();
+    let admin_token = session_backed_token(&fx.db, &auth, fx.admin, fx.org_tenant, fx.org_id).await;
+    let app = app!(fx.db, auth);
+    SurrealTenantRepository::new(fx.db.clone())
+        .create(CreateTenant {
+            organization_id: fx.org_id,
+            kind: TenantKind::Standard,
+            name: "Taken".into(),
+            slug: "taken".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+
+    sign_in!(app, fx.org_id, fx.tenant).expect("sign-in while active");
+    oauth2_refresh_token(&fx).await;
+    let sessions = "SELECT count() AS total FROM session WHERE tenant_id = $tenant GROUP ALL";
+    let live_refresh = "SELECT count() AS total FROM oauth2_refresh_token \
+                        WHERE tenant_id = $tenant AND revoked = false GROUP ALL";
+    let sessions_before = count(&fx.db, sessions, fx.tenant).await;
+    assert!(sessions_before > 0);
+
+    let tenant_path = format!("/api/v1/organizations/{}/tenants/{}", fx.org_id, fx.tenant);
+    let (status, body) = send(
+        &app,
+        Method::PUT,
+        &tenant_path,
+        &admin_token,
+        None,
+        Some(serde_json::json!({ "status": "Suspended", "slug": "taken" })),
+    )
+    .await;
+    // The slug conflict fails the status write. (It answers `500` rather
+    // than `409` today: the unique-index violation surfaces from inside the
+    // suspend transaction. The failure, not its code, is what this pins.)
+    assert!(
+        status >= 400,
+        "suspend with a taken slug must fail, got {status}: {body}"
+    );
+
+    let (_, body) = get_with!(app, &tenant_path, admin_token);
+    assert_eq!(body["status"], "Active", "{body}");
+    assert_eq!(
+        count(&fx.db, sessions, fx.tenant).await,
+        sessions_before,
+        "a failed suspend must not end the tenant's sessions"
+    );
+    assert_eq!(
+        count(&fx.db, live_refresh, fx.tenant).await,
+        1,
+        "a failed suspend must not revoke the tenant's refresh tokens"
+    );
+}
+
+/// Make `tenant`'s stored record unreadable (its `organization_id` is no
+/// UUID), so every read of it fails with a datastore error rather than
+/// `NotFound`.
+async fn corrupt_tenant(db: &Surreal<TestDb>, tenant: Uuid) {
+    db.query("UPDATE type::record('tenant', $id) SET organization_id = 'not-a-uuid'")
+        .bind(("id", tenant.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+}
+
+/// QR1-6: the path-scoped suspension check fails closed. When the named
+/// tenant cannot be read (a datastore error, not "no such tenant"), a write
+/// into it is refused rather than let through. The CA was minted (201)
+/// before the fix.
+#[actix_rt::test]
+async fn path_scoped_writes_fail_closed_when_the_tenant_cannot_be_read() {
+    use actix_web::http::Method;
+
+    let fx = fixture().await;
+    let auth = test_auth_config();
+    let admin_token = session_backed_token(&fx.db, &auth, fx.admin, fx.org_tenant, fx.org_id).await;
+    let app = app!(fx.db, auth);
+    let org_ca = organization_ca(&app, &fx, &admin_token).await;
+
+    corrupt_tenant(&fx.db, fx.tenant).await;
+
+    let (status, body) = send(
+        &app,
+        Method::POST,
+        &format!(
+            "/api/v1/organizations/{}/tenants/{}/signing-cas",
+            fx.org_id, fx.tenant
+        ),
+        &admin_token,
+        None,
+        Some(serde_json::json!({
+            "parent_ca_id": org_ca,
+            "subject": "Tenant Signing CA",
+            "key_algorithm": "Ed25519",
+            "validity_days": 364
+        })),
+    )
+    .await;
+    assert_ne!(
+        status, 201,
+        "a write must not proceed on an unreadable tenant: {body}"
+    );
+    assert_eq!(
+        count(&fx.db, TENANT_CAS, fx.tenant).await,
+        0,
+        "no CA written"
+    );
+}
+
+/// SR1-7: the UMA Protection API and the SSF stream-management API take an
+/// OAuth2 client's token, which no session backs; their extractors refuse a
+/// suspended tenant's tokens. Both answered (200 and 404) before the fix.
+#[actix_rt::test]
+async fn the_uma_and_ssf_extractors_refuse_a_suspended_tenants_tokens() {
+    use actix_web::http::Method;
+
+    let fx = fixture().await;
+    let auth = test_auth_config();
+    let admin_token = session_backed_token(&fx.db, &auth, fx.admin, fx.org_tenant, fx.org_id).await;
+    let app = app!(fx.db, auth);
+    let client_token = |scope: &str| {
+        axiam_auth::token::issue_client_credentials_token(
+            &fx.client_id,
+            fx.tenant,
+            fx.org_id,
+            &[scope.to_owned()],
+            &auth,
+        )
+        .unwrap()
+    };
+    let pat = client_token(axiam_core::models::uma::UMA_PROTECTION_SCOPE);
+    let receiver = client_token(axiam_core::models::ssf::SSF_MANAGE_SCOPE);
+    let uma = "/uma2/rreg/resource_set";
+    let ssf = "/ssf/v1/stream";
+
+    let (status, body) = send(&app, Method::GET, uma, &pat, None, None).await;
+    assert_eq!(status, 200, "UMA while active: {body}");
+
+    set_status!(app, fx, admin_token, "Suspended");
+
+    for (path, token) in [(uma, &pat), (ssf, &receiver)] {
+        let (status, body) = send(&app, Method::GET, path, token, None, None).await;
+        assert_eq!(status, 403, "{path} on a suspended tenant: {body}");
+        assert_eq!(body["error"], "tenant_suspended", "{path}: {body}");
+    }
+}
+
+/// An in-memory `MakeWriter`, so a test can read what was logged.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+    type Writer = LogBuf;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// QR1-11: a tenant lookup that fails is logged as what it is, not as a
+/// suspension. It was logged `reason = "tenant_suspended"` before the fix.
+#[actix_rt::test]
+async fn scim_token_resolution_logs_an_unreadable_tenant_as_unavailable() {
+    use axiam_api_rest::ScimTokenResolver;
+
+    let fx = fixture().await;
+    let (raw, resolver) = scim_token(&fx).await;
+    corrupt_tenant(&fx.db, fx.tenant).await;
+
+    let logs = LogBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let resolved = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        resolver.resolve(&raw).await
+    };
+    assert!(resolved.is_none(), "an unreadable tenant admits nobody");
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("scim.token_rejected"), "{text}");
+    assert!(
+        !text.contains("tenant_suspended"),
+        "a lookup error is not a suspension: {text}"
+    );
+    assert!(text.contains("tenant_unavailable"), "{text}");
 }

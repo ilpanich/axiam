@@ -98,9 +98,12 @@ channels:
       dead-lettering. SA-15 (N2): a request whose AMQP `reply_to` property
       names a queue is answered on that queue instead (default exchange,
       routing key = `reply_to`); this shared queue receives only the answers
-      to requests that name none. Every response is signed with the
-      requester's tenant subkey and bound to the request's `nonce`, so a
-      requester trusts the signature, not the route.
+      to requests that name none, or that name one of the server's own
+      `axiam.` queues (not honoured, SR1-5). Every response is signed with the
+      requester's tenant subkey and bound to the request's `nonce`; the
+      signature authenticates it to holders of that subkey (the server or any
+      of the tenant's producers), so where several services share a tenant
+      each reads its answers from an exclusive `reply_to` queue (CONTRACT §8).
     bindings:
       amqp:
         is: queue

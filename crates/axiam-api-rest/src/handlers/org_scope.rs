@@ -249,13 +249,20 @@ pub async fn require_organization_principal_for_tenant<C: Connection + Clone>(
 
     // SA-13 (OD-13c): asked after the checks above, so only a caller allowed
     // to act on the tenant learns it is suspended — and only of a tenant in its
-    // own organization; any other is left to the handler's own 404.
-    if action == TenantAction::Write
-        && let Ok(target) = state.tenant_repo.get_by_id(tenant_id).await
-        && target.organization_id == user.org_id
-        && !axiam_core::models::tenant::tenant_accepts_principals(&target)
-    {
-        return Err(AxiamApiError(AxiamError::TenantSuspended));
+    // own organization; any other, and one that does not exist, is left to the
+    // handler's own 404. Any other failure to read it refuses (QR1-6): "could
+    // not tell" never reads as "not suspended", as at every other door.
+    if action == TenantAction::Write {
+        match state.tenant_repo.get_by_id(tenant_id).await {
+            Ok(target)
+                if target.organization_id == user.org_id
+                    && !axiam_core::models::tenant::tenant_accepts_principals(&target) =>
+            {
+                return Err(AxiamApiError(AxiamError::TenantSuspended));
+            }
+            Ok(_) | Err(AxiamError::NotFound { .. }) => {}
+            Err(e) => return Err(AxiamApiError(e)),
+        }
     }
 
     Ok(())

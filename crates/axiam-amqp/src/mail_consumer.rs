@@ -468,16 +468,24 @@ fn error_class_for(error_msg: &str) -> &'static str {
 /// for an unsigned, tampered, stale or replayed message, or a body that is not
 /// a mail message, after appending an `amqp.internal_message_rejected` row to
 /// the system audit log. Broker-free so it can be tested directly.
+///
+/// `redelivered` is the broker's flag on the delivery: a redelivery of a mail
+/// already admitted (this consumer died before it acked) is admitted again
+/// rather than dead-lettered as a replay (SR1-1).
 pub async fn open_mail_delivery<A>(
     raw: &[u8],
     gate: &InternalQueueGate,
     audit_repo: &A,
     now: chrono::DateTime<chrono::Utc>,
+    redelivered: bool,
 ) -> Option<OutboundMailMessage>
 where
     A: AuditLogRepository,
 {
-    let rejection = match gate.open(MAIL_PURPOSE, raw, now).await {
+    let rejection = match gate
+        .open_delivery(MAIL_PURPOSE, raw, now, redelivered)
+        .await
+    {
         Ok(opened) => match serde_json::from_value(opened.into_body()) {
             Ok(msg) => return Some(msg),
             Err(_) => Rejection::MalformedBody,
@@ -571,6 +579,7 @@ pub async fn start_mail_consumer<E, A, U, T, N, O>(
             &gate,
             &audit_repo,
             chrono::Utc::now(),
+            delivery.redelivered,
         )
         .await
         {

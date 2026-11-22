@@ -450,6 +450,49 @@ impl<C: Connection> SurrealSessionRepository<C> {
         }
     }
 
+    /// The ids of every session of a tenant, read for the revocation feed —
+    /// empty when the feed is off. A read only: nothing is revoked.
+    ///
+    /// For a caller whose revocation happens elsewhere, in a transaction that
+    /// does not publish to the feed: the tenant suspension (SA-13, QR1-5),
+    /// whose status write deletes the tenant's sessions atomically with the
+    /// status. It reads the ids first, then, once that write succeeded,
+    /// publishes them with [`Self::publish_session_revocations`].
+    ///
+    /// # Errors
+    ///
+    /// A datastore failure.
+    pub async fn tenant_session_ids_for_feed(&self, tenant_id: Uuid) -> AxiamResult<Vec<Uuid>> {
+        #[derive(Debug, SurrealValue)]
+        struct IdRow {
+            record_id: String,
+        }
+        if self.revocation_feed_ttl.is_none() {
+            return Ok(Vec::new());
+        }
+        let mut result = self
+            .db
+            .current()
+            .query("SELECT meta::id(id) AS record_id FROM session WHERE tenant_id = $tenant_id")
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let rows: Vec<IdRow> = result.take(0).map_err(DbError::from)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| Uuid::parse_str(&r.record_id).ok())
+            .collect())
+    }
+
+    /// Publish already-revoked sessions to the revocation feed (a no-op when
+    /// it is off). Best effort, as every publish to the feed is — see
+    /// `publish_revocations`.
+    pub async fn publish_session_revocations(&self, session_ids: &[Uuid]) {
+        self.publish_revocations(session_ids).await;
+    }
+
     /// Revoke every session of a tenant — the first step of a tenant deletion
     /// (#523, D-4), run by the handler before the tenant is tombstoned.
     ///

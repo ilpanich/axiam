@@ -703,16 +703,35 @@ pub async fn update<C: Connection + Clone>(
         return Err(AxiamError::OrganizationTenantNotSuspendable.into());
     }
     // SA-13 (N16, D-3): suspending a tenant refuses its principals at every
-    // door (`tenant_accepts_principals`) and revokes what they hold, in the
-    // tombstone's order: its sessions first, through the repository that
-    // publishes them to the revocation feed and drops them from the validity
-    // cache, then its refresh tokens. A failure here leaves the status as it
-    // was and the PUT retryable. The status write then revokes once more in its
-    // own transaction (a sign-in that raced this pass). Its data stays, and the
-    // caller — an organization principal, whose own tenant this is not — keeps
-    // reading it and can set it back to `Active`; sign-in then needs a new
-    // session.
+    // door (`tenant_accepts_principals`) and revokes what they hold. Nothing
+    // is revoked before the status write succeeds (QR1-5): that write can
+    // still fail — a slug another tenant holds is a `409` — and a failed
+    // suspend must leave an active tenant's users signed in.
+    //
+    // The status write itself revokes every session and refresh token of the
+    // tenant in its own transaction, atomically with the status. The session
+    // ids are read first (a read, no revocation) only so they can be published
+    // to the revocation feed afterwards, which the transaction does not do;
+    // then the repositories' own passes drop the validity cache and catch a
+    // session or token written between the read and the commit. A failure
+    // after the commit leaves the tenant suspended and revoked, and repeating
+    // the PUT repeats the passes. Its data stays, and the caller — an
+    // organization principal, whose own tenant this is not — keeps reading it
+    // and can set it back to `Active`; sign-in then needs a new session.
+    let revoked_sessions = if suspends {
+        state
+            .session_repo
+            .tenant_session_ids_for_feed(path.tenant_id)
+            .await?
+    } else {
+        Vec::new()
+    };
+    let tenant = state.tenant_repo.update(path.tenant_id, body).await?;
     if suspends {
+        state
+            .session_repo
+            .publish_session_revocations(&revoked_sessions)
+            .await;
         state
             .session_repo
             .invalidate_tenant_sessions(path.tenant_id)
@@ -721,11 +740,6 @@ pub async fn update<C: Connection + Clone>(
             .refresh_token_repo
             .revoke_all_for_tenant(path.tenant_id)
             .await?;
-    }
-    let tenant = state.tenant_repo.update(path.tenant_id, body).await?;
-    if suspends && let Some(cache) = state.session_repo.validation_cache() {
-        // Any session the status write's own pass removed.
-        cache.invalidate_tenant(path.tenant_id);
     }
     Ok(HttpResponse::Ok().json(tenant))
 }

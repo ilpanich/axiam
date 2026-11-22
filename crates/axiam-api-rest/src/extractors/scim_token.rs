@@ -87,10 +87,22 @@ impl<C: Connection + Clone> SurrealScimTokenResolver<C> {
     /// token of a suspended tenant, which keeps its tokens (un-suspending
     /// restores them). Checked on every request, for the reason the bound
     /// user is.
-    async fn tenant_admits(&self, tenant_id: Uuid) -> bool {
+    ///
+    /// `Err` carries the reason logged with the refusal (QR1-11): a datastore
+    /// fault is `tenant_unavailable`, logged with its error, not a suspension.
+    async fn tenant_admits(&self, tenant_id: Uuid) -> Result<(), &'static str> {
         match self.tenants.get_by_id(tenant_id).await {
-            Ok(tenant) => axiam_core::models::tenant::tenant_accepts_principals(&tenant),
-            Err(_) => false,
+            Ok(tenant) if axiam_core::models::tenant::tenant_accepts_principals(&tenant) => Ok(()),
+            Ok(_) => Err("tenant_suspended"),
+            Err(axiam_core::error::AxiamError::NotFound { .. }) => Err("tenant_deleted"),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    %tenant_id,
+                    "could not read a provisioning token's tenant; refusing the token"
+                );
+                Err("tenant_unavailable")
+            }
         }
     }
 
@@ -134,14 +146,14 @@ impl<C: Connection + Clone + 'static> ScimTokenResolver for SurrealScimTokenReso
                 return None;
             }
 
-            if !self.tenant_admits(token.tenant_id).await {
+            if let Err(reason) = self.tenant_admits(token.tenant_id).await {
                 tracing::info!(
                     target: "axiam::audit",
                     event = "scim.token_rejected",
                     tenant_id = %token.tenant_id,
                     token_id = %token.id,
-                    reason = "tenant_suspended",
-                    "provisioning token's tenant is suspended or deleted"
+                    reason,
+                    "provisioning token's tenant does not admit it (suspended, deleted, or unreadable)"
                 );
                 return None;
             }

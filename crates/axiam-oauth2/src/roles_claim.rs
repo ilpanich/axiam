@@ -218,10 +218,22 @@ mod tests {
     use super::*;
     use axiam_core::models::role::Role;
 
+    /// An assignment of a role whose `is_global` flag is the usual pairing
+    /// (`true` exactly when the assignment carries no resource).
     fn assignment(
         name: &str,
         resource: Option<Uuid>,
         tenants: Option<Vec<Uuid>>,
+    ) -> RoleAssignment {
+        assignment_flagged(name, resource, tenants, resource.is_none())
+    }
+
+    /// As [`assignment`], with the role's `is_global` flag set explicitly.
+    fn assignment_flagged(
+        name: &str,
+        resource: Option<Uuid>,
+        tenants: Option<Vec<Uuid>>,
+        is_global: bool,
     ) -> RoleAssignment {
         RoleAssignment {
             role: Role {
@@ -229,7 +241,7 @@ mod tests {
                 tenant_id: Uuid::nil(),
                 name: name.into(),
                 description: String::new(),
-                is_global: resource.is_some(),
+                is_global,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             },
@@ -254,6 +266,23 @@ mod tests {
             tenant,
         );
         assert_eq!(names, ["alpha", "here", "zeta"]);
+    }
+
+    /// The role's `is_global` flag decides nothing: whether the *assignment*
+    /// carries a resource does. A resource-scoped assignment of a role flagged
+    /// global is left out; an unscoped assignment of a role flagged
+    /// non-global is in.
+    #[test]
+    fn the_roles_is_global_flag_is_ignored() {
+        let tenant = Uuid::new_v4();
+        let names = global_role_names(
+            &[
+                assignment_flagged("flagged-global-scoped", Some(Uuid::new_v4()), None, true),
+                assignment_flagged("flagged-local-unscoped", None, None, false),
+            ],
+            tenant,
+        );
+        assert_eq!(names, ["flagged-local-unscoped"]);
     }
 
     #[tokio::test]

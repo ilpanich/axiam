@@ -21,6 +21,30 @@ failure: a row consumed but claimable by nobody is a burned credential.
 
 ---
 
+## surrealdb 4.0.1 / surrealdb-core 4.0.1 / surrealkv 1.3.0
+
+**Taken:** 2026-11-18, for the Dependabot minor-patch update in PR #871. It moved
+`surrealdb` and `surrealdb-core` from 4.0.0 to 4.0.1; `surrealkv` is unchanged at 1.3.0.
+**Host:** Linux x86_64, **4 cores** (a cloud sandbox VM, not otherwise controlled for
+load), embedded engine, multi-threaded tokio, release build, a fresh `PROBE_DIR` per run.
+**Probe commit:** the one that re-pinned this lockfile to `=4.0.1`.
+
+| Datastore      | Mechanism | Rounds × racers | Rounds with >1 winner | Rounds with 0 winners | Attempts the engine aborted | Wall time |
+|----------------|-----------|-----------------|-----------------------|-----------------------|-----------------------------|-----------|
+| `kv-surrealkv` | `tx`      | 5000 × 8        | **0**                 | 0                     | 34 524 / 40 000 (86%)       | 31 s      |
+| `kv-surrealkv` | `nonce`   | 5000 × 8        | **0**                 | 0                     | 0 / 40 000                  | 53 s      |
+
+No unexpected errors in either run.
+
+### What changed against 4.0.0
+
+Nothing measurable. The property holds in both shapes, and the `tx` abort rate (86.3%)
+sits on the 4.0.0 4-core figure (86.9–87.0%), so the patch release neither fixes nor
+worsens the 4.0 contention regression recorded below. Wall times are not comparable to
+the 4.0.0 rows: this host is a shared VM, not the idle machine those were taken on.
+
+---
+
 ## surrealdb 4.0.0 / surrealdb-core 4.0.0 / surrealkv 1.3.0
 
 **Taken:** 2026-11-07, for the SurrealDB 4 migration (branch `chore/surrealdb-4`). It

@@ -425,35 +425,39 @@ function MemoryCapChart() {
           paddingTop: 16,
         }}
       >
-        The cap is 2 GiB for every target — raised from 1 GiB two runs ago,
-        equally for all three, because Keycloak could not reliably survive
-        sustained password-login load below it. Across this entire matrix
-        AXIAM's server averaged 86–120 MiB, under 6% of the same allowance,
-        while delivering the throughput numbers above; Keycloak's heaviest
-        scenario averaged 853 MiB, and raising its cap to 4 GiB for a labelled
-        login attempt made it slower rather than faster.
+        The cap is 2 GiB for every target — raised from 1 GiB in earlier runs,
+        equally for all, because Keycloak could not reliably survive sustained
+        password-login load below it. Across this entire matrix AXIAM's server
+        averaged 54–75 MiB, under 4% of the same allowance; Keycloak 26.8.1's
+        averaged 708–941 MiB, which is no visible reduction against the
+        710–853 MiB Keycloak 26.7.0 averaged in run 5 (a different host, so a
+        direction rather than a measurement of the release-note claim);
+        Zitadel's averaged 127–137 MiB.
       </p>
     </div>
   );
 }
+
+/** Open upstream issue behind the database-tier regression (run 6). */
+const SURREALDB_BUG_URL = "https://github.com/surrealdb/surrealdb/issues/7667";
 
 /* ---- headline stat cards ---------------------------------------------- */
 
 const HEADLINES = [
   {
     label: "Token issuance",
-    value: "6.5–7.9×",
-    sub: "more tokens/s than Zitadel / Keycloak — and now the same ~8× under TLS 1.3 and mutual TLS",
+    value: "3.8–3.9×",
+    sub: "the tokens/s of Zitadel and Keycloak, held within 2% under TLS 1.3 and mutual TLS",
   },
   {
-    label: "Identity reads over gRPC",
-    value: "12,307",
-    sub: "req/s at a 6 ms p95 — 3.3× Keycloak's best userinfo number; Zitadel's gRPC measures 191/s",
+    label: "Server memory under load",
+    value: "54–75 MiB",
+    sub: "AXIAM's server across the whole matrix, against 708–941 MiB for Keycloak and 127–137 MiB for Zitadel",
   },
   {
-    label: "Native mutual TLS",
-    value: "≈1%",
-    sub: "cost over plain TLS 1.3, in-process, no sidecar — in the run of record at median-of-3",
+    label: "JWKS, no database involved",
+    value: "43,640",
+    sub: "req/s at a 1.8 ms p95 — 7.9× Keycloak and 21× Zitadel, with the server at 1.3 of its 2 cores",
   },
 ];
 
@@ -462,105 +466,110 @@ const HEADLINES = [
 const TARGETS = [
   [
     "AXIAM",
-    "AXIAM 1.0.0-alpha24 — the published release image, pinned by digest",
-    "SurrealDB v3 (digest-pinned) + RabbitMQ 4",
+    "AXIAM 1.3.0 — the published release image, pinned by digest",
+    "SurrealDB v4.0.1 + RabbitMQ 4 (TLS)",
   ],
-  ["Keycloak", "Keycloak 26.7.0 (JVM)", "PostgreSQL 16 (uniformly tuned)"],
-  ["Zitadel", "Zitadel v4.16.2 (Go)", "PostgreSQL 16 (uniformly tuned)"],
+  ["Keycloak", "Keycloak 26.8.1 (JVM)", "PostgreSQL 16 (uniformly tuned)"],
+  ["Zitadel", "Zitadel v4.19.5 (Go)", "PostgreSQL 16 (uniformly tuned)"],
+  ["authentik", "authentik 2026.8.5 (Python) — server + worker", "PostgreSQL 16 (uniformly tuned), no Redis"],
 ];
 
-/* ---- sensitivity highlights -------------------------------------------- */
+/* ---- what this run found ----------------------------------------------- */
 
-const SENSITIVITY = [
+const FINDINGS = [
   {
-    title: "Mystery 1 closed — the TLS plateau was Nagle's algorithm",
-    body: "The previous draft published a −57% TLS drop on token issuance as an open question with a named suspect: actix-web never set TCP_NODELAY, so Nagle's algorithm held the second TLS record of each HTTP/2 response until the peer's 40 ms delayed-ACK timer fired. The controlled A/B settles it — 1,172 req/s with the old behaviour (a flat 42.8 / 44.1 ms plateau, reproduced exactly), 2,642 req/s with TCP_NODELAY, against a 2,757 req/s plaintext control. The wire-level photograph confirms the mechanism: an `ss -ti` snapshot inside the server's network namespace caught 18 of 20 connections frozen with bytes in the send queue behind a single unacked segment, versus zero in the control. TCP_NODELAY now ships on by default, and the TLS penalty is −2.0%.",
+    title: "AXIAM's ceiling is now its database tier",
+    body: "On every AXIAM cell that reads or writes data, SurrealDB averaged 2.00–2.04 of its 2-core cap while the AXIAM server used 0.27–0.84 of its own 2 cores. The report's bottleneck column names `bench-axiam-surrealdb` on 27 of AXIAM's 33 cells; the six others are JWKS, which never touches the database, and password login, where the server is busy hashing. The server process has headroom it cannot use, so these cells measure SurrealDB under AXIAM's query load, not AXIAM's request handling.",
   },
   {
-    title: "Mystery 2 closed — REST's authz deficit was one database read",
-    body: "With the decision cache on, gRPC checks used to reach 13× while REST barely moved. A 2×2 (decision cache × session-validation cache) confirms the cause: REST validates session revocation on every request, gRPC validates the JWT and stops. Turning both caches on lifts REST from 5,597 to 11,647 checks/s — parity with gRPC's 11,172 — while the session cache does nothing at all for gRPC, which never did the read. Both caches remain OFF by default: these are hot-key ceilings, not expectations. The flip side is stated with the same candour — part of gRPC's speed is that it does not re-check revocation per call, so token expiry (15 min max) is its revocation bound, a documented posture choice with a strict mode on the roadmap.",
+    title: "Database-bound cells fell 43–75% against run 5; the database-free cell rose 64%",
+    body: "Against run 5 on the laptop: client credentials 2,804 → 1,610, introspection 4,504 → 1,582, userinfo 4,752 → 1,411, gRPC userinfo 12,307 → 3,078, single authorization checks 1,032 → 492 — while JWKS went from 26,680 to 43,640. The competitors are the control for the change of host: Keycloak moved +3% to +21% on the same cells and Zitadel −14% to −1%. A host effect cannot produce opposite movements on AXIAM's database-bound and database-free cells; something in the database tier changed. Run 6 is the first on SurrealDB 4.0 (AXIAM 1.3.0 requires it), and SurrealDB has an open upstream bug (surrealdb/surrealdb#7667, highlighted at the top of this page): write statements cost 10–17× more CPU than in 3.3.5, unchanged in 4.0.1. That bug is the leading suspect. This run cannot show how much of the regression it accounts for, and how much comes from the way AXIAM 1.3's queries run on 4.0. The re-run on a fixed SurrealDB release will answer that, and a same-host A/B is listed below.",
   },
   {
-    title: "Caching and revocation, measured rather than assumed",
-    body: "The obvious objection to any decision cache is that it delays revocation, so this run measured it twice over with caching on at a 5 s TTL. Revoke a role through the API and the invalidation hook fires end to end: a deny is served 262 ms after the revocation call. Delete the grant behind the server's back — directly in the database, suppressing every hook — and stale allows persist to 5.2 s, inside the promised TTL-plus-slack bound. Revocation through the API is immediate even with caches on; only out-of-band database surgery waits out the TTL, which is exactly the documented contract.",
+    title: "Native mTLS still costs nothing measurable — partly because the server is not the ceiling",
+    body: "Mutual TLS terminated in the server process, with the verified client certificate as the identity source, stays within ±2% of plaintext on every database-bound AXIAM cell. Read that with care: TLS work lands on the AXIAM server, which has headroom, while the ceiling is SurrealDB. The one cell where the server works hardest, JWKS, shows the real handshake-and-record cost: −16.0% under TLS 1.3 and −12.7% under mTLS, against −5.6% / −17.0% for Keycloak.",
   },
   {
-    title: "Mystery 3 closed — per-query waste removed, concurrency remains",
-    body: "EXPLAIN on the live schema found two full-table scans on the hot authorization read path. Removing them (no schema change needed) took cache-off capped checks from 753 to 1,010–1,032 req/s, past the pre-registered 1,000 bar, and CI tests now fail if any hot authorization query ever regresses to a table scan. The capped→uncapped delta (2→4 database cores) narrowed from ~+90% to +75–79%, which reframes the ceiling: per-query cost is no longer the dominant waste, database concurrency is. Read-scaling now outranks further per-query tuning on the roadmap, and \"give the database cores first\" remains the operative sizing guidance for authz-heavy workloads.",
+    title: "Login: a draw with Keycloak, both CPU-bound on hashing",
+    body: "AXIAM serves 49 logins/s at a 1,046 ms p95 with its server at 1.81 of 2 cores; Keycloak serves 47 at 1,213 ms with its server pegged. For the first time in this series Keycloak's login cell is valid at every profile, and it was measured at the same 2 GiB cap as everyone else. Zitadel's default bcrypt cost keeps it at a ~29 s p50, which is expected and tunable.",
   },
   {
-    title: "Native mTLS is still free — now in the run of record",
-    body: "The p3 profile terminates client-certificate TLS 1.3 inside the server process — no proxy in front, the verified peer certificate is the identity source. This run promotes it from a sensitivity pass to a full matrix profile at median-of-3, and it holds: mutual TLS costs about 1% over plain TLS 1.3 on every scenario. For an IoT or zero-trust fleet that needs client certificates on every connection, AXIAM is the only one of the three offering this in-process, and it is effectively free — where Keycloak pays −17% on its hottest read under mTLS and could not produce a valid login cell under it at all.",
+    title: "The SDK picture is cleaner than run 5's",
+    body: "C++'s reconnect-shaped p95 tail is gone (72 ms against a 71 ms wire baseline), and TypeScript's negative overhead — flagged in run 5 as a comparability problem — is now a coherent +3.2 ms. Eight of the nine concurrent SDKs sit within +0.5 to +3.2 ms of raw k6 at p95; Python remains the outlier at +21 ms.",
   },
 ];
 
 const CAVEATS = [
   {
-    title: "Session/token refresh regressed 35% — and it is our own doing",
-    body: "AXIAM's refresh cell fell from 839 to 545 req/s (p50 47.5 → 88.8 ms) between the two runs, on tight medians, with no harness change anywhere on that path. The suspects are our own post-run-4 security-hardening commits and/or database version drift, and a stage-timed bisection is queued. The cross-vendor position is unchanged — AXIAM still leads Keycloak on this cell, under its protocol-variant label — but we would rather flag our own regression than let a favourable ratio hide it.",
+    title: "Not comparable with run 5 — the box, the engine and the release all changed",
+    body: "Run 5 measured AXIAM 1.0.0-alpha24 on SurrealDB 3 on a consumer laptop. Run 6 measures AXIAM 1.3.0 on SurrealDB 4.0.1 on a cloud VM. Any run-5 figure quoted on this page is context for a finding, not a like-for-like delta, and no number here should be read against an older page or comparison document without that sentence attached.",
   },
   {
-    title: "The rate limiter fails our own enforcement assertions — in both directions",
-    body: "This run added an automated check comparing configured limits against admitted rates under a single-IP flood, with a ±10% bar. Login passes exactly (11/min admitted against 10 configured). The REST machine endpoints over-admit — +12% on token, +48% on introspect, +50% on authz check — as token-bucket burst bleeds into the sustained window. The gRPC families under-admit by ×20–33 (181/min admitted against 6,000 configured on authz): the ×60 units bug of the previous draft is genuinely fixed, but two cooperating limiter layers with mismatched windows appear to compound under overload, which is a real availability bug under attack. Three limiter families (revoke, gRPC admin, gRPC infra) still have no test scenario. Compliant clients under the limit are unaffected by any of this — but until it is fixed and re-measured we do not advertise gRPC throughput under the abuse posture, and we publish the failing table rather than the passing subset.",
+    title: "AXIAM lost two head-to-head cells it used to win",
+    body: "Keycloak now leads token introspection (1,940 vs 1,582 req/s) and REST userinfo (3,862 vs 1,411), and on whole-stack CPU per request it wins both. AXIAM still leads token issuance by 3.8–3.9×, JWKS by 7.9×, and is the cheapest server-only on every cell — but we publish the losses as plainly as the wins, and we do not claim the database tier will recover until it has been measured doing so.",
   },
   {
-    title: "Keycloak's login story is genuinely hard to measure fairly",
-    body: "We raised Keycloak's cap to 4 GiB as promised, and it got slower: ~21 req/s at a ~2.5 s p95, still failing the validity gate and below its 2 GiB survivor runs. Its login behaviour looks memory-sensitive rather than simply memory-starved, so we will say that rather than keep raising its cap. Credit where it is due — it produced its first valid login cell of this series at p2 (51 req/s), and that is charted. Zitadel's login exclusion remains its default bcrypt cost, which is expected and tunable, and its refresh exclusion is a flow our harness still doesn't implement.",
+    title: "A narrower run than run 5",
+    body: "This was a comparison pass: the dry run, resting footprints, the core matrix (median of 3) and the SDK pass. Deferred: the new-feature cells, the production rate-limit table, the minimal profile and every investigation pass (refresh stage timings, database ceiling, strict revocation, decision-cache sensitivity). The rate-limiter enforcement gaps published with run 5 have therefore been neither confirmed fixed nor re-measured, and nothing on this page should be read as saying they were.",
   },
   {
-    title: "Median-of-3 on a release image — but still a laptop",
-    body: "64 of 72 matrix cells are valid and every invalid cell is listed with its reason; every cell is the median of three runs (spread ≤ ±2% on AXIAM cells, ±13–17% on the batch cells, where coalescing is phase-sensitive). The hardware is still a consumer laptop (Dell XPS 15, i7-8750H): package temperatures hit 95–100 °C on hot cells and the clock varied 3.1–3.9 GHz. The thermal envelope was identical for all targets, so cross-target fairness holds and absolute numbers are, if anything, conservative — but the server-class re-run remains the standing caveat, and the biggest single upgrade this series can still make.",
+    title: "authentik produced no valid cell",
+    body: "Every authentik cell failed the validity gate (p95 well above 2 s) with its PostgreSQL pegged, at the same per-container caps as everyone else — which, with the worker carrying its own 2-CPU / 2 GiB cap, is a 6-CPU / 5 GiB stack against Keycloak's 4 / 3. Its p2 profile is its own TLS listener over HTTP/1.1, it has no p3, its login is protocol-variant and its refresh a fallback operation. We make no performance statement about authentik from this run; an uncapped pass would be needed to say whether that is the envelope or the product.",
   },
   {
-    title: "Not a like-for-like re-run of the previous draft",
-    body: "Between the two runs, two authorization table scans were removed, Nagle was disabled on the REST listener, the gRPC rate-limiter units bug was fixed, the shipped rate-limit defaults were revised, and the batch default the harness measures finally matches the batch default the product ships. Treat this run as the new baseline; where a controlled comparison was wanted, a one-variable A/B was run and is reported as such. The investigation passes are single labelled runs by design — only the matrix cells are median-of-3.",
+    title: "One cloud VM, qualified, still shared tenancy",
+    body: "A 16-vCPU AMD EPYC Genoa instance (Infomaniak Public Cloud) passed a pre-run qualification: sysbench spread 0.32% over three runs, 0.00% steal under load, and no period above 5% steal during the matrix. Its vCPUs are SMT threads on shared hardware, so absolute figures describe this instance class. The harness carried local changes to the SDK bench manifests and the AXIAM target compose file, recorded in the provenance; the C# SDK bench was retargeted to .NET 10 for the SDK pass only. The server image itself is the published 1.3.0, by digest.",
+  },
+  {
+    title: "A shared p95 band",
+    body: "Every capped target shows a p95 between roughly 65 and 90 ms on its busy cells whatever its p50 — AXIAM's client-credentials cell is 15 ms p50 / 69 ms p95, Keycloak's userinfo 2.4 / 80 ms. The pattern follows whichever container is pegged at its CPU quota, which points at quota throttling rather than at any one product. It is a hypothesis, not yet a measurement, and it affects all targets alike.",
   },
 ];
 
 const NEXT = [
-  "The refresh-regression bisection, stage-timed",
-  "Fix the gRPC limiter starvation and the REST over-admission, re-verified by the same assertion script that failed them here",
-  "Scenario coverage for the three untested limiter families",
-  "The TypeScript wire-baseline audit before any TS overhead claim is published",
-  "Profile the Python SDK gap that survived the async-driver fix",
-  "Chase the C++ reconnect tail into server-side idle-timeout suspects",
-  "A server-class re-run to replace the laptop numbers",
+  "Re-run the database-bound cells on this VM once surrealdb/surrealdb#7667 is fixed in a SurrealDB release",
+  "A same-VM A/B — AXIAM 1.2.x on SurrealDB 3 against 1.3.0 on SurrealDB 4 — to split the database-tier regression between engine and queries",
+  "The database-ceiling pass (uncapped SurrealDB) on this VM",
+  "The deferred passes: production rate-limit table, minimal profile, new-feature cells",
+  "Refresh stage timings",
+  "An uncapped authentik pass, to obtain a valid cell or explain why none exists",
+  "Profile the Python SDK gap",
+  "The seventh draft of PUBLIC_BENCH_ANALYSIS.md from this run",
 ];
 
-/* ---- §10 excerpt: why build AXIAM at all? ------------------------------ */
+/* ---- why build AXIAM at all? ------------------------------------------- */
 
 /**
- * Excerpted from §10 of `benchmarks/PUBLIC_BENCH_ANALYSIS.md`. The report
- * answers the fair question the field invites — Keycloak is mature and
- * ubiquitous, Zitadel is modern and well-engineered — from the measurements
- * rather than from ambition, and it answers it with the cons attached. Both
- * halves are reproduced here.
+ * The question the field invites — Keycloak is mature and ubiquitous,
+ * Zitadel is modern and well-engineered — answered from run 6's
+ * measurements, with the cons attached.
  */
 const WHY_AXIAM = [
   {
     n: "1",
-    title: "The efficiency gap is real, large, and it is the product",
-    body: "These are not micro-optimizations: on identical hardware, identical caps and identical scenarios, AXIAM issues ~8× the tokens, introspects ~2.4–4.8× the tokens, and serves ~6–13× the JWKS reads of the incumbents — in 86–120 MiB of server RSS, under 8% of what Keycloak uses for less throughput. IAM is infrastructure that runs 24/7 in front of everything; its cost floor and its p95 are a tax every request in the system pays. Rust with no GC pauses, no JVM warm-up, and CPU-shaped-per-request economics moves that floor by close to an order of magnitude — that is a capability difference, not a benchmark trophy.",
+    title: "The server is efficient; the database tier is the work in front of us",
+    body: "Server-only, AXIAM spends the least CPU per request on every cell measured — 0.44 cpu·ms per token against Keycloak's 4.89 and Zitadel's 4.61, 0.42 on introspection and userinfo — and serves 43,640 JWKS reads/s from 54 MiB. IAM is infrastructure that runs in front of everything, and a server whose cost floor is an order of magnitude lower is a real capability. Run 6 also says, plainly, that the stack is only as fast as its slowest tier: with SurrealDB 4.0.1 pegged, Keycloak wins two head-to-head cells. Making the database tier match the server is now the measured priority, not a footnote.",
   },
   {
     n: "2",
     title: "Nobody else treats the machine/IoT edge as the main stage",
-    body: "Authorization decisions as a first-class, benchmarked hot path (5,100+ hierarchy-aware RBAC checks/s on 2+2 cores, batch API at the shipped default); a gRPC data plane that does 12,000+ identity reads/s at a 6 ms p95 (the competitors' gRPC surfaces are management APIs, and it shows — Zitadel's measures 200/s); and in-process mutual TLS at ~1% cost, no sidecar — which makes per-device client certificates the cheap option for IoT fleets rather than an architecture project. If your workload is humans logging into web apps, Keycloak serves you well today. If it is services and devices asking “may I?” tens of thousands of times a second, that workload is what AXIAM is shaped around.",
+    body: "Authorization decisions as a first-class, benchmarked hot path (2,425–3,100 hierarchy-aware RBAC checks/s in batches at the shipped default, cache off); a gRPC data plane that serves 12.6× Zitadel's gRPC userinfo (the competitors' gRPC surfaces are management APIs, and it shows); and in-process mutual TLS with no sidecar, which makes per-device client certificates the cheap option for IoT fleets rather than an architecture project. If your workload is humans logging into web apps, Keycloak serves you well today. If it is services and devices asking “may I?” many times a second, that workload is what AXIAM is shaped around.",
   },
   {
     n: "3",
     title: "Security posture as measured defaults, not documentation",
-    body: "AXIAM is the only target here that ships abuse rate-limits on by default — sized from these measurements, with human endpoints locked strictly regardless of posture (and login enforcement measured exact under flood; the machine-endpoint enforcement gaps above are published, tracked bugs, not fine print). Argon2id, EdDSA short-lived tokens, single-use rotating refresh tokens, append-only audit and encrypted-at-rest secrets are defaults, not options. And the process is part of the posture: this benchmark series has now found, published and fixed a synchronous rate-limit write, a ×60 limiter units bug, a Nagle-induced TLS latency cliff and two authorization table scans — and currently carries an open refresh regression and a gRPC flood-behaviour bug in public view. We think an IAM vendor that measures itself adversarially and publishes the misses is itself a security feature.",
+    body: "AXIAM ships abuse rate-limits on by default, with human endpoints locked strictly regardless of posture. Argon2id, EdDSA short-lived tokens, single-use rotating refresh tokens, append-only audit and encrypted-at-rest secrets are defaults, not options. And the process is part of the posture: this series has found, published and fixed a synchronous rate-limit write, a ×60 limiter units bug, a Nagle-induced TLS latency cliff and two authorization table scans — and now publishes a database-tier regression on its own release, in public view, before it is understood.",
   },
   {
     n: "4",
     title: "Deny-override RBAC and a real device flow, not just device-shaped marketing",
-    body: "The RBAC engine is default-deny with deny-override: an explicit deny grant beats every allow, at any depth of the resource hierarchy and at equal specificity — the semantic gap incumbent additive-only engines leave open. And the OAuth2 Device Authorization Grant ships end to end — enter a code, authenticate, consent, approve or deny — for the headless devices and CLIs a browser-redirect flow can't reach. Both shipped ahead of this benchmark series; neither is a roadmap promise.",
+    body: "The RBAC engine is default-deny with deny-override: an explicit deny grant beats every allow, at any depth of the resource hierarchy and at equal specificity — the semantic gap incumbent additive-only engines leave open. And the OAuth2 Device Authorization Grant ships end to end — enter a code, authenticate, consent, approve or deny — for the headless devices and CLIs a browser-redirect flow can't reach.",
   },
 ];
 
 const WHY_AXIAM_CONS =
-  "AXIAM is young — these runs measured 1.0.0-alpha24, and 1.0.0 is its first stable release: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community; Zitadel's resting stack is smaller than ours (SurrealDB + RabbitMQ ride along in every AXIAM deployment); Keycloak wins one whole-stack efficiency cell outright; SurrealDB is a younger storage engine than Postgres by a decade; and every number in this document comes from one consumer laptop until the server-class re-run lands. Choosing AXIAM today means choosing a young system whose performance-per-watt, machine-first design and measurement culture you value over incumbent breadth. That trade is exactly the niche the incumbents leave open — and the measurements above are why we believe the niche is worth serving.";
+  "AXIAM is young: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community. On this run Keycloak beats it on introspection and REST userinfo throughput and on whole-stack CPU for both; AXIAM's stack carries SurrealDB and RabbitMQ in every full deployment, and by cgroup working set Zitadel's stack is smaller at rest; SurrealDB is a younger storage engine than PostgreSQL by a decade, and its 4.0 line is the tier this run found pegged. Choosing AXIAM today means choosing a young system whose server efficiency, machine-first design and measurement culture you value over incumbent breadth — with its database tier as the open item. That trade is exactly the niche the incumbents leave open, and the measurements above are why we believe it is worth serving.";
+
 
 /* ---- page -------------------------------------------------------------- */
 
@@ -582,53 +591,64 @@ export default function Benchmarks() {
       </h1>
       <p style={{ margin: "0 0 24px", fontSize: 17, color: "#94a3b8", maxWidth: 720 }}>
         A vendor-neutral harness drives the identical logical workload through a
-        per-target adapter, comparing AXIAM against Keycloak and Zitadel across
-        OAuth2/OIDC flows. Below are the run-5 results — the first measured
-        against a <strong style={{ color: "#e2e8f0" }}>published release image</strong>{" "}
-        rather than a working tree, pulled by digest exactly as any reader would
-        pull it, and the first with the full three-profile matrix (plaintext,
-        TLS&nbsp;1.3, native mutual TLS) in the run of record.
+        per-target adapter, comparing AXIAM against Keycloak, Zitadel and — new
+        this run — authentik across OAuth2/OIDC flows. Below are the run-6
+        results of 2026-11-20/21: the first measured on a qualified{" "}
+        <strong style={{ color: "#e2e8f0" }}>server-class cloud VM</strong>{" "}
+        rather than a laptop, against the published{" "}
+        <code style={{ color: "#67e8f9" }}>1.3.0</code> release image pulled by
+        digest, median of three runs across plaintext, TLS&nbsp;1.3 and native
+        mutual TLS.
+      </p>
+      <p style={{ margin: "0 0 44px", fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 720 }}>
+        Read one fact before any number: run 6 is{" "}
+        <strong style={{ color: "#e2e8f0" }}>not comparable with run 5</strong>.
+        The host changed, AXIAM moved from 1.0.0-alpha24 to 1.3.0, and its
+        database from SurrealDB 3 to 4.0.1. The headline finding follows from
+        the last of these: on every cell that touches data, SurrealDB is pegged
+        at its cap while the AXIAM server uses well under half of its own, and
+        AXIAM's lead narrowed — it now loses two head-to-head cells to
+        Keycloak. Both are charted below, with the reasons.
       </p>
 
-      {/* ---- Preliminary banner ---- */}
+      {/* ---- Upstream SurrealDB 4 bug ---- */}
       <div
         className="glass-card"
         style={{
           padding: "18px 22px",
           borderColor: "rgba(255,189,46,.4)",
           background: "rgba(255,189,46,.08)",
-          display: "flex",
-          gap: 14,
-          alignItems: "flex-start",
           marginBottom: 44,
+          marginTop: -20,
         }}
       >
-        <span style={{ fontSize: 20, lineHeight: 1 }} aria-hidden="true">
-          ⚠️
-        </span>
-        <div>
-          <div
-            style={{ fontSize: 15, fontWeight: 700, color: "#ffd98a", marginBottom: 4 }}
-          >
-            Preliminary results — the benchmark is still being improved
-          </div>
-          <p style={{ margin: 0, fontSize: 14, lineHeight: 1.65, color: "#e2e8f0" }}>
-            These numbers come from run 5 (2026-08-05/06) — a full{" "}
-            <strong>median-of-3</strong> matrix, three targets, three profiles
-            (plaintext, TLS 1.3, native mTLS), 64 of 72 cells valid with every
-            invalid cell listed and explained, measured against the released,
-            digest-pinned <code>1.0.0-alpha24</code> image. The story of this
-            draft is that all three of the previous draft's open mysteries were
-            closed with controlled experiments — the TLS plateau, the REST/gRPC
-            authorization asymmetry and the database ceiling. It also found two
-            new problems, published here with the same candour: a refresh
-            regression we introduced ourselves, and a rate limiter that fails
-            our own enforcement assertions. Everything still runs on a consumer
-            laptop rather than server-class hardware. Treat these as a strong,
-            reproducible signal, not a final verdict; this page is updated as
-            each improved run lands.
-          </p>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#ffd98a", marginBottom: 6 }}>
+          Known upstream bug: SurrealDB 4 write statements
         </div>
+        <p style={{ margin: 0, fontSize: 14, lineHeight: 1.65, color: "#e2e8f0" }}>
+          <a
+            href={SURREALDB_BUG_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "#67e8f9" }}
+          >
+            surrealdb/surrealdb#7667
+          </a>{" "}
+          reports that in SurrealDB 4.0.0 every write statement costs about
+          350&nbsp;µs of CPU in the query executor, 10–17× more than in 3.3.5,
+          and about 2–3× more per round trip over the server. A later comment
+          on the issue says 4.0.1, the version this run used, is unchanged. The
+          issue is open and no fix has been merged upstream. It is the leading
+          suspect for the drop on AXIAM's database-bound cells, which are
+          marked on the charts below. Whether it explains all of them,
+          read-heavy cells included, is not yet established.{" "}
+          <strong>
+            Those cells will be re-measured on the same VM once a fixed
+            SurrealDB release ships
+          </strong>
+          , and this page will be updated with the result. JWKS, password login
+          and the competitors' figures do not depend on SurrealDB.
+        </p>
       </div>
 
       {/* ---- Headline numbers ---- */}
@@ -660,7 +680,7 @@ export default function Benchmarks() {
       <section style={{ marginBottom: 52 }}>
         <SectionTitle kicker="Method" title="How the benchmark is designed" />
         <p style={{ fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 760 }}>
-          Three open-source IAM servers are driven with the <em>identical logical
+          Four open-source IAM servers are driven with the <em>identical logical
           workload</em> through a vendor-neutral{" "}
           <a
             href="https://k6.io"
@@ -722,21 +742,23 @@ export default function Benchmarks() {
 
       {/* ---- How it's run ---- */}
       <section style={{ marginBottom: 52 }}>
-        <SectionTitle kicker="Setup" title="How it was run — on a PC" />
+        <SectionTitle kicker="Setup" title="How it was run — on a cloud VM" />
         <p style={{ fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 760 }}>
-          Everything ran on a single consumer laptop (Dell XPS 15 9570 — Intel
-          i7-8750H, 12 logical CPUs, ~31&nbsp;GiB RAM), with the CPU governor
-          pinned to <code style={{ color: "#67e8f9" }}>performance</code> and the
-          targets benchmarked sequentially, never concurrently. Each server runs
-          in a container capped identically at 2 CPUs and 2048&nbsp;MiB, so no
-          target can buy throughput with extra hardware.
+          Everything ran on one Infomaniak Public Cloud instance — AMD EPYC
+          Genoa, 16 vCPUs, 64&nbsp;GiB RAM, local disk, Ubuntu 24.04 with kernel
+          6.8 — created for the run and qualified before it: three sysbench
+          passes within 0.32% of each other, 0.00% CPU steal under load, and no
+          period above 5% steal during the matrix. The targets were benchmarked
+          sequentially, never concurrently. Each server runs in a container
+          capped identically at 2 CPUs and 2048&nbsp;MiB, so no target can buy
+          throughput with extra hardware.
         </p>
         <div className="ax-grid-2" style={{ marginTop: 20, gap: 14 }}>
           {[
-            ["Load model", "Closed-loop, 50 virtual users. 30 s warm-up + 120 s measured window per scenario — repeated 3×, median reported."],
-            ["Profiles", "Three, all median-of-3 in the run of record: p0-plaintext, p2-tls13 (TLS 1.3 terminated in-process by all three targets, gRPC included) and p3-mtls (in-process mutual TLS), now a full matrix profile rather than a sensitivity pass."],
-            ["Validity gates", "A cell counts only if error rate ≤ 1% and p95 < 2000 ms. Failing cells are labelled, never charted as a head-to-head — 64 of 72 cells passed this run, and the settle gate cleared first-probe on every session."],
-            ["Container caps", "IAM server 2 CPU / 2 GiB · database 2 CPU / 1 GiB · RabbitMQ (AXIAM only) 1 CPU / 512 MiB. The server cap was raised from 1 GiB — for every target equally — because Keycloak could not reliably survive login load below it."],
+            ["Load model", "Closed-loop, 50 virtual users, k6 2.3. 30 s warm-up + 120 s measured window per scenario — repeated 3×, median reported."],
+            ["Profiles", "Three, all median-of-3: p0-plaintext, p2-tls13 (TLS 1.3 terminated in-process, gRPC included; authentik's is its own TLS listener over HTTP/1.1) and p3-mtls (in-process mutual TLS; authentik has none)."],
+            ["Validity gates", "A cell counts only if error rate ≤ 1% and p95 < 2000 ms. Failing cells are labelled, never charted as a head-to-head — 66 of 84 cells passed this run (the 18 others: all 12 of authentik's, and Zitadel's login and fallback refresh), and the settle gate cleared first-probe on every cell."],
+            ["Container caps", "IAM server 2 CPU / 2 GiB · database 2 CPU / 1 GiB · RabbitMQ (AXIAM only) 1 CPU / 512 MiB · authentik's worker 2 CPU / 2 GiB, like its server. Unchanged from run 5."],
           ].map(([t, b]) => (
             <div key={t} className="glass-card" style={{ padding: 20 }}>
               <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6, color: "#e2e8f0" }}>
@@ -759,28 +781,31 @@ export default function Benchmarks() {
           <li style={{ marginBottom: 8 }}>
             <strong>Identical envelope.</strong> Same host, same container caps,
             same 50-VU closed loop and measurement window for every target —
-            and every matrix cell is the median of three runs.
+            and every matrix cell is the median of three runs, on a VM whose
+            steal time was checked before and during the run.
           </li>
           <li style={{ marginBottom: 8 }}>
             <strong>Provenance recorded.</strong> Every container in every cell
             records its image digest, and this run benchmarks a{" "}
             <em>published</em> artifact —{" "}
-            <code>ghcr.io/ilpanich/axiam/server:1.0.0-alpha24</code>, pinned by
+            <code style={{ overflowWrap: "anywhere" }}>ghcr.io/ilpanich/axiam/server:1.3.0</code>, pinned by
             digest and pulled exactly as any reader would pull it — so the
             numbers describe a release anyone can fetch rather than a working
             tree only we can build.
           </li>
           <li style={{ marginBottom: 8 }}>
             <strong>Competitors tuned, not hobbled.</strong> PostgreSQL is
-            minimally and <em>uniformly</em> tuned for both Keycloak and Zitadel;
+            minimally and <em>uniformly</em> tuned for Keycloak, Zitadel and
+            authentik;
             SurrealDB runs stock. AXIAM's own per-IP rate limits are neutralized so
             they don't cap the load generator.
           </li>
           <li style={{ marginBottom: 8 }}>
-            <strong>Telemetry recorded.</strong> Every cell logs host CPU
-            frequency, package temperature and load-generator CPU at 1-second
-            resolution, published with the raw data — so thermal throttling and a
-            saturated generator are visible rather than hidden.
+            <strong>Telemetry recorded.</strong> Every cell logs per-container
+            CPU and memory, host statistics and load-generator CPU at 1-second
+            resolution, with CPU steal sampled throughout — so a saturated
+            container, a noisy neighbour or a saturated generator is visible
+            rather than hidden.
           </li>
           <li style={{ marginBottom: 8 }}>
             <strong>Only valid cells count.</strong> Fallback operations and cells
@@ -797,7 +822,8 @@ export default function Benchmarks() {
           Plaintext (p0) profile, capped matrix, median of three runs. Higher is
           better. Each chart is a valid cell from the full result matrix; where
           a cell is not a like-for-like race, the chart carries the label that
-          says so.
+          says so. A value in parentheses failed the validity gate and is shown
+          only so that a target is not silently missing.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           {BENCH_SCENARIOS.map((s) => (
@@ -810,9 +836,10 @@ export default function Benchmarks() {
       <section style={{ marginBottom: 52 }}>
         <SectionTitle kicker="Efficiency" title="Throughput per core & CPU cost" />
         <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6, maxWidth: 760, marginBottom: 20 }}>
-          Whole-stack, plaintext. AXIAM's figures still carry its audit broker and,
-          on some cells, a saturated database — which is exactly why Keycloak edges
-          it on userinfo CPU cost. Reported plainly.
+          Whole-stack, plaintext. AXIAM's figures carry its audit broker and a
+          saturated database on every cell except JWKS, and Keycloak now wins
+          introspection and userinfo on both measures. Server-only, AXIAM is the
+          cheapest on all four — see the CPU chart below. Reported plainly.
         </p>
         <div className="glass-card" style={{ padding: 4, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5, minWidth: 560 }}>
@@ -902,7 +929,7 @@ export default function Benchmarks() {
             unit="average resident memory of the server container · MiB · lower is better"
             rows={BENCH_MEMORY_AVG}
             format={(n) => `${n.toLocaleString("en-US")} MiB`}
-            footnote="* Keycloak's login cells are only partially valid, and its 4 GiB labelled attempt is excluded from this chart entirely — it is reported in the caveats instead. † Authorization checks and batches have no competitor equivalent; AXIAM's server ran them in 86–94 MiB. Zitadel has no refresh cell — its flow is excluded from this run."
+            footnote="† Authorization checks and batches have no competitor equivalent; AXIAM's server ran them in 57 MiB. Zitadel has no valid login or refresh cell (its default bcrypt cost, and a fallback operation), and authentik no valid cell at all, so neither is charted here."
           />
 
           <ResourceChart
@@ -911,7 +938,7 @@ export default function Benchmarks() {
             rows={BENCH_CPU_PER_REQ}
             format={(n) => n.toFixed(2)}
             scale="row"
-            footnote="Whole-stack userinfo is the single efficiency cell Keycloak wins — AXIAM's figure there carries a pegged SurrealDB plus RabbitMQ. Measured server-only, the same request costs AXIAM 0.25 cpu·ms against Keycloak's 0.53. Both are published; neither is hidden."
+            footnote="Whole-stack, Keycloak wins introspection and userinfo — AXIAM's figures there carry a pegged SurrealDB plus RabbitMQ. Server-only, AXIAM is the cheapest on every row: 0.42 cpu·ms per userinfo against Keycloak's 0.52, 0.44 per token against 4.89. Both views are published; neither is hidden."
           />
 
           <ResourceChart
@@ -926,11 +953,11 @@ export default function Benchmarks() {
 
         <div className="glass-card" style={{ padding: 4, marginTop: 20, overflowX: "auto" }}>
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5, minWidth: 480 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5, minWidth: 640 }}
           >
             <thead>
               <tr>
-                {["Target", "Whole-stack memory", "What's in it"].map((h) => (
+                {["Target", "Under load (avg)", "At rest · RSS", "At rest · working set", "What's in it"].map((h) => (
                   <th
                     key={h}
                     style={{
@@ -957,7 +984,7 @@ export default function Benchmarks() {
                         borderBottom: "1px solid rgba(255,255,255,.06)",
                         color: ci === 0 ? "#e2e8f0" : "#cbd5e1",
                         fontWeight: ci === 0 ? 700 : 400,
-                        fontFamily: ci === 1 ? "ui-monospace,Menlo,monospace" : undefined,
+                        fontFamily: ci >= 1 && ci <= 3 ? "ui-monospace,Menlo,monospace" : undefined,
                       }}
                     >
                       {cell}
@@ -978,14 +1005,15 @@ export default function Benchmarks() {
             maxWidth: 760,
           }}
         >
-          Read plainly: <strong style={{ color: "#e2e8f0" }}>Zitadel's stack is the
-          smallest at rest</strong> — its Go server is respectably compact and its
-          costs surface as CPU per request instead. AXIAM's stack is not the
-          smallest, but it does the most work per byte and per core, by 1.6× to
-          24× on every cell except one. And where Keycloak needed its memory cap
-          doubled just to run the login scenario — then got slower when we
-          doubled it again — AXIAM's server averaged 86–120 MiB across the
-          entire matrix, of the same 2 GiB allowance.
+          Whole-stack MiB. Under load is the range of per-cell averages over
+          every valid cell; at rest is the median of a freshly started stack.
+          Read plainly: <strong style={{ color: "#e2e8f0" }}>which stack is
+          smallest at rest depends on the measure</strong>. By resident memory
+          AXIAM's is (373 MiB against Zitadel's 593), by cgroup working set
+          Zitadel's is (172 against 216) — PostgreSQL's shared buffers count in
+          its resident set. Under load AXIAM's server averaged 54–75 MiB
+          across the entire matrix, of the same 2 GiB allowance that Keycloak's
+          filled to 941.
         </p>
       </section>
 
@@ -993,15 +1021,13 @@ export default function Benchmarks() {
       <section style={{ marginBottom: 52 }}>
         <SectionTitle kicker="AXIAM-only" title="Authorization decisions" />
         <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6, maxWidth: 760, marginBottom: 22 }}>
-          No head-to-head here — Keycloak and Zitadel expose no equivalent decision
+          No head-to-head here — no other target exposes an equivalent decision
           endpoint. Each check is a full RBAC evaluation (tenant-scoped roles,
           resource hierarchy, scopes) against live data, over REST and gRPC,
           with the decision cache off. Batch bars are checks/s at the shipped{" "}
-          <code style={{ color: "#67e8f9" }}>coalesced</code> default — measured
-          at full matrix scale this time, after the previous run's harness pin
-          accidentally exercised a non-default strategy. The two cache-ON bars
-          are a labelled best-case sensitivity pass, not the default
-          configuration.
+          <code style={{ color: "#67e8f9" }}>coalesced</code> default, five
+          checks per batch. The cache-on sensitivity pass of run 5 was not
+          repeated.
         </p>
         <BarChart scenario={BENCH_AUTHZ} />
       </section>
@@ -1069,14 +1095,17 @@ export default function Benchmarks() {
           </table>
         </div>
         <p style={{ margin: "16px 4px 0", fontSize: 13.5, color: "#94a3b8", lineHeight: 1.7, maxWidth: 760 }}>
-          The headline stands its third and strongest re-measurement:{" "}
+          The headline holds a fourth time, with a qualifier:{" "}
           <strong style={{ color: "#e2e8f0" }}>
-            native mutual TLS costs AXIAM about 1% over plain TLS 1.3 on every
-            scenario
+            native mutual TLS costs AXIAM within ±2% of plaintext on every
+            database-bound scenario
           </strong>
-          . For comparison, Keycloak pays up to −17.2% under mTLS on its hottest
-          read and could not produce a valid login cell under it; Zitadel's
-          valid cells sit between −1.7% and −3.9%.
+          , because the TLS work lands on a server with spare cores while the
+          ceiling is the database. JWKS, where the server works hardest, shows
+          the cost of the cryptography itself: −16.0% under TLS&nbsp;1.3 and
+          −12.7% under mTLS. For comparison, Keycloak pays −9.8% to −17.0%
+          under mTLS on introspection, userinfo and JWKS, and is valid at every
+          profile this run; Zitadel's valid cells sit between −2.1% and +2.6%.
         </p>
       </section>
 
@@ -1084,13 +1113,13 @@ export default function Benchmarks() {
       <section style={{ marginBottom: 52 }}>
         <SectionTitle kicker="SDKs" title="What the client libraries cost" />
         <p style={{ fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 760 }}>
-          All eleven official SDKs run the same four operations against the same
-          seeded AXIAM at plaintext — <strong>three passes each, medianed</strong>{" "}
-          — with a matched-concurrency k6 wire baseline measured on the same host
-          first. That baseline is what makes the last column meaningful: it is
-          the authorization-check p95 an SDK adds over raw HTTP at the same
-          concurrency, and this is the first run of this series that can publish
-          it honestly.
+          All eleven official SDKs (1.3.1) run the same four operations against
+          the same seeded AXIAM at plaintext —{" "}
+          <strong>three passes each, medianed</strong> — with a
+          matched-concurrency k6 wire baseline measured on the same host. That
+          baseline is what makes the last column meaningful: it is the
+          authorization-check p95 an SDK adds over raw HTTP at the same
+          concurrency. Every SDK ran clean, all three passes, zero errors.
         </p>
 
         <div className="glass-card" style={{ padding: 4, marginTop: 22, overflowX: "auto" }}>
@@ -1174,38 +1203,40 @@ export default function Benchmarks() {
         <p style={{ margin: "12px 4px 0", fontSize: 12.5, color: "#64748b", lineHeight: 1.6 }}>
           Milliseconds unless noted; throughput in requests/s; concurrency 16.
           The two <em>serial</em> harnesses (C and PHP) drive a single worker by
-          their own design, so their throughput is not comparable with the
-          others and they run no login/refresh op-cell.
+          their own design, so their throughput and latencies — login
+          included, which never queues behind other hashes — are not
+          comparable with the others, and no overhead is computed for them.
         </p>
 
         <ul style={{ margin: "20px 0 0", paddingLeft: 22, color: "#cbd5e1", lineHeight: 1.75, maxWidth: 760 }}>
           <li style={{ marginBottom: 8 }}>
-            <strong>The server, not the SDKs, sets the floor.</strong> Ten SDKs
-            measure refresh at 16.7–17.3 ms p50 and login at 232–257 ms —
-            server-side Argon2id dominates identically from every language.
+            <strong>The server, not the SDKs, sets the floor.</strong> All nine
+            concurrent SDKs measure login at 324–336 ms p50 and refresh at
+            10.3–12.1 ms — server-side Argon2id and the database dominate
+            identically from every language, and check throughput is bounded by
+            the same pegged SurrealDB as the matrix.
           </li>
           <li style={{ marginBottom: 8 }}>
-            <strong>Hot-path overhead is single-digit milliseconds</strong> at
-            p95 for seven of the nine concurrent SDKs (+2.7 to +4.6 ms over raw
-            k6 at the same concurrency) — the headline the wire baseline was
-            built to establish.
+            <strong>Hot-path overhead is under 3.5 ms</strong> at p95 for eight
+            of the nine concurrent SDKs (+0.5 to +3.2 ms over raw k6 at the
+            same concurrency).
           </li>
           <li style={{ marginBottom: 8 }}>
-            <strong>Python is still the outlier</strong> after moving to a
-            genuinely async driver (p50 40 ms, +60 ms p95 overhead). The previous
-            draft blamed the harness; the harness is now clean, so the remaining
-            gap belongs to the SDK/runtime and is being profiled.
+            <strong>Python is still the outlier</strong> (check p50 39 ms, +21 ms
+            p95 overhead) on a uvloop event loop with one worker thread; the gap
+            belongs to the SDK/runtime and is being profiled.
           </li>
           <li style={{ marginBottom: 8 }}>
-            <strong>C++ keeps its reconnect-shaped tail</strong> (p50 3.2 ms,
-            p95 280 ms) despite the connection-age fix — the investigation has
-            moved to server-side idle-timeout suspects.
+            <strong>Two run-5 flags are cleared.</strong> C++'s
+            reconnect-shaped tail is gone (p95 72.0 ms), and TypeScript's
+            negative overhead is now a coherent +3.2 ms.
           </li>
           <li style={{ marginBottom: 8 }}>
-            <strong>TypeScript's negative “overhead” is flagged, not
-            celebrated.</strong> A client should not beat the wire baseline on
-            the same box, so its baseline comparability is under audit before we
-            publish any TS overhead claim.
+            <strong>Some login overheads read negative</strong> (by up to
+            −7.9 ms), which is why the table carries no login overhead:
+            login latency is dominated by queuing behind server-side hashing,
+            so a few milliseconds either side of the baseline is noise, not SDK
+            cost.
           </li>
         </ul>
 
@@ -1213,9 +1244,9 @@ export default function Benchmarks() {
           Client-side footprint
         </h3>
         <p style={{ fontSize: 14, color: "#94a3b8", lineHeight: 1.7, maxWidth: 760, margin: "0 0 18px" }}>
-          New this run: each SDK's own process CPU over the whole bench and its
-          peak resident memory — half the story for IoT and sidecar deployments,
-          where the client is the constrained side. First pass of this telemetry.
+          Each SDK's own process CPU over the whole bench and its peak resident
+          memory, median of three passes — half the story for IoT and sidecar
+          deployments, where the client is the constrained side.
         </p>
         <div className="glass-card" style={{ padding: 4, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5, minWidth: 480 }}>
@@ -1268,8 +1299,8 @@ export default function Benchmarks() {
                       borderBottom: "1px solid rgba(255,255,255,.06)",
                       textAlign: "right",
                       fontFamily: "ui-monospace,Menlo,monospace",
-                      color: row.cpu <= 3.3 ? "#67e8f9" : "#cbd5e1",
-                      fontWeight: row.cpu <= 3.3 ? 700 : 400,
+                      color: row.cpu <= 4.4 ? "#67e8f9" : "#cbd5e1",
+                      fontWeight: row.cpu <= 4.4 ? 700 : 400,
                     }}
                   >
                     {row.cpu.toFixed(1)}
@@ -1292,29 +1323,28 @@ export default function Benchmarks() {
           </table>
         </div>
         <p style={{ margin: "16px 4px 0", fontSize: 13.5, color: "#94a3b8", lineHeight: 1.7, maxWidth: 760 }}>
-          Go is by far the cheapest concurrent client on CPU; C and Rust are the
-          smallest on memory (13 and 23 MiB — the embedded/IoT lane); the JVM
-          SDKs pay the expected 300–460 MiB runtime tax at equal wire
-          performance; Python is the most expensive on CPU <em>and</em> the
-          slowest, a consistent picture. One number we flag rather than explain:
-          Rust's client CPU reads high relative to its excellent latency
-          profile, and since this is the first run of this telemetry, that figure
-          gets a second look before we draw conclusions from it.
+          C++ is now the cheapest concurrent client on both CPU and memory (3.0
+          s, 15 MiB), with Go close on CPU; C, C++ and Rust are the smallest on
+          memory (10, 15 and 23 MiB — the embedded/IoT lane); the JVM SDKs pay
+          the expected 335–623 MiB runtime tax at equal wire performance;
+          Python is the most expensive on CPU <em>and</em> the slowest, a
+          consistent picture. One number we flag for the second run in a row
+          rather than explain: Rust's client CPU (22 s) reads high against its
+          memory footprint and its latency profile, and is on the list to be
+          traced.
         </p>
       </section>
 
       {/* ---- Sensitivity ---- */}
       <section style={{ marginBottom: 52 }}>
-        <SectionTitle kicker="Investigation" title="Three mysteries, closed" />
+        <SectionTitle kicker="Findings" title="What run 6 found" />
         <p style={{ fontSize: 14, color: "#64748b", lineHeight: 1.6, maxWidth: 760, marginBottom: 20 }}>
-          The previous draft published three unexplained results as open
-          questions with named hypotheses. Run 5 tested all three with labeled
-          single-variable passes — never mixed into the comparison tables — and
-          closed all three with data. This is why we benchmark in the open: the
-          benchmark is also a debugger.
+          Run 6 ran the comparison only — no investigation passes — so these
+          are readings of the matrix, each with the evidence behind it. The
+          first two are the story of this run, and they are not flattering.
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {SENSITIVITY.map((s) => (
+          {FINDINGS.map((s) => (
             <div key={s.title} className="glass-card" style={{ padding: 22 }}>
               <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: "#67e8f9" }}>
                 {s.title}
@@ -1351,13 +1381,12 @@ export default function Benchmarks() {
 
       {/* ---- §10 excerpt: why build AXIAM at all? ---- */}
       <section style={{ marginBottom: 52 }}>
-        <SectionTitle kicker="From the report · §10" title="Why build AXIAM at all?" />
+        <SectionTitle kicker="Reading the numbers" title="Why build AXIAM at all?" />
         <p style={{ fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 760, marginBottom: 20 }}>
           A fair question given this field: Keycloak is mature and ubiquitous,
           Zitadel is modern and well-engineered, Auth0 and Okta are excellent
-          managed products. Five drafts of measurements into this project, the
-          answer has sharpened rather than softened. Excerpted from §10 of the
-          analysis:
+          managed products. Six runs of measurements into this project, and
+          with this run's losses on the table, the answer is:
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {WHY_AXIAM.map((w) => (
@@ -1439,28 +1468,28 @@ export default function Benchmarks() {
               paddingTop: 18,
             }}
           >
-            Full data, metric definitions and the raw per-cell telemetry live in
-            the repository under{" "}
-            <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>
-              benchmarks/PUBLIC_BENCH_ANALYSIS.md
-            </code>{" "}
-            and{" "}
+            Metric definitions live in the repository under{" "}
             <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>
               benchmarks/docs/methodology.md
             </code>
-            . Sources: benchmark run 5 of 2026-08-05/06 (median-of-3 capped
-            matrix × three profiles × three targets, against the digest-pinned{" "}
+            ;{" "}
             <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>
-              1.0.0-alpha24
+              benchmarks/PUBLIC_BENCH_ANALYSIS.md
             </code>{" "}
-            release image; labeled investigation passes for the TCP_NODELAY A/B
-            with VU sweep and in-namespace socket captures, the session/decision
-            cache 2×2, the cache-on revocation cell, DB capped/uncapped, the
-            4 GiB Keycloak login attempt and the production rate-limit posture;
-            an 11-language SDK median-of-3 pass with a matched-VU wire baseline
-            and client CPU/RSS telemetry; per-cell k6 summaries with 1-second
-            container and host telemetry). Target versions: AXIAM 1.0.0-alpha24,
-            Keycloak 26.7.0, Zitadel v4.16.2, SurrealDB v3, PostgreSQL 16.
+            is still the run-5 analysis until its seventh draft is written from
+            this run. Sources: benchmark run 6 of 2026-11-20/21 (median-of-3
+            capped matrix × three profiles × four targets, 66 of 84 cells
+            valid, against the digest-pinned{" "}
+            <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>
+              1.3.0
+            </code>{" "}
+            release image; resting footprints of the four stacks; an
+            11-language SDK median-of-3 pass with a matched-VU wire baseline and
+            client CPU/RSS telemetry; per-cell k6 summaries with 1-second
+            container and host telemetry). Target versions: AXIAM 1.3.0,
+            Keycloak 26.8.1, Zitadel v4.19.5, authentik 2026.8.5, SurrealDB
+            v4.0.1, PostgreSQL 16. Host: Infomaniak Public Cloud, AMD EPYC
+            Genoa, 16 vCPUs, 64 GiB.
           </p>
         </div>
       </section>

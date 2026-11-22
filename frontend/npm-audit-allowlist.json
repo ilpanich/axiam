@@ -1,0 +1,11 @@
+{
+  "_comment": "Advisories the CI `npm audit` step accepts at or above 'high'. Each entry needs a reason and a review date; remove it as soon as a fixed release can be taken. An entry that no longer matches anything fails the step, so stale suppressions get deleted rather than outliving their advisory.",
+  "advisories": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "reason": "ReDoS through single-branch repeated extglobs; the advisory covers every picomatch version and no patched release exists (latest 4.0.7). Reached only through build and test tooling (vite via tinyglobby/fdir, vitest, @vitest/coverage-v8) on developer-controlled glob patterns; nothing from picomatch ships in the built admin UI. Drop when picomatch publishes a fix and the lockfile picks it up.",
+      "review": "2027-01-18"
+    }
+  ]
+}

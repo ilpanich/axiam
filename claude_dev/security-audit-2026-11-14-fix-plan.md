@@ -1243,6 +1243,37 @@ clause obliges.
 
 ## 6. Wave 3 — SDKs
 
+> **REVIEW GATE — PASSED (2026-11-22).** Each SDK repository had its own gate. Every round was an independent Opus 5.5 review covering both code quality and security. The six login-glue SDKs also had a C6/C7 consistency check against SA-20. Reviewers received the diff, this plan's §1, §2 and §6, the report sections, CONTRACT 1.68 and the Wave 3 decisions, but no implementer summaries. Under the owner's wrap-up rule, a repository closed once a round found nothing at medium or higher, and its low and nit findings were filed as issues.
+>
+> | SDK | Rounds | Mediums fixed (fix commits) | PR | Follow-up issue |
+> |---|---|---|---|---|
+> | TypeScript | 3 | TYP-R1-1 (`771da8c`) | #168 | #167 |
+> | Python | 1 | — | #111 | #110 |
+> | PHP | 1 | — | #93 | #92 |
+> | C# | 5 | CSH-R1-1 (`5511649`), CSH-R3-1 (`9b33edd`) | #126 | #125 |
+> | Java | 1 | — | #134 | #133 |
+> | Kotlin | 1 | — | #100 | #99 |
+> | Go | 1 | — | #112 | #111 |
+> | Rust | 1 | — | #153 | #152 |
+> | C++ | 5 | CPL-R1-1 (`8297ad8`), CPL-R3-1 (`75d5ddf`) | #90 | #89 |
+> | C | 3 | C-R1-1, C-R1-2 (`1ca1fb3`) | #88 | #87 |
+> | Swift | 1 | — | #92 | #91 |
+>
+> The login-glue consistency check found no divergence of medium or higher. Its reference defect, GLUE-R1-5, was fixed in TypeScript round 2, and the C# items in C# round 2; the other ports' items are in their follow-up issues.
+>
+> **Decisions taken during Wave 3:**
+> - Every SDK ships as 1.4.0.
+> - N2: no SDK had a requester, so the owner decided all seven D-9 SDKs gain `AuthzRequester`, with Go as the reference.
+> - N14: rules 10–12 are separate sub-leads; a rule that was already enforced is pinned by a test, with no production change.
+> - Java C2: the fix for the same root cause is kept.
+> - CPL-R1-6 (N15 in C++) and CSH-R1-6 (rule 11b and `require_scope` in C#) were resolved by the reviewer's own option of documenting them as not implemented.
+>
+> **Cross-SDK issues in this repository:**
+> - #880: SDKs refuse kid-less back-channel logout tokens.
+> - #881: requester unsigned opt-out docs.
+> - #882: consumers verify over a re-serialization.
+> - #883: requester log context.
+
 Common instructions for SA-20 … SA-30:
 
 - Start by re-syncing the vendored `CONTRACT.md` (and `openapi.json`, `proto/`

@@ -376,6 +376,14 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
         // while the request is pending — lock an account found compromised —
         // and a cancel, which the mailbox holder can trigger, must not undo
         // that decision with the older value.
+        //
+        // SR3-1: `Inactive` alone cannot tell the request's parking from an
+        // administrator's or SCIM's deactivation, which leaves the parked
+        // account `Inactive` too. So every writer of a user's status records
+        // it as the pending request's `prior_status` in the same transaction
+        // (`PENDING_ERASURE_RECORDS_STATUS` in the user repository): by the
+        // time this runs, `prior_status` is the latest decision, and restoring
+        // it restores that decision.
         let query = format!(
             "BEGIN TRANSACTION; \
              LET $row = (SELECT status, purge_claimed_at, scheduled_purge_at, user_id, \
@@ -1446,6 +1454,98 @@ mod tests {
                 .await,
             UserStatus::Locked
         );
+    }
+
+    /// SR3-1 (N11) — an administrator (the admin UI's deactivate) or SCIM
+    /// (`active=false`) deactivates the account while its erasure request is
+    /// pending. The parked account was `Inactive` already, so the write leaves
+    /// the status unchanged; the cancel must still keep the account `Inactive`
+    /// rather than restore the `Active` it had when the request was filed.
+    #[tokio::test]
+    async fn cancel_keeps_a_deactivation_made_while_pending() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel_with(UserStatus::Active, false, Some(UserStatus::Inactive))
+                .await,
+            UserStatus::Inactive
+        );
+    }
+
+    /// SR3-1 (N11) — the directory sync's deactivation, made while the erasure
+    /// request is pending, also survives the cancel. An administrator
+    /// re-activated the parked directory account (so the sync can see it as
+    /// live), the sync then deactivates it: the cancel keeps it `Inactive`.
+    #[tokio::test]
+    async fn cancel_keeps_a_directory_sync_deactivation_made_while_pending() {
+        use crate::repository::{
+            SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+        };
+        use axiam_core::models::user::{CreateDirectoryAccount, UpdateUser, UserStatus};
+        use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+
+        let db = setup_db().await;
+        let org = SurrealOrganizationRepository::new(db.clone())
+            .create(axiam_core::models::organization::CreateOrganization {
+                name: "Org".into(),
+                slug: "org".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let tenant = SurrealTenantRepository::new(db.clone())
+            .create(axiam_core::models::tenant::CreateTenant {
+                organization_id: org.id,
+                kind: TenantKind::Standard,
+                name: "Tenant".into(),
+                slug: "tenant".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let user_repo = SurrealUserRepository::new(db.clone());
+        let user = user_repo
+            .create_directory_account(CreateDirectoryAccount {
+                tenant_id: tenant.id,
+                username: "dir".into(),
+                email: "dir@example.com".into(),
+                external_id: "entry-1".into(),
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let repo = SurrealAccountDeletionRepository::new(db.clone());
+        let deletion = repo
+            .create_with_pending_flag(
+                tenant.id,
+                user.id,
+                Utc::now() + Duration::days(30),
+                "dir-hash".into(),
+            )
+            .await
+            .unwrap();
+        user_repo
+            .update(
+                tenant.id,
+                user.id,
+                UpdateUser {
+                    status: Some(UserStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let deactivated = user_repo
+            .deactivate_directory_account(tenant.id, user.id)
+            .await
+            .unwrap()
+            .expect("the sync deactivates a live directory account");
+        assert_eq!(deactivated.status, UserStatus::Inactive);
+
+        let outcome = repo.cancel_pending(tenant.id, deletion.id).await.unwrap();
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+        let after = user_repo.get_by_id(tenant.id, user.id).await.unwrap();
+        assert!(!after.deletion_pending);
+        assert_eq!(after.status, UserStatus::Inactive);
     }
 
     /// SA-09 (N11) — an `Active` account still comes back `Active`.

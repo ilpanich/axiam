@@ -17,8 +17,10 @@
 //!   machine-principal extractor uses) holding
 //!   [`VALIDATE_CREDENTIALS_PERMISSION`], which the seeder gives to no role.
 //!   Every answer is audited as [`CREDENTIALS_VALIDATED_ACTION`] — the
-//!   `PERMISSION_DENIED` refusals of a caller that is not such a principal
-//!   included (outcome `Denied`).
+//!   `PERMISSION_DENIED` refusals included (outcome `Denied`): a body
+//!   `tenant_id` other than the token's, a caller that is not such a
+//!   principal, and one without the permission. The row's actor type is the
+//!   token's `sub_kind`.
 //!
 //! Before this, the only check was that the body's `tenant_id` matched the
 //! token's, so any same-tenant user token read any user's username, email and
@@ -300,6 +302,18 @@ fn is_service_account(claims: &ValidatedClaims) -> bool {
     claims.0.aud.as_deref() == Some(AUD_M2M) && claims.0.sub_kind == SubjectKind::ServiceAccount
 }
 
+/// The audit actor type of the caller `claims` name, from its `sub_kind`
+/// (QR3-4) — the mapping the audit middleware uses. An OAuth2 client's `sub`
+/// is not a UUID, so such a caller is refused before any row is written; the
+/// arm exists for completeness.
+fn actor_type_of(claims: &ValidatedClaims) -> ActorType {
+    match claims.0.sub_kind {
+        SubjectKind::User => ActorType::User,
+        SubjectKind::ServiceAccount => ActorType::ServiceAccount,
+        SubjectKind::OAuth2Client => ActorType::System,
+    }
+}
+
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, Status> {
     value
         .parse::<Uuid>()
@@ -405,7 +419,13 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         // Cross-validate body tenant_id against verified claims (reject on mismatch,
         // fail-closed — no cross-tenant credential oracle per 23-RESEARCH.md
         // Open Question 1 / Assumption A1).
+        //
+        // QR3-4: audited like the other refusals, in the caller's own tenant
+        // (the one its token names) — the body's tenant is not the caller's.
+        let actor_type = actor_type_of(&claims);
         if tenant_id != claims_tenant_id {
+            self.audit_credential_denial(claims_tenant_id, caller_id, actor_type, ip_address)
+                .await;
             return Err(Status::permission_denied(
                 "tenant_id mismatch: body does not match token claims",
             ));
@@ -417,7 +437,9 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
         // decided before the lookup, the hash permit and the lockout
         // accrual, so a refused caller can neither probe nor lock anyone.
         if !is_service_account(&claims) {
-            self.audit_credential_denial(claims_tenant_id, caller_id, ActorType::User, ip_address)
+            // QR3-4: a service account whose token has the wrong audience
+            // is still a service account; the row says what the token says.
+            self.audit_credential_denial(claims_tenant_id, caller_id, actor_type, ip_address)
                 .await;
             return Err(Status::permission_denied(
                 "ValidateCredentials is restricted to service-account (axiam:m2m) principals",
@@ -429,13 +451,8 @@ impl<U: UserRepository + 'static> UserService for UserServiceImpl<U> {
             .await
         {
             if status.code() == tonic::Code::PermissionDenied {
-                self.audit_credential_denial(
-                    claims_tenant_id,
-                    caller_id,
-                    ActorType::ServiceAccount,
-                    ip_address,
-                )
-                .await;
+                self.audit_credential_denial(claims_tenant_id, caller_id, actor_type, ip_address)
+                    .await;
             }
             return Err(status);
         }

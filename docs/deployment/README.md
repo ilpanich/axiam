@@ -1839,6 +1839,17 @@ but before the ack sends it again); a principal that can both publish to and
 consume from these queues can replay through a requeue, which is one more
 reason the broker must not grant SDK principals either on them.
 
+Note what the broker can and cannot deny here. RabbitMQ authorizes
+`basic.publish` as *write on the exchange*, not on the destination queue
+(write on a queue governs only `queue.bind`), and every AXIAM queue is reached
+through the default exchange. A per-queue "deny publish" rule is accepted by
+the broker but has no effect on publishing: a principal that may publish to
+the default exchange at all — an AMQP SDK producer sending authorization
+requests, for one — can publish to `axiam.mail.outbound` and every other queue
+whose name it knows. Consuming *can* be denied per queue. Only a separate vhost,
+or no publish right on the default exchange, keeps a principal from publishing
+to these queues.
+
 Two delivery rules changed with it. Mail of every type except a notification
 rule's is sent only to the address of the user record the message names; when
 that user cannot be read, nothing is sent (the message's own `to_address` was
@@ -1855,13 +1866,15 @@ only one that loses nothing and opens nothing:
    let `axiam.mail.outbound`, `axiam.webhook`, `axiam.ssf_push`,
    `axiam.scim_push`, `axiam.ciba_ping` **and their `.retry` queues** empty,
    then deploy. Nothing is rejected.
-2. **Relax for one deployment** — only with broker ACLs confirmed. **While the
-   flag is `false`, the N3 hole is open again for its duration:** any principal
-   with broker write access to these queues can inject an unsigned mail,
-   webhook, SSF, SCIM or CIBA message and the consumers will act on it, exactly
-   as before SA-14. Use it only where the broker already denies every
-   non-AXIAM principal write access to those queues, and keep the window as
-   short as the rollout. Deploy with
+2. **Relax for one deployment** — only where no other principal can publish
+   to the default exchange. **While the flag is `false`, the N3 hole is open
+   again for its duration:** any principal that can publish to the default
+   exchange of AXIAM's vhost can inject an unsigned mail, webhook, SSF, SCIM or
+   CIBA message and the consumers will act on it, exactly as before SA-14. A
+   per-queue ACL does not prevent this (see the note above). Use it only where
+   no non-AXIAM principal can publish on AXIAM's vhost at all — no AMQP SDK
+   producers there, or SDK producers confined to a separate vhost — otherwise
+   drain; and keep the window as short as the rollout. Deploy with
    `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false`: the new replicas
    still sign everything they publish and still reject any envelope that fails
    to verify, but also accept a message in the old, unsigned shape (each one is

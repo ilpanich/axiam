@@ -657,6 +657,9 @@ impl<
         let marker = user.directory_external_id.as_deref().unwrap_or_default();
         match outcome {
             Ok(identity) if identity.external_id.eq_ignore_ascii_case(marker) => {
+                // QR3-1 (SA-13, N16): the credential has verified; a suspended
+                // tenant is refused now, before its memberships are rewritten.
+                self.admit_tenant(input.tenant_id).await?;
                 // G-3 (T23.3.4): the directory's groups become AXIAM memberships
                 // *before* anything is issued — so a removal in the directory
                 // takes effect at this sign-in, and a mapping that cannot be
@@ -728,6 +731,17 @@ impl<
         user_agent: Option<String>,
         mfa_policy: Option<MfaPolicy>,
     ) -> AxiamResult<LoginResult> {
+        // 3b. QR3-1 (SA-13, N16, D-3): a tenant that does not admit its
+        //     principals is refused here, once the credential has verified
+        //     and before anything below writes or calls out — the lockout
+        //     bookkeeping, the `login.post_auth` reactor, a challenge or a
+        //     session. After the credential, so a wrong password on a
+        //     suspended tenant still answers as a wrong password (no oracle);
+        //     before the side effects, because a suspended tenant admits no
+        //     writes from its principals. The directory paths run the same
+        //     check before their own writes (JIT provisioning, group mapping).
+        self.admit_tenant(tenant_id).await?;
+
         // 4. Admit the sign-in unless a lockout is in force *now*, resetting
         //    the failed-login counter in the same conditional write (item 5 of
         //    the 1.1.0 atomicity audit). The lock was checked when the account

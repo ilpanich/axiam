@@ -705,7 +705,7 @@ pub async fn update<C: Connection + Clone>(
     // SA-13 (N16, D-3): suspending a tenant refuses its principals at every
     // door (`tenant_accepts_principals`) and revokes what they hold. Nothing
     // is revoked before the status write succeeds (QR1-5): that write can
-    // still fail — a slug another tenant holds is a `409` — and a failed
+    // still fail (a slug another tenant holds, for example), and a failed
     // suspend must leave an active tenant's users signed in.
     //
     // The status write itself revokes every session and refresh token of the
@@ -713,7 +713,10 @@ pub async fn update<C: Connection + Clone>(
     // ids are read first (a read, no revocation) only so they can be published
     // to the revocation feed afterwards, which the transaction does not do;
     // then the repositories' own passes drop the validity cache and catch a
-    // session or token written between the read and the commit. A failure
+    // session or token written after the commit. A session written between
+    // the read and the commit is revoked by the transaction itself but is not
+    // published to the feed, which never saw it; the per-request tenant check
+    // at every door refuses it all the same. A failure
     // after the commit leaves the tenant suspended and revoked, and repeating
     // the PUT repeats the passes. Its data stays, and the caller — an
     // organization principal, whose own tenant this is not — keeps reading it

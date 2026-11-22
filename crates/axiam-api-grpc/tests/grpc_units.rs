@@ -1538,6 +1538,83 @@ async fn validate_credentials_refuses_a_service_account_without_the_permission()
     assert_eq!(rows[0].resource_id, None);
 }
 
+/// QR3-4: the body-`tenant_id` mismatch is a `PERMISSION_DENIED` refusal like
+/// the others, and is audited like them — `Denied`, in the caller's own tenant
+/// (the one its token names), naming the caller and no account.
+#[tokio::test]
+async fn validate_credentials_audits_a_tenant_mismatch() {
+    let tenant = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let authz = Arc::new(ScriptedAuthorizer::allowing());
+    let audit = Arc::new(RecordingAudit::default());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(active_user(tenant, hash)),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        audit.clone(),
+    );
+    let claims = m2m_claims_for(tenant);
+    let caller: Uuid = claims.0.sub.parse().unwrap();
+    let mut req = Request::new(validate_request(other, test_password()));
+    req.extensions_mut().insert(claims);
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(authz.asked().is_empty());
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 1, "the mismatch refusal writes one row");
+    assert_eq!(rows[0].action, "auth.credentials_validated");
+    assert_eq!(rows[0].tenant_id, tenant);
+    assert_eq!(rows[0].outcome, AuditOutcome::Denied);
+    assert_eq!(rows[0].actor_id, caller);
+    assert_eq!(rows[0].actor_type, ActorType::ServiceAccount);
+    assert_eq!(rows[0].resource_id, None);
+}
+
+/// QR3-4: a service account whose token carries the wrong audience is refused
+/// as "not a service-account principal", but the row records it as what its
+/// token says it is — `ServiceAccount`, from `sub_kind` — not `User`.
+#[tokio::test]
+async fn validate_credentials_records_a_wrong_audience_service_account_as_one() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let authz = Arc::new(ScriptedAuthorizer::allowing());
+    let audit = Arc::new(RecordingAudit::default());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(active_user(tenant, hash)),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        audit.clone(),
+    );
+    let token = axiam_auth::token::AccessTokenSpec::service_account(
+        Uuid::new_v4(),
+        tenant,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+    )
+    .aud(AUD_USER)
+    .issue(&auth_config())
+    .unwrap();
+    let claims = axiam_auth::token::validate_access_token(&token, &auth_config()).unwrap();
+    let caller: Uuid = claims.0.sub.parse().unwrap();
+    let mut req = Request::new(validate_request(tenant, test_password()));
+    req.extensions_mut().insert(claims);
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(authz.asked().is_empty());
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, AuditOutcome::Denied);
+    assert_eq!(rows[0].actor_id, caller);
+    assert_eq!(rows[0].actor_type, ActorType::ServiceAccount);
+}
+
 /// Every answer — valid, wrong password, unknown name — writes one
 /// `auth.credentials_validated` row naming the service account.
 #[tokio::test]

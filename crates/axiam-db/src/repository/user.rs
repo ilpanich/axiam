@@ -222,6 +222,16 @@ const DIRECTORY_ACCOUNT_CREDENTIAL: &str = "axiam:directory_account_credential";
 /// back as `NotFound`, the answer a write to a missing user already gave.
 const CREDENTIAL_TARGET_MISSING: &str = "axiam:credential_target_missing";
 
+/// SR3-1 (N11): the statement every writer of a user's `status` runs in the
+/// same transaction as its write. It records the new status (`$status`) as the
+/// `prior_status` of the account's pending erasure request, if it has one, so
+/// the request's cancel restores the latest administrative decision — an
+/// administrator's or SCIM's deactivation, the directory sync's — rather than
+/// the status the account had when the request was filed. Matches nothing when
+/// no request is pending.
+const PENDING_ERASURE_RECORDS_STATUS: &str = "UPDATE account_deletion SET prior_status = $status \
+     WHERE tenant_id = $tenant_id AND user_id = $id AND status = 'pending'; ";
+
 /// The text of a transaction's failed statements, for `classify_write_error`.
 ///
 /// Every slot is read, not `check()`'s first: the statement that failed (a
@@ -841,7 +851,15 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             let rotates_hash = input.password_hash.is_some();
             let writes_record = input.opaque_record.is_some();
             let email_changes = input.email.is_some();
-            let (query, update_slot) = if email_changes || rotates_hash {
+            // SR3-1 (N11): a status write on an account whose erasure request
+            // is pending is the latest decision about that account, and the
+            // request's `prior_status` is what a cancel restores. It is
+            // recorded there in this same transaction, so a deactivation by an
+            // administrator or SCIM `active=false` — which leaves an account
+            // the request already parked as `Inactive` unchanged — survives the
+            // cancel instead of being replaced by the older status.
+            let writes_status = input.status.is_some();
+            let (query, update_slot) = if email_changes || rotates_hash || writes_status {
                 let mut q = String::from("BEGIN TRANSACTION; ");
                 // BEGIN occupies slot 0; each `LET` below shifts the UPDATE.
                 let mut slot = 1;
@@ -894,6 +912,9 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         "DELETE FROM opaque_credential \
                          WHERE tenant_id = $tenant_id AND user_id = $id; ",
                     );
+                }
+                if writes_status {
+                    q.push_str(PENDING_ERASURE_RECORDS_STATUS);
                 }
                 if writes_record {
                     q.push_str(
@@ -1357,26 +1378,35 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // already `Inactive`, was tombstoned (marker cleared) or anonymised
         // meanwhile matches nothing, so the job can never overwrite a state an
         // administrator or an erasure chose, and never writes any status but
-        // `Inactive`.
+        // `Inactive`. SR3-1: a write that lands on an account with a pending
+        // erasure request records itself as the request's `prior_status`, in
+        // the same transaction, so the request's cancel does not undo it.
         let id_str = user_id.to_string();
         let rows: Vec<UserRow> = crate::helpers::retry_on_write_conflict(|| async {
             let mut result = self
                 .db
                 .current()
-                .query(
-                    "UPDATE type::record('user', $id) SET \
-                         status = 'Inactive', updated_at = time::now() \
+                .query(format!(
+                    "BEGIN TRANSACTION; \
+                     LET $changed = (UPDATE type::record('user', $id) SET \
+                         status = $status, updated_at = time::now() \
                      WHERE tenant_id = $tenant_id \
                        AND directory_external_id != NONE \
-                       AND status IN ['Active', 'PendingVerification', 'Locked']",
-                )
+                       AND status IN ['Active', 'PendingVerification', 'Locked'] \
+                     RETURN AFTER); \
+                     IF array::len($changed) > 0 {{ {PENDING_ERASURE_RECORDS_STATUS} }}; \
+                     $changed; \
+                     COMMIT TRANSACTION"
+                ))
                 .bind(("id", id_str.clone()))
                 .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("status", "Inactive".to_string()))
                 .await
                 .map_err(DbError::from)?
                 .check()
                 .map_err(|e| classify_write_error(e.to_string(), "user"))?;
-            let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
+            // Slots: BEGIN=0, LET=1, IF=2, $changed=3, COMMIT=4.
+            let rows: Vec<UserRow> = result.take(3).map_err(DbError::from)?;
             Ok::<_, DbError>(rows)
         })
         .await?;

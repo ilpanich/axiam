@@ -1671,3 +1671,123 @@ impl WebauthnCredentialRepository for FailingFirstDelete {
         self.inner.count_by_user(tenant_id, user_id).await
     }
 }
+
+// ---------------------------------------------------------------------------
+// QR3-1 (SA-13, N16, D-3): a suspended tenant is refused once the credential
+// verifies and before any sign-in side effect — JIT provisioning, the group
+// mapping, the lockout bookkeeping. A wrong credential still answers as one.
+// ---------------------------------------------------------------------------
+
+/// A tenant lifecycle check that refuses every tenant, as a suspended one is.
+struct SuspendedTenant;
+
+impl axiam_core::models::tenant::TenantAdmission for SuspendedTenant {
+    fn admit(
+        &self,
+        _tenant_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AxiamResult<()>> + Send + '_>> {
+        Box::pin(async { Err(AxiamError::TenantSuspended) })
+    }
+}
+
+/// **QR3-1** — a directory user's first sign-in on a suspended tenant: the
+/// directory vouches for the password, the answer is `TenantSuspended`, and
+/// no local account is created, no `directory.jit_provisioned` row written.
+/// Before the fix the account was created (and the reactor called) and only
+/// `create_session_and_tokens` refused. A wrong password is still the
+/// unknown-user answer.
+#[tokio::test]
+async fn qr3_1_a_first_directory_login_on_a_suspended_tenant_creates_no_account() {
+    let h = harness().await;
+    let directory_credential = fresh_credential();
+    let directory = StubDirectory::arc(
+        identity(ENTRY, "alice", "alice@example.com"),
+        &directory_credential,
+    );
+    let svc =
+        service(&h, Some(Arc::clone(&directory))).with_tenant_admission(Arc::new(SuspendedTenant));
+    let before = account_count(&h).await;
+
+    let wrong = svc.login(input(&h, "alice", &fresh_credential())).await;
+    assert!(
+        is_invalid_credentials(&wrong),
+        "a wrong password on a suspended tenant answers as a wrong password"
+    );
+
+    let outcome = svc.login(input(&h, "alice", &directory_credential)).await;
+    assert!(
+        matches!(outcome, Err(AxiamError::TenantSuspended)),
+        "the right password on a suspended tenant is refused tenant_suspended"
+    );
+    assert!(
+        matches!(
+            h.users.get_by_username(h.tenant_id, "alice").await,
+            Err(AxiamError::NotFound { .. })
+        ),
+        "no account is provisioned into a suspended tenant"
+    );
+    assert_eq!(account_count(&h).await, before);
+    assert!(audit_rows(&h, AUDIT_JIT_PROVISIONED).await.is_empty());
+}
+
+/// **QR3-1** — an existing directory account on a suspended tenant: the
+/// directory's groups are not mapped into it.
+#[tokio::test]
+async fn qr3_1_a_directory_login_on_a_suspended_tenant_maps_no_groups() {
+    let h = harness().await;
+    let directory_credential = fresh_credential();
+    h.users
+        .create_directory_account(CreateDirectoryAccount {
+            tenant_id: h.tenant_id,
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            external_id: ENTRY.into(),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    let directory = StubDirectory::arc(
+        identity(ENTRY, "alice", "alice@example.com"),
+        &directory_credential,
+    );
+    let mapper = Arc::new(CountingMapper(AtomicUsize::new(0)));
+    let svc = service(&h, Some(directory))
+        .with_directory_group_mapper(Arc::clone(&mapper) as _)
+        .with_tenant_admission(Arc::new(SuspendedTenant));
+
+    let outcome = svc.login(input(&h, "alice", &directory_credential)).await;
+    assert!(matches!(outcome, Err(AxiamError::TenantSuspended)));
+    assert_eq!(
+        mapper.0.load(Ordering::SeqCst),
+        0,
+        "no membership is written into a suspended tenant"
+    );
+}
+
+/// **QR3-1** — a local account on a suspended tenant: the right password is
+/// refused before the lockout bookkeeping, so the failed-attempt counter a
+/// successful sign-in would reset is left as it was. A wrong password still
+/// counts, as on any tenant (no oracle).
+#[tokio::test]
+async fn qr3_1_a_local_login_on_a_suspended_tenant_runs_no_post_credential_bookkeeping() {
+    let h = harness().await;
+    let svc = service(&h, None).with_tenant_admission(Arc::new(SuspendedTenant));
+
+    let wrong = svc.login(input(&h, "bob", &fresh_credential())).await;
+    assert!(is_invalid_credentials(&wrong));
+    let counted = h.users.get_by_id(h.tenant_id, h.local_user).await.unwrap();
+    assert_eq!(
+        counted.failed_login_attempts, 1,
+        "the wrong password counts"
+    );
+
+    let outcome = svc
+        .login(input(&h, "bob", &h.local_credential.clone()))
+        .await;
+    assert!(matches!(outcome, Err(AxiamError::TenantSuspended)));
+    let after = h.users.get_by_id(h.tenant_id, h.local_user).await.unwrap();
+    assert_eq!(
+        after.failed_login_attempts, 1,
+        "a refused sign-in on a suspended tenant does not reset the counter"
+    );
+}

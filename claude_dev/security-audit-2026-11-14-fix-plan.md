@@ -837,6 +837,10 @@ gRPC callers of these RPCs now need the permission.
 >   the `X-Axiam-Tenant` header get reads and the status change only; any other
 >   write, including a tenant update that also changes name, slug or metadata,
 >   returns 403 `tenant_suspended`.
+>   *Amended 2026-11-22 (Wave 2 gate, QR3-2):* a header-scoped `DELETE` of the
+>   suspended tenant itself (exact tenant route, header naming the same tenant)
+>   is also allowed, consistent with OD-13c and with the admin UI, which sends
+>   the header on every request.
 > - **OD-13c** — path-scoped organization routes block writes and allow reads:
 >   signing-CA creation and `sign-csr` are refused, intermediate listing,
 >   tenant `GET`, `audit-export` and tenant `DELETE` stay allowed. Header-scoped

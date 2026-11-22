@@ -1118,6 +1118,10 @@ All SDKs that consume AXIAM AMQP messages (currently: Rust, TypeScript/Node, Go,
    a. Extract the `hmac_signature` value from the message.
    b. Set `hmac_signature` to `null` (or remove it) in the message body.
    c. Serialize the remaining message body to canonical JSON.
+      For `AuthzResponse` (contract 1.68) steps b–c do not apply: the canonical bytes are the
+      received bytes with the trailing signature member removed, and an SDK MUST NOT
+      re-serialize; see "An SDK MUST verify over the received bytes" under
+      [Signed authorization responses](#signed-authorization-responses-contract-168).
    d. Compute `HMAC-SHA256(secret_key, canonical_json_bytes)`.
    e. Compare the computed hex-encoded HMAC to the received `hmac_signature` using constant-time comparison.
    f. If they match: process the message normally.
@@ -1220,10 +1224,15 @@ shared `axiam.authz.response`) and publish to the requester's response queue, it
   set `reply_to` to an **exclusive** queue only it consumes (a broker-named `amq.gen-…` queue
   declared `exclusive`, or `amq.rabbitmq.reply-to`), and MUST NOT read its answers from the
   shared `axiam.authz.response`.
-- The broker's own access control is the boundary between same-tenant services, and operators
-  SHOULD configure it: deny every SDK principal read (consume) access on `axiam.authz.request`,
-  and write (publish) access on the response queues, `axiam.authz.response` included. Only the
-  server needs either.
+- The broker's own access control is the boundary between same-tenant services on the
+  **reading** side, and operators SHOULD configure it: deny every SDK principal read (consume)
+  access on `axiam.authz.request` (only the server consumes it), and keep `correlation_id` and
+  `nonce` unpredictable. The **publishing** side cannot be closed this way: RabbitMQ authorizes
+  `basic.publish` as write on the *exchange*, not on the destination queue (write on a queue
+  governs only `queue.bind`), and every AXIAM queue is reached through the default exchange.
+  A principal that may publish authorization requests at all can therefore publish to any queue
+  whose name it knows, `axiam.authz.response` included; that is why the exclusive, unguessable
+  `reply_to` queue above is a MUST and not an ACL.
 - A deployment that cannot separate same-tenant services at the broker treats them as one trust
   domain for AMQP authorization, or uses REST or gRPC, whose answers are bound to the caller's
   own connection.
@@ -15190,8 +15199,10 @@ remediation, each marked *contract 1.68* where it lives.
   that fails. The signature authenticates the answer to holders of the tenant subkey only — the
   server or any of the tenant's producers — so where several services of a tenant use AMQP
   authorization each MUST read its answers from an exclusive `reply_to` queue, and broker ACLs
-  SHOULD deny SDK principals read access on `axiam.authz.request` and write access on response
-  queues. Against a server older than 1.68, whose responses are unsigned, the default is to
+  SHOULD deny SDK principals read access on `axiam.authz.request`. No ACL can deny them publish
+  access to a response queue: RabbitMQ authorizes a publish against the exchange, and every
+  AXIAM queue is reached through the default exchange (the generic §8 "Protocol" steps 2b–2c
+  are also marked as not applying to `AuthzResponse`). Against a server older than 1.68, whose responses are unsigned, the default is to
   refuse; an explicit integrator opt-out MAY admit an unsigned response for one rolling upgrade.
 - **(g) Inbound CSRF (N12).** No new rule: the §3a double-submit check binds every guard that
   can admit a request on the `axiam_access` cookie, and each guard carries the four-case test.

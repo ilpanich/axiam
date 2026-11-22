@@ -1270,6 +1270,8 @@ Common instructions for SA-20 … SA-30:
 
 ### SA-20 — TypeScript SDK (reference) — Opus 5.5
 
+> **EXECUTED (2026-11-22, Opus 5.5). C7, C6, N14, N15: reproduced; N2: not reproduced (no requester existed).** Commit `732b8f1` in `axiam-typescript-sdk`. C7: `__Host-axiam_oidc_bind` cookie (loopback `axiam_oidc_bind`), SHA-256 digest on the state entry, consume then compare in constant time, uniform 401, cookie cleared on every callback; design recorded in `docs/login-glue-binding.md`, from which SA-21…25 ported. C6: `isSafeReturnTo` at store and redirect, `allowReturnTo` predicate. N14: rules 10–12. N15: roles claim only, `requireScope` / `requireScopeHook` / `@RequireScope`. N2: owner decision (2026-11-22) to build an authz requester in all seven D-9 SDKs — `AuthzResponseVerifier` and `AuthzRequester` added as a new feature. Ride-alongs done. Before: 58/60, 11/15, 22/28, 8/10 new tests failing; after: 1969 passed, 3 skipped (built-bundle tests, skipped when `dist/` is absent, as at baseline). Version 1.4.0.
+
 `src/middleware/oidcLoginCore.ts` (143, 197, 227), `src/node/oidcState.ts` (115),
 `src/middleware/express.ts` (350–359), `src/middleware/fastify.ts` (~357),
 `src/middleware/verifyCore.ts` (195), `src/node/jwks.ts`.
@@ -1295,6 +1297,8 @@ produce no redirect to that target.
 
 ### SA-21 — Python SDK — Sonnet 5.5
 
+> **EXECUTED (2026-11-22, Sonnet 5.5). C6, C7, N15: reproduced; N14 rules 10–11 reproduced, rule 12 not reproduced (PyJWKClient already refuses; pinned only); N2: not reproduced, requester built per owner decision.** Commit `5b9abfe` in `axiam-python-sdk`. Django and FastAPI glue ported from SA-20; `require_scope`; `roles_claim_present`; CSRF `compare_digest` over bytes (a non-ASCII value was a 500); memory state store capped. Before: 11, 17, 3 and 72 new tests failing; after: 2424 passed; ruff, mypy --strict clean. Version 1.4.0.
+
 `src/axiam_sdk/django/oidc.py` (101, 118, 196, 198), the FastAPI/Flask login
 glue if present, `src/axiam_sdk/fastapi/__init__.py` (299). Port C7 and C6 from
 SA-20 (`_safe_return_to` as sketched in the report), N2, N14, N15. Ride-along:
@@ -1302,6 +1306,8 @@ SA-20 (`_safe_return_to` as sketched in the report), N2, N14, N15. Ride-along:
 `django/middleware.py:136`); cap the in-memory state store.
 
 ### SA-22 — PHP SDK — Sonnet 5.5
+
+> **EXECUTED (2026-11-22, Sonnet 5.5). C5, C6, C7, N15: reproduced; N14 rules 10–11 reproduced, rule 12 not reproduced (pinned only); N2: requester built per owner decision.** Commit `253c2a6` in `axiam-php-sdk`. C5: 50 forged kids made 100 requests before; now ≤1 fetch per 60 s and `jwks_uri` cached. Laravel and Symfony glue ported; `#[RequireScope]`; ride-along: Laravel `AxiamAccessMiddleware` denies an unreflectable action. Laravel apps must list the binding cookie in `EncryptCookies::$except` (documented). After: 2293 tests, PHPStan level 6 clean. Version 1.4.0 (changelog only; no version file).
 
 `src/Auth/JwksVerifier.php` (253, 704, 714), `src/Oidc/OidcLoginFlow.php`,
 `src/AccessEnforcer.php` (166), `src/Laravel/AxiamMiddleware.php` (170, 252),
@@ -1317,6 +1323,8 @@ SA-20 (`_safe_return_to` as sketched in the report), N2, N14, N15. Ride-along:
 
 ### SA-23 — C# SDK — Sonnet 5.5
 
+> **EXECUTED (2026-11-22, Sonnet 5.5). C5, C6, C7: reproduced; N14 rules 10–11 reproduced, rule 12 not reproduced (pinned only); N15: not reproduced (middleware already read `roles` only — documented and pinned, no production change); N2: requester built per owner decision.** Commit `86a6e9a` in `axiam-csharp-sdk`. C6 follows CONTRACT 1.68 §12.8 (stricter than `Url.IsLocalUrl`). Ride-alongs: empty expected nonce refused; `JwksCacheTtl` clamped. Before: 17/24, 2/2, 32/37 failing; after: 1634 + 112 passed (.NET 10). Version 1.4.0.
+
 `Axiam.Sdk/Auth/JwksVerifier.cs` (808), `Axiam.Sdk.AspNetCore/OidcLoginEndpoints.cs`.
 C5 (cooldown term in `IsFresh`, same test as PHP); C6 with `Url.IsLocalUrl`
 semantics; C7 ported from SA-20; N2; N14; N15 (document the framework-native
@@ -1324,6 +1332,8 @@ semantics; C7 ported from SA-20; N2; N14; N15 (document the framework-native
 in `OidcExchangeAsync`; clamp `JwksCacheTtl`.
 
 ### SA-24 — Java SDK — Sonnet 5.5
+
+> **EXECUTED (2026-11-22, Sonnet 5.5). C7, C6, N14 (rules 10–12), N15, C5: reproduced; C2 parity: the Go case is not affected (pinned), but the same root cause reproduced through a repeated key and trailing content and was fixed as in SA-26 (owner decision, 2026-11-22); N2: requester built per owner decision.** Commit `7f64c56` in `axiam-java-sdk`. Spring authorities `ROLE_`/`SCOPE_`; `@AxiamRequireScope`; explicit unknown-kid cooldown (21 fetches before). Before: 14/17, 4/8, 11/12, 3/5 failing; after: `mvnw verify` 1639 tests. Version 1.4.0.
 
 `spring/AxiamAuthenticationFilter.java` (200, 224, 267),
 `spring/AxiamAuthorizationInterceptor.java` (358), `annotations/AxiamRequireRole.java`,
@@ -1341,6 +1351,8 @@ in `OidcExchangeAsync`; clamp `JwksCacheTtl`.
 
 ### SA-25 — Kotlin SDK — Sonnet 5.5
 
+> **EXECUTED (2026-11-22, Sonnet 5.5). N12, C6, C7, N15, C5 cooldown: reproduced; N14 rules 10–11 reproduced, rule 12 not reproduced (pinned only).** Commit `234709b` in `axiam-kotlin-sdk`. N12: §3a double-submit check for cookie-sourced POST/PUT/PATCH/DELETE, 403 `csrf_validation_failed`. Ktor glue ported; `requireScope`; login result's `AxiamUser.roles` from the roles claim only. Before: 34 new tests failing; after: 1420 tests, `gradlew build` green (JDK 21). Version 1.4.0.
+
 `ktor/AxiamAuthentication.kt` (50, 107, 177, 205–206, 270), `AxiamOidcLogin.kt`
 (81, 215, 224), `AxiamClient.kt` (1511), `Models.kt`.
 
@@ -1351,6 +1363,8 @@ in `OidcExchangeAsync`; clamp `JwksCacheTtl`.
 2. C6, C7 ported from SA-20; N14; N15; the unknown-`kid` cooldown test as in SA-24.
 
 ### SA-26 — Go SDK — Sonnet 5.5
+
+> **EXECUTED (2026-11-22, Sonnet 5.5). C2, N15: reproduced; N14 rules 10–11 reproduced, rule 12 not reproduced (the JWKS library refuses; owner decision: no production check, pinned only); N2: not reproduced (no requester existed) — owner decision to build `amqp.AuthzRequester`.** Commit `6dbe025` in `axiam-go-sdk`. C2: `Event.Fields`/`Event.Raw` built from the verified canonical bytes; duplicate and top-level case-variant keys nacked. Before: 3/5, 9, 2+ new tests failing; after: `go test ./...`, vet, gofmt clean. Version 1.4.0 (changelog heading; tag at release).
 
 `amqp/consumer.go` (152, 178), `amqp/hmac.go` (157–189), `amqp/event.go` (24–31),
 `examples/amqp-consumer/main.go`.
@@ -1365,6 +1379,8 @@ in `OidcExchangeAsync`; clamp `JwksCacheTtl`.
 
 ### SA-27 — Rust SDK — Sonnet 5.5
 
+> **EXECUTED (2026-11-22, Sonnet 5.5). N14 (rules 10–12), N15: reproduced; N2: not reproduced — requester built per owner decision.** Commit `79b11be` in `axiam-rust-sdk`. N15 was not in the report's list but reproduced (`actix.rs` mapped scope to roles). Ride-along: overflow-safe DPoP iat check (it panicked before). Before: 6/7, 2/2, 1/1 failing; after: 1254 passed, clippy -D warnings clean. Version 1.4.0.
+
 `src/token/jwks.rs` (552, 1126, 1158, 1391), `src/middleware/actix.rs` (451).
 Validate N14 with the report's test (kid-less `mfa_challenge` token accepted
 with only `expect_tenant_id`), then apply §10: `purpose` rejected, `typ`
@@ -1372,6 +1388,8 @@ checked, no single-key fallback in `find_jwk` on the access-token path. N2. N15.
 Ride-along: checked arithmetic at `dpop.rs:417`.
 
 ### SA-28 — C++ SDK — Sonnet 5.5
+
+> **EXECUTED (2026-11-22, Sonnet 5.5). C4, N14 (rules 10–12): reproduced.** Commit `5db38a4` in `axiam-cplusplus-sdk`. Non-throwing JOSE/JWKS parsing; ride-along: embedded NUL in an OPAQUE password refused. Before: 7 new tests failing; after: 1682 cases passed. Version 1.4.0, SOVERSION unchanged.
 
 `src/jwks.cpp` (118–123, 184–192), `src/authenticator.cpp` (133, 246–249),
 `include/axiam/authenticator.hpp` (186), `src/oidc.cpp` (1047, 1696).
@@ -1386,11 +1404,15 @@ Ride-along: reject a password with an embedded NUL in `src/opaque.cpp`.
 
 ### SA-29 — C SDK — Sonnet 5.5
 
+> **EXECUTED (2026-11-22, Sonnet 5.5). N14 (rules 10–12): reproduced.** Commit `30016f1` in `axiam-c-sdk`. `AXIAM_JWT_VERIFY_ACCESS_TOKEN` (part of STRICT). Ride-alongs: 16 MiB response cap in `write_cb`; range-checked casts at `client.c:921` and `reactor.c:245` (the OPAQUE cost test passed on the unfixed code: a pin). Before: 14/21 failing; after: ctest 85/85. Version 1.4.0, SOVERSION unchanged.
+
 N14 only. Ride-along: cap the response body in `src/transport_curl.c` `write_cb`;
 range-check doubles before the integer casts at `src/client.c:921` and
 `reactor.c:245`.
 
 ### SA-30 — Swift SDK — Sonnet 5.5
+
+> **EXECUTED (2026-11-22, Sonnet 5.5). N14 rules 10–11: reproduced; rule 12 already enforced by `JwksVerifier.selectKey` (no change).** Commit `e84986e` in `axiam-swift-sdk`. The agent had no toolchain; the orchestrator ran the tests in the `swift:6.4-jammy` CI image: before 7 failures, after 1538 passed. Version 1.4.0.
 
 N14 only.
 

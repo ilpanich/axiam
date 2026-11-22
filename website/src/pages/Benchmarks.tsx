@@ -13,6 +13,7 @@ import {
   BENCH_TLS_COST,
   BENCH_SDK_LATENCY,
   BENCH_SDK_FOOTPRINT,
+  BENCH_CAPS,
 } from "../data";
 
 /* ---- shared bits ------------------------------------------------------- */
@@ -438,21 +439,22 @@ function MemoryCapChart() {
   );
 }
 
-/** Open upstream issue behind the database-tier regression (run 6). */
+/** Open upstream issues in the pinned SurrealDB 4.0.1 build (runs 6 and 6b). */
 const SURREALDB_BUG_URL = "https://github.com/surrealdb/surrealdb/issues/7667";
+const SURREALDB_EVENT_BUG_URL = "https://github.com/surrealdb/surrealdb/issues/7716";
 
 /* ---- headline stat cards ---------------------------------------------- */
 
 const HEADLINES = [
   {
     label: "Token issuance",
-    value: "3.8–3.9×",
-    sub: "the tokens/s of Zitadel and Keycloak, held within 2% under TLS 1.3 and mutual TLS",
+    value: "3.5–4.6×",
+    sub: "the tokens/s of Keycloak and Zitadel with 4 CPUs per container (3.8–3.9× at 2), held within 2% under TLS 1.3 and mTLS",
   },
   {
     label: "Server memory under load",
     value: "54–75 MiB",
-    sub: "AXIAM's server across the whole matrix, against 708–941 MiB for Keycloak and 127–137 MiB for Zitadel",
+    sub: "AXIAM's server across the whole run-6 matrix (89–133 MiB at 4 CPUs), against 708–941 MiB for Keycloak and 127–137 MiB for Zitadel",
   },
   {
     label: "JWKS, no database involved",
@@ -478,12 +480,24 @@ const TARGETS = [
 
 const FINDINGS = [
   {
+    title: "Run 6b: double the cores, double the throughput — the 2-CPU caps were the limit",
+    body: "With 4 CPUs per server and per database, AXIAM gained 2.02–2.32× on every cell it could gain on and stayed bound in SurrealDB (4.0–4.1 of 4 cores, server at 0.6–1.9). Keycloak gained 1.96–2.27× and stayed bound in its own server. Zitadel gained 1.66–1.95×, and on token issuance and introspection none of its containers reached 95% of the cap (server 3.65–3.70, PostgreSQL 3.38–3.63 of 4), so part of its limit is not CPU. The run-6 ordering survives the doubling: AXIAM still leads token issuance (3,234 vs 934 and 704 req/s), Keycloak still leads introspection (3,952 vs 3,272) and REST userinfo (7,807 vs 2,963), and login is a draw (98 vs 93 logins/s, inside Keycloak's ±4.3% spread).",
+  },
+  {
+    title: "SurrealDB's per-statement cost parallelises — and the shared p95 band was CPU-quota throttling",
+    body: "If surrealdb/surrealdb#7667's per-statement CPU cost could not run in parallel, more database cores would not help. They do: AXIAM's database-bound cells more than doubled. At the same time AXIAM's p95 collapsed — 69 → 20 ms on token issuance, 69 → 20 ms on introspection, 59 → 11 ms on gRPC userinfo — while its p50 barely moved (14.9 → 13.7 ms). Keycloak shows the same signature (JWKS p95 73.5 → 5.6 ms). A tail that shrinks when a container stops hitting its quota, while the median stays put, is what CFS throttling looks like; run 6's 65–90 ms band was that, not any product. The bug still costs CPU on every write: it is now known to cost cores, not to serialise.",
+  },
+  {
+    title: "AXIAM 1.3.1 measured 5–12% below 1.3.0 at equal caps — unexplained so far",
+    body: "Run 6b's control pass ran AXIAM 1.3.1 at run 6's 2/2 caps on the same VM a day later, against the same SurrealDB digest: client credentials 1,610 → 1,448 (−10%), introspection −9%, userinfo −6%, gRPC userinfo −9%, refresh −12%, authorization −7 to −11%, JWKS −5%. That is outside run 6's ±0.3–4.5% run-to-run spread. 1.3.1's changelog lists dependency bumps and test fixes and no performance change, and the control pass had no competitor alongside it, so release and day-to-day host drift cannot be separated yet. We report it rather than absorb it; the run-6b cap factors use 1.3.1 at 2/2 as AXIAM's baseline, so they measure the caps alone.",
+  },
+  {
     title: "AXIAM's ceiling is now its database tier",
     body: "On every AXIAM cell that reads or writes data, SurrealDB averaged 2.00–2.04 of its 2-core cap while the AXIAM server used 0.27–0.84 of its own 2 cores. The report's bottleneck column names `bench-axiam-surrealdb` on 27 of AXIAM's 33 cells; the six others are JWKS, which never touches the database, and password login, where the server is busy hashing. The server process has headroom it cannot use, so these cells measure SurrealDB under AXIAM's query load, not AXIAM's request handling.",
   },
   {
     title: "Database-bound cells fell 43–75% against run 5; the database-free cell rose 64%",
-    body: "Against run 5 on the laptop: client credentials 2,804 → 1,610, introspection 4,504 → 1,582, userinfo 4,752 → 1,411, gRPC userinfo 12,307 → 3,078, single authorization checks 1,032 → 492 — while JWKS went from 26,680 to 43,640. The competitors are the control for the change of host: Keycloak moved +3% to +21% on the same cells and Zitadel −14% to −1%. A host effect cannot produce opposite movements on AXIAM's database-bound and database-free cells; something in the database tier changed. Run 6 is the first on SurrealDB 4.0 (AXIAM 1.3.0 requires it), and SurrealDB has an open upstream bug (surrealdb/surrealdb#7667, highlighted at the top of this page): write statements cost 10–17× more CPU than in 3.3.5, unchanged in 4.0.1. That bug is the leading suspect. This run cannot show how much of the regression it accounts for, and how much comes from the way AXIAM 1.3's queries run on 4.0. The re-run on a fixed SurrealDB release will answer that, and a same-host A/B is listed below.",
+    body: "Run 6, at 2/2. Against run 5 on the laptop: client credentials 2,804 → 1,610, introspection 4,504 → 1,582, userinfo 4,752 → 1,411, gRPC userinfo 12,307 → 3,078, single authorization checks 1,032 → 492 — while JWKS went from 26,680 to 43,640. The competitors are the control for the change of host: Keycloak moved +3% to +21% on the same cells and Zitadel −14% to −1%. A host effect cannot produce opposite movements on AXIAM's database-bound and database-free cells; something in the database tier changed. Run 6 is the first on SurrealDB 4.0 (AXIAM 1.3.0 requires it), and SurrealDB has an open upstream bug (surrealdb/surrealdb#7667, highlighted at the top of this page): write statements cost 10–17× more CPU than in 3.3.5, unchanged in 4.0.1. That bug is the leading suspect. This run cannot show how much of the regression it accounts for, and how much comes from the way AXIAM 1.3's queries run on 4.0. The re-run on a fixed SurrealDB release will answer that, and a same-host A/B is listed below.",
   },
   {
     title: "Native mTLS still costs nothing measurable — partly because the server is not the ceiling",
@@ -521,20 +535,21 @@ const CAVEATS = [
     body: "A 16-vCPU AMD EPYC Genoa instance (Infomaniak Public Cloud) passed a pre-run qualification: sysbench spread 0.32% over three runs, 0.00% steal under load, and no period above 5% steal during the matrix. Its vCPUs are SMT threads on shared hardware, so absolute figures describe this instance class. The harness carried local changes to the SDK bench manifests and the AXIAM target compose file, recorded in the provenance; the C# SDK bench was retargeted to .NET 10 for the SDK pass only. The server image itself is the published 1.3.0, by digest.",
   },
   {
-    title: "A shared p95 band",
-    body: "Every capped target shows a p95 between roughly 65 and 90 ms on its busy cells whatever its p50 — AXIAM's client-credentials cell is 15 ms p50 / 69 ms p95, Keycloak's userinfo 2.4 / 80 ms. The pattern follows whichever container is pegged at its CPU quota, which points at quota throttling rather than at any one product. It is a hypothesis, not yet a measurement, and it affects all targets alike.",
+    title: "Run 6b is a sensitivity pass, at plaintext only",
+    body: "Run 6b moved one variable — CPU, from 2 to 4 per server and per database for every target (memory unchanged; RabbitMQ unchanged at 1 CPU), giving stack ceilings of 8 CPUs for Keycloak and Zitadel, 9 for AXIAM and 12 for authentik (its worker carries the server cap). It measured p0-plaintext only, its cells are never medianed with run 6's, and the TLS, mTLS, resource, efficiency and SDK figures on this page remain run 6's at 2/2. Efficiency stays per core actually used, so the different ceilings favour nobody. AXIAM's JWKS cell at 4/4 saturated the load generator (k6 at 7.3 cores) and is not quoted as a capacity.",
   },
 ];
 
 const NEXT = [
   "Re-run the database-bound cells on this VM once surrealdb/surrealdb#7667 is fixed in a SurrealDB release",
+  "Explain AXIAM 1.3.1's 5–12% at equal caps: a same-day 1.3.0 / 1.3.1 control with a competitor alongside",
   "A same-VM A/B — AXIAM 1.2.x on SurrealDB 3 against 1.3.0 on SurrealDB 4 — to split the database-tier regression between engine and queries",
-  "The database-ceiling pass (uncapped SurrealDB) on this VM",
+  "Find Zitadel's non-CPU limit and its fixed 200 ms gRPC userinfo floor before quoting either as a product ceiling",
   "The deferred passes: production rate-limit table, minimal profile, new-feature cells",
   "Refresh stage timings",
-  "An uncapped authentik pass, to obtain a valid cell or explain why none exists",
+  "authentik: still no valid cell at 4/4 (it roughly doubled, still above the 2 s gate) — a larger envelope, or an explanation",
   "Profile the Python SDK gap",
-  "The seventh draft of PUBLIC_BENCH_ANALYSIS.md from this run",
+  "The seventh draft of PUBLIC_BENCH_ANALYSIS.md from runs 6 and 6b",
 ];
 
 /* ---- why build AXIAM at all? ------------------------------------------- */
@@ -568,7 +583,7 @@ const WHY_AXIAM = [
 ];
 
 const WHY_AXIAM_CONS =
-  "AXIAM is young: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community. On this run Keycloak beats it on introspection and REST userinfo throughput and on whole-stack CPU for both; AXIAM's stack carries SurrealDB and RabbitMQ in every full deployment, and by cgroup working set Zitadel's stack is smaller at rest; SurrealDB is a younger storage engine than PostgreSQL by a decade, and its 4.0 line is the tier this run found pegged. Choosing AXIAM today means choosing a young system whose server efficiency, machine-first design and measurement culture you value over incumbent breadth — with its database tier as the open item. That trade is exactly the niche the incumbents leave open, and the measurements above are why we believe it is worth serving.";
+  "AXIAM is young: it has a fraction of Keycloak's protocol surface, extension ecosystem, hosting options and community. On runs 6 and 6b alike Keycloak beats it on introspection and REST userinfo throughput, and on whole-stack CPU for both; AXIAM's stack carries SurrealDB and RabbitMQ in every full deployment, and by cgroup working set Zitadel's stack is smaller at rest; SurrealDB is a younger storage engine than PostgreSQL by a decade, and its 4.0 line is the tier this run found pegged. Choosing AXIAM today means choosing a young system whose server efficiency, machine-first design and measurement culture you value over incumbent breadth — with its database tier as the open item. That trade is exactly the niche the incumbents leave open, and the measurements above are why we believe it is worth serving.";
 
 
 /* ---- page -------------------------------------------------------------- */
@@ -598,7 +613,10 @@ export default function Benchmarks() {
         rather than a laptop, against the published{" "}
         <code style={{ color: "#67e8f9" }}>1.3.0</code> release image pulled by
         digest, median of three runs across plaintext, TLS&nbsp;1.3 and native
-        mutual TLS.
+        mutual TLS — and{" "}
+        <a href="#run-6b" style={{ color: "#67e8f9" }}>run 6b</a> of
+        2026-11-21/22, the same comparison on the same VM with every server
+        and every database given 4 CPUs instead of 2.
       </p>
       <p style={{ margin: "0 0 44px", fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 720 }}>
         Read one fact before any number: run 6 is{" "}
@@ -608,7 +626,8 @@ export default function Benchmarks() {
         the last of these: on every cell that touches data, SurrealDB is pegged
         at its cap while the AXIAM server uses well under half of its own, and
         AXIAM's lead narrowed — it now loses two head-to-head cells to
-        Keycloak. Both are charted below, with the reasons.
+        Keycloak. Doubling the caps in run 6b doubled AXIAM and Keycloak alike
+        and changed no winner. Both are shown below, with the reasons.
       </p>
 
       {/* ---- Upstream SurrealDB 4 bug ---- */}
@@ -623,9 +642,11 @@ export default function Benchmarks() {
         }}
       >
         <div style={{ fontSize: 15, fontWeight: 700, color: "#ffd98a", marginBottom: 6 }}>
-          Known upstream bug: SurrealDB 4 write statements
+          Known upstream bugs in the SurrealDB 4.0.1 build measured here
         </div>
         <p style={{ margin: 0, fontSize: 14, lineHeight: 1.65, color: "#e2e8f0" }}>
+          Both are open, with no fix merged upstream, and both report 4.0.x as
+          a regression from 3.3.x.{" "}
           <a
             href={SURREALDB_BUG_URL}
             target="_blank"
@@ -634,17 +655,31 @@ export default function Benchmarks() {
           >
             surrealdb/surrealdb#7667
           </a>{" "}
-          reports that in SurrealDB 4.0.0 every write statement costs about
-          350&nbsp;µs of CPU in the query executor, 10–17× more than in 3.3.5,
-          and about 2–3× more per round trip over the server. A later comment
-          on the issue says 4.0.1, the version this run used, is unchanged. The
-          issue is open and no fix has been merged upstream. It is the leading
-          suspect for the drop on AXIAM's database-bound cells, which are
-          marked on the charts below. Whether it explains all of them,
-          read-heavy cells included, is not yet established.{" "}
+          reports that every write statement costs about 350&nbsp;µs of CPU in
+          the query executor, 10–17× more than in 3.3.5, unchanged in 4.0.1.
+          It sits on AXIAM's request path and is the leading suspect for the
+          drop on AXIAM's database-bound cells, which are marked on the charts
+          below.{" "}
+          <a
+            href={SURREALDB_EVENT_BUG_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "#67e8f9" }}
+          >
+            surrealdb/surrealdb#7716
+          </a>{" "}
+          reports that every CREATE firing a <code>DEFINE EVENT</code>{" "}
+          re-plans the whole event body — 16.6–18.9× lower throughput than
+          3.3.x in the reporter's workload. AXIAM's shipped schema defines no events, so
+          it is not expected to touch these cells; it is listed because it is
+          a known regression of the exact build pinned. Run 6b adds one
+          measured fact: with twice the database cores AXIAM's throughput more
+          than doubled, so the extra per-statement cost runs in parallel and
+          costs cores rather than serialising. Whether #7667 explains the
+          whole drop, read-heavy cells included, is not yet established.{" "}
           <strong>
-            Those cells will be re-measured on the same VM once a fixed
-            SurrealDB release ships
+            The database-bound cells will be re-measured on the same VM once a
+            fixed SurrealDB release ships
           </strong>
           , and this page will be updated with the result. JWKS, password login
           and the competitors' figures do not depend on SurrealDB.
@@ -830,6 +865,124 @@ export default function Benchmarks() {
             <BarChart key={s.id} scenario={s} />
           ))}
         </div>
+      </section>
+
+      {/* ---- Run 6b: raised caps ---- */}
+      <section id="run-6b" style={{ marginBottom: 52, scrollMarginTop: 90 }}>
+        <SectionTitle kicker="Run 6b" title="Twice the cores: was it the caps?" />
+        <p style={{ fontSize: 15, color: "#cbd5e1", lineHeight: 1.7, maxWidth: 760 }}>
+          In run 6 nearly every cell stopped at the 2-CPU cap of one container
+          while the host had more than half its CPU free. Run 6b re-ran the
+          plaintext comparison on the same VM with{" "}
+          <strong style={{ color: "#e2e8f0" }}>4 CPUs for every server and every
+          database</strong> — the same step for every target and role, memory
+          unchanged — against the same competitor and SurrealDB images, by
+          digest. AXIAM's 2/2 baseline is a control pass of 1.3.1 at run 6's
+          caps, so its factor measures the caps alone. Median of three runs;
+          22 of 30 cells valid (authentik's six, and Zitadel's login and
+          fallback refresh, are invalid as in run 6).
+        </p>
+        <div className="glass-card" style={{ padding: 4, marginTop: 20, overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 720 }}>
+            <thead>
+              <tr>
+                {["Scenario", "AXIAM", "Keycloak", "Zitadel"].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      textAlign: "left",
+                      padding: "12px 14px",
+                      borderBottom: "1px solid rgba(0,212,255,.18)",
+                      color: "#67e8f9",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {BENCH_CAPS.map((row) => (
+                <tr key={row.scenario}>
+                  <td
+                    style={{
+                      padding: "11px 14px",
+                      borderBottom: "1px solid rgba(255,255,255,.06)",
+                      color: "#e2e8f0",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {row.scenario}
+                  </td>
+                  {row.cells.map((cell, ci) => (
+                    <td
+                      key={ci}
+                      style={{
+                        padding: "11px 14px",
+                        borderBottom: "1px solid rgba(255,255,255,.06)",
+                        verticalAlign: "top",
+                      }}
+                    >
+                      {cell === null ? (
+                        <span style={{ color: "#64748b" }}>—</span>
+                      ) : (
+                        <>
+                          <div
+                            style={{
+                              fontFamily: "ui-monospace,Menlo,monospace",
+                              color: ci === 0 ? "#67e8f9" : "#cbd5e1",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {cell.from} → {cell.to}
+                          </div>
+                          <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 2 }}>
+                            {cell.factor} · bound: {cell.bound}
+                          </div>
+                        </>
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ margin: "12px 4px 0", fontSize: 12.5, color: "#64748b", lineHeight: 1.6 }}>
+          Requests/s at 2 → 4 CPUs per server and per database, p0-plaintext.
+          “Bound” names the container at ≥ 95% of its cap at 4/4. AXIAM's JWKS
+          at 4/4 saturated the load generator and is not a capacity figure.
+          Zitadel's login and refresh, and every authentik cell, failed the
+          validity gate at both cap levels.
+        </p>
+        <ul style={{ margin: "20px 0 0", paddingLeft: 22, color: "#cbd5e1", lineHeight: 1.75, maxWidth: 760 }}>
+          <li style={{ marginBottom: 8 }}>
+            <strong>AXIAM and Keycloak scale cleanly.</strong> Both roughly
+            double and stay bound in the same container (AXIAM's login excepted: its server hashed at 3.7 of 4 cores, just under the 95% mark) — SurrealDB for AXIAM,
+            the JVM server for Keycloak. Run 6 measured their 2-CPU caps, not
+            their limits.
+          </li>
+          <li style={{ marginBottom: 8 }}>
+            <strong>Zitadel has a limit that is not CPU.</strong> On token
+            issuance and introspection no container reached 95% of its cap, and
+            its gRPC userinfo held a flat 200 ms p50 with both containers near
+            one core.
+          </li>
+          <li style={{ marginBottom: 8 }}>
+            <strong>No winner changed.</strong> Token issuance: AXIAM 3,234,
+            Keycloak 934, Zitadel 704 req/s. Introspection: Keycloak 3,952,
+            AXIAM 3,272, Zitadel 1,522. REST userinfo: Keycloak 7,807, AXIAM
+            2,963, Zitadel 1,677. gRPC userinfo: AXIAM 6,369, Zitadel 226.
+            Login: Keycloak 98, AXIAM 93 — a draw within spread.
+          </li>
+          <li style={{ marginBottom: 8 }}>
+            <strong>The tails shrank more than the medians.</strong> AXIAM's
+            token-issuance p95 fell from 69 to 20 ms with its p50 almost
+            unchanged; Keycloak's JWKS p95 from 73.5 to 5.6 ms. Run 6's shared
+            65–90 ms p95 band was CPU-quota throttling of the pegged container.
+          </li>
+        </ul>
       </section>
 
       {/* ---- Efficiency ---- */}
@@ -1489,7 +1642,10 @@ export default function Benchmarks() {
             container and host telemetry). Target versions: AXIAM 1.3.0,
             Keycloak 26.8.1, Zitadel v4.19.5, authentik 2026.8.5, SurrealDB
             v4.0.1, PostgreSQL 16. Host: Infomaniak Public Cloud, AMD EPYC
-            Genoa, 16 vCPUs, 64 GiB.
+            Genoa, 16 vCPUs, 64 GiB. Run 6b of 2026-11-21/22 on the same VM:
+            p0-plaintext, median of 3, a 2/2 control pass of AXIAM 1.3.1
+            (image digest recorded) and a 4/4 pass of all four targets on the
+            run-6 competitor and SurrealDB digests, 22 of 30 cells valid.
           </p>
         </div>
       </section>

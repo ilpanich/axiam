@@ -7,6 +7,7 @@ import type {
   BenchResourceRow,
   BenchSdkRow,
   BenchSdkFootprintRow,
+  BenchCapsRow,
 } from "./types";
 
 /**
@@ -1919,6 +1920,89 @@ export const BENCH_SDK_FOOTPRINT: BenchSdkFootprintRow[] = [
   { sdk: "Rust", runtime: "rustc 1.99", cpu: 22.1, rss: 23 },
   { sdk: "Java", runtime: "JVM 21", cpu: 24.0, rss: 335 },
   { sdk: "Python", runtime: "python 3.12, uvloop", cpu: 62.1, rss: 89 },
+];
+
+/**
+ * Run 6b (2026-11-21/22, same VM) — the p0-plaintext comparison with every
+ * server and every database capped at 4 CPU instead of 2 (memory unchanged,
+ * RabbitMQ unchanged), median of 3. The 2/2 baseline is run 6 for the
+ * competitors (the same images, by digest) and run 6b's control pass for
+ * AXIAM (1.3.1 at 2/2), so AXIAM's factor is a cap effect only. Authorization
+ * batch rows are checks/s (operations × 5). Values `[AXIAM, Keycloak, Zitadel]`.
+ */
+export const BENCH_CAPS: BenchCapsRow[] = [
+  {
+    scenario: "Client credentials",
+    cells: [
+      { from: "1,448", to: "3,234", factor: "2.23×", bound: "SurrealDB" },
+      { from: "411", to: "934", factor: "2.27×", bound: "server" },
+      { from: "425", to: "704", factor: "1.66×", bound: "none ≥ 95%" },
+    ],
+  },
+  {
+    scenario: "Token introspection",
+    cells: [
+      { from: "1,438", to: "3,272", factor: "2.28×", bound: "SurrealDB" },
+      { from: "1,940", to: "3,952", factor: "2.04×", bound: "server" },
+      { from: "827", to: "1,522", factor: "1.84×", bound: "none ≥ 95%" },
+    ],
+  },
+  {
+    scenario: "OIDC userinfo — REST",
+    cells: [
+      { from: "1,320", to: "2,963", factor: "2.24×", bound: "SurrealDB" },
+      { from: "3,862", to: "7,807", factor: "2.02×", bound: "server" },
+      { from: "859", to: "1,677", factor: "1.95×", bound: "PostgreSQL" },
+    ],
+  },
+  {
+    scenario: "OIDC userinfo — gRPC",
+    cells: [
+      { from: "2,795", to: "6,369", factor: "2.28×", bound: "SurrealDB" },
+      null,
+      { from: "245", to: "226", factor: "0.92×", bound: "none — 200 ms floor" },
+    ],
+  },
+  {
+    scenario: "JWKS fetch",
+    cells: [
+      { from: "41,523", to: "43,232", factor: "1.04×", bound: "load generator" },
+      { from: "5,529", to: "10,832", factor: "1.96×", bound: "server" },
+      { from: "2,031", to: "3,953", factor: "1.95×", bound: "PostgreSQL" },
+    ],
+  },
+  {
+    scenario: "Password login",
+    cells: [
+      { from: "46", to: "93", factor: "2.02×", bound: "none ≥ 95% (server 3.7)" },
+      { from: "47", to: "98", factor: "2.09×", bound: "server" },
+      null,
+    ],
+  },
+  {
+    scenario: "Session / token refresh",
+    cells: [
+      { from: "305", to: "707", factor: "2.32×", bound: "SurrealDB" },
+      { from: "435", to: "943", factor: "2.17×", bound: "server" },
+      null,
+    ],
+  },
+  {
+    scenario: "Authz check — REST / gRPC",
+    cells: [
+      { from: "451 / 572", to: "1,007 / 1,320", factor: "2.23× / 2.31×", bound: "SurrealDB" },
+      null,
+      null,
+    ],
+  },
+  {
+    scenario: "Authz batch — REST / gRPC (checks/s)",
+    cells: [
+      { from: "2,225 / 2,885", to: "4,870 / 6,145", factor: "2.19× / 2.13×", bound: "SurrealDB" },
+      null,
+      null,
+    ],
+  },
 ];
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";

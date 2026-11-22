@@ -159,6 +159,24 @@ export interface BenchSdkRow {
   best?: boolean;
 }
 
+/** One target's throughput at the 2/2 caps and at the raised 4/4 caps (run 6b). */
+export interface BenchCapsCell {
+  /** Throughput at 2 CPU per server and per database, req/s (pre-formatted). */
+  from: string;
+  /** Throughput at 4 CPU per server and per database, req/s (pre-formatted). */
+  to: string;
+  /** `to ÷ from`, pre-formatted (e.g. "2.23×"). */
+  factor: string;
+  /** Which container was at ≥ 95% of its cap at 4/4, or why none was. */
+  bound: string;
+}
+
+/** One scenario's row of the raised-caps table, `[AXIAM, Keycloak, Zitadel]`. */
+export interface BenchCapsRow {
+  scenario: string;
+  cells: [BenchCapsCell | null, BenchCapsCell | null, BenchCapsCell | null];
+}
+
 /** One SDK's own client-process cost over the whole benchmark. */
 export interface BenchSdkFootprintRow {
   sdk: string;

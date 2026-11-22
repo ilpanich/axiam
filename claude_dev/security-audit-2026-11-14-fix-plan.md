@@ -653,6 +653,36 @@ to both count queries and bind `$tenant_id`, matching the data query beside each
 
 ## 5. Wave 2 — server, remaining leads
 
+> **REVIEW GATE — PASSED (2026-11-22), 5 rounds.**
+>
+> **Shape.**
+> - 3 review rounds (1, 3, 5). Each review round had one code-quality and one security review, both by Opus 5.5 reviewers who wrote none of the code.
+> - 2 fix rounds, one signed commit each: `e7306e1` (wave 2, round 2) and `5e0cec2` (wave 2, round 4).
+> - Reviewers received the complete wave diff (base `31f7962`, with the unrelated `main` merge `f54a16d` subtracted), this plan's §1–§3, §5 and §7, the report sections and the owner decisions. They did not receive implementer summaries.
+> - The gate closed under the owner's wrap-up rule (2026-11-22, applies to every remaining gate): once a round finds nothing at medium or higher, the low and nit findings are filed as GitHub issues and the wave closes.
+>
+> **Findings.**
+> - **Round 1:** 22 findings, QR1-1…QR1-13 and SR1-1…SR1-9. All were fixed in round 2; none was rejected. Partial resolutions accepted:
+>   - the mail consumer's in-loop sleep was not refactored; `amqp.internal_queues.max_age_secs` (default 86400) bounds the queue age instead;
+>   - audit ingestion stays open to suspended tenants, and the docs and CONTRACT were narrowed to say so;
+>   - `reply_to` is restricted only for the `axiam.` prefix.
+> - **QR1-8:** the CONTRACT §34.12 text was corrected in round 2. The commit-message part, for SA-14's follow-up `36233bc`, is recorded here rather than by rewriting pushed history.
+> - **Round 3:** 7 findings, SR3-1 (medium), SR3-2, QR3-1, QR3-2 (low) and SR3-3, QR3-3, QR3-4 (nit). All fixed in round 4, except QR3-2, which the owner settled by amending OD-13b.
+> - **Round 5:** no finding at medium or higher. Filed as issues:
+>   - #877, SR5-1 (low): federated sign-in provisions users on a suspended tenant before the refusal;
+>   - #878, QR5-1 and SR5-2 (low and nit): the lockout race can confirm a correct password on a suspended tenant;
+>   - #879, QR5-2, SR5-3 and QR5-3 (nit): stale wording in the deployment README and the auth handler comments.
+>
+> **Owner decisions taken during the gate.**
+> - **OD-13b amended:** a header-scoped `DELETE` of the suspended tenant itself is allowed (see SA-13).
+> - **npm audit allowlist:** the stale entry GHSA-fc5q-39xc-vjpf is removed (`538149f`).
+> - **CodeQL test-code alerts:** left for the maintainer to dismiss.
+>
+> **Out-of-band commits on the branch.**
+> - `f54a16d`: merge of `origin/main`.
+> - `538149f`: the allowlist change above.
+> - `a1d8648`: `url` 2.5.9 for RUSTSEC-2026-0592, published 2026-11-20.
+
 ### SA-09 — Erasure cancel restores the prior status (N11)
 
 > **EXECUTED (2026-11-20, Sonnet 5.5). N11: reproduced.** On the unfixed code a

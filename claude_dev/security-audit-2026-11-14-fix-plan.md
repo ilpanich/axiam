@@ -1453,6 +1453,13 @@ N14 only.
 
 ### SA-40 — REST edge matchers — Sonnet 5.5
 
+> **EXECUTED (2026-11-23, Sonnet 5.5). All three hardening leads (h01-rest-authn): reproduced.**
+> - `normalize_for_public_check` returns `None` for a segment that percent-decodes, repeatedly, to `.` or `..`. Before the fix, `/api/docs/%2e%2e/v1/users` was classified public; `%252e%252e` is also refused.
+> - `is_csrf_exempt` uses exact equality on the path instead of `ends_with`. Before the fix, `/api/v1/users/api/v1/auth/login` was exempt. `CsrfMiddleware` wraps only the `/api/v1` and `/api/v1/auth` scopes, which see the full path. The `/oauth2/` prefix rule is unchanged.
+> - The `tenant_path` duplicate-selector check compares percent-decoded keys via `url::form_urlencoded::parse`. Before the fix, `a=1&tenant%5Fid=x` slipped past.
+>
+> Tests: three new unit tests (one per bypass family) failed with the fixes reverted (0 passed, 3 failed) and pass after. `axiam-api-rest --lib`: 336 passed. fmt, every Architecture Invariants check, and clippy `-D warnings` are clean. No dependency, API or spec change.
+
 `normalize_for_public_check`: reject any segment that percent-decodes to `.` or
 `..`. `is_csrf_exempt`: exact equality on the scope-relative path instead of
 `ends_with`. `tenant_path` duplicate-selector check: compare percent-decoded

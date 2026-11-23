@@ -29,10 +29,53 @@ use crate::permissions::PUBLIC_PATHS;
 // Public-path check
 // ---------------------------------------------------------------------------
 
+/// Whether `segment` is `.` or `..` once percent-decoded.
+///
+/// Decoding is repeated until the segment stops changing, so a double-encoded
+/// `%252e%252e` is caught too, whatever number of decoding layers a proxy in
+/// front of the server happens to have stripped.
+fn is_dot_segment(segment: &str) -> bool {
+    let mut current = segment.to_owned();
+    loop {
+        if current == "." || current == ".." {
+            return true;
+        }
+        let decoded = percent_decode_lossy(&current);
+        if decoded == current {
+            return false;
+        }
+        current = decoded;
+    }
+}
+
+/// Decodes `%XX` escapes; malformed escapes are kept verbatim.
+fn percent_decode_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Normalizes `path` for the public-path allowlist check (SECHRD-11 / T-24-11).
 ///
 /// - Collapses repeated `/` into a single `/`.
-/// - Rejects (returns `None`) any path with a literal `..` path segment.
+/// - Rejects (returns `None`) any path with a `.` or `..` path segment,
+///   literal or percent-encoded (`%2e%2e`, `%2E`, double-encoded).
 ///
 /// This function performs **no** rewriting/canonicalization for routing
 /// purposes — it exists solely to produce a fail-closed input to
@@ -44,7 +87,7 @@ fn normalize_for_public_check(path: &str) -> Option<String> {
     // per-segment comparison is sufficient here because the only decision
     // this function feeds is a boolean allow/deny, not a rewritten path
     // used for filesystem or routing access.
-    if path.split('/').any(|segment| segment == "..") {
+    if path.split('/').any(is_dot_segment) {
         return None;
     }
 
@@ -256,6 +299,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::{is_public_path, matches_public_allowlist};
+
+    #[test]
+    fn percent_encoded_dot_segments_are_never_public() {
+        for path in [
+            "/api/docs/%2e%2e/v1/users",
+            "/api/docs/%2E%2E/v1/users",
+            "/api/docs/.%2e/v1/users",
+            "/api/docs/%2e./v1/users",
+            "/api/docs/%2e/v1/users",
+            "/api/docs/%252e%252e/v1/users",
+            "/api/docs/../v1/users",
+        ] {
+            assert!(
+                !is_public_path(path),
+                "{path} must not be classified public"
+            );
+        }
+        // Legitimate public paths are unaffected, including encoded non-dot bytes.
+        assert!(is_public_path("/api/docs/openapi.json"));
+        assert!(is_public_path("/api/docs/swagger%2Dui.css"));
+    }
 
     #[test]
     fn public_paths_are_recognized() {

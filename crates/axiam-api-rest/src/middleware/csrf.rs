@@ -130,10 +130,11 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
 const CSRF_EXEMPT_PREFIXES: &[&str] = &["/oauth2/"];
 
 fn is_csrf_exempt(path: &str) -> bool {
-    for suffix in CSRF_EXEMPT_SUFFIXES {
-        if path.ends_with(suffix) {
-            return true;
-        }
+    // Exact equality on the full path (every entry is `/api/v1/...`, and the
+    // middleware only wraps scopes that see that full path). `ends_with` would
+    // exempt any future nested route whose tail happens to equal an entry.
+    if CSRF_EXEMPT_SUFFIXES.contains(&path) {
+        return true;
     }
     for prefix in CSRF_EXEMPT_PREFIXES {
         if path.starts_with(prefix) {
@@ -707,6 +708,20 @@ mod tests {
                 "{path} must be CSRF-exempt: the caller is signing in and has no csrf cookie yet"
             );
         }
+    }
+
+    #[test]
+    fn a_path_merely_ending_in_an_exempt_entry_is_not_exempt() {
+        for path in [
+            "/api/v1/users/api/v1/auth/login",
+            "/api/v1/resources/x/api/v1/auth/reset/confirm",
+            "/t/abc/api/v1/auth/login",
+            "/api/v1/auth/login/",
+            "/api/v1/auth/login/extra",
+        ] {
+            assert!(!is_csrf_exempt(path), "{path} must not be CSRF-exempt");
+        }
+        assert!(is_csrf_exempt("/api/v1/auth/login"));
     }
 
     #[test]

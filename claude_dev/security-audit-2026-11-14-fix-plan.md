@@ -1494,6 +1494,19 @@ report.
 no panic on non-ASCII. `ip_class.rs` `classify_v6`: classify `::ffff:0:0/96` as
 special-purpose.
 
+> **CI follow-up (2026-11-23, Sonnet 5.5), on PR #875 after `2b4f639`.** CI's `Test`, coverage and E2E jobs found four regressions the narrow local gates had missed:
+> - **R1 (SA-41).** Seven REST tests got `active:false` for live tokens. Production was right: those fixtures minted a user token whose `sid` named no session row. The fixtures now create the row. No assertion changed.
+> - **R2 (SA-40).** `mcp06_a_percent_encoded_tenant_id_on_a_tenant_path_is_still_refused` expected 401 without a credential. Since SA-40 the guard decodes keys and answers 400 `invalid_request` before authentication, as it already did for the plain spelling. The owner approved the new expectation (2026-11-23), and `security-review-mcp-2026-09-17.md` §7 now records the change.
+> - **R3 (SA-06).** The personal-data gate flagged `user.credential_version` and `credential_changed_at` as unclassified. Both are now classified in `USER_COLUMNS` as server-internal: not cleared, not exported.
+> - **R4 (SA-42).** On CI, `localhost` also resolves to `::1`, which `is_never_allowed` flags as part of `::/96`. That broke the `allow_private` seam: the Keycloak E2E test and `webhook_pins_resolved_ip`. `pick_address` now exempts exactly `::1` under `allow_private`. Metadata addresses and IPv4-compatible forms of them stay refused in any position. The SEC-107 allowlist path is unchanged. New test: `sa42_allow_private_still_reaches_a_loopback_answer`.
+>
+> Gate (run one suite at a time) passed:
+> - REST: `oauth2_flow_test` 49, `resource_indicators_test` 20, `webhook_test` 28, `mcp_authorization_test` 14.
+> - pki lib 154, core lib 580, oauth2 lib 675 + `token_service` 177, `grpc_units` 58, `personal_data_gate` 3.
+> - fmt and clippy `-D warnings` clean.
+>
+> From now on, every Wave 4 gate includes the integration suites of the crates it touches.
+
 ### SA-43 — MFA and WebAuthn — Opus 5.5
 
 `service.rs:1051` `enroll_mfa`: write the pending secret to a separate field and

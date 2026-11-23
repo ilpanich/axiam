@@ -43,7 +43,7 @@
 //! the full SSRF guard against the redirect target").
 
 use std::collections::BTreeSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -176,7 +176,7 @@ fn host_is_allowlisted(host: &str) -> bool {
 // `is_disallowed_ip` is re-exported because callers outside this crate (the
 // webhook tests among them) have always reached it as `ssrf::is_disallowed_ip`.
 pub use axiam_core::ip_class::is_disallowed_ip;
-use axiam_core::ip_class::is_never_allowed;
+use axiam_core::ip_class::{canonical, is_never_allowed};
 
 /// Resolve `host:port` (A + AAAA), reject if ANY resolved address is
 /// disallowed, and return ONE validated address to pin into the connection.
@@ -207,14 +207,32 @@ pub async fn resolve_and_pick(
         return Err(SsrfError::ResolveFailed);
     }
 
+    pick_address(host, &addrs, allow_private)
+}
+
+/// Decide which of `addrs` (a resolver's non-empty answer for `host`) may be
+/// pinned. Split from [`resolve_and_pick`] so the decision is testable with an
+/// injected answer.
+fn pick_address(host: &str, addrs: &[IpAddr], allow_private: bool) -> Result<IpAddr, SsrfError> {
     // SA-42: `allow_private` waives the private-address rule only, never the
-    // metadata-endpoint rule.
-    if addrs.iter().any(|ip| is_never_allowed(*ip)) {
-        return Err(SsrfError::Blocked);
+    // metadata-endpoint rule. `::1` is the one address `is_never_allowed` flags
+    // (as part of the deprecated `::/96`) that is not a metadata endpoint: it
+    // is loopback, exactly like `127.0.0.1`, which the seam has always
+    // reached, and `localhost` resolves to both. The exemption is this seam's
+    // alone; SEC-107's allowlist below still refuses `::1`.
+    if allow_private {
+        let is_ipv6_loopback = |ip: &IpAddr| canonical(*ip) == IpAddr::V6(Ipv6Addr::LOCALHOST);
+        if addrs
+            .iter()
+            .any(|ip| is_never_allowed(*ip) && !is_ipv6_loopback(ip))
+        {
+            return Err(SsrfError::Blocked);
+        }
+        return Ok(addrs[0]);
     }
 
-    if allow_private {
-        return Ok(addrs[0]);
+    if addrs.iter().any(|ip| is_never_allowed(*ip)) {
+        return Err(SsrfError::Blocked);
     }
 
     if let Some(bad) = addrs.iter().find(|ip| is_disallowed_ip(**ip)) {
@@ -455,6 +473,39 @@ mod tests {
         }
         // The seam still reaches loopback.
         assert!(resolve_and_pick("127.0.0.1", 443, true).await.is_ok());
+    }
+
+    /// SA-42 regression: `localhost` resolves to `127.0.0.1` and `::1`, and the
+    /// seam must keep reaching it. An answer that also carries a metadata
+    /// address is never pinned, whatever its order.
+    #[test]
+    fn sa42_allow_private_still_reaches_a_loopback_answer() {
+        let v4: IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+        let meta: IpAddr = "169.254.169.254".parse().unwrap();
+        assert_eq!(pick_address("localhost", &[v4, v6], true).unwrap(), v4);
+        assert_eq!(pick_address("localhost", &[v6, v4], true).unwrap(), v6);
+        assert_eq!(pick_address("localhost", &[v6], true).unwrap(), v6);
+        for answer in [[v4, meta], [meta, v6], [v6, meta]] {
+            assert!(
+                matches!(
+                    pick_address("localhost", &answer, true),
+                    Err(SsrfError::Blocked)
+                ),
+                "{answer:?}"
+            );
+        }
+        // An IPv4-compatible spelling of metadata is still refused.
+        let compat: IpAddr = "::a9fe:a9fe".parse().unwrap();
+        assert!(matches!(
+            pick_address("h", &[v4, compat], true),
+            Err(SsrfError::Blocked)
+        ));
+        // Without the seam, loopback is still refused.
+        assert!(matches!(
+            pick_address("localhost", &[v4, v6], false),
+            Err(SsrfError::Blocked)
+        ));
     }
 
     /// SEC-094 — end-to-end: the mapped form must be rejected by

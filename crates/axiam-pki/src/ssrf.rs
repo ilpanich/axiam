@@ -207,6 +207,12 @@ pub async fn resolve_and_pick(
         return Err(SsrfError::ResolveFailed);
     }
 
+    // SA-42: `allow_private` waives the private-address rule only, never the
+    // metadata-endpoint rule.
+    if addrs.iter().any(|ip| is_never_allowed(*ip)) {
+        return Err(SsrfError::Blocked);
+    }
+
     if allow_private {
         return Ok(addrs[0]);
     }
@@ -435,6 +441,21 @@ pub async fn read_capped_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-42 — `allow_private` is a loopback test seam; it must never reach a
+    /// cloud metadata endpoint.
+    #[tokio::test]
+    async fn sa42_allow_private_never_reaches_metadata() {
+        for host in ["169.254.169.254", "::ffff:169.254.169.254", "fe80::1"] {
+            let result = resolve_and_pick(host, 443, true).await;
+            assert!(
+                matches!(result, Err(SsrfError::Blocked)),
+                "{host} with allow_private=true must be Blocked, got {result:?}"
+            );
+        }
+        // The seam still reaches loopback.
+        assert!(resolve_and_pick("127.0.0.1", 443, true).await.is_ok());
+    }
 
     /// SEC-094 — end-to-end: the mapped form must be rejected by
     /// `resolve_and_pick`, i.e. before `pinned_client` can pin it. Uses a

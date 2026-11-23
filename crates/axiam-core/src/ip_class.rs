@@ -154,6 +154,13 @@ fn classify_v6(v6: Ipv6Addr) -> IpClass {
         };
     }
 
+    // ::ffff:0:0/96 — RFC 2765 IPv4-translated (SIIT). The IPv4-mapped form
+    // `::ffff:a.b.c.d` is folded by `canonical` before this function runs, so
+    // only the `::ffff:0:a.b.c.d` spelling reaches here.
+    if s[..4] == [0, 0, 0, 0] && s[4] == 0xffff && s[5] == 0 {
+        return IpClass::SpecialPurpose;
+    }
+
     // 6to4, 2002::/16 (RFC 3056): bits 16..48 are an IPv4 address. The prefix
     // as a whole maps the entire public IPv4 space, so classify what it embeds:
     // `2002:7f00:1::1` is 127.0.0.1, `2002:a9fe:a9fe::1` the metadata service.
@@ -368,6 +375,14 @@ impl std::fmt::Display for IpNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-42 — `::ffff:0:0/96` (RFC 2765 IPv4-translated) is special-purpose.
+    #[test]
+    fn sa42_ipv4_translated_prefix_is_special_purpose() {
+        for literal in ["::ffff:0:a9fe:a9fe", "::ffff:0:7f00:1", "::ffff:0:808:808"] {
+            assert_eq!(classify(ip(literal)), IpClass::SpecialPurpose, "{literal}");
+        }
+    }
 
     fn ip(literal: &str) -> IpAddr {
         literal.parse().expect("literal parses")

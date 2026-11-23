@@ -1482,6 +1482,13 @@ report.
 
 ### SA-42 — SSRF guard — Sonnet 5.5
 
+> **EXECUTED (2026-11-23, Sonnet 5.5). All three hardening leads (h05-ssrf-dcr): reproduced.**
+> - `axiam-pki` `resolve_and_pick` now rejects any resolved address `is_never_allowed` flags before the `allow_private` early return. Before the fix, `169.254.169.254` with `allow_private = true` resolved to `Ok`. Consequence: `is_never_allowed` already covers `::/96`, so the `allow_private` seam can no longer reach `[::1]`; `127.0.0.1` still works and no test relied on `[::1]`.
+> - `dcr.rs` `host_glob_matches` compares byte slices. Before the fix, `é.example.com` panicked with "byte index 7 is not a char boundary".
+> - `ip_class::classify_v6` classifies `::ffff:0:0/96` (RFC 2765) as `SpecialPurpose`. Before the fix, `::ffff:0:a9fe:a9fe` was `Global`.
+>
+> Tests: three new tests, one per item, failed before the fix and pass after. Library suites pass for `axiam-core`, `axiam-pki`, `axiam-oauth2` and `axiam-federation`. So do the guard's callers: `ciba_ping_test`, `ssf_delivery_test` and `outbound_scim_test`, plus nine REST integration suites that exercise `allow_private` (webhooks, federation, provider ID token, external token exchange). fmt, every Architecture Invariants check, and clippy `-D warnings` are clean. No API, spec or dependency change.
+
 `ssrf.rs:210–211`: apply `is_never_allowed` to every resolved address even when
 `allow_private` is true. `dcr.rs:349` `host_glob_matches`: compare byte slices,
 no panic on non-ASCII. `ip_class.rs` `classify_v6`: classify `::ffff:0:0/96` as

@@ -10,6 +10,8 @@
   §11 lists them so nothing is silently dropped.
 - **Run 6b** (§13, added 2026-11-21): the same comparison with every server and database cap raised
   from 2 to 4 CPUs, on AXIAM 1.3.1 with the competitors and SurrealDB 4.0.1 pinned to run 6's digests.
+- **Run 6c** (§14, added 2026-11-23): AXIAM 1.3.1 against a SurrealDB **3.3.5** server, at both
+  run-6b cap settings — how much of AXIAM's database cost is the 4.x server. Benchmark-only, unsupported.
 - **Relationship to the run-6 runbook**: this file covers *the machine*.
   [`run6-runbook.md`](run6-runbook.md) remains the reference for *the run* — what each cell
   measures, the labels, the reporting rules. Where this file says "run6 §12.x", the commands
@@ -789,7 +791,8 @@ just bench-pack
    executing path, not lock contention. Neither issue measures whether more cores help — an inference,
    not a finding: if SurrealDB runs statements in parallel, AXIAM's throughput should rise with the
    database cap while each request's latency does not fall. Run 6b measures which; say that the
-   datastore build is a known-regressed one wherever AXIAM's numbers appear.
+   datastore build is a known-regressed one wherever AXIAM's numbers appear. Run 6c (§14) measures how much of AXIAM's database
+   cost that regression accounts for (#7716 does not apply to AXIAM's schema, §14.1).
 6. **The labels of run 6 still apply**: authentik's login is `protocol-variant`, authentik's and
    Zitadel's refresh are `fallback-op`, Zitadel's userinfo uses a client-credentials token, and the
    cells run 6 marked invalid (authentik's six, Zitadel's login and refresh) are reported as such
@@ -813,3 +816,318 @@ to `results/RUN-NOTES.md`:
 ```
 
 I will then write the scaling comparison (run 6 → pass A → pass B, per target and cell) from it.
+
+---
+
+## 14. Run 6c — AXIAM on a SurrealDB 3.3.5 server
+
+Written 2026-11-23. **A benchmark-only setup, not a supported deployment**: AXIAM 1.3.1 requires
+SurrealDB 4.0 (`docs/deployment/README.md`: "If you override the image, stay on 4.0.x"), and nothing
+here changes that. Same scope as runs 6 and 6b: the comparison stays run 6b's; run 6c explains one of
+its numbers.
+
+### 14.1 Why: how much of AXIAM's database cost is the 4.x server?
+
+In runs 6 and 6b AXIAM's busiest container is SurrealDB (§13.1: 2.02–2.04 cores, at its cap, in 9 of
+11 cells). The 4.0 server has a known per-statement CPU regression, so part of that cost may be the
+server version rather than AXIAM:
+
+- **surrealdb/surrealdb#7667** (open): "every write statement costs ~350 µs of CPU in `exec::ir`,
+  10–17× slower than 3.3.5"; the reporter measured it CPU-bound, a fixed cost per write statement,
+  with reads and empty transactions barely changed; a later comment found it unchanged in 4.0.1.
+- **surrealdb/surrealdb#7716** (open): every write that fires a `DEFINE EVENT` re-plans the event
+  body. **It does not apply to AXIAM**: AXIAM's schema defines no events (`git grep 'DEFINE EVENT'
+  v1.3.1 -- crates/` finds two, both in test code: a `#[cfg(test)]` helper in
+  `axiam-db/src/repository/session.rs` and a test string in `axiam-db/src/schema.rs`). Run 6c
+  therefore measures #7667, not #7716.
+
+Run 6c runs **the same AXIAM 1.3.1 image** against a **SurrealDB 3.3.5 server** — the last release
+before 4.0 — and changes nothing else.
+
+### 14.2 Why it can run at all — the facts, each with its evidence
+
+Re-checked on 2026-11-23 against the sources named.
+
+1. **The client accepts a 3.x server.** AXIAM 1.3.1 locks the `surrealdb` SDK at **4.0.0**
+   (`Cargo.lock` at `v1.3.1`; 4.0.1 reached `main` only after the tag). Both 4.0.0 and 4.0.1 declare,
+   at `src/lib.rs:92`, `const SUPPORTED_VERSIONS: &str = ">=3.0.0-alpha.1, <5.0.0";`, and
+   `check_server_version` refuses a server outside that range on connect (`src/lib.rs:370–377`). The
+   refusal in 68b6d4d's message ("A 3.x client refuses a 4.0 server") is the other direction: an old
+   client, a new server. **Limit:** the range check says the client will not *refuse* 3.3.5; it does not
+   prove that every query and every serialized value round-trips across the major version. That is
+   what the dry run (§14.6) establishes.
+2. **AXIAM's queries need nothing new from 4.x.** 68b6d4d (the 4.0 migration) added no migration:
+   `axiam-db/src/schema.rs` has the same 1 313 `DEFINE` statements before and after it; its
+   `schema.rs` change wraps the application of a migration in `retry_on_write_conflict`. Its query
+   changes are a write-conflict retry on the CIBA redemption and a bound `$cutoff` (a datetime computed
+   in Rust) in the rate-limit sweep, replacing `time::now() - duration::from_secs($retention)` — plain
+   SurrealQL that 3.3.x also runs. 9e55515 and 5ccd0d7, also in 1.3.1, change retry budgets
+   (`helpers.rs`, `role.rs`, `notification_window.rs`). **8a78041 is not in 1.3.1** (2026-11-13, after
+   the 2026-11-11 tag) and does not matter here; it only changes how the lost migration lease parks.
+   AXIAM ran on 3.3.x until 68b6d4d with this same schema.
+3. **The single-winner guarantee holds on 3.3.5.** `tools/surreal-race-probe/RESULTS.md`, section
+   "surrealdb 3.3.5 / surrealdb-core 3.3.5 / surrealkv 0.21.4": 5 000 rounds × 8 racers in both
+   mechanisms, **0 rounds with more than one winner**, 0 burned. The same file records 4.0's slower
+   commit path (on 4 cores the `tx` abort rate goes from 37 % on 3.3.5 to 87 % on 4.0.0, and `nonce`,
+   which never aborts, takes 4–5× as long) — which is the reason for this pass. **Caveat:** the probe ran
+   the *embedded* 3.3.5 engine; this exact pairing (a 4.0.0 client, a 3.3.5 server over the network)
+   was never probed. Serialization is the engine's property, so the result should carry over —
+   an inference, not a measurement.
+4. **The datastore must be fresh.** Upgrading a 3.x datastore to 4.0 is one-way
+   (`docs/deployment/README.md`, "Upgrading a SurrealDB 3 datastore": "After that the data cannot be
+   opened by 3.x"), so a volume a 4.x server has written cannot be opened by 3.3.5. `bench-matrix` and
+   `bench-dry-run` run `bench-up → bench-seed → bench-run → bench-down` per target, profile and repeat,
+   and `bench-down` runs `docker compose … down -v`, so every block starts on an empty
+   `bench-axiam_surrealdb-data` — **provided the previous teardown happened**. A stack left running
+   from run 6b, or a failed teardown, leaves a 4.x volume, and `bench-up` against a running stack
+   reuses it. §14.6 therefore tears down and checks that the volume is gone before anything else.
+5. **Nothing else tests this pairing.** At `v1.3.1`, CI (`ci.yml`, `coverage.yml`), every shipped
+   Compose file under `docker/`, `k8s/surrealdb/statefulset.yml` and the benchmark harness all pin
+   `surrealdb/surrealdb:v4.0.0`. The dry runs of §14.6 are therefore **mandatory gates**: if either
+   fails, stop and send the logs. **Do not adapt code, schema or harness** to make it pass — a failure
+   is the finding "AXIAM 1.3.1 does not run on a 3.3.5 server", and the pass ends there.
+6. **Security.** 3.3.5 carries two advisories that 4.0 fixed (`CHANGELOG.md` `[1.3.0]`, "SurrealDB 4.0
+   clears …"): **RUSTSEC-2026-0452** (`surrealkv` < 1.2.0, out-of-bounds read from a crafted SSTable;
+   the trigger needs write access to the database volume) and **RUSTSEC-2026-0454** (`surrealdb-core`
+   < 4.0.0, unsound `Send`/`Sync`; no query or network trigger named) — the triage notes are in
+   `deny.toml` before 68b6d4d. On this internet-facing VM (§12) the database port **is not published at
+   all**: the `surrealdb` service has no `ports:` entry and is reachable only on the compose network
+   `bench`. (`BENCH_BIND_ADDR` governs the ports that *are* published — the AXIAM server's 8090/50051,
+   loopback — and `runner/bind-addr-selftest.sh` pins every `ports:` entry to it.) Leave it that way,
+   and tear the stack down when the pass ends.
+
+### 14.3 The rule: one variable
+
+| | Run 6b (the control) | **Run 6c** |
+|---|---|---|
+| AXIAM | `ghcr.io/ilpanich/axiam/server:1.3.1` | the same image |
+| SurrealDB server | 4.0.1 (run 6's digest) | **3.3.5, by digest** |
+| RabbitMQ, PostgreSQL, competitors | run 6's digests | run 6's digests (only RabbitMQ is in AXIAM's stack) |
+| caps, memory, scenarios, profile, repeats | §13.2, §13.6 | the same |
+
+Two passes, each compared with its run-6b twin at **equal caps**:
+
+| Pass | Caps | Tree | Compared with |
+|---|---|---|---|
+| **A** | 2/2 (run 6's) | `results/run6c/axiam-1.3.1-surreal-3.3.5-caps-2x2` | run 6b pass A (`results/run6b/axiam-1.3.1-caps-2x2`) |
+| **B** | 4/4 (`BENCH_CPUS=4 BENCH_DB_CPUS=4`) | `results/run6c/axiam-1.3.1-surreal-3.3.5-caps-4x4` | AXIAM's cells in run 6b pass B (`results/run6b/caps-4x4`) |
+
+AXIAM only, **p0-plaintext**, the CORE `BENCH_SCENARIO_ONLY` set of §13.6, `repeat=3`.
+
+**Same VM, or the control is gone.** As in §13.4: run 6b is the control only on the **same instance**.
+If the VM was destroyed and recreated since run 6b, re-run `05-qualify.sh`, and know that **neither
+run-6b pass is a valid control any more**: re-run run 6b's AXIAM cells at both caps on the new instance
+first (§13.6 pass A, and pass B with `targets="axiam"`), or the server-version delta and the host delta
+cannot be told apart.
+
+### 14.4 Duration
+
+At §13.5's ≈ 3.7 min per cell:
+
+| Step | Cells | Wall clock |
+|---|---|---|
+| dry runs at 2/2 and 4/4 (gates) | 2 × 11, short windows | ≈ 20 min |
+| pass A — 11 cells × 3 | 33 | ≈ 2 h |
+| pass B — 11 cells × 3 | 33 | ≈ 2 h |
+| **Total** | | **≈ 4.5 h** |
+
+### 14.5 Before you start
+
+Everything below runs on the VM, in `tmux`, after run 6b (so the `v1.3.1` checkout and run 6's
+results are in place). Re-run the checkout script to be sure the tree is the tag, clean (it refuses
+local changes — restore the C# project first if §5.1 was applied):
+
+```bash
+AXIAM_TAG=v1.3.1 ~/bench-vm/scripts/03-checkouts.sh
+```
+
+```bash
+cd ~/bench/axiam/benchmarks && mkdir -p results/run6c/provenance
+```
+
+### 14.6 Commands
+
+**1 — A fresh datastore volume (§14.2 point 4).** Tear down whatever AXIAM stack exists, then check
+that the volume is gone; the second command must print nothing:
+
+```bash
+just target=axiam bench-down
+```
+
+```bash
+docker volume ls -q --filter name=bench-axiam_surrealdb-data
+```
+
+**2 — The images.** Everything except AXIAM and SurrealDB from run 6's digests, then AXIAM 1.3.1:
+
+```bash
+eval "$(python3 -I ~/bench-vm/scripts/pin-images-from-run.py results/run-1 --except BENCH_AXIAM_IMAGE --except BENCH_SURREALDB_IMAGE)" && export BENCH_AXIAM_IMAGE=ghcr.io/ilpanich/axiam/server:1.3.1
+```
+
+SurrealDB 3.3.5 by its digest, never the tag (the method in the comment above `image:` in
+`targets/axiam/docker-compose.yml`):
+
+```bash
+docker pull surrealdb/surrealdb:v3.3.5
+```
+
+```bash
+export BENCH_SURREALDB_IMAGE="surrealdb/surrealdb@$(docker inspect --format '{{index .RepoDigests 0}}' surrealdb/surrealdb:v3.3.5 | cut -d@ -f2)" && echo "$BENCH_SURREALDB_IMAGE"
+```
+
+That digest must really be 3.3.5 — the server says so itself:
+
+```bash
+docker run --rm "$BENCH_SURREALDB_IMAGE" version
+```
+
+Pull and record every image, then pin the shell to the record:
+
+```bash
+bash runner/pull-pinned-images.sh results/run6c/provenance && source results/run6c/provenance/pinned-images.sh
+```
+
+```bash
+grep -E 'SURREALDB|AXIAM' results/run6c/provenance/images.txt
+```
+
+`BENCH_SURREALDB_IMAGE` must show the digest printed above (3.3.5), and `BENCH_AXIAM_IMAGE` the same
+1.3.1 digest as `results/run6b/provenance/images.txt`:
+
+```bash
+grep AXIAM results/run6b/provenance/images.txt
+```
+
+```bash
+bash runner/record-provenance.sh -run6c
+```
+
+The steal log for the round:
+
+```bash
+vmstat -n -t 10 > results/run6c/provenance/vmstat-steal.txt &
+```
+
+The CORE set (non-AXIAM names in it are ignored for AXIAM, as in run 6b):
+
+```bash
+export BENCH_SCENARIO_ONLY="jwks_fetch.js oauth2_client_credentials.js oauth2_password_login.js token_introspection.js token_refresh.js userinfo.js zitadel_userinfo_grpc.js userinfo_grpc.js authz_check_rest.js authz_check_grpc.js authz_batch_rest.js authz_batch_grpc.js"
+```
+
+**3 — The gates: a dry run at each cap setting.** Under `results/dry-run/`, which `bench-pack`
+excludes like every dry run. First at 2/2 (no cap variable set):
+
+```bash
+unset BENCH_CPUS BENCH_MEM BENCH_DB_CPUS BENCH_DB_MEM BENCH_AUTHENTIK_WORKER_CPUS BENCH_AUTHENTIK_WORKER_MEM
+```
+
+```bash
+BENCH_RESULTS_DIR="$PWD/results/dry-run/run6c-caps-2x2" just targets="axiam" profiles="p0-plaintext" bench-dry-run 2>&1 | tee ~/bench/logs/run6c-dry-run-2x2.log
+```
+
+```bash
+cat results/dry-run/run6c-caps-2x2/SUMMARY.md
+```
+
+Then at 4/4:
+
+```bash
+BENCH_CPUS=4 BENCH_DB_CPUS=4 BENCH_RESULTS_DIR="$PWD/results/dry-run/run6c-caps-4x4" just targets="axiam" profiles="p0-plaintext" bench-dry-run 2>&1 | tee ~/bench/logs/run6c-dry-run-4x4.log
+```
+
+```bash
+cat results/dry-run/run6c-caps-4x4/SUMMARY.md
+```
+
+**Both must be all-PASS** for AXIAM's 11 cells (`SKIP` only for scenarios not in the set). Where it
+would show first if the 3.3.5 server is the problem: a `FAIL` at `(bench-up)` — the server never became
+healthy; its log is dumped above the summary (a version refusal reads `server version … does not match
+the range supported by the client`; a migration or query error names the statement) — or at
+`(bench-seed)`, or a cell's `.dryrun.log`. **On any FAIL: stop here, run step 6 (teardown), and send the
+two logs. Do not change code, schema or harness to get past it** (§14.2 point 5).
+
+**4 — Pass A**, at run 6's caps:
+
+```bash
+BENCH_RESULTS_DIR="$PWD/results/run6c/axiam-1.3.1-surreal-3.3.5-caps-2x2" just targets="axiam" profiles="p0-plaintext" repeat=3 bench-matrix 2>&1 | tee ~/bench/logs/run6c-pass-a.log
+```
+
+**5 — Pass B**, at 4/4:
+
+```bash
+BENCH_CPUS=4 BENCH_DB_CPUS=4 BENCH_RESULTS_DIR="$PWD/results/run6c/axiam-1.3.1-surreal-3.3.5-caps-4x4" just targets="axiam" profiles="p0-plaintext" repeat=3 bench-matrix 2>&1 | tee ~/bench/logs/run6c-pass-b.log
+```
+
+Every cell must have run against the 3.3.5 digest and the intended caps — one line per pass, each with
+the single 3.3.5 digest:
+
+```bash
+jq -r '.containers[] | select(.role=="db") | "\(.image_digest) cpu_cap=\(.cpu_cap)"' results/run6c/*/run-*/axiam/p0-plaintext/*.meta.json | sort | uniq -c
+```
+
+**6 — Close the round**, and leave no 3.3.5 volume behind (a later 4.x run could not open it either
+without the experimental upgrade flag):
+
+```bash
+pkill -f 'vmstat -n -t 10'; unset BENCH_SCENARIO_ONLY BENCH_SURREALDB_IMAGE; bash runner/record-provenance.sh -run6c-after
+```
+
+```bash
+just target=axiam bench-down
+```
+
+```bash
+docker volume ls -q --filter name=bench-axiam_surrealdb-data
+```
+
+`bench-matrix` wrote `report.md` into each pass's tree. Pack and fetch as in §13.6:
+
+```bash
+just bench-pack
+```
+
+```bash
+./run.sh fetch ~/axiam-results-run6c        # on your PC
+```
+
+### 14.7 Reading run 6c — what the report must say
+
+1. **The label, on every number:** "SurrealDB 3.3.5 server, unsupported, benchmark-only". The
+   comparison with the competitors keeps **run 6b's figures** as the official ones; run 6c never
+   enters a head-to-head table.
+2. **Run 6c cells are a labelled sensitivity pass.** They are never medianed with run 6 or run 6b.
+3. **Per cell, at equal caps** (pass A against run 6b pass A, pass B against run 6b pass B): the
+   throughput ratio `thr(3.3.5) ÷ thr(4.0.1)`, p50 and p99, the SurrealDB container's CPU and its
+   cores per 1 000 requests, and the `bottleneck` column.
+4. **The prediction, stated before the numbers.** #7667 puts a fixed CPU cost on every *write
+   statement* and leaves reads almost unchanged. So 3.3.5 should show **less database CPU per request
+   and higher throughput on the write path** — `token_refresh`, `oauth2_client_credentials`,
+   `oauth2_password_login` (where Argon2id on the server may cap the gain: in run 6 the server, not the
+   database, was its busiest container) — and **little movement on read-mostly cells** — `jwks_fetch`,
+   `userinfo`, `authz_check_*`. A result that departs from this is **reported as found, not explained
+   away**: for instance, a large gain on a "read-mostly" cell says that cell writes more per request
+   than its label suggests, which is itself worth knowing.
+5. **Where the bottleneck goes.** If SurrealDB stops being the container at its cap, name the next one;
+   if it stays at its cap with a higher throughput, the per-request database cost fell.
+6. **The caveats**: the client/server pairing is unsupported and untested outside this pass (§14.2
+   points 1, 3, 5); 3.3.5 carries RUSTSEC-2026-0452 and RUSTSEC-2026-0454 (point 6); #7716 does not
+   apply to AXIAM's schema (§14.1).
+
+### 14.8 What to send back
+
+The archive from `just bench-pack` (it now carries `results/run6c/**`), and these lines added to
+`results/RUN-NOTES.md`:
+
+```text
+## Run 6c
+- Same VM instance as run 6b?  yes / no (if no: 05-qualify.sh re-run; which run-6b AXIAM cells were re-run as the control)
+- SurrealDB:          3.3.5 @ <digest from results/run6c/provenance/images.txt>; `docker run … version` printed: <output>
+- AXIAM:              1.3.1 @ <digest>, identical to run 6b's (yes / no)
+- Volume reset:       `docker volume ls` empty before the dry runs (yes / no) and after the round (yes / no)
+- Dry runs:           2/2 <all PASS / which FAIL>; 4/4 <all PASS / which FAIL>
+- Caps check (jq):    pass A db cpu_cap=2 only (yes / no); pass B cpu_cap=4 only (yes / no)
+- Steal during run:   mean <x> %; periods above 5 %: <when>
+- Start / end, interruptions, anything re-run:
+```
+
+I will then write the per-cell comparison of §14.7 from it.

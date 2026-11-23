@@ -997,6 +997,21 @@ where
         })
     }
 
+    /// SA-41 — whether the session a token's `sid` names is still live: a
+    /// missing or expired row is not. A read that fails otherwise is a server
+    /// error, not a guess.
+    async fn introspected_session_is_live(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<bool, OAuth2Error> {
+        match self.session_repo.get_by_id(tenant_id, session_id).await {
+            Ok(session) => Ok(session.expires_at > chrono::Utc::now()),
+            Err(AxiamError::NotFound { .. }) => Ok(false),
+            Err(e) => Err(OAuth2Error::ServerError(e.to_string())),
+        }
+    }
+
     /// Whether the account behind an introspected token may still act
     /// (#520, P23W1-12).
     ///
@@ -2561,6 +2576,18 @@ where
             ));
         }
 
+        // SA-41 (RFC 9700 §2.1.1) — a `code_verifier` for a code that carries
+        // no stored challenge is a PKCE downgrade attempt: the client believes
+        // the flow is PKCE-protected, the code is not. Refuse rather than
+        // silently ignoring it.
+        if auth_code.code_challenge.is_none() && req.code_verifier.is_some() {
+            return Err(OAuth2Error::InvalidGrant(
+                "code_verifier presented, but the authorization request carried no \
+                 code_challenge (RFC 9700 §2.1.1)"
+                    .into(),
+            ));
+        }
+
         // Verify PKCE before consuming the code
         if let Some(ref challenge) = auth_code.code_challenge {
             let verifier = req.code_verifier.as_deref().ok_or_else(|| {
@@ -3822,6 +3849,19 @@ where
             // cross-tenant introspection / metadata leaks.
             let token_tenant = claims.tenant_id.parse::<Uuid>().unwrap_or(Uuid::nil());
             if token_tenant != tenant_id {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
+            // SA-41 — and only while the session the token names (`sid`) is
+            // still live: a token of a logged-out or expired session is
+            // inactive at once, not at `exp`. Tokens that name no session
+            // (client credentials, exchanged, RPT) are unaffected.
+            if let Some(sid) = claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok())
+                && !self.introspected_session_is_live(tenant_id, sid).await?
+            {
                 return Ok(IntrospectionResponse {
                     active: false,
                     ..Default::default()

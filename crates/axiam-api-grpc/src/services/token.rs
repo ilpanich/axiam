@@ -5,11 +5,13 @@ use axiam_auth::error::AuthError;
 use axiam_auth::token::validate_access_token;
 use axiam_core::error::AxiamError;
 use axiam_core::repository::UserRepository;
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use axiam_auth::token::ValidatedClaims;
 
+use crate::middleware::strict_revocation::SessionRevocationCheck;
 use crate::proto::token_service_server::TokenService;
 use crate::proto::{
     CnfClaim, IntrospectTokenRequest, IntrospectTokenResponse, RptPermission, ValidateTokenRequest,
@@ -46,11 +48,42 @@ pub struct TokenServiceImpl<U: UserRepository> {
     /// a token whose account may no longer act as inactive. `ValidateToken`
     /// stays a local signature-and-claims check and reads nothing.
     user_repo: U,
+    /// Read by `IntrospectToken` only (SA-41): a token whose `sid` session is
+    /// no longer live reports `active: false`. `None` skips the check.
+    session_check: Option<Arc<dyn SessionRevocationCheck>>,
 }
 
 impl<U: UserRepository> TokenServiceImpl<U> {
     pub fn new(config: AuthConfig, user_repo: U) -> Self {
-        Self { config, user_repo }
+        Self {
+            config,
+            user_repo,
+            session_check: None,
+        }
+    }
+
+    /// Have `IntrospectToken` report a token inactive once the session its
+    /// `sid` claim names is revoked or expired (SA-41). The checker should
+    /// hold no validation cache: a negative answer must never be stale.
+    #[must_use]
+    pub fn with_session_check(mut self, check: Arc<dyn SessionRevocationCheck>) -> Self {
+        self.session_check = Some(check);
+        self
+    }
+
+    /// Whether the session a token's `sid` names is still live. A token with
+    /// no (or an unparseable-as-session) `sid` names none and is unaffected.
+    async fn session_is_live(&self, claims: &axiam_auth::token::AccessTokenClaims) -> bool {
+        let Some(check) = &self.session_check else {
+            return true;
+        };
+        let (Some(sid), Ok(tenant_id)) = (
+            claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
+            claims.tenant_id.parse::<Uuid>(),
+        ) else {
+            return true;
+        };
+        check.is_session_active(tenant_id, sid).await
     }
 
     /// Whether the account a user token names may still act (#520,
@@ -171,7 +204,8 @@ impl<U: UserRepository + 'static> TokenService for TokenServiceImpl<U> {
             // call; `ValidateToken` stays the read-free local check.
             Ok(validated)
                 if validated.0.tenant_id == caller_tenant
-                    && self.subject_may_act(&validated.0).await? =>
+                    && self.subject_may_act(&validated.0).await?
+                    && self.session_is_live(&validated.0).await =>
             {
                 let claims = validated.0;
                 let cnf = wire_cnf(&claims);

@@ -7068,3 +7068,111 @@ async fn r681_a_confidential_clients_refresh_is_unchanged() {
     assert_eq!(resp.token_type, "DPoP");
     assert_eq!(created.lock().unwrap()[0].dpop_jkt, None);
 }
+
+// ---------------------------------------------------------------------------
+// SA-41 — PKCE downgrade, and introspection of a token whose session is gone
+// ---------------------------------------------------------------------------
+
+/// RFC 9700 §2.1.1 — a `code_verifier` presented for a code that carries no
+/// stored challenge is refused, not silently ignored (PKCE downgrade).
+#[tokio::test]
+async fn sa41_a_verifier_for_a_code_with_no_stored_challenge_is_refused() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(make_auth_code(&["profile"], None)),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let verifier = "a-verifier-padded-to-at-least-forty-three-characters";
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), auth_code_req(Some(verifier)), &no_cert())
+            .await
+            .expect_err("a verifier with no stored challenge must be refused")
+            .error_code(),
+        "invalid_grant"
+    );
+}
+
+fn sa41_session(id: Uuid, expires_in: chrono::Duration) -> axiam_core::models::session::Session {
+    axiam_core::models::session::Session {
+        id,
+        tenant_id: client_tenant(),
+        user_id: Uuid::new_v4(),
+        token_hash: "t".into(),
+        ip_address: None,
+        user_agent: None,
+        expires_at: Utc::now() + expires_in,
+        created_at: Utc::now(),
+        authenticated_at: Utc::now(),
+        amr: vec![],
+        browser_token_hash: None,
+        refresh_replay_at: None,
+        refresh_replay_grace_accepted: 0,
+        refresh_replay_refused: 0,
+        lineage_id: Uuid::nil(),
+        credential_version: None,
+    }
+}
+
+/// Introspection reports `active: false` for a token whose `sid` session is
+/// gone or expired, and `active: true` while it is live.
+#[tokio::test]
+async fn sa41_introspection_reports_a_token_of_a_dead_session_inactive() {
+    let tenant_id = client_tenant();
+    let cfg = test_config();
+    let sid = Uuid::new_v4();
+    let token = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant_id,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+    )
+    .session(Some(sid))
+    .issue(&cfg)
+    .unwrap();
+
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    for (session, active, what) in [
+        (
+            Some(sa41_session(sid, chrono::Duration::hours(1))),
+            true,
+            "live",
+        ),
+        (None, false, "logged out"),
+        (
+            Some(sa41_session(sid, chrono::Duration::seconds(-5))),
+            false,
+            "expired",
+        ),
+    ] {
+        let svc = TokenService::new(
+            MockClientRepo(
+                ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+                upgrade.clone(),
+            ),
+            MockSaRepo(SaOutcome::NotFound, upgrade.clone()),
+            dummy_code_repo(),
+            MockTenantRepo::new(TenantOutcome::Found),
+            MockRefreshRepo::new(),
+            MockUserRepo::default(),
+            MockSessionRepo(
+                session,
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                false,
+            ),
+            MockAuditRepo::default(),
+            test_config(),
+            2_592_000,
+            not_issued_here(),
+        );
+        let resp = svc
+            .introspect_token(tenant_id, introspect_req(&token), &no_cert())
+            .await
+            .unwrap();
+        assert_eq!(resp.active, active, "session {what}");
+        if !active {
+            assert!(resp.sub.is_none() && resp.scope.is_none() && resp.exp.is_none());
+        }
+    }
+}

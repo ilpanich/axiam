@@ -1468,6 +1468,13 @@ report.
 
 ### SA-41 — OAuth2 — Sonnet 5.5
 
+> **EXECUTED (2026-11-23, Sonnet 5.5). All three hardening leads (h04-oauth2-as): reproduced.**
+> - Code exchange returns `invalid_grant` when a `code_verifier` is presented for a code that carries no stored challenge (RFC 9700 §2.1.1). Before the fix, the exchange succeeded and the verifier was ignored.
+> - `ParService::consume` reads the handle with `find_unconsumed` and refuses another client's handle before calling the destructive `consume`. The atomic `consume` and its post-check are kept. Before the fix, a wrong client's call spent the handle (`consumes` 1, expected 0).
+> - REST introspection reports `active: false` when the token's `sid` session is missing or expired; any other read failure is `server_error`. gRPC `IntrospectToken` does the same through a new additive builder, `TokenServiceImpl::with_session_check`. The server wires in its own `SurrealSessionRepository`, which has no validation cache, and that check fails closed. A token with no `sid` (client credentials, exchanged, RPT) is unaffected. Before the fix, both paths reported a logged-out session's token as active.
+>
+> Tests: four new tests (PAR unit, PKCE, REST and gRPC introspection) failed before the fix and pass after. Suites after the fix: `axiam-oauth2 --test token_service` 177 passed; `axiam-api-grpc --test grpc_units` 58 passed; `par::tests` 13 passed. fmt, every Architecture Invariants check, and clippy `-D warnings` are clean. `TokenServiceImpl::new` and `start_grpc_server` keep their signatures. No REST type, spec or dependency change.
+
 `token.rs:2488`: reject a `code_verifier` when the code has no stored challenge.
 `par.rs:328–345`: check the presenting client before consuming the
 `request_uri`. `token.rs:3655–3715` and gRPC `IntrospectToken`: report

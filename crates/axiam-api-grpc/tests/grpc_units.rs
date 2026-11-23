@@ -1765,3 +1765,47 @@ async fn n10_validate_token_reports_a_webauthn_state_token_invalid() {
         resp.subject_id
     );
 }
+
+// ---------------------------------------------------------------------------
+// SA-41 — introspection of a token whose `sid` session is no longer live
+// ---------------------------------------------------------------------------
+
+struct FixedSessions(bool);
+
+impl axiam_api_grpc::middleware::strict_revocation::SessionRevocationCheck for FixedSessions {
+    fn is_session_active(
+        &self,
+        _tenant_id: Uuid,
+        _session_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        let live = self.0;
+        Box::pin(async move { live })
+    }
+}
+
+#[tokio::test]
+async fn sa41_introspection_reports_a_token_of_a_dead_session_inactive() {
+    let tenant = Uuid::new_v4();
+    let token = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+    )
+    .session(Some(Uuid::new_v4()))
+    .issue(&auth_config())
+    .unwrap();
+
+    for (live, what) in [(true, "live"), (false, "ended")] {
+        let svc = token_service().with_session_check(Arc::new(FixedSessions(live)));
+        let mut req = Request::new(IntrospectTokenRequest {
+            access_token: token.clone(),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let resp = svc.introspect_token(req).await.unwrap().into_inner();
+        assert_eq!(resp.active, live, "session {what}");
+        if !live {
+            assert!(resp.sub.is_empty() && resp.jti.is_empty() && resp.scope.is_empty());
+        }
+    }
+}

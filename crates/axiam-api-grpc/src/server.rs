@@ -319,6 +319,7 @@ where
     // was passed to a per-minute window verbatim, which made the effective
     // gRPC ceiling 1/60th of the configured one.
     let db: DbHandle<C> = db.into();
+    let introspection_db = db.clone();
     // SA-13 (N16, D-3): always on — a suspended tenant's tokens are refused on
     // this listener as on REST. Its own repository over the same handle; it
     // holds no cache (see `middleware::tenant_admission`).
@@ -369,8 +370,13 @@ where
         UserInfoServiceImpl::new(user_repo.clone()),
         AuthInterceptor::new(auth_config.clone()),
     );
+    // SA-41: introspection answers `active: false` for a token whose session
+    // was ended. Its own session repository over the same handle, with no
+    // validation cache, so a revoked session is never answered from memory.
     let token_svc = TokenServiceServer::with_interceptor(
-        TokenServiceImpl::new(auth_config.clone(), user_repo),
+        TokenServiceImpl::new(auth_config.clone(), user_repo).with_session_check(Arc::new(
+            axiam_db::SurrealSessionRepository::new(introspection_db),
+        )),
         AuthInterceptor::new(auth_config.clone()),
     );
     // X1 / R2.3 — reactor admin CRUD over gRPC, mirroring the REST

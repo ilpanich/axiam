@@ -325,3 +325,12 @@ async fn shared_rate_limit_layer_is_cloneable() {
     // Cloning is what tonic/tower does per connection — cover the Clone impl.
     let _clone = layer.clone();
 }
+
+/// SA-44: the inbound message cap is stated, not inherited from tonic.
+#[test]
+fn inbound_message_cap_is_four_mib() {
+    assert_eq!(
+        axiam_api_grpc::server::MAX_DECODING_MESSAGE_BYTES,
+        4 * 1024 * 1024
+    );
+}

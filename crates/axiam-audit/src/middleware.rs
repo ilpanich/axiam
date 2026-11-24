@@ -663,6 +663,10 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let path = req.path().to_string();
+        // SA-44: the path recorded in the action, with any segment that a
+        // `{token}` route parameter matched replaced (the single-use account
+        // export handle must not be copied into the audit log).
+        let recorded_path = redacted_path(&path, req.match_pattern().as_deref());
 
         // Skip health/readiness endpoints.
         if SKIP_PATHS.iter().any(|p| path.starts_with(p)) {
@@ -796,7 +800,7 @@ where
                 tenant_id,
                 actor_id,
                 actor_type,
-                action: format!("{method} {path}"),
+                action: format!("{method} {recorded_path}"),
                 resource_id: None,
                 outcome,
                 ip_address,
@@ -865,6 +869,38 @@ where
 /// The organization is returned as well as the tenant because the notification
 /// dispatcher needs it to resolve the effective email configuration — it was
 /// already being parsed here for the cache and then thrown away.
+/// Route parameters whose path segment is a bearer value
+/// (`/account/export/{token}`). Mirrors the REST tracing span's list.
+const REDACTED_PATH_PARAMETERS: &[&str] = &["token"];
+
+/// `path` with every segment that `pattern` (the matched route) marks with a
+/// [`REDACTED_PATH_PARAMETERS`] placeholder replaced by `[redacted]`.
+fn redacted_path(path: &str, pattern: Option<&str>) -> String {
+    let Some(pattern) = pattern else {
+        return path.to_owned();
+    };
+    let segments: Vec<&str> = path.split('/').collect();
+    let placeholders: Vec<&str> = pattern.split('/').collect();
+    if segments.len() != placeholders.len() {
+        return path.to_owned();
+    }
+    segments
+        .iter()
+        .zip(placeholders)
+        .map(|(segment, placeholder)| {
+            let name = placeholder
+                .strip_prefix('{')
+                .and_then(|p| p.strip_suffix('}'))
+                .map(|p| p.split(':').next().unwrap_or_default());
+            match name {
+                Some(name) if REDACTED_PATH_PARAMETERS.contains(&name) => "[redacted]",
+                _ => segment,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid, ActorType)> {
     use actix_web::web;
     use axiam_auth::config::AuthConfig;

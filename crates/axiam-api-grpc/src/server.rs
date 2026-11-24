@@ -58,6 +58,7 @@ use axiam_core::repository::{
 use axiam_db::DbHandle;
 use surrealdb::Connection;
 use tokio::sync::Semaphore;
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Server;
 use uuid::Uuid;
 
@@ -79,6 +80,11 @@ use crate::services::{
     UserServiceImpl,
 };
 use crate::tls_incoming::tls_incoming;
+
+/// The largest inbound gRPC message any service accepts (CQ-B20, SA-44). This
+/// equals tonic's default; it is set explicitly so the cap is a stated
+/// property of the server rather than an inherited one.
+pub const MAX_DECODING_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 /// How the gRPC listener terminates TLS, as decided by the composition root.
 ///
@@ -189,7 +195,8 @@ pub enum GrpcTls {
 /// the same two the REST listener reads.
 ///
 /// Transport limits (CQ-B20):
-/// - Max message size: 4 MiB decode / 4 MiB encode
+/// - Max inbound message size: [`MAX_DECODING_MESSAGE_BYTES`] (4 MiB), set
+///   explicitly on every service; outbound messages are not capped (tonic default)
 /// - Per-connection timeout: 30 s
 /// - Concurrency limit: 256 streams per connection
 ///
@@ -344,62 +351,76 @@ where
         GrpcStrictRevocationLayer::new(checker, auth_config.clone())
     });
 
-    let authz_svc = AuthorizationServiceServer::with_interceptor(
-        AuthorizationServiceImpl::new(engine, batch_max_concurrency),
+    let authz_svc = InterceptedService::new(
+        AuthorizationServiceServer::new(AuthorizationServiceImpl::new(
+            engine,
+            batch_max_concurrency,
+        ))
+        .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES),
         AuthInterceptor::new(auth_config.clone()),
     );
     // SECFIX-01: UserService and TokenService previously had zero auth —
     // any unauthenticated mesh peer could call GetUser/ValidateCredentials/
     // IntrospectToken. Wrap them with the same AuthInterceptor chokepoint
     // as AuthorizationService so every gRPC call requires a verified bearer JWT.
-    let user_svc = UserServiceServer::with_interceptor(
-        UserServiceImpl::new(
+    let user_svc = InterceptedService::new(
+        UserServiceServer::new(UserServiceImpl::new(
             user_repo.clone(),
             auth_config.clone(),
             crypto_semaphore,
             lockout_policy,
             Arc::new(user_engine),
             Arc::new(reactor_audit_repo.clone()),
-        ),
+        ))
+        .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES),
         AuthInterceptor::new(auth_config.clone()),
     );
     // UserInfoService: OIDC-style self lookup — identity derived entirely from
     // the interceptor-verified bearer token (no request body), mirroring the
     // REST `/oauth2/userinfo` endpoint. Guarded by the same AuthInterceptor.
-    let user_info_svc = UserInfoServiceServer::with_interceptor(
-        UserInfoServiceImpl::new(user_repo.clone()),
+    let user_info_svc = InterceptedService::new(
+        UserInfoServiceServer::new(UserInfoServiceImpl::new(user_repo.clone()))
+            .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES),
         AuthInterceptor::new(auth_config.clone()),
     );
     // SA-41: introspection answers `active: false` for a token whose session
     // was ended. Its own session repository over the same handle, with no
     // validation cache, so a revoked session is never answered from memory.
-    let token_svc = TokenServiceServer::with_interceptor(
-        TokenServiceImpl::new(auth_config.clone(), user_repo).with_session_check(Arc::new(
-            axiam_db::SurrealSessionRepository::new(introspection_db),
-        )),
+    let token_svc = InterceptedService::new(
+        TokenServiceServer::new(
+            TokenServiceImpl::new(auth_config.clone(), user_repo).with_session_check(Arc::new(
+                axiam_db::SurrealSessionRepository::new(introspection_db),
+            )),
+        )
+        .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES),
         AuthInterceptor::new(auth_config.clone()),
     );
     // X1 / R2.3 — reactor admin CRUD over gRPC, mirroring the REST
     // `/api/v1/reactors*` surface. Same `AuthInterceptor` chokepoint as every
     // other authenticated service here.
-    let reactor_svc = ReactorAdminServiceServer::with_interceptor(
-        ReactorAdminServiceImpl::new(
-            reactor_repo,
-            reactor_engine,
-            reactor_audit_repo,
-            reactor_routing_invalidator,
-            reactor_dispatch_available,
+    let reactor_svc = InterceptedService::new(
+        ReactorAdminServiceServer::new(
+            ReactorAdminServiceImpl::new(
+                reactor_repo,
+                reactor_engine,
+                reactor_audit_repo,
+                reactor_routing_invalidator,
+                reactor_dispatch_available,
+            )
+            .with_profile(profile),
         )
-        .with_profile(profile),
+        .max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES),
         AuthInterceptor::new(auth_config),
     );
 
     // CQ-B20: Apply transport limits to the gRPC server builder.
-    // Note: tonic 0.14 does not expose max_decoding_message_size / max_encoding_message_size
-    // at the Server level (added in tonic 0.12+ via the Router API). The HTTP/2 frame-size
-    // limit (max_frame_size) is the closest available per-connection cap in 0.14. Upgrade
-    // to tonic ≥0.12 to use per-service max_decoding_message_size / max_encoding_message_size.
-    // Tracked: max_decoding_message_size (CQ-B20, pending tonic upgrade in Phase 19).
+    // Inbound message size is capped per service with
+    // `max_decoding_message_size(MAX_DECODING_MESSAGE_BYTES)` (set where each
+    // service is built above) rather than relying on tonic's 4 MiB default,
+    // so the limit is stated, not inherited. tonic 0.14 has no Server-level
+    // equivalent. The HTTP/2 frame-size cap below is a separate, per-frame
+    // limit; it does not bound message size. Outbound messages are not capped
+    // (tonic's default).
     // SECHRD-03 (D-01a/b/c) + run-5 J1: layer ORDER is load-bearing here.
     // Tower's `Server::builder()` runs the FIRST-added layer with the request
     // FIRST (the opposite of actix's last-`.wrap()`-is-outermost rule), so
@@ -442,7 +463,7 @@ where
     // every RPC, including any added later). `option_layer` makes the disabled
     // case a genuine no-op rather than a branch in the request path.
     let mut builder = Server::builder()
-        .max_frame_size(4 * 1024 * 1024) // CQ-B20: 4 MiB frame cap (tonic-0.14 equivalent of max_decoding_message_size)
+        .max_frame_size(4 * 1024 * 1024) // CQ-B20: 4 MiB HTTP/2 frame cap (per frame, not per message)
         .timeout(Duration::from_secs(30))
         .concurrency_limit_per_connection(256)
         // OUTERMOST (added first = runs first): refunds h2's small-DATA-frame

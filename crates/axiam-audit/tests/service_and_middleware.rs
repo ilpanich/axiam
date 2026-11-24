@@ -219,6 +219,51 @@ async fn middleware_logs_unauthenticated_success() {
     assert_eq!(e.metadata.as_ref().unwrap()["http_status"], 200);
 }
 
+/// SA-44: a bearer value carried in a `{token}` path segment (the single-use
+/// account-export handle) must not be copied into the audit row's action.
+#[actix_web::test]
+async fn a_token_path_segment_is_redacted_from_the_recorded_action() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    let app = test::init_service(
+        App::new().wrap(mw).service(
+            web::scope("/api/v1")
+                .route(
+                    "/account/export/{token}",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/users/{user_id}",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        ),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/api/v1/account/export/super-secret-handle")
+        .to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::get()
+        .uri("/api/v1/users/42")
+        .to_request();
+    test::call_service(&app, req).await;
+
+    wait_for_entries(&repo, 2).await;
+    let entries = repo.snapshot();
+    let actions: Vec<&str> = entries.iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.iter().all(|a| !a.contains("super-secret-handle")),
+        "token leaked into audit action: {actions:?}"
+    );
+    assert!(
+        actions.contains(&"GET /api/v1/account/export/[redacted]"),
+        "{actions:?}"
+    );
+    assert!(actions.contains(&"GET /api/v1/users/42"), "{actions:?}");
+}
+
 #[actix_web::test]
 async fn middleware_maps_403_to_denied() {
     let repo = RecordingRepo::new();

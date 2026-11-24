@@ -1541,6 +1541,21 @@ and state-machine change on the MFA path.
 
 ### SA-44 — Audit and gRPC — Sonnet 5.5
 
+> **EXECUTED (2026-11-24, Sonnet 5.5). Audit-path and `/health/jobs` leads (h12-directory-audit-gdpr, h16-obvious-wildcard): reproduced. gRPC decoding size: no behaviour change (tonic's 4 MiB default already applied); set explicitly, as the plan asks.**
+> - **Audit action.** The middleware records a redacted path: a segment that a `{token}` route parameter matches becomes `[redacted]`, mirroring `redacted_path` in REST `request_span.rs`. Before the fix: `token leaked into audit action: ["GET /api/v1/account/export/super-secret-handle", …]`. Searching every route placeholder found no other path-borne secret; reset and verification tokens travel in query strings, which the action never records.
+> - **gRPC.** `MAX_DECODING_MESSAGE_BYTES` (4 MiB) is set on all five services, and the wrong comment ("tonic 0.14 lacks max_decoding_message_size") is corrected.
+> - **`/health/jobs`.** `CleanupTask::record` stores `error_category(&e)` instead of the error's `Display`; the detail stays in the warn log. Before the fix: `left: "Database error: conn to ws://db.internal:8000 refused"`. Directory-sync failures keep their tag (for example `directory_unavailable`) through a fixed whitelist, `DIRECTORY_SYNC_TAGS`. Free-text `Internal` errors report `internal_error`.
+> - **Spec.** The `JobStatus.last_error` description changed, so `sdks/openapi.json` and `sdks/management-registry.json` were regenerated; only the description and the digest moved. The eleven SDK repos must re-sync the spec.
+>
+> Gate, all passing:
+> - `axiam-audit` lib and its 5 suites;
+> - `axiam-api-grpc` lib and 10 suites (`--features client`);
+> - `axiam-server` lib, `cleanup_task` and `directory_sync_sweep`;
+> - REST `health_test`, `audit_test` and the `gdpr*` suites;
+> - fmt, clippy `-D warnings`, and every Architecture Invariants check.
+>
+> Residual: `DIRECTORY_SYNC_TAGS` duplicates `SyncError::tag()`, and no test ties the two together.
+
 `axiam-audit/src/middleware.rs:543`: redact the token segment of
 `/api/v1/account/export/{token}` (and any other path-borne secret; search for
 them). `axiam-api-grpc/src/server.rs:373–377`: set `max_decoding_message_size`

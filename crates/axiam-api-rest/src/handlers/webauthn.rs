@@ -528,7 +528,9 @@ async fn emit_registered<C: Connection + Clone>(
 // -------------------------------------------------------------------
 
 /// Everything both setup-token registration endpoints must establish before
-/// touching a ceremony.
+/// touching a ceremony — and, since SA-43, what the TOTP setup endpoints
+/// (`POST /auth/mfa/setup/enroll` and `/confirm`) establish too, so all four
+/// setup-token endpoints share one first-factor-only guard.
 ///
 /// Three things, and each is a rule the endpoint states:
 ///
@@ -547,7 +549,7 @@ async fn emit_registered<C: Connection + Clone>(
 ///    selected tenant to confuse it with — but the reason it is the right one
 ///    is the same reason `start_registration` gives: the policy that governs a
 ///    credential is the policy of the tenant the credential is stored in.
-async fn setup_token_registration_context<C: Connection + Clone>(
+pub(crate) async fn setup_token_registration_context<C: Connection + Clone>(
     state: &web::Data<AppState<C>>,
     setup_token: &str,
 ) -> Result<(Uuid, Uuid, Uuid), AxiamApiError> {
@@ -685,6 +687,18 @@ pub async fn setup_finish_registration<C: Connection + Clone>(
 
     enforce_mds_freshness(&state, &policy, tenant_id, user_id).await?;
 
+    // SA-43: spend the setup token BEFORE the credential is stored. Two
+    // finishes sent together with one token — the user's and a captured
+    // copy's — both pass the factor-presence guard above, and would both
+    // register a credential; of two spends exactly one wins, so the loser is
+    // refused before it writes anything. The cost: a ceremony that fails
+    // after this point has used the token, and the user signs in again.
+    let spent = state
+        .auth_service
+        .spend_setup_token(&b.setup_token)
+        .await
+        .map_err(AxiamApiError)?;
+
     let cred = state
         .webauthn
         .webauthn_service
@@ -732,7 +746,7 @@ pub async fn setup_finish_registration<C: Connection + Clone>(
     let out = state
         .auth_service
         .complete_setup_token_login(
-            &b.setup_token,
+            spent,
             AuthenticationEvidence::now(setup_registration_amr(
                 cred.credential_type,
                 user_verification,

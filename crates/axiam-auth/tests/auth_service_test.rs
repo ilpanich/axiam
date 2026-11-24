@@ -1599,6 +1599,7 @@ async fn mfa_login_challenge_flow() {
             totp_code: new_code,
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -1668,6 +1669,7 @@ async fn mfa_wrong_code_rejected() {
             totp_code: "000000".into(),
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
         .await
         .unwrap_err();
@@ -2505,6 +2507,7 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
             totp_code: code,
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -2904,6 +2907,7 @@ async fn x7_2_a_totp_second_step_records_pwd_otp_and_mfa() {
             totp_code: generate_next_step_code(&totp),
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
         .await
         .unwrap();
@@ -3456,6 +3460,7 @@ async fn s6_an_mfa_challenge_token_issued_before_a_reset_is_refused_after_it() {
             totp_code: code,
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
         .await
         .unwrap_err();
@@ -3536,6 +3541,7 @@ async fn sr3_1_a_challenge_built_from_the_replaced_credential_is_refused() {
             totp_code: totp.generate_current().to_string(),
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
         .await
         .expect_err("a challenge built from the replaced credential must not verify");
@@ -3693,6 +3699,7 @@ async fn sr3_2_a_stale_challenge_is_refused_with_the_uniform_answer() {
             totp_code: code,
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
     };
     let forged_reason = reason_of(verify(forged.clone(), "000000".into()).await.unwrap_err());
@@ -4642,6 +4649,7 @@ async fn qr11_2_totp_verify_mfa_refuses_a_credential_change_after_its_check() {
             totp_code: generate_next_step_code(&totp),
             ip_address: None,
             user_agent: None,
+            lockout_policy: None,
         })
         .await;
     w.assert_refused_as_a_wrong_password_with_no_session(outcome)
@@ -4674,10 +4682,15 @@ async fn qr11_2_setup_token_completion_refuses_a_credential_change_after_its_che
     };
 
     w.arm_the_race();
+    let spent = w
+        .raced
+        .spend_setup_token(&setup_token)
+        .await
+        .expect("the token is spent once");
     let outcome = w
         .raced
         .complete_setup_token_login(
-            &setup_token,
+            spent,
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
             None,
             None,
@@ -5447,5 +5460,372 @@ async fn refresh_refuses_a_suspended_tenant_even_with_a_live_session() {
     assert!(
         matches!(refused, AxiamError::TenantSuspended),
         "{refused:?}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// SA-43 (h08-authn-recovery) — MFA enrolment state machine, setup tokens and
+// the per-account MFA failure counter
+// -----------------------------------------------------------------------
+
+fn sa43_svc(
+    user_repo: SurrealUserRepository<surrealdb::engine::local::Db>,
+    session_repo: SurrealSessionRepository<surrealdb::engine::local::Db>,
+    fed_repo: SurrealFederationLinkRepository<surrealdb::engine::local::Db>,
+    refresh_token_repo: SurrealRefreshTokenRepository<surrealdb::engine::local::Db>,
+) -> TestSvc {
+    AuthService::new(
+        user_repo,
+        session_repo,
+        fed_repo,
+        refresh_token_repo,
+        test_config(),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    )
+}
+
+/// The challenge token of a password login for an account with MFA on.
+async fn sa43_challenge(svc: &TestSvc, tenant_id: Uuid, org_id: Uuid) -> String {
+    match login_alice_with(svc, tenant_id, org_id, None).await {
+        LoginResult::MfaRequired(c) => c.challenge_token,
+        other => panic!("expected MfaRequired, got {other:?}"),
+    }
+}
+
+/// A passkey row for alice, as a completed WebAuthn registration leaves one.
+async fn sa43_register_passkey(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) {
+    use axiam_core::models::webauthn_credential::{
+        CreateWebauthnCredential, WebauthnCredentialType,
+    };
+    use axiam_core::repository::WebauthnCredentialRepository;
+    SurrealWebauthnCredentialRepository::new(db.clone())
+        .create(CreateWebauthnCredential {
+            tenant_id,
+            user_id,
+            credential_id: Uuid::new_v4().to_string(),
+            name: "passkey".into(),
+            credential_type: WebauthnCredentialType::Passkey,
+            passkey_json: "sealed-passkey-placeholder".into(),
+            aaguid: None,
+            attestation_format: None,
+            attested: false,
+            authenticator_name: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// Re-starting TOTP enrolment must not invalidate the confirmed authenticator:
+/// the new secret is pending until `confirm_mfa`, and the old one keeps
+/// answering `verify_mfa` in the meantime.
+#[tokio::test]
+async fn sa43_restarting_totp_enrolment_keeps_the_confirmed_authenticator() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, _db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+
+    let confirmed = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    // A second enrolment is started and abandoned.
+    svc.enroll_mfa(tenant_id, user_id).await.unwrap();
+
+    let challenge_token = sa43_challenge(&svc, tenant_id, org_id).await;
+    let out = svc
+        .verify_mfa(VerifyMfaInput {
+            challenge_token,
+            totp_code: generate_next_step_code(&confirmed),
+            ip_address: None,
+            user_agent: None,
+            lockout_policy: None,
+        })
+        .await;
+    assert!(
+        out.is_ok(),
+        "the confirmed authenticator still signs in after an unconfirmed \
+         re-enrolment: {out:?}"
+    );
+}
+
+/// On an account whose only factor is a passkey (`mfa_enabled`, no TOTP),
+/// starting a TOTP enrolment must not create a live TOTP factor before
+/// `confirm_mfa`.
+#[tokio::test]
+async fn sa43_an_unconfirmed_totp_enrolment_is_not_a_live_factor() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    sa43_register_passkey(&db, tenant_id, user_id).await;
+    assert!(
+        mfa_methods(&db)
+            .enable_after_enrollment(tenant_id, user_id)
+            .await
+            .unwrap()
+    );
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+
+    let pending = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
+    let types = mfa_methods(&db)
+        .available_method_types(tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        types,
+        vec!["webauthn".to_string()],
+        "no TOTP listed before confirm"
+    );
+
+    let challenge_token = sa43_challenge(&svc, tenant_id, org_id).await;
+    let totp = totp_from_secret(&pending.secret_base32, "alice@example.com");
+    let refused = svc
+        .verify_mfa(VerifyMfaInput {
+            challenge_token,
+            totp_code: totp.generate_current().to_string(),
+            ip_address: None,
+            user_agent: None,
+            lockout_policy: None,
+        })
+        .await;
+    assert!(
+        refused.is_err(),
+        "a code from an unconfirmed secret is not a second factor"
+    );
+
+    // Confirming it makes it one.
+    svc.confirm_mfa(tenant_id, user_id, &totp.generate_current().to_string())
+        .await
+        .unwrap();
+    let challenge_token = sa43_challenge(&svc, tenant_id, org_id).await;
+    svc.verify_mfa(VerifyMfaInput {
+        challenge_token,
+        totp_code: generate_next_step_code(&totp),
+        ip_address: None,
+        user_agent: None,
+        lockout_policy: None,
+    })
+    .await
+    .expect("the confirmed secret signs in");
+}
+
+/// A setup token adds the FIRST factor only. Once a passkey was enrolled with
+/// it (the WebAuthn twin completed), the same token must not start a TOTP
+/// enrolment.
+#[tokio::test]
+async fn sa43_setup_token_cannot_enrol_totp_once_a_passkey_exists() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+
+    // What `POST /auth/webauthn/setup/register/finish` leaves behind.
+    sa43_register_passkey(&db, tenant_id, user_id).await;
+    mfa_methods(&db)
+        .enable_after_enrollment(tenant_id, user_id)
+        .await
+        .unwrap();
+
+    let err = svc
+        .enroll_mfa_with_setup_token(&setup_token)
+        .await
+        .expect_err("a setup token adds a first factor, never a second");
+    assert!(
+        matches!(&err, AxiamError::Validation { message } if message.contains("already")),
+        "refused as MfaAlreadyConfigured: {err:?}"
+    );
+}
+
+/// A setup token completes one sign-in. After the forced enrolment finished,
+/// presenting it again must not issue a second session.
+#[tokio::test]
+async fn sa43_a_setup_token_completes_one_sign_in() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, _user_id, _db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
+    let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
+    svc.confirm_mfa_with_setup_token(
+        &setup_token,
+        &totp.generate_current().to_string(),
+        None,
+        None,
+    )
+    .await
+    .expect("the forced enrolment completes");
+
+    // `complete_setup_token_login` takes a `SpentSetupToken`, which only a
+    // successful spend yields, so a second session needs a second spend.
+    let again = svc.spend_setup_token(&setup_token).await;
+    assert!(
+        again.is_err(),
+        "a spent setup token must not issue a second session"
+    );
+}
+
+/// Wrong TOTP codes accrue on the account and lock it at the tenant's
+/// threshold, like wrong passwords; once locked, even a correct code is
+/// refused.
+#[tokio::test]
+async fn sa43_wrong_totp_codes_lock_the_account() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let challenge_token = sa43_challenge(&svc, tenant_id, org_id).await;
+
+    let threshold = test_config().max_failed_login_attempts;
+    for _ in 0..threshold {
+        let _ = svc
+            .verify_mfa(VerifyMfaInput {
+                challenge_token: challenge_token.clone(),
+                totp_code: "000000".into(),
+                ip_address: None,
+                user_agent: None,
+                lockout_policy: None,
+            })
+            .await
+            .expect_err("a wrong code");
+    }
+
+    let user = SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        user.failed_login_attempts, threshold,
+        "each wrong code counted"
+    );
+    assert!(
+        user.locked_until.is_some_and(|t| t > Utc::now()),
+        "the account is locked at the threshold"
+    );
+
+    let refused = svc
+        .verify_mfa(VerifyMfaInput {
+            challenge_token,
+            totp_code: generate_next_step_code(&totp),
+            ip_address: None,
+            user_agent: None,
+            lockout_policy: None,
+        })
+        .await;
+    assert!(
+        refused.is_err(),
+        "a locked account is refused even a correct code"
+    );
+}
+
+/// SA-43 (owner decision 2026-11-24): for an account with MFA on, the password
+/// step does not reset the failed-attempt counter — only a completed second
+/// factor does. N−1 wrong codes, a correct password, one more wrong code: the
+/// account is locked.
+#[tokio::test]
+async fn sa43_a_correct_password_does_not_reset_mfa_failures() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let threshold = test_config().max_failed_login_attempts;
+
+    let wrong = |challenge_token: String| VerifyMfaInput {
+        challenge_token,
+        totp_code: "000000".into(),
+        ip_address: None,
+        user_agent: None,
+        lockout_policy: None,
+    };
+    let challenge = sa43_challenge(&svc, tenant_id, org_id).await;
+    for _ in 0..threshold - 1 {
+        svc.verify_mfa(wrong(challenge.clone()))
+            .await
+            .expect_err("a wrong code");
+    }
+    // A correct password: the second factor is still owed.
+    let challenge = sa43_challenge(&svc, tenant_id, org_id).await;
+    svc.verify_mfa(wrong(challenge))
+        .await
+        .expect_err("a wrong code");
+
+    let user = SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap();
+    assert!(
+        user.locked_until.is_some_and(|t| t > Utc::now()),
+        "the password step must not have reset the MFA failures: {} attempts, locked_until {:?}",
+        user.failed_login_attempts,
+        user.locked_until
+    );
+}
+
+/// A completed second factor is what resets the counter.
+#[tokio::test]
+async fn sa43_a_completed_second_factor_resets_the_counter() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let totp = enable_mfa_for_alice(&svc, tenant_id, user_id).await;
+    let challenge = sa43_challenge(&svc, tenant_id, org_id).await;
+    for _ in 0..2 {
+        svc.verify_mfa(VerifyMfaInput {
+            challenge_token: challenge.clone(),
+            totp_code: "000000".into(),
+            ip_address: None,
+            user_agent: None,
+            lockout_policy: None,
+        })
+        .await
+        .expect_err("a wrong code");
+    }
+    svc.verify_mfa(VerifyMfaInput {
+        challenge_token: challenge,
+        totp_code: generate_next_step_code(&totp),
+        ip_address: None,
+        user_agent: None,
+        lockout_policy: None,
+    })
+    .await
+    .expect("the correct code signs in");
+    let user = SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        user.failed_login_attempts, 0,
+        "a completed sign-in resets the counter"
+    );
+}
+
+/// An administrator's MFA reset also drops a TOTP enrolment in progress.
+#[tokio::test]
+async fn sa43_reset_mfa_clears_the_pending_totp_secret() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, _org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    svc.enroll_mfa(tenant_id, user_id).await.unwrap();
+    let users = SurrealUserRepository::new(db.clone());
+    assert!(
+        users
+            .pending_mfa_secret(tenant_id, user_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    mfa_methods(&db)
+        .reset_mfa(tenant_id, user_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        users.pending_mfa_secret(tenant_id, user_id).await.unwrap(),
+        None,
+        "the reset leaves no enrolment to confirm"
     );
 }

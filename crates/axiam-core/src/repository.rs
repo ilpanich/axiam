@@ -437,6 +437,105 @@ pub trait UserRepository: Send + Sync {
         }
     }
 
+    /// Stage `encrypted_secret` as the user's **pending** TOTP secret
+    /// (SA-43, h08-authn-recovery): the secret a TOTP enrolment has issued and
+    /// the user has not yet confirmed with a code.
+    ///
+    /// It is written to its own column, never to `mfa_secret`, so starting an
+    /// enrolment cannot replace a confirmed authenticator (the old secret keeps
+    /// answering `verify_mfa` until the new one is confirmed) and cannot create
+    /// a live TOTP factor on an account whose `mfa_enabled` flag a passkey
+    /// already turned on. A second enrolment replaces the pending secret.
+    ///
+    /// The default implementation refuses, so a test double that never enrols
+    /// TOTP needs nothing new.
+    fn stage_pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _encrypted_secret: String,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not stage TOTP enrolments".into(),
+            ))
+        }
+    }
+
+    /// The user's pending TOTP secret ([`Self::stage_pending_mfa_secret`]),
+    /// `None` when no enrolment is in progress. `NotFound` for no such user.
+    ///
+    /// The default implementation answers `None`: a test double has no
+    /// enrolment in progress.
+    fn pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<String>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Confirm a TOTP enrolment: make the pending secret the user's
+    /// `mfa_secret`, clear the pending column and set `mfa_enabled`, in one
+    /// write **only if** the pending secret is still `expected` — the one the
+    /// caller verified the user's code against.
+    ///
+    /// `Ok(true)` when the swap happened; `Ok(false)` when the pending secret
+    /// changed (a concurrent re-enrolment) or is gone, and the caller refuses
+    /// the confirmation.
+    ///
+    /// The default implementation refuses, as for
+    /// [`Self::stage_pending_mfa_secret`].
+    fn promote_pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _expected: &str,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not stage TOTP enrolments".into(),
+            ))
+        }
+    }
+
+    /// Drop the user's pending TOTP secret, if any (SA-43): an administrator's
+    /// MFA reset leaves no enrolment behind to be confirmed later.
+    ///
+    /// The default implementation does nothing, consistent with
+    /// [`Self::pending_mfa_secret`]'s default of no enrolment in progress.
+    fn clear_pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async { Ok(()) }
+    }
+
+    /// Spend an MFA setup token (SA-43, h08-authn-recovery): record its `jti`
+    /// in the shared single-use store until `expires_at` (the token's `exp`,
+    /// after which the token is refused on its own and the sweep removes the
+    /// row).
+    ///
+    /// `Ok(())` the first time; `Err(AxiamError::ReplayDetected)` on every
+    /// later attempt, decided by a UNIQUE index rather than a read, so of two
+    /// completions sent together exactly one passes.
+    ///
+    /// The default implementation refuses, so a test double that never
+    /// completes a forced enrolment needs nothing new.
+    fn consume_mfa_setup_token(
+        &self,
+        _tenant_id: Uuid,
+        _jti: &str,
+        _expires_at: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not record setup tokens".into(),
+            ))
+        }
+    }
+
     /// Anonymize a user row in-place for GDPR Art. 17 erasure (D-05).
     ///
     /// Implementations MUST scrub every PII column (email, username,

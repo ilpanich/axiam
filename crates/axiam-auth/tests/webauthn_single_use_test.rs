@@ -912,3 +912,93 @@ async fn a_webauthn_sign_in_to_a_suspended_tenant_is_refused() {
     );
     assert_eq!(sessions(&w).await, 1);
 }
+
+// ---------------------------------------------------------------------------
+// SA-43 (h08-authn-recovery): the username-bound second factor asks whether the
+// account may still sign in, as the discoverable path and `verify_mfa` do
+// ---------------------------------------------------------------------------
+
+/// Set the world's user's status or lockout, as an administrator (or the
+/// lockout path) would between the password step and the assertion.
+async fn sa43_update_user(w: &World, input: axiam_core::models::user::UpdateUser) {
+    SurrealUserRepository::new(w.db.clone())
+        .update(w.tenant_id, w.user_id, input)
+        .await
+        .unwrap();
+}
+
+/// An account deactivated after the password step (between the MFA challenge
+/// and the WebAuthn assertion) gets no session from a valid assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sa43_a_deactivated_account_gets_no_session_from_the_second_factor() {
+    use axiam_core::models::user::{UpdateUser, UserStatus};
+
+    let w = world().await;
+    let (challenge, token) = start(&w).await;
+    sa43_update_user(
+        &w,
+        UpdateUser {
+            status: Some(UserStatus::Inactive),
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    assert!(
+        !finish(&w, &token, &assertion).await,
+        "a deactivated account is refused at the second factor"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was written");
+}
+
+/// The same for an account serving a lockout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sa43_a_locked_account_gets_no_session_from_the_second_factor() {
+    use axiam_core::models::user::UpdateUser;
+
+    let w = world().await;
+    let (challenge, token) = start(&w).await;
+    sa43_update_user(
+        &w,
+        UpdateUser {
+            locked_until: Some(Some(chrono::Utc::now() + chrono::Duration::minutes(10))),
+            ..Default::default()
+        },
+    )
+    .await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    assert!(
+        !finish(&w, &token, &assertion).await,
+        "a locked account is refused at the second factor"
+    );
+    assert_eq!(sessions(&w).await, 0, "no session was written");
+}
+
+/// SA-43 (owner decision 2026-11-24): a completed WebAuthn second factor
+/// resets the failed-attempt counter, as the password step no longer does for
+/// an account with MFA on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sa43_a_webauthn_second_factor_resets_the_counter() {
+    use axiam_core::models::user::UpdateUser;
+
+    let w = world().await;
+    sa43_update_user(
+        &w,
+        UpdateUser {
+            failed_login_attempts: Some(3),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (challenge, token) = start(&w).await;
+    let assertion = w.authenticator.assert(&challenge, 1, w.user_id);
+    assert!(
+        finish(&w, &token, &assertion).await,
+        "the second factor signs in"
+    );
+    let user = SurrealUserRepository::new(w.db.clone())
+        .get_by_id(w.tenant_id, w.user_id)
+        .await
+        .unwrap();
+    assert_eq!(user.failed_login_attempts, 0);
+}

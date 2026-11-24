@@ -189,6 +189,10 @@ pub struct VerifyMfaInput {
     pub totp_code: String,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
+    /// Tenant-effective lockout policy, as on [`LoginInput::lockout_policy`]
+    /// (SA-43): a wrong TOTP code accrues toward the same per-account lockout
+    /// a wrong password does. `None` meters against the deployment default.
+    pub lockout_policy: Option<LockoutPolicy>,
 }
 
 // -----------------------------------------------------------------------
@@ -217,6 +221,52 @@ struct MfaChallengeClaims {
     /// timestamp check alone then applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cv: Option<i64>,
+    /// A setup token's single-use id (SA-43): the token is spent, once, when
+    /// the sign-in it interrupted completes
+    /// ([`AuthService::spend_setup_token`]). Absent on challenge
+    /// tokens, and on a setup token minted before the claim existed, which
+    /// therefore cannot complete a sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
+    exp: i64,
+}
+
+/// A setup token that has been spent (SA-43): proof, obtainable only from
+/// [`AuthService::spend_setup_token`], that this token's single use was
+/// claimed by the caller holding it. [`AuthService::complete_setup_token_login`]
+/// takes one, so a session can only be issued for a token spent exactly once,
+/// and the WebAuthn setup finish spends it *before* it stores a credential.
+#[derive(Debug)]
+pub struct SpentSetupToken {
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    credential_version: i64,
+}
+
+impl SpentSetupToken {
+    /// The account the token was issued to.
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+    /// The tenant the token was issued in.
+    pub fn tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+    /// The organization of that tenant.
+    pub fn org_id(&self) -> Uuid {
+        self.org_id
+    }
+}
+
+/// What a verified setup token names (SA-43): the account, the credential
+/// version read while it was checked, and what spends it.
+struct SetupTokenIds {
+    user_id: Uuid,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    credential_version: i64,
+    jti: Option<String>,
     exp: i64,
 }
 
@@ -753,7 +803,16 @@ impl<
         //    same answer `login` gives a locked account (no oracle) — with no
         //    session, challenge or token issued. Every path that proves a
         //    credential lands here: password, OPAQUE, directory bind, JIT.
-        let clear_failures = user.failed_login_attempts > 0 || user.locked_until.is_some();
+        //
+        //    SA-43 (owner decision 2026-11-24): for an account with MFA on, the
+        //    password is only the first of two factors and does NOT reset the
+        //    counter — the completed second factor does (`verify_mfa`, the
+        //    WebAuthn second-factor finish). Otherwise whoever knows the
+        //    password could zero the counter between rounds of TOTP guesses.
+        //    The lock check itself is unchanged; accounts without MFA are
+        //    reset here exactly as before.
+        let clear_failures =
+            !user.mfa_enabled && (user.failed_login_attempts > 0 || user.locked_until.is_some());
         if !self
             .user_repo
             .admit_unless_locked(tenant_id, user.id, clear_failures)
@@ -1062,6 +1121,12 @@ impl<
             user.created_at,
             self.config.email_verification_grace_period_hours,
         )?;
+        // SA-43: an account serving a lockout is refused before the code is
+        // looked at — a correct code during the lockout neither succeeds nor
+        // shows — with the answer a wrong code gets.
+        if crate::lockout::is_locked_out(&user) {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
 
         let encrypted_secret = user
             .mfa_secret
@@ -1083,6 +1148,11 @@ impl<
         )?;
 
         if !valid {
+            // SA-43: a wrong code accrues on the account, toward the same
+            // lockout a wrong password does, so guessing one account's TOTP is
+            // bounded per account and not only per source IP.
+            self.record_failed_login(tenant_id, &user, input.lockout_policy.as_ref())
+                .await?;
             return Err(AuthError::MfaInvalidCode.into());
         }
 
@@ -1098,6 +1168,20 @@ impl<
             .update_totp_step(tenant_id, user_id, used_step)
             .await?;
         if !advanced {
+            return Err(AuthError::MfaInvalidCode.into());
+        }
+
+        // SA-43: a wrong code sent alongside this one may have locked the
+        // account after the check above; a lock committed first stands. The
+        // sign-in is complete, so this is also where the failed-attempt
+        // counter resets — the password step no longer resets it for an
+        // account with MFA on. The reset is conditional on the lock, inside
+        // the write, as `login`'s is.
+        if !self
+            .user_repo
+            .admit_unless_locked(tenant_id, user_id, true)
+            .await?
+        {
             return Err(AuthError::MfaInvalidCode.into());
         }
 
@@ -1258,14 +1342,34 @@ impl<
         let (user_id, org_id) = webauthn
             .finish_authentication(tenant_id, state_token, response)
             .await?;
+        // SA-43: the assertion proves possession; whether the account may sign
+        // in is a separate question, asked here as the discoverable path and
+        // `verify_mfa` ask it. An account deactivated, locked out or
+        // anonymised between the password step and the assertion gets no
+        // session.
+        self.ensure_can_sign_in(&user)?;
+        // SA-43: the second factor completed the sign-in, so the
+        // failed-attempt counter resets here (the password step no longer
+        // resets it for an account with MFA on) — unless a lock committed in
+        // the meantime, which stands and refuses the sign-in.
+        if !self
+            .user_repo
+            .admit_unless_locked(tenant_id, user_id, true)
+            .await?
+        {
+            return Err(AuthError::InvalidCredentials.into());
+        }
         Ok((user_id, org_id, credential_version))
     }
 
     /// Start MFA enrollment for a user (step 1 of 2).
     ///
-    /// Generates a TOTP secret, encrypts it, stores it on the user,
-    /// but does NOT enable MFA yet — call `confirm_mfa` with a valid
-    /// code to activate.
+    /// Generates a TOTP secret, encrypts it, and stages it as the user's
+    /// **pending** secret — not `mfa_secret` (SA-43). Nothing about the
+    /// account's live factors changes until `confirm_mfa` verifies a code
+    /// against it: a confirmed authenticator keeps working while a
+    /// re-enrolment is in progress (or abandoned), and a passkey-only account
+    /// does not acquire a TOTP factor nobody confirmed.
     pub async fn enroll_mfa(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<EnrollMfaOutput> {
         let encryption_key = self
             .config
@@ -1287,16 +1391,10 @@ impl<
         let secret_bytes = secret.as_bytes().to_vec();
         let encrypted = totp::encrypt_secret(encryption_key, &secret_bytes)?;
 
-        // Store encrypted secret but leave mfa_enabled = false.
+        // SA-43: the pending column only; `mfa_secret` and `mfa_enabled` are
+        // swapped in by `confirm_mfa`.
         self.user_repo
-            .update(
-                tenant_id,
-                user_id,
-                UpdateUser {
-                    mfa_secret: Some(Some(encrypted)),
-                    ..Default::default()
-                },
-            )
+            .stage_pending_mfa_secret(tenant_id, user_id, encrypted)
             .await?;
 
         Ok(EnrollMfaOutput {
@@ -1322,10 +1420,20 @@ impl<
             .ok_or_else(|| AuthError::Crypto("MFA encryption key not configured".into()))?;
 
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
-        let encrypted_secret = user
-            .mfa_secret
-            .as_deref()
-            .ok_or(AuthError::MfaNotEnrolled)?;
+        // SA-43: the secret being confirmed is the pending one. An enrolment
+        // started before the pending column existed left its secret in
+        // `mfa_secret` under `mfa_enabled = false`; that one is still
+        // confirmable in place (a secret under a true flag is a confirmed
+        // factor, never an enrolment to confirm).
+        let pending = self
+            .user_repo
+            .pending_mfa_secret(tenant_id, user_id)
+            .await?;
+        let encrypted_secret = match (&pending, &user.mfa_secret) {
+            (Some(pending), _) => pending.as_str(),
+            (None, Some(legacy)) if !user.mfa_enabled => legacy.as_str(),
+            _ => return Err(AuthError::MfaNotEnrolled.into()),
+        };
 
         let secret_bytes = totp::decrypt_secret(encryption_key, encrypted_secret)?;
         // SECHRD-01/T-24-03: reuse the same matched-step verification and
@@ -1359,17 +1467,34 @@ impl<
             return Err(AuthError::MfaInvalidCode.into());
         }
 
-        // Activate MFA.
-        self.user_repo
-            .update(
-                tenant_id,
-                user_id,
-                UpdateUser {
-                    mfa_enabled: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        // Activate MFA. SA-43: the pending secret becomes `mfa_secret` in the
+        // same conditional write that sets the flag, and only if it is still
+        // the one the code was just verified against — a re-enrolment racing
+        // this confirmation refuses it rather than promoting a secret nobody
+        // proved.
+        match pending {
+            Some(pending) => {
+                if !self
+                    .user_repo
+                    .promote_pending_mfa_secret(tenant_id, user_id, &pending)
+                    .await?
+                {
+                    return Err(AuthError::MfaInvalidCode.into());
+                }
+            }
+            None => {
+                self.user_repo
+                    .update(
+                        tenant_id,
+                        user_id,
+                        UpdateUser {
+                            mfa_enabled: Some(true),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+            }
+        }
 
         Ok(())
     }
@@ -2045,11 +2170,20 @@ impl<
         &self,
         setup_token: &str,
     ) -> AxiamResult<EnrollMfaOutput> {
-        let (user_id, tenant_id, _org_id, _cv) = self.decode_mfa_setup_token(setup_token).await?;
+        let ids = self.decode_mfa_setup_token(setup_token).await?;
+        let (user_id, tenant_id) = (ids.user_id, ids.tenant_id);
 
-        // Guard: if MFA is already configured, reject.
+        // Guard: a setup token adds the account's FIRST factor, never a second
+        // (SA-43). `mfa_enabled` is the account-has-a-factor flag — set by a
+        // confirmed TOTP secret and by an enrolled passkey or security key
+        // alike (`MfaMethodService::enable_after_enrollment`) — so it refuses a
+        // passkey-only account too, which the old `mfa_enabled &&
+        // mfa_secret.is_some()` let through. The REST endpoints additionally
+        // ask `MfaMethodService::available_method_types`, which also sees
+        // WebAuthn rows whose flag was never turned on, exactly as the WebAuthn
+        // setup twins do.
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
-        if user.mfa_enabled && user.mfa_secret.is_some() {
+        if user.mfa_enabled {
             return Err(AuthError::MfaAlreadyConfigured.into());
         }
 
@@ -2068,13 +2202,19 @@ impl<
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, _org_id, _cv) = self.decode_mfa_setup_token(setup_token).await?;
+        let ids = self.decode_mfa_setup_token(setup_token).await?;
 
-        // Confirm MFA (validates code, flips mfa_enabled to true).
-        self.confirm_mfa(tenant_id, user_id, totp_code).await?;
+        // Confirm MFA (validates code, flips mfa_enabled to true). SA-43: the
+        // token is spent after the code verifies, not before, so a mistyped
+        // code does not cost the user their sign-in. Two confirmations sent
+        // together cannot both store a factor anyway: the pending secret is
+        // promoted by a compare-and-set, once.
+        self.confirm_mfa(ids.tenant_id, ids.user_id, totp_code)
+            .await?;
+        let spent = self.spend_setup_token(setup_token).await?;
 
         self.complete_setup_token_login(
-            setup_token,
+            spent,
             // Same evidence as `verify_mfa`: the setup token descends from a
             // verified password, and the TOTP code was just checked by
             // `confirm_mfa` above.
@@ -2101,12 +2241,13 @@ impl<
     /// thing minted there to be forgotten, and it would be discovered by a
     /// relying party rather than by the compiler.
     ///
-    /// The token is decoded again here rather than passed as three `Uuid`s.
-    /// One decode per entry point would be enough for correctness, but a
-    /// signature taking `(user_id, tenant_id, org_id)` accepts values from
-    /// anywhere — including a request body — and this function issues a
-    /// session. Taking the token keeps the identity it grants tied to
-    /// something signed.
+    /// It takes a [`SpentSetupToken`] rather than three `Uuid`s: a signature
+    /// taking `(user_id, tenant_id, org_id)` accepts values from anywhere —
+    /// including a request body — and this function issues a session. A
+    /// `SpentSetupToken` is only made by [`Self::spend_setup_token`], from a
+    /// verified token whose single use it has just claimed (SA-43), so the
+    /// identity granted stays tied to something signed, and one token issues
+    /// at most one session.
     ///
     /// `evidence` is the caller's, because only the caller knows what was
     /// actually proved: the TOTP path records `otp`, the WebAuthn path records
@@ -2115,25 +2256,56 @@ impl<
     /// record `mfa`, because two distinct factors were verified.
     pub async fn complete_setup_token_login(
         &self,
-        setup_token: &str,
+        spent: SpentSetupToken,
         evidence: AuthenticationEvidence,
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
-        let (user_id, tenant_id, org_id, credential_version) =
-            self.decode_mfa_setup_token(setup_token).await?;
         // SR10-1: the version of the user row read while the setup token was
         // checked, so a credential change after that read refuses the session.
         self.create_session_and_tokens(
-            user_id,
-            tenant_id,
-            org_id,
+            spent.user_id,
+            spent.tenant_id,
+            spent.org_id,
             ip_address,
             user_agent,
             evidence,
-            Some(credential_version),
+            Some(spent.credential_version),
         )
         .await
+    }
+
+    /// Verify a setup token and claim its single use (SA-43).
+    ///
+    /// A setup token completes ONE sign-in. Its `jti` is recorded in the
+    /// single-use store; a second spend — a replay within the token's
+    /// lifetime, or a copy sent alongside — is refused as an invalid setup
+    /// token, decided by a UNIQUE index so that of two spends sent together
+    /// exactly one wins. A token with no `jti` (minted before the claim
+    /// existed) cannot be spent; its holder signs in again.
+    ///
+    /// Callers spend before the step that must happen once: the WebAuthn setup
+    /// finish before it stores the credential (two finishes sent together
+    /// would otherwise both pass the factor-presence guard and both register
+    /// one), the TOTP setup confirm once its code has verified.
+    pub async fn spend_setup_token(&self, setup_token: &str) -> AxiamResult<SpentSetupToken> {
+        let ids = self.decode_mfa_setup_token(setup_token).await?;
+        let jti = ids.jti.as_deref().ok_or(AuthError::MfaSetupTokenInvalid)?;
+        let expires_at =
+            DateTime::from_timestamp(ids.exp, 0).ok_or(AuthError::MfaSetupTokenInvalid)?;
+        self.user_repo
+            .consume_mfa_setup_token(ids.tenant_id, jti, expires_at)
+            .await
+            .map_err(|e| match e {
+                AxiamError::ReplayDetected => AxiamError::from(AuthError::MfaSetupTokenInvalid),
+                other => other,
+            })?;
+        Ok(SpentSetupToken {
+            user_id: ids.user_id,
+            tenant_id: ids.tenant_id,
+            org_id: ids.org_id,
+            credential_version: ids.credential_version,
+        })
     }
 
     /// Decode a setup token for a caller that is about to enrol the account's
@@ -2153,7 +2325,7 @@ impl<
     pub async fn decode_setup_token(&self, setup_token: &str) -> AxiamResult<(Uuid, Uuid, Uuid)> {
         self.decode_mfa_setup_token(setup_token)
             .await
-            .map(|(user_id, tenant_id, org_id, _)| (user_id, tenant_id, org_id))
+            .map(|ids| (ids.user_id, ids.tenant_id, ids.org_id))
             .map_err(Into::into)
     }
 
@@ -2372,6 +2544,7 @@ impl<
             iat: now,
             iat_ns: issued_at.timestamp_nanos_opt(),
             cv: Some(credential_version),
+            jti: None,
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -2429,6 +2602,8 @@ impl<
             iat: now,
             iat_ns: issued_at.timestamp_nanos_opt(),
             cv: Some(credential_version),
+            // SA-43: spent when the sign-in completes.
+            jti: Some(Uuid::new_v4().to_string()),
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
@@ -2442,10 +2617,7 @@ impl<
     /// A token minted before the user's credential last changed is refused
     /// with the same [`AuthError::MfaSetupTokenInvalid`] an expired or forged
     /// one gets (SA-06, S-6).
-    async fn decode_mfa_setup_token(
-        &self,
-        token: &str,
-    ) -> Result<(Uuid, Uuid, Uuid, i64), AuthError> {
+    async fn decode_mfa_setup_token(&self, token: &str) -> Result<SetupTokenIds, AuthError> {
         use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 
         let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
@@ -2502,7 +2674,14 @@ impl<
             return Err(AuthError::MfaSetupTokenInvalid);
         }
 
-        Ok((user_id, tenant_id, org_id, user.credential_version))
+        Ok(SetupTokenIds {
+            user_id,
+            tenant_id,
+            org_id,
+            credential_version: user.credential_version,
+            jti: data.claims.jti,
+            exp: data.claims.exp,
+        })
     }
 
     /// Record one failed authentication attempt against `user_id`, for the

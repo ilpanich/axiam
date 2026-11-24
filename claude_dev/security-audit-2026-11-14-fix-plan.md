@@ -1509,6 +1509,27 @@ special-purpose.
 
 ### SA-43 — MFA and WebAuthn — Opus 5.5
 
+> **EXECUTED (2026-11-24, Opus 5.5). All items (h08-authn-recovery): reproduced.**
+> - **Pending TOTP secret.** `enroll_mfa` now stages the new secret in `user.mfa_pending_secret` (schema v121, additive; erased and never exported). `confirm_mfa` verifies against the pending secret and promotes it with a compare-and-set, also setting `mfa_enabled`. Re-enrolment therefore no longer invalidates a confirmed authenticator, and an unconfirmed TOTP is not a live factor. An enrolment that started before v121 can still be confirmed.
+> - **Setup tokens.** `enroll_mfa_with_setup_token` and the REST TOTP setup endpoints refuse any account that already has a factor (the same guard as the WebAuthn setup endpoints). Setup tokens carry a `jti` and are single-use; spending one is the only way to get a `SpentSetupToken`. The WebAuthn setup finish spends the token before it stores the credential, so two concurrent finishes register one credential. Setup tokens issued before this change cannot complete a sign-in (they expire within 5 min).
+> - **WebAuthn second factor.** The second-factor finish calls `ensure_can_sign_in`, so a deactivated or locked account is refused.
+> - **`verify_mfa` failure counter.** Wrong codes now feed the existing per-account lockout, and a locked account is refused (with the same answer as a wrong code). Owner decision (2026-11-24): for MFA accounts, the password step no longer resets the counter; only a completed second factor (TOTP or WebAuthn) does. Accounts without MFA behave as before.
+> - **Admin reset.** Owner decision (2026-11-24): `reset_mfa` also clears a pending secret.
+>
+> Tests: 12 new `sa43_*` tests, each failing before its fix and passing after. Ten are in `axiam-auth` (`auth_service_test`, `webauthn_single_use_test`) and two are in REST `webauthn_test`; one of the REST tests is a concurrency test on surrealkv. The gate passed:
+> - `axiam-auth` lib and all 18 suites;
+> - 33 REST suites touching MFA, WebAuthn and lockout, run one at a time;
+> - gRPC `grpc_auth_test`, `grpc_authz_test`, `grpc_server_test`, `grpc_units`, `grpc_userinfo_test`;
+> - `axiam-db` lib and 8 suites, including `personal_data_gate` and `schema_test`;
+> - `axiam-core` lib and its suites;
+> - fmt, clippy `-D warnings`, and every Architecture Invariants check.
+>
+> No REST/gRPC request or response type changed, so the spec was not regenerated.
+>
+> Known residuals:
+> - A WebAuthn setup ceremony that fails after the token is spent requires a fresh sign-in.
+> - A passkey-first sign-in does not reset the counter; it never did.
+
 `service.rs:1051` `enroll_mfa`: write the pending secret to a separate field and
 swap it in at `confirm_mfa`, so re-enrolment cannot invalidate a confirmed
 authenticator. `enroll_mfa_with_setup_token`: use the same

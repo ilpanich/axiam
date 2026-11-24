@@ -1471,6 +1471,147 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         Ok(!rows.is_empty())
     }
 
+    async fn stage_pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        encrypted_secret: String,
+    ) -> AxiamResult<()> {
+        // SA-43: the pending column only — `mfa_secret` and `mfa_enabled` are
+        // untouched until `promote_pending_mfa_secret`.
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE type::record('user', $id) SET \
+                  mfa_pending_secret = $secret, updated_at = time::now() \
+                  WHERE tenant_id = $tenant_id)",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("secret", encrypted_secret))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "user".into(),
+                id: user_id.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<Option<String>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE mfa_pending_secret FROM type::record('user', $id) \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<Option<String>> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter().next().ok_or_else(|| {
+            DbError::NotFound {
+                entity: "user".into(),
+                id: user_id.to_string(),
+            }
+            .into()
+        })
+    }
+
+    async fn promote_pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        expected: &str,
+    ) -> AxiamResult<bool> {
+        // SA-43: compare-and-swap on the pending secret the caller verified the
+        // code against, so a re-enrolment racing the confirmation cannot have
+        // its (unverified) secret promoted. The value written is the bound one,
+        // equal to the pending column by the WHERE.
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE type::record('user', $id) SET \
+                  mfa_secret = $expected, mfa_pending_secret = NONE, \
+                  mfa_enabled = true, updated_at = time::now() \
+                  WHERE tenant_id = $tenant_id AND mfa_pending_secret = $expected)",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("expected", expected.to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+        let promoted = !rows.is_empty();
+        if promoted {
+            self.notify_user_changed(tenant_id, user_id).await;
+        }
+        Ok(promoted)
+    }
+
+    async fn clear_pending_mfa_secret(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 mfa_pending_secret = NONE, updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id AND mfa_pending_secret != NONE",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        Ok(())
+    }
+
+    async fn consume_mfa_setup_token(
+        &self,
+        tenant_id: Uuid,
+        jti: &str,
+        expires_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        // SA-43: the replay store every other single-use purpose token uses
+        // (`oauth2_proof_replay`), under the kind that records ceremony state
+        // tokens and a scope of its own, `mfa_setup`. Reusing the kind keeps
+        // v121 additive: widening the kind's ASSERT is an OVERWRITE (#729).
+        // The UNIQUE `(tenant_id, kind, scope, jti)` index decides, and the
+        // proof sweep removes the row once `expires_at` passes.
+        use axiam_core::repository::ProofReplayRepository;
+        crate::repository::oauth2_proof_replay::SurrealProofReplayRepository::new(self.db.clone())
+            .insert_proof_jti(
+                tenant_id,
+                axiam_core::repository::ProofKind::WebauthnAssertion,
+                "mfa_setup",
+                jti,
+                expires_at,
+            )
+            .await
+    }
+
     async fn admit_unless_locked(
         &self,
         tenant_id: Uuid,

@@ -915,11 +915,30 @@ pub async fn verify_mfa<C: Connection + Clone>(
     body: web::Json<MfaVerifyRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
+    // SA-43: a wrong code accrues toward the account's lockout, metered on the
+    // tenant's own policy as the password step is. The challenge names the
+    // tenant; a token that does not decode is refused by `verify_mfa` itself,
+    // and a settings lookup that fails meters on the deployment default
+    // (`None`) rather than not at all.
+    let lockout_policy = match state
+        .auth_service
+        .decode_mfa_challenge_ids(&b.challenge_token)
+        .await
+    {
+        Ok((_user_id, tenant_id, org_id)) => state
+            .settings_repo
+            .get_effective_settings(org_id, tenant_id)
+            .await
+            .ok()
+            .map(|settings| settings.lockout),
+        Err(_) => None,
+    };
     let input = VerifyMfaInput {
         challenge_token: b.challenge_token,
         totp_code: b.totp_code,
         ip_address: client_ip(&req),
         user_agent: user_agent(&req),
+        lockout_policy,
     };
 
     let out = state.auth_service.verify_mfa(input).await?;
@@ -1118,6 +1137,11 @@ pub async fn setup_enroll_mfa<C: Connection + Clone>(
     state: web::Data<AppState<C>>,
     body: web::Json<MfaSetupEnrollRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
+    // SA-43: the guard the WebAuthn setup twins use — the token is a setup
+    // token, and the account has no factor yet, asked of
+    // `MfaMethodService::available_method_types`, which sees the WebAuthn
+    // credential rows as well as the TOTP secret.
+    crate::handlers::webauthn::setup_token_registration_context(&state, &body.setup_token).await?;
     let out = state
         .auth_service
         .enroll_mfa_with_setup_token(&body.setup_token)
@@ -1149,6 +1173,10 @@ pub async fn setup_confirm_mfa<C: Connection + Clone>(
     body: web::Json<MfaSetupConfirmRequest>,
 ) -> Result<HttpResponse, AxiamApiError> {
     let b = body.into_inner();
+    // SA-43: the same first-factor-only guard as `setup_enroll_mfa` and the
+    // WebAuthn setup twins. A pending TOTP enrolment is not a factor, so the
+    // confirmation of the enrolment this token started is still admitted.
+    crate::handlers::webauthn::setup_token_registration_context(&state, &b.setup_token).await?;
     let out = state
         .auth_service
         .confirm_mfa_with_setup_token(

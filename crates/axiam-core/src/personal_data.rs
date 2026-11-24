@@ -166,6 +166,14 @@ pub const USER_COLUMNS: &[UserColumn] = &[
                boolean and never as the secret itself.",
     },
     UserColumn {
+        name: "mfa_pending_secret",
+        erasure: Some(Erasure::ToNone),
+        export: None,
+        note: "SA-43: a credential — the encrypted TOTP secret of an enrolment \
+               not yet confirmed. Erased with `mfa_secret` and, like it, never \
+               exported.",
+    },
+    UserColumn {
         name: "failed_login_attempts",
         erasure: None,
         export: None,
@@ -457,6 +465,7 @@ mod tests {
              password_hash = '', \
              mfa_enabled = false, \
              mfa_secret = NONE, \
+             mfa_pending_secret = NONE, \
              last_failed_login_at = NONE, \
              locked_until = NONE, \
              metadata = {}, \

@@ -633,6 +633,11 @@ static MIGRATIONS: &[Migration] = &[
         name: "account_deletion_prior_status",
         sql: SCHEMA_V120,
     },
+    Migration {
+        version: 121,
+        name: "user_mfa_pending_secret",
+        sql: SCHEMA_V121,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5973,9 +5978,43 @@ const SCHEMA_V120: &str = "\
 DEFINE FIELD IF NOT EXISTS prior_status ON TABLE account_deletion TYPE option<string>;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v121 — the pending TOTP secret of a user (SA-43, h08-authn-recovery)
+// -----------------------------------------------------------------------
+//
+// `mfa_pending_secret` holds the encrypted secret a TOTP enrolment issued and
+// the user has not confirmed yet. `confirm_mfa` moves it into `mfa_secret`, so
+// starting an enrolment no longer replaces a confirmed authenticator, and no
+// longer makes a live TOTP factor on an account whose `mfa_enabled` a passkey
+// turned on.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a row with no
+// enrolment in progress reads `NONE`. An enrolment started before this version
+// (a secret under `mfa_enabled = false`) is still confirmed from `mfa_secret`.
+const SCHEMA_V121: &str = "\
+DEFINE FIELD IF NOT EXISTS mfa_pending_secret ON TABLE user TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-43 (h08-authn-recovery) — v121 is the one optional
+    /// `mfa_pending_secret` column on `user`, additive, no `DEFAULT`, no
+    /// backfill.
+    #[test]
+    fn v121_adds_only_the_optional_pending_mfa_secret_column() {
+        let statements: Vec<&str> = SCHEMA_V121
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS mfa_pending_secret ON TABLE user TYPE option<string>"],
+        );
+        assert!(is_additive(SCHEMA_V121));
+    }
 
     /// SA-09 (N11) — v120 is the one optional `prior_status` column on
     /// `account_deletion`, additive, no `DEFAULT`, no backfill.
@@ -8246,8 +8285,10 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&120),
-            "v120 is the newest migration (SA-09, N11 — `account_deletion.prior_status`, the \
+            Some(&121),
+            "v121 is the newest migration (SA-43, h08-authn-recovery — \
+             `user.mfa_pending_secret`, the unconfirmed TOTP secret, optional, absent reading \
+             as no enrolment in progress); v120 was (SA-09, N11 — `account_deletion.prior_status`, the \
              status an account had before an erasure request, optional, absent reading as \
              Active); v119 was (SA-06, N7, SR16-1 — `session.credential_version`, \
              the credential version a session was written under, optional, absent reading as a \

@@ -71,6 +71,48 @@ impl<U: UserRepository> UserRepository for ReadThenBumpUserRepo<U> {
     async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
         self.inner.update_totp_step(tenant_id, id, step).await
     }
+    async fn stage_pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        encrypted_secret: String,
+    ) -> AxiamResult<()> {
+        self.inner
+            .stage_pending_mfa_secret(tenant_id, user_id, encrypted_secret)
+            .await
+    }
+    async fn pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<Option<String>> {
+        self.inner.pending_mfa_secret(tenant_id, user_id).await
+    }
+    async fn promote_pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        expected: &str,
+    ) -> AxiamResult<bool> {
+        self.inner
+            .promote_pending_mfa_secret(tenant_id, user_id, expected)
+            .await
+    }
+    async fn clear_pending_mfa_secret(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        self.inner
+            .clear_pending_mfa_secret(tenant_id, user_id)
+            .await
+    }
+    async fn consume_mfa_setup_token(
+        &self,
+        tenant_id: Uuid,
+        jti: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> AxiamResult<()> {
+        self.inner
+            .consume_mfa_setup_token(tenant_id, jti, expires_at)
+            .await
+    }
     async fn list(
         &self,
         tenant_id: Uuid,

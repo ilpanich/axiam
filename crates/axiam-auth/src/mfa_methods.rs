@@ -115,12 +115,13 @@ impl<
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
         let mut types = Vec::new();
 
-        // `mfa_enabled` is half of this condition, not decoration.
-        // [`AuthService::enroll_mfa`] writes the secret and leaves the flag
-        // off; [`AuthService::confirm_mfa`] is what turns it on. So a secret
-        // present while the flag is off is an enrollment the user never
-        // completed, and offering `totp` for it would list a factor the user
-        // never proved they hold. Same condition [`Self::list_methods`] uses.
+        // `mfa_enabled` is half of this condition, not decoration. Since
+        // SA-43 [`AuthService::enroll_mfa`] stages its secret in a separate
+        // pending column and [`AuthService::confirm_mfa`] moves it here, but a
+        // secret written by an older release sits here under a false flag —
+        // an enrollment the user never completed, and offering `totp` for it
+        // would list a factor the user never proved they hold. Same condition
+        // [`Self::list_methods`] uses.
         if user.mfa_enabled && user.mfa_secret.is_some() {
             types.push("totp".into());
         }
@@ -345,6 +346,11 @@ impl<
                     ..Default::default()
                 },
             )
+            .await?;
+        // SA-43: and a TOTP enrolment in progress, which `confirm_mfa` would
+        // otherwise still accept after the reset.
+        self.user_repo
+            .clear_pending_mfa_secret(tenant_id, user_id)
             .await?;
 
         self.session_repo

@@ -704,6 +704,26 @@ export default function Benchmarks() {
           </strong>
           , and this page will be updated with the result.
         </p>
+        <p
+          style={{
+            margin: "12px 0 0",
+            padding: "12px 14px",
+            fontSize: 14.5,
+            lineHeight: 1.65,
+            color: "#e2e8f0",
+            borderLeft: "3px solid #67e8f9",
+            background: "rgba(0,212,255,.06)",
+            borderRadius: 6,
+          }}
+        >
+          <strong>Our reading:</strong> the figures with SurrealDB 3.3.5
+          (run 6c) are the ones that represent AXIAM's own performance; the
+          4.0.1 figures carry the server regression on top. We expect AXIAM to
+          return to the 3.3.5 level once SurrealDB fixes the 4.0 regressions
+          tracked in #7667 and #7716. Until then, the 4.0.1 figures are what a
+          supported deployment gets today, since AXIAM 1.3 requires SurrealDB
+          4.0.
+        </p>
       </div>
 
       {/* ---- Headline numbers ---- */}
@@ -1018,6 +1038,9 @@ export default function Benchmarks() {
           cells valid in each pass. Every figure here is labelled{" "}
           <em>SurrealDB 3.3.5 server, unsupported, benchmark-only</em>: AXIAM
           1.3 requires 4.0, and run 6c never enters a head-to-head table.
+          These are nonetheless the figures we consider representative of
+          AXIAM itself, and the level we expect back once SurrealDB fixes
+          its 4.0 regressions.
         </p>
         <div className="glass-card" style={{ padding: 4, marginTop: 20, overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 720 }}>

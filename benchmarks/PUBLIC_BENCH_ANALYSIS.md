@@ -243,11 +243,16 @@ batched checks on the laptop; the database tier is the whole difference
 
 ### Session/token refresh — published under the protocol-variant label
 
-> ⚠️ **Comparability: protocol-variant.** AXIAM has no ROPC/password grant
-> by design; its cell measures **session cookie refresh**
-> (`POST /api/v1/auth/refresh`, CSRF double-submit, single-use rotation).
-> Keycloak's measures the **OAuth2 refresh-token grant**. Zitadel's and
-> authentik's cells are fallback operations and are excluded.
+> ⚠️ **Comparability: protocol-variant.** AXIAM supports the OAuth2
+> refresh-token grant, but this cell obtains user tokens through a password
+> login, and AXIAM's token endpoint has no password (ROPC) grant. So AXIAM's
+> cell measures **session-cookie refresh** (`POST /api/v1/auth/refresh`,
+> CSRF double-submit, single-use rotation), while Keycloak's measures the
+> **OAuth2 refresh-token grant**. Zitadel's and authentik's cells are
+> fallback operations and are excluded. The like-for-like cell,
+> `oauth2_refresh_grant` (AXIAM seeded through the authorization-code flow
+> with PKCE, every target measured on `grant_type=refresh_token`), was added
+> after this round and has no results yet.
 
 | pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
 |---|---|---|---|---|---|---|---|---|---|
@@ -264,7 +269,8 @@ batched checks on the laptop; the database tier is the whole difference
 | run 6c B (3.3.5) | 4/4 | axiam | 771 | 54.5 | 82.9 | 4.67 | 6.049 | none | ✓ 2/3 |
 
 **Keycloak is ahead this run** (435 vs 347 at 2/2; 943 vs 707 at 4/4).
-AXIAM's refresh is three database round trips with SurrealDB pegged.
+AXIAM's session refresh is three database round trips with SurrealDB
+pegged.
 On 3.3.5 at 4/4 its limit is no longer database CPU (SurrealDB 3.73 of 4,
 server 0.68, bottleneck none) — something else bounds it (§5).
 
@@ -1090,7 +1096,9 @@ un-re-measured; no valid authentik cell.
    posture trade-off (§5.2.3).
 6. The deferred passes: production rate limits, minimal profile,
    new-feature cells, refresh stage timings, strict revocation.
-7. Zitadel's non-CPU limit and 200 ms gRPC floor; a larger authentik
+7. The first `oauth2_refresh_grant` cells — the OAuth2 refresh grant, like
+   for like with Keycloak — at 2/2 and 4/4.
+8. Zitadel's non-CPU limit and 200 ms gRPC floor; a larger authentik
    envelope or an explanation.
 
 ---

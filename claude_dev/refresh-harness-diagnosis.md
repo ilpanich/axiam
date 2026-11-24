@@ -298,8 +298,9 @@ After the fix the two cells measure *different protocol operations*:
 | AXIAM | `POST /api/v1/auth/refresh` | **session refresh** (cookie + CSRF double-submit) | `axiam-auth` `SessionRepository` |
 | Keycloak | `POST /realms/…/protocol/openid-connect/token` `grant_type=refresh_token` | **OAuth2 refresh grant** | Keycloak's OAuth2 store |
 
-AXIAM *cannot* be made to match Keycloak's shape from a password login, and this
-is deliberate rather than a gap: `TokenService::exchange`
+AXIAM *cannot* be made to match Keycloak's shape from a password login
+(correction, 2026-11-24: "deliberate" below is an inference from the code and
+the OAuth 2.1 posture; no recorded design decision says so): `TokenService::exchange`
 (`crates/axiam-oauth2/src/token.rs:143-147`) supports exactly
 `authorization_code`, `client_credentials` and `refresh_token` — there is **no
 password/ROPC grant**, which is the OAuth 2.1-recommended posture (the password
@@ -325,6 +326,11 @@ flow.
    committing to it. That would give a true protocol-level head-to-head and
    would additionally cover AXIAM's authorization-code path, which no scenario
    currently benchmarks at all.
+   **Done (2026-11-24):** `scenarios/oauth2_refresh_grant.js` — the
+   authorize leg uses the bench user's bearer token, as `oauth2_authorize.js`
+   does, against the admin-created confidential `bench-client` (no consent
+   step), with PKCE S256; the measured op is `grant_type=refresh_token` on
+   every target. `token_refresh.js` keeps its `protocol-variant` label.
 3. **Publishing rule until then:** AXIAM's refresh number may be published as
    AXIAM's *session-refresh* capability, and Keycloak's as its *OAuth2-refresh*
    capability, side by side with the distinction stated — never as "AXIAM is

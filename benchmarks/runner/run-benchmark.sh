@@ -272,7 +272,7 @@ ZITADEL_ONLY_SCENARIOS="zitadel_userinfo_grpc.js"
 # confidential one; it is gated here with the rest of the OAuth2 set because
 # the same seed provisions both. oauth2_discovery.js is NOT here, for the
 # reason jwks_fetch is not: it needs a tenant, never a client.
-OAUTH2_SCENARIOS="oauth2_client_credentials.js oauth2_client_credentials_reactor_hook.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js oauth2_code_pkce.js"
+OAUTH2_SCENARIOS="oauth2_client_credentials.js oauth2_client_credentials_reactor_hook.js token_introspection.js token_refresh.js userinfo.js oauth2_revoke.js oauth2_authorize.js device_authorization.js device_verify.js device_flow_poll.js token_exchange.js uma2_perm.js uma_ticket_grant.js oauth2_code_pkce.js oauth2_refresh_grant.js"
 skip_oauth2() {
   [ "${BENCH_SKIP_OAUTH2:-0}" = "1" ] && return 0
   [ "$TARGET" = "axiam" ] && [ -z "${BENCH_CLIENT_SECRET:-}" ] && return 0

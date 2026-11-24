@@ -121,7 +121,7 @@ check_runs() {
     fail=1
   fi
 }
-SHARED="jwks_fetch.js oauth2_client_credentials.js oauth2_password_login.js token_introspection.js token_refresh.js userinfo.js"
+SHARED="jwks_fetch.js oauth2_client_credentials.js oauth2_password_login.js oauth2_refresh_grant.js token_introspection.js token_refresh.js userinfo.js"
 # shellcheck disable=SC2086
 check_runs keycloak  $SHARED
 # shellcheck disable=SC2086
@@ -136,7 +136,7 @@ check_runs authentik $SHARED
 check_runs axiam authz_batch_grpc.js authz_batch_rest.js authz_check_grpc.js authz_check_rest.js \
   device_authorization.js device_flow_poll.js device_verify.js grpc_admin_validate.js grpc_infra.js \
   jwks_fetch.js oauth2_authorize.js oauth2_client_credentials.js oauth2_code_pkce.js oauth2_discovery.js \
-  oauth2_password_login.js oauth2_revoke.js opaque_login_start.js opaque_register_start.js \
+  oauth2_password_login.js oauth2_refresh_grant.js oauth2_revoke.js opaque_login_start.js opaque_register_start.js \
   scim_provisioning.js token_exchange.js token_introspection.js token_refresh.js uma2_perm.js \
   uma_ticket_grant.js userinfo.js userinfo_grpc.js
 

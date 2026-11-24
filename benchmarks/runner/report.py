@@ -415,17 +415,22 @@ def is_protocol_variant(scenario, target):
 
 # Per-scenario, per-target prose naming exactly what that target's cell
 # measures, for the caveat rendered next to PROTOCOL_VARIANT_SCENARIOS rows.
-# token_refresh: AXIAM deliberately ships no OAuth 2.1 ROPC/password grant
-# (refresh-harness-diagnosis.md §6), so its refresh cell is a SESSION refresh
-# (cookie + CSRF double-submit against axiam-auth's SessionRepository), while
-# Keycloak's/Zitadel's is the OAuth2 refresh_token grant. Both renew an access
-# credential without re-authenticating, so the row stays comparable at that
-# level, but never at the protocol level.
+# token_refresh: the cell seeds every target's refresh token from a password
+# login. AXIAM supports the OAuth2 refresh_token grant, but its token endpoint
+# has no password (ROPC) grant to seed one from, so its token_refresh cell is a
+# SESSION refresh (cookie + CSRF double-submit against axiam-auth's
+# SessionRepository), while Keycloak's/Zitadel's is the OAuth2 refresh_token
+# grant. Both renew an access credential without re-authenticating, so the row
+# stays comparable at that level, but never at the protocol level. The
+# like-for-like OAuth2 refresh grant is oauth2_refresh_grant (AXIAM seeded
+# through the authorization-code flow with PKCE), which carries no label.
 PROTOCOL_VARIANT_NOTES = {
     "token_refresh": {
         "axiam": "session refresh (POST /api/v1/auth/refresh, cookie + CSRF "
-                 "double-submit, axiam-auth SessionRepository — no OAuth2 "
-                 "ROPC/password grant exists to seed an OAuth2 refresh token)",
+                 "double-submit, axiam-auth SessionRepository). AXIAM supports "
+                 "the OAuth2 refresh-token grant, but its token endpoint has no "
+                 "password (ROPC) grant for this cell to seed one from; "
+                 "oauth2_refresh_grant measures the OAuth2 grant like for like",
         "keycloak": "OAuth2 refresh grant (grant_type=refresh_token against "
                     "the realm token endpoint)",
         "zitadel": "OAuth2 refresh grant (via a Session-API-v2-seeded login; "

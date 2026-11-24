@@ -78,6 +78,7 @@ benchmarks/
 │   ├── oauth2_client_credentials.js
 │   ├── token_introspection.js
 │   ├── token_refresh.js
+│   ├── oauth2_refresh_grant.js   # OAuth2 refresh grant on every target (AXIAM seeded via code+PKCE)
 │   ├── jwks_fetch.js
 │   ├── userinfo.js
 │   ├── authz_check_rest.js     # AXIAM-only; SDK check_access wire baseline
@@ -617,7 +618,8 @@ needed for the five shared endpoints and is not attempted.
 ### Scenarios, profiles, and what authentik is not part of
 
 * **Scenarios.** `--scenario all` runs the five shared scenarios plus
-  `token_refresh` (as above) — exactly Keycloak's set. Every AXIAM-only and
+  `token_refresh` and `oauth2_refresh_grant` (both fall back as above) —
+  exactly Keycloak's set. Every AXIAM-only and
   Zitadel-only scenario is excluded by the runner's "every target except X"
   filters, and `runner/scenario-filter-selftest.sh` pins both the exclusions and
   the exact survivor set per competitor (`BENCH_LIST_SCENARIOS=1` prints it

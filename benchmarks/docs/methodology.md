@@ -378,15 +378,24 @@ things under the same name.
 A third comparability class, orthogonal to both of the above: some scenarios
 are structurally guaranteed to measure a **different underlying operation per
 target**, even though every cell is a real, correct, non-fallback measurement
-of the operation its own label names. Today that's `token_refresh.js`: AXIAM
-ships no OAuth 2.1 ROPC/password grant (the grant is removed in OAuth 2.1),
-so it has no way to seed an OAuth2 refresh token from a password login — its
-cell measures a **session refresh** (`POST /api/v1/auth/refresh`, cookie +
-CSRF double-submit, `axiam-auth`'s `SessionRepository`), while Keycloak's and
-Zitadel's cells measure the **OAuth2 `refresh_token` grant**. Both renew an
-access credential without re-authenticating — comparable at the product
-level — but never at the protocol level (see
-`claude_dev/refresh-harness-diagnosis.md` §6 for the full derivation).
+of the operation its own label names. Today that's `token_refresh.js`, which
+seeds every target's refresh token from a password login. AXIAM supports the
+OAuth2 `refresh_token` grant, but its token endpoint implements no password
+(ROPC) grant — `TokenService::exchange` accepts `authorization_code`,
+`client_credentials` and `refresh_token` — so this cell cannot seed an OAuth2
+refresh token on AXIAM. Its AXIAM cell therefore measures a **session
+refresh** (`POST /api/v1/auth/refresh`, cookie + CSRF double-submit,
+`axiam-auth`'s `SessionRepository`), while Keycloak's and Zitadel's cells
+measure the **OAuth2 `refresh_token` grant**. Both renew an access credential
+without re-authenticating — comparable at the product level — but never at the
+protocol level (see `claude_dev/refresh-harness-diagnosis.md` §6).
+
+The like-for-like counterpart is `oauth2_refresh_grant.js`: every target
+answers the same `grant_type=refresh_token` request with the confidential
+bench client's credentials. Only the seeding differs, before measurement —
+AXIAM runs the authorization-code flow with PKCE (S256) per VU in `setup()`,
+Keycloak uses ROPC — so that cell carries **no** protocol-variant label, and
+Zitadel's and authentik's cells read `fallback-op` as in `token_refresh.js`.
 
 Unlike `fallback-op`, this is a **static, per-scenario property** — it can't
 be derived from `bench_fallback` (a cell can read `fallback_count: 0` and

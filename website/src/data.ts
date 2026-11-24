@@ -1694,7 +1694,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "AXIAM issues 3.9× the tokens/s of Keycloak and 3.8× those of Zitadel, at a 15 ms p50 against their 99–109 ms, and holds within 2% under TLS 1.3 and mutual TLS. The lead is half what run 5 measured (7.9×): AXIAM's server used 0.70 of its 2 cores while SurrealDB sat at its 2-core cap, so this cell now measures the database tier, not the token service.",
-    note: "SurrealDB 4.0.1 costs 25% here (run 6c)",
+    note: "SurrealDB 4.0.1 costs 26% here (run 6c)",
   },
   {
     id: "introspection",
@@ -1735,7 +1735,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "Keycloak serves 2.7× AXIAM's userinfo reads (3,862 vs 1,411 req/s); AXIAM still leads Zitadel by 1.6×. Keycloak answers this endpoint without touching PostgreSQL (0.01 cores), whereas AXIAM reads SurrealDB on every call and SurrealDB is pegged. Server-only, AXIAM costs 0.42 cpu·ms per request against Keycloak's 0.52, so the gap is the database round trip, not the server.",
-    note: "SurrealDB 4.0.1 costs 35% here (run 6c) · Zitadel token via client_credentials",
+    note: "SurrealDB 4.0.1 costs 37% here (run 6c) · Zitadel token via client_credentials",
   },
   {
     id: "userinfo_grpc",
@@ -1773,7 +1773,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "Informational, not a like-for-like race: AXIAM has no ROPC/password grant by design, so its cell measures session-cookie refresh (CSRF double-submit, single-use rotation) while Keycloak's measures the OAuth2 refresh-token grant. Keycloak is ahead this run; AXIAM's server sat at 0.27 cores with SurrealDB pegged, and refresh is three database round trips. Zitadel's and authentik's cells are fallback operations and are excluded.",
-    note: "protocol-variant · SurrealDB 4.0.1 costs 31% here (run 6c)",
+    note: "protocol-variant · SurrealDB 4.0.1 costs 32% here (run 6c)",
   },
 ];
 
@@ -1808,7 +1808,7 @@ export const BENCH_AUTHZ: BenchScenario = {
   ],
   takeaway:
     "gRPC delivers 31% more single checks than REST at a lower p95 (100 vs 153 ms), and a batch of five turns 485 REST operations/s into 2,425 checks/s — 4.9× singles, the same amplification run 5 measured. The absolute figures are half or less of run 5's (1,032 / 1,268 / 5,130 / 4,640): on every authorization cell SurrealDB used 2.02 of its 2 cores while AXIAM's server used 0.38–0.43. These are database-tier numbers; the cache-on sensitivity pass was not part of this run.",
-  note: "AXIAM-only · SurrealDB 4.0.1 costs 16–39% here (run 6c)",
+  note: "AXIAM-only · SurrealDB 4.0.1 costs 15–38% here (run 6c)",
 };
 
 /**
@@ -2010,21 +2010,22 @@ export const BENCH_CAPS: BenchCapsRow[] = [
  * Run 6c (2026-11-23/24, same VM as runs 6 and 6b) — the same AXIAM 1.3.1
  * image against a SurrealDB **3.3.5** server (unsupported, benchmark-only),
  * compared cell by cell with run 6b's AXIAM 1.3.1 on 4.0.1 at equal caps.
- * p0-plaintext, median of 3, 33/33 cells valid in both passes. "costs" is
+ * All three profiles were measured (33/33 valid per pass); this table compares
+ * p0-plaintext only, against run 6b's p0 cells. Median of 3. "costs" is
  * how much lower 4.0.1's throughput is than 3.3.5's: 1 − thr(4.0.1)/thr(3.3.5).
  */
 export const BENCH_SURREAL: BenchSurrealRow[] = [
-  { scenario: "Client credentials", caps2: "1,448 → 1,922 · 1.33× · 25%", caps4: "3,234 → 3,748 · 1.16× · 14%", dbCost: "1.40 → 1.06" },
-  { scenario: "Token introspection", caps2: "1,438 → 1,658 · 1.15× · 13%", caps4: "3,272 → 3,628 · 1.11× · 10%", dbCost: "1.41 → 1.23" },
-  { scenario: "OIDC userinfo — REST", caps2: "1,320 → 2,030 · 1.54× · 35%", caps4: "2,963 → 4,413 · 1.49× · 33%", dbCost: "1.54 → 1.00" },
-  { scenario: "OIDC userinfo — gRPC", caps2: "2,795 → 4,072 · 1.46× · 31%", caps4: "6,369 → 8,753 · 1.37× · 27%", dbCost: "0.73 → 0.50" },
-  { scenario: "Session refresh", caps2: "305 → 445 · 1.46× · 31%", caps4: "707 → 756 · 1.07× · 6%", dbCost: "6.62 → 4.49" },
-  { scenario: "Authz check — REST", caps2: "451 → 733 · 1.63× · 38%", caps4: "1,007 → 1,609 · 1.60× · 37%", dbCost: "4.48 → 2.76" },
-  { scenario: "Authz check — gRPC", caps2: "572 → 867 · 1.52× · 34%", caps4: "1,320 → 1,975 · 1.50× · 33%", dbCost: "3.53 → 2.34" },
-  { scenario: "Authz batch — REST", caps2: "445 → 728 · 1.64× · 39%", caps4: "974 → 1,615 · 1.66× · 40%", dbCost: "4.54 → 2.77" },
-  { scenario: "Authz batch — gRPC", caps2: "577 → 688 · 1.19× · 16%", caps4: "1,229 → 1,535 · 1.25× · 20%", dbCost: "3.50 → 2.95" },
+  { scenario: "Client credentials", caps2: "1,448 → 1,970 · 1.36× · 26%", caps4: "3,234 → 3,853 · 1.19× · 16%", dbCost: "1.40 → 1.04" },
+  { scenario: "Token introspection", caps2: "1,438 → 1,661 · 1.16× · 13%", caps4: "3,272 → 3,609 · 1.10× · 9%", dbCost: "1.41 → 1.23" },
+  { scenario: "OIDC userinfo — REST", caps2: "1,320 → 2,081 · 1.58× · 37%", caps4: "2,963 → 4,372 · 1.48× · 32%", dbCost: "1.54 → 0.98" },
+  { scenario: "OIDC userinfo — gRPC", caps2: "2,795 → 4,026 · 1.44× · 31%", caps4: "6,369 → 8,743 · 1.37× · 27%", dbCost: "0.73 → 0.51" },
+  { scenario: "Session refresh", caps2: "305 → 450 · 1.48× · 32%", caps4: "707 → 771 · 1.09× · 8%", dbCost: "6.62 → 4.49" },
+  { scenario: "Authz check — REST", caps2: "451 → 714 · 1.58× · 37%", caps4: "1,007 → 1,593 · 1.58× · 37%", dbCost: "4.48 → 2.84" },
+  { scenario: "Authz check — gRPC", caps2: "572 → 914 · 1.60× · 37%", caps4: "1,320 → 1,955 · 1.48× · 32%", dbCost: "3.53 → 2.22" },
+  { scenario: "Authz batch — REST", caps2: "445 → 716 · 1.61× · 38%", caps4: "974 → 1,556 · 1.60× · 37%", dbCost: "4.54 → 2.84" },
+  { scenario: "Authz batch — gRPC", caps2: "577 → 679 · 1.18× · 15%", caps4: "1,229 → 1,540 · 1.25× · 20%", dbCost: "3.50 → 2.99" },
   { scenario: "Password login", caps2: "46 → 47 · 1.02×", caps4: "93 → 89 · 0.96×", dbCost: "14.8 → 8.1" },
-  { scenario: "JWKS fetch (no database)", caps2: "41,523 → 34,281 · 0.83×", caps4: "43,232 → 36,159 · 0.84×", dbCost: "—" },
+  { scenario: "JWKS fetch (no database)", caps2: "41,523 → 40,430 · 0.97×", caps4: "43,232 → 41,737 · 0.97×", dbCost: "—" },
 ];
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";

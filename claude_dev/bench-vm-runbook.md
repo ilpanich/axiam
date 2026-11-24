@@ -864,7 +864,20 @@ Re-checked on 2026-11-23 against the sources named.
    SurrealQL that 3.3.x also runs. 9e55515 and 5ccd0d7, also in 1.3.1, change retry budgets
    (`helpers.rs`, `role.rs`, `notification_window.rs`). **8a78041 is not in 1.3.1** (2026-11-13, after
    the 2026-11-11 tag) and does not matter here; it only changes how the lost migration lease parks.
-   AXIAM ran on 3.3.x until 68b6d4d with this same schema.
+   Checked over the whole range rather than these four commits — every non-test change under
+   `crates/` from `68b6d4d^` (the last 3.x commit) to `v1.3.1`, 40 commits: six `axiam-db` files
+   changed, and the `$cutoff` sweep is the **only** change to SurrealQL text (the CIBA query is
+   identical line for line inside its new retry). The write-conflict detection, which matches the
+   datastore's error *text*, was not touched: `WRITE_CONFLICT_MARKERS` in `helpers.rs` still holds
+   the 3.x phrasing (`"Transaction conflict"`, from a live 3.x message), and the 4.0 SDK has no
+   3.x-specific code path beyond the version check. **The server these queries last passed CI
+   against is 3.3.4, not 3.3.5**: at `68b6d4d^`, `ci.yml`, the benchmark compose and
+   `docker/docker-compose.prod.yml` all pin `surrealdb/surrealdb:v3.3.4` (3.3.5 was only the SDK
+   crate). 3.3.5 is a patch release, and the race probe found no change from 3.3.4 to 3.3.5 in the
+   property it measures, so no difference is expected — but it is the one server version this pass
+   runs that CI never did. What *is* new is the client: the 4.0 SDK now encodes AXIAM's parameters
+   and decodes its results for a 3.x server, a pairing SurrealDB declares supported and nobody has
+   run with AXIAM's values. That is what the dry run tests.
 3. **The single-winner guarantee holds on 3.3.5.** `tools/surreal-race-probe/RESULTS.md`, section
    "surrealdb 3.3.5 / surrealdb-core 3.3.5 / surrealkv 0.21.4": 5 000 rounds × 8 racers in both
    mechanisms, **0 rounds with more than one winner**, 0 burned. The same file records 4.0's slower
@@ -1046,6 +1059,15 @@ the range supported by the client`; a migration or query error names the stateme
 `(bench-seed)`, or a cell's `.dryrun.log`. **On any FAIL: stop here, run step 6 (teardown), and send the
 two logs. Do not change code, schema or harness to get past it** (§14.2 point 5).
 
+**The 3.3.4 fallback — the maintainer's decision, not the operator's.** If the FAIL is a query or a
+serialized value that 3.3.5 rejects, the one variable left to try is the server: **3.3.4** is the exact
+server AXIAM's queries last passed CI against (§14.2 point 2). It is not a silent substitute: #7667
+measures 4.0 against **3.3.5**, so a 3.3.4 run answers "how much is the 4.x server" against a different
+baseline, and its report must say so on every number. If the maintainer chooses it, repeat steps 1–3
+with `v3.3.4` in place of `v3.3.5` in the two SurrealDB commands of step 2 (pull and digest), write the
+trees as `…-surreal-3.3.4-…` instead of `…-surreal-3.3.5-…`, and record the choice in the run notes. A
+FAIL on 3.3.4 too ends the pass: the incompatibility is then the 4.0 SDK's, not the server patch's.
+
 **4 — Pass A**, at run 6's caps:
 
 ```bash
@@ -1125,6 +1147,7 @@ The archive from `just bench-pack` (it now carries `results/run6c/**`), and thes
 - AXIAM:              1.3.1 @ <digest>, identical to run 6b's (yes / no)
 - Volume reset:       `docker volume ls` empty before the dry runs (yes / no) and after the round (yes / no)
 - Dry runs:           2/2 <all PASS / which FAIL>; 4/4 <all PASS / which FAIL>
+- 3.3.4 fallback:     not needed / used, decided by <who>, because <the 3.3.5 FAIL>
 - Caps check (jq):    pass A db cpu_cap=2 only (yes / no); pass B cpu_cap=4 only (yes / no)
 - Steal during run:   mean <x> %; periods above 5 %: <when>
 - Start / end, interruptions, anything re-run:

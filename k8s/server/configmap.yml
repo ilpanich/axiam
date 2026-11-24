@@ -97,6 +97,19 @@ data:
   # Read via std::env::var directly rather than through the config layer, but
   # the name is the same either way.
   AXIAM__RATE_LIMIT__TRUSTED_HOPS: "0"
+  # TRUSTED_PROXIES is the other half of the same rule (SA-45), and it is NOT
+  # set here: its value is the ingress controller's pod CIDR, which differs per
+  # cluster (`kubectl -n ingress-nginx get pods -o wide`, or the CNI's pod
+  # range), so a default would be wrong somewhere. Left empty, the server reads
+  # X-Forwarded-For from EVERY peer, so any pod that can reach :8090 (or a local
+  # process) can forge the client address. Set it to the controller's CIDR so
+  # only that proxy's header is read and every other peer is keyed on its own
+  # address:
+  #
+  #   AXIAM__RATE_LIMIT__TRUSTED_PROXIES: "10.42.0.0/16"
+  #
+  # `none` means no proxy is trusted at all. Semantics, boot WARN and the
+  # worked table: docs/deployment/README.md (the TRUSTED_PROXIES row).
   # ---------------------------------------------------------------------
   # Forwarded client certificates
   # ---------------------------------------------------------------------

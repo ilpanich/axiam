@@ -1565,6 +1565,23 @@ SA-12; skip it here.
 
 ### SA-45 — Deployment manifests — Sonnet 5.5
 
+> **EXECUTED (2026-11-24, Sonnet 5.5). Four leads (h15-supply-deploy) reproduced; the rpi5-k3s ServiceLB lead did not reproduce, so nothing was changed for it.**
+> - **ServiceAccount tokens.** `automountServiceAccountToken: false` is set on every pod in `k8s/`: the `axiam-server` and `axiam-frontend` Deployments and the `vault`, `surrealdb` and `rabbitmq` StatefulSets, plus the `vault` ServiceAccount. Before the change, the grep found no occurrence. The rpi5 overlay only patches replica counts.
+> - **Ingress policy.** `allow-ingress-to-server` now pairs its `namespaceSelector` with a controller `podSelector` (ingress-nginx chart labels) in the same `from` entry, so both must match.
+> - **Compose binds.** The dev and e2e compose files publish SurrealDB 8000, RabbitMQ 5671/15672 and dev Vault 8200 on `127.0.0.1` instead of `0.0.0.0`. CI reaches these services only from the runner host.
+> - **`TRUSTED_PROXIES`.** It is documented, with a commented example, next to `TRUSTED_HOPS` in the k8s ConfigMap. No value is set.
+> - **ServiceLB (not reproduced).** k3s is installed with `--disable servicelb`, and ingress-nginx runs as a hostNetwork DaemonSet with no Service. Every Service in `k8s/` is ClusterIP, so no Service exists to carry `externalTrafficPolicy`.
+>
+> Checks:
+> - `check-docker-context` and `check-config-key-coverage` pass.
+> - `docker compose config -q` passes for both compose files.
+> - All touched YAML parses.
+> - No kubeconform or kubectl was available, and no repo check validates `k8s/`.
+>
+> Residuals:
+> - `allow-ingress-to-frontend.yml` has the same namespace-only rule (not in scope).
+> - With a hostNetwork controller, as on rpi5, the CNI may see node IPs, so neither selector would match. This is unchanged from before; confirm on the cluster.
+
 `automountServiceAccountToken: false` on every pod; a controller `podSelector`
 on `allow-ingress-to-server`; dev and e2e compose bind SurrealDB, RabbitMQ and
 Vault to `127.0.0.1`; `externalTrafficPolicy: Local` on the rpi5-k3s ServiceLB;

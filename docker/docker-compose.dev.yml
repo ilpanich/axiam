@@ -28,7 +28,7 @@ services:
       SURREAL_USER: root
       SURREAL_PASS: root
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - surrealdb-data:/data
     healthcheck:
@@ -45,8 +45,8 @@ services:
       # A6: 5671 (AMQPS) only. There is no plaintext 5672 mapping because there
       # is no plaintext listener to map — see docker/rabbitmq-tls.conf, mounted
       # below, which sets `listeners.tcp = none`.
-      - "5671:5671"
-      - "15672:15672"
+      - "127.0.0.1:5671:5671"
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: axiam
       RABBITMQ_DEFAULT_PASS: axiam
@@ -101,7 +101,7 @@ services:
       VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}"
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
     ports:
-      - "8200:8200"
+      - "127.0.0.1:8200:8200"
     healthcheck:
       # 200 = unsealed and active. A dev-mode Vault should reach this within a
       # second or two; anything else means it did not start cleanly.

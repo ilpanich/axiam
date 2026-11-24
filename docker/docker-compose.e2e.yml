@@ -36,7 +36,7 @@ services:
       SURREAL_USER: root
       SURREAL_PASS: root
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - e2e-surrealdb-data:/data
     healthcheck:
@@ -107,8 +107,8 @@ services:
     container_name: axiam-e2e-rabbitmq
     ports:
       # A6: 5671 (AMQPS) only — there is no plaintext listener to publish.
-      - "5671:5671"
-      - "15672:15672"
+      - "127.0.0.1:5671:5671"
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: axiam
       RABBITMQ_DEFAULT_PASS: axiam

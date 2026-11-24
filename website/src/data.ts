@@ -1772,7 +1772,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
       { target: "AXIAM", value: 347, display: "347", axiam: true },
     ],
     takeaway:
-      "Informational, not a like-for-like race: AXIAM has no ROPC/password grant by design, so its cell measures session-cookie refresh (CSRF double-submit, single-use rotation) while Keycloak's measures the OAuth2 refresh-token grant. Keycloak is ahead this run; AXIAM's server sat at 0.27 cores with SurrealDB pegged, and refresh is three database round trips. Zitadel's and authentik's cells are fallback operations and are excluded.",
+      "Informational, not a like-for-like race. AXIAM supports the OAuth2 refresh-token grant, but the harness obtains user tokens through a password login, and AXIAM's token endpoint has no password (ROPC) grant. So AXIAM's cell measures session-cookie refresh (CSRF double-submit, single-use rotation), while Keycloak's measures the OAuth2 refresh-token grant. Keycloak is ahead this run; AXIAM's server sat at 0.27 cores with SurrealDB pegged, and session refresh is three database round trips. Zitadel's and authentik's cells are fallback operations and are excluded.",
     note: "protocol-variant · SurrealDB 4.0.1 costs 32% here (run 6c)",
   },
 ];

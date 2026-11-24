@@ -556,6 +556,7 @@ const NEXT = [
   "Find Zitadel's non-CPU limit and its fixed 200 ms gRPC userinfo floor before quoting either as a product ceiling",
   "The deferred passes: production rate-limit table, minimal profile, new-feature cells",
   "Refresh stage timings",
+  "A like-for-like OAuth2 refresh-grant cell against Keycloak — AXIAM seeded through the authorization-code flow with PKCE (harness ready)",
   "authentik: still no valid cell at 4/4 (it roughly doubled, still above the 2 s gate) — a larger envelope, or an explanation",
   "Profile the Python SDK gap",
   "The seventh draft of PUBLIC_BENCH_ANALYSIS.md from runs 6 and 6b",

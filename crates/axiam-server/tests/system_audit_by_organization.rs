@@ -105,7 +105,7 @@ async fn active_user(db: &Surreal<Db>, tenant_id: Uuid, username: &str) -> Uuid 
             tenant_id,
             username: username.into(),
             email: format!("{username}@example.com"),
-            password: "test-only-placeholder-not-a-real-password".into(), // gitleaks:allow
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await

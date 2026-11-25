@@ -55,7 +55,7 @@ async fn setup() -> (
             tenant_id: tenant.id,
             username: "alice".into(),
             email: "alice@example.com".into(),
-            password: "pass123".into(),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await
@@ -66,7 +66,7 @@ async fn setup() -> (
             tenant_id: tenant.id,
             username: "bob".into(),
             email: "bob@example.com".into(),
-            password: "pass123".into(),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await
@@ -466,7 +466,7 @@ async fn get_members_total_does_not_leak_other_tenant_count() {
                 tenant_id: tenant_b,
                 username: format!("u{n}"),
                 email: format!("u{n}@example.com"),
-                password: "pass123".into(),
+                password: axiam_test_support::test_password(),
                 metadata: None,
             })
             .await

@@ -134,7 +134,7 @@ async fn user_with_role(db: &Surreal<TestDb>, tenant_id: Uuid, role_name: &str) 
             tenant_id,
             username: format!("u-{}", Uuid::new_v4().simple()),
             email: format!("u-{}@example.com", Uuid::new_v4().simple()),
-            password: generated_secret("pw"),
+            password: axiam_test_support::test_password(),
             metadata: None,
         })
         .await

@@ -201,7 +201,7 @@ async fn login_alice(
         .unwrap()
     {
         LoginResult::Success(out) => out,
-        other => panic!("expected Success, got {other:?}"),
+        _ => panic!("expected Success, got another variant"),
     }
 }
 
@@ -395,7 +395,7 @@ async fn login_locked_user() {
                 "expected 'locked' in reason: {reason}"
             );
         }
-        other => panic!("expected AuthenticationFailed, got {other:?}"),
+        _ => panic!("expected AuthenticationFailed, got another variant"),
     }
 }
 
@@ -446,7 +446,7 @@ async fn login_inactive_user() {
                 "expected 'inactive' in reason: {reason}"
             );
         }
-        other => panic!("expected AuthenticationFailed, got {other:?}"),
+        _ => panic!("expected AuthenticationFailed, got another variant"),
     }
 }
 
@@ -1218,7 +1218,7 @@ async fn refresh_locked_user_fails() {
         AxiamError::AuthenticationFailed { reason } => {
             assert!(reason.contains("locked"), "expected 'locked': {reason}");
         }
-        other => panic!("expected AuthenticationFailed, got {other:?}"),
+        _ => panic!("expected AuthenticationFailed, got another variant"),
     }
 }
 
@@ -1324,7 +1324,7 @@ async fn refresh_inactive_user_fails() {
         AxiamError::AuthenticationFailed { reason } => {
             assert!(reason.contains("inactive"), "expected 'inactive': {reason}");
         }
-        other => panic!("expected AuthenticationFailed, got {other:?}"),
+        _ => panic!("expected AuthenticationFailed, got another variant"),
     }
 }
 
@@ -1586,7 +1586,7 @@ async fn mfa_login_challenge_flow() {
 
     let challenge_token = match login_result {
         LoginResult::MfaRequired(mfa) => mfa.challenge_token,
-        other => panic!("expected MfaRequired, got {other:?}"),
+        _ => panic!("expected MfaRequired, got another variant"),
     };
 
     // Verify MFA with a valid code from a LATER step — SECHRD-01 now seeds
@@ -2188,7 +2188,7 @@ async fn login_mfa_enforced_no_mfa_configured_returns_setup_required() {
                 "setup_token should be non-empty"
             );
         }
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     }
 }
 
@@ -2229,7 +2229,7 @@ async fn login_mfa_enforced_mfa_already_configured_returns_mfa_challenge() {
                 "challenge_token should be non-empty"
             );
         }
-        other => panic!("expected MfaRequired, got {other:?}"),
+        _ => panic!("expected MfaRequired, got another variant"),
     }
 }
 
@@ -2262,7 +2262,7 @@ async fn login_mfa_not_enforced_no_mfa_returns_success() {
 
     assert!(
         matches!(result, LoginResult::Success(_)),
-        "expected Success, got {result:?}"
+        "expected Success"
     );
 }
 
@@ -2341,7 +2341,7 @@ async fn login_mfa_enforced_federated_user_skips_enforcement() {
 
     assert!(
         matches!(result, LoginResult::Success(_)),
-        "expected Success for federated user, got {result:?}"
+        "expected Success for federated user"
     );
 }
 
@@ -2374,7 +2374,7 @@ async fn enroll_mfa_with_setup_token_succeeds() {
         .unwrap()
     {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
 
     let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
@@ -2413,7 +2413,7 @@ async fn confirm_mfa_with_setup_token_returns_login_tokens() {
         .unwrap()
     {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
 
     // Step 2: Enroll with setup_token → get secret.
@@ -2470,7 +2470,7 @@ async fn reset_mfa_clears_state_and_revokes_sessions() {
 
     let challenge_token = match result {
         LoginResult::MfaRequired(mfa) => mfa.challenge_token,
-        other => panic!("expected MfaRequired, got {other:?}"),
+        _ => panic!("expected MfaRequired, got another variant"),
     };
 
     // Re-fetch user to get the encrypted secret for TOTP generation.
@@ -2583,7 +2583,7 @@ async fn login_after_reset_requires_setup_again() {
 
     assert!(
         matches!(result, LoginResult::MfaSetupRequired(_)),
-        "expected MfaSetupRequired after reset, got {result:?}"
+        "expected MfaSetupRequired after reset"
     );
 }
 
@@ -3210,13 +3210,13 @@ async fn sa03_mfa_purpose_tokens_are_typed_and_are_not_access_tokens() {
 
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     enable_mfa_for_alice(&svc, tenant_id, user_id).await;
     let challenge_token =
         match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
             LoginResult::MfaRequired(c) => c.challenge_token,
-            other => panic!("expected MfaRequired, got {other:?}"),
+            _ => panic!("expected MfaRequired, got another variant"),
         };
 
     for (token, typ) in [
@@ -3348,24 +3348,27 @@ async fn sa03_an_access_token_is_refused_by_the_mfa_verifiers() {
 // -----------------------------------------------------------------------
 
 /// A reset: the same write `PasswordResetService::confirm_reset` makes.
+/// Returns the new password, generated per call rather than a literal.
 async fn reset_alices_password(
     users: &SurrealUserRepository<surrealdb::engine::local::Db>,
     tenant_id: Uuid,
     user_id: Uuid,
-) {
+) -> String {
+    let new_password = other_password();
     users
         .update(
             tenant_id,
             user_id,
             axiam_core::models::user::UpdateUser {
                 password_hash: Some(
-                    axiam_auth::password::hash_password("A-brand-new-Passw0rd!", None).unwrap(),
+                    axiam_auth::password::hash_password(&new_password, None).unwrap(),
                 ),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
+    new_password
 }
 
 /// S-6: an MFA setup token issued before a reset is refused after it, by every
@@ -3385,7 +3388,7 @@ async fn s6_an_mfa_setup_token_issued_before_a_reset_is_refused_after_it() {
     );
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     // Control: before any reset the token is good (and a user with no epoch is
     // unaffected).
@@ -3399,7 +3402,7 @@ async fn s6_an_mfa_setup_token_issued_before_a_reset_is_refused_after_it() {
                 &e,
                 axiam_core::error::AxiamError::AuthenticationFailed { .. }
             ),
-            "expected the invalid-token answer, got {e:?}"
+            "expected the invalid-token answer"
         );
     };
     invalid(svc.decode_setup_token(&setup_token).await.unwrap_err());
@@ -3442,7 +3445,7 @@ async fn s6_an_mfa_challenge_token_issued_before_a_reset_is_refused_after_it() {
     let challenge_token =
         match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
             LoginResult::MfaRequired(c) => c.challenge_token,
-            other => panic!("expected MfaRequired, got {other:?}"),
+            _ => panic!("expected MfaRequired, got another variant"),
         };
     assert!(svc.decode_mfa_challenge_ids(&challenge_token).await.is_ok());
 
@@ -3523,7 +3526,7 @@ async fn sr3_1_a_challenge_built_from_the_replaced_credential_is_refused() {
     let challenge_token =
         match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
             LoginResult::MfaRequired(c) => c.challenge_token,
-            other => panic!("expected MfaRequired, got {other:?}"),
+            _ => panic!("expected MfaRequired, got another variant"),
         };
     // ...and the reset commits afterwards, its epoch stamped before the token.
     reset_alices_password(&users, tenant_id, user_id).await;
@@ -3564,7 +3567,7 @@ async fn sr3_1_a_setup_token_built_from_the_replaced_credential_is_refused() {
     );
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     reset_alices_password(&users, tenant_id, user_id).await;
     rewind_the_epoch_before_the_artefact(&db, &users, tenant_id, user_id).await;
@@ -3632,7 +3635,7 @@ async fn qr21_1_a_challenge_with_the_current_version_is_accepted_despite_an_earl
     let challenge_token =
         match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
             LoginResult::MfaRequired(c) => c.challenge_token,
-            other => panic!("expected MfaRequired, got {other:?}"),
+            _ => panic!("expected MfaRequired, got another variant"),
         };
     // The datastore clock reads an hour ahead of the minting replica: the epoch
     // is now after the challenge's `iat`, with the version untouched.
@@ -3671,7 +3674,7 @@ async fn sr3_2_a_stale_challenge_is_refused_with_the_uniform_answer() {
     let challenge_token =
         match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
             LoginResult::MfaRequired(c) => c.challenge_token,
-            other => panic!("expected MfaRequired, got {other:?}"),
+            _ => panic!("expected MfaRequired, got another variant"),
         };
 
     // The answer a forged challenge gets: a signed token that is not a
@@ -3691,7 +3694,7 @@ async fn sr3_2_a_stale_challenge_is_refused_with_the_uniform_answer() {
     );
     let reason_of = |e: AxiamError| match e {
         AxiamError::AuthenticationFailed { reason } => reason,
-        other => panic!("expected AuthenticationFailed, got {other:?}"),
+        _ => panic!("expected AuthenticationFailed, got another variant"),
     };
     let verify = |token: String, code: String| {
         svc.verify_mfa(VerifyMfaInput {
@@ -3773,20 +3776,20 @@ async fn s6_a_token_issued_after_the_reset_is_accepted() {
             .is_none(),
         "a user nobody has changed has no epoch"
     );
-    reset_alices_password(&users, tenant_id, user_id).await;
+    let new_password = reset_alices_password(&users, tenant_id, user_id).await;
     tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
 
     let setup_token = match login_alice_with_password(
         &svc,
         tenant_id,
         org_id,
-        "A-brand-new-Passw0rd!",
+        &new_password,
         mfa_enforced_policy(),
     )
     .await
     {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     assert!(svc.decode_setup_token(&setup_token).await.is_ok());
 }
@@ -3892,7 +3895,7 @@ async fn qr2_6_a_token_issued_after_the_epoch_in_the_same_second_is_accepted() {
     let challenge_token =
         match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
             LoginResult::MfaRequired(c) => c.challenge_token,
-            other => panic!("expected MfaRequired, got {other:?}"),
+            _ => panic!("expected MfaRequired, got another variant"),
         };
 
     // The epoch is the start of the second the challenge was minted in: before
@@ -3940,7 +3943,7 @@ async fn qr2_6_a_setup_token_issued_after_the_epoch_in_the_same_second_is_accept
     );
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     let (iat, iat_ns) = token_issue_time(&setup_token);
     set_alices_epoch(
@@ -4391,7 +4394,7 @@ async fn sr11_1_a_sign_in_landing_during_a_reset_leaves_no_session() {
     svc.confirm_reset(
         tenant_id,
         &raw_token,
-        "NewStr0ngPassword",
+        &other_password(),
         &policy,
         None,
         None,
@@ -4639,7 +4642,7 @@ async fn qr11_2_totp_verify_mfa_refuses_a_credential_change_after_its_check() {
         .unwrap()
     {
         LoginResult::MfaRequired(mfa) => mfa.challenge_token,
-        other => panic!("expected MfaRequired, got {other:?}"),
+        _ => panic!("expected MfaRequired, got another variant"),
     };
 
     w.arm_the_race();
@@ -4679,7 +4682,7 @@ async fn qr11_2_setup_token_completion_refuses_a_credential_change_after_its_che
         .unwrap()
     {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
 
     w.arm_the_race();
@@ -4979,7 +4982,7 @@ async fn sr16_1_a_reset_between_the_rotations_consume_and_create_leaves_no_sessi
                 .confirm_reset(
                     tenant_id,
                     &raw_reset,
-                    "NewStr0ngPassword",
+                    &other_password(),
                     &sr16_policy(),
                     None,
                     None,
@@ -5052,7 +5055,7 @@ async fn qr17_1_a_rotation_committed_after_a_reset_and_its_revocations_does_not_
                 .confirm_reset(
                     tenant_id,
                     &raw_reset,
-                    "NewStr0ngPassword",
+                    &other_password(),
                     &sr16_policy(),
                     None,
                     None,
@@ -5489,7 +5492,7 @@ fn sa43_svc(
 async fn sa43_challenge(svc: &TestSvc, tenant_id: Uuid, org_id: Uuid) -> String {
     match login_alice_with(svc, tenant_id, org_id, None).await {
         LoginResult::MfaRequired(c) => c.challenge_token,
-        other => panic!("expected MfaRequired, got {other:?}"),
+        _ => panic!("expected MfaRequired, got another variant"),
     }
 }
 
@@ -5546,7 +5549,7 @@ async fn sa43_restarting_totp_enrolment_keeps_the_confirmed_authenticator() {
     assert!(
         out.is_ok(),
         "the confirmed authenticator still signs in after an unconfirmed \
-         re-enrolment: {out:?}"
+         re-enrolment"
     );
 }
 
@@ -5619,7 +5622,7 @@ async fn sa43_setup_token_cannot_enrol_totp_once_a_passkey_exists() {
     let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
 
     // What `POST /auth/webauthn/setup/register/finish` leaves behind.
@@ -5648,7 +5651,7 @@ async fn sa43_a_setup_token_completes_one_sign_in() {
     let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
     let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
@@ -5862,7 +5865,7 @@ async fn sr12_a_spent_setup_token_cannot_enrol_or_confirm_totp() {
     let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     // The enrolment is started while the token is still unspent.
     let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
@@ -5957,7 +5960,7 @@ async fn sr12_a_wrong_code_does_not_spend_the_setup_token() {
     let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
     let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
         LoginResult::MfaSetupRequired(s) => s.setup_token,
-        other => panic!("expected MfaSetupRequired, got {other:?}"),
+        _ => panic!("expected MfaSetupRequired, got another variant"),
     };
     let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
     let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
@@ -5986,7 +5989,7 @@ async fn qr17_a_failed_pending_clear_leaves_no_session_live() {
     let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
     let out = match login_alice_with(&svc, tenant_id, org_id, None).await {
         LoginResult::Success(out) => out,
-        other => panic!("expected Success, got {other:?}"),
+        _ => panic!("expected Success, got another variant"),
     };
 
     let reset = MfaMethodService::new(

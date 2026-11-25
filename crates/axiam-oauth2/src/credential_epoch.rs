@@ -136,7 +136,8 @@ mod tests {
                 tenant_id,
                 username: "epoch-user".into(),
                 email: "epoch-user@example.com".into(),
-                password: "test-only-placeholder-not-a-real-password".into(), // gitleaks:allow
+                // Generated per run: a literal reads as a hard-coded credential (CodeQL).
+                password: format!("Fx1!{}", Uuid::new_v4().simple()),
                 metadata: None,
             })
             .await

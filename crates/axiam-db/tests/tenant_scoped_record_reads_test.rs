@@ -165,6 +165,46 @@ async fn session_for(db: &Surreal<Db>, tenant_id: Uuid, user_id: Uuid, ttl: Dura
         .id
 }
 
+/// The session check with the account: the same verdict as the session check
+/// alone, and the account — as `get_by_id` answers it — only when active.
+#[tokio::test]
+async fn the_session_check_with_the_account_answers_as_the_two_reads() {
+    let (db, a, b) = setup().await;
+    let sessions = SurrealSessionRepository::new(db.clone());
+    let users = SurrealUserRepository::new(db.clone());
+    let alice = user_in(&db, a, "alice").await;
+    let live = session_for(&db, a, alice, Duration::hours(1)).await;
+    let expired = session_for(&db, a, alice, Duration::seconds(-1)).await;
+
+    let (active, account) = sessions
+        .is_session_active_checked_with_account(a, live, alice)
+        .await;
+    assert!(active);
+    let account = account.expect("read alongside").unwrap();
+    assert_eq!(account.id, users.get_by_id(a, alice).await.unwrap().id);
+
+    // Inactive: expired, unknown, or another tenant's — and no account.
+    for (tenant, session) in [(a, expired), (a, Uuid::new_v4()), (b, live)] {
+        let (active, account) = sessions
+            .is_session_active_checked_with_account(tenant, session, alice)
+            .await;
+        assert_eq!(
+            active,
+            sessions.is_session_active_checked(tenant, session).await
+        );
+        assert!(!active);
+        assert!(account.is_none());
+    }
+
+    // An account outside the session's tenant is NotFound, as get_by_id says.
+    let bob = user_in(&db, b, "bob").await;
+    let (active, account) = sessions
+        .is_session_active_checked_with_account(a, live, bob)
+        .await;
+    assert!(active);
+    assert!(matches!(account, Some(Err(AxiamError::NotFound { .. }))));
+}
+
 /// The client lookup with its tenant and an account: the client as
 /// `get_by_client_id` answers, the tenant as `TenantRepository::get_by_id`
 /// (a tombstoned one is NotFound), the account as `UserRepository::get_by_id`.

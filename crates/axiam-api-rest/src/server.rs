@@ -2550,6 +2550,9 @@ fn oauth2_scope<C: surrealdb::Connection + Clone>(
             // its own token because RFC 6750 §2.2 puts one carrier in the body.
             .service(
                 web::resource("/userinfo")
+                    // The handler reads the principal's own account; let the
+                    // session check read it in the same round trip.
+                    .app_data(crate::extractors::auth::PrefetchAccount)
                     .route(web::get().to(handlers::oauth2::userinfo::<C>))
                     .route(web::post().to(handlers::oauth2::userinfo_post::<C>)),
             );

@@ -1341,22 +1341,12 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         let mut result = self
             .db
             .current()
-            .query(
+            .query(format!(
                 "LET $subject_records = [\
                      type::record('user', $user_id), \
                      type::record('service_account', $user_id)\
                  ]; \
-                 SELECT meta::id(out.id) AS record_id, \
-                        out.tenant_id AS tenant_id, \
-                        out.name AS name, \
-                        out.description AS description, \
-                        out.is_global AS is_global, \
-                        out.created_at AS created_at, \
-                        out.updated_at AS updated_at, \
-                        resource_id, \
-                        tenant_scope, \
-                        inherit \
-                 FROM has_role \
+                 SELECT {ASSIGNMENT_COLUMNS} FROM has_role \
                  WHERE in IN $subject_records \
                  AND out.tenant_id = $tenant_id; \
                  LET $group_records = (\
@@ -1364,20 +1354,10 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
                      WHERE in IN $subject_records \
                      AND out.tenant_id = $tenant_id\
                  ); \
-                 SELECT meta::id(out.id) AS record_id, \
-                        out.tenant_id AS tenant_id, \
-                        out.name AS name, \
-                        out.description AS description, \
-                        out.is_global AS is_global, \
-                        out.created_at AS created_at, \
-                        out.updated_at AS updated_at, \
-                        resource_id, \
-                        tenant_scope, \
-                        inherit \
-                 FROM has_role \
+                 SELECT {ASSIGNMENT_COLUMNS} FROM has_role \
                  WHERE in IN $group_records \
-                 AND out.tenant_id = $tenant_id;",
-            )
+                 AND out.tenant_id = $tenant_id;"
+            ))
             .bind(("tenant_id", tenant_id_str))
             .bind(("user_id", user_id_str))
             .await

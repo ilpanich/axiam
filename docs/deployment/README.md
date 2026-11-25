@@ -798,6 +798,235 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
 
+## Upgrading to the release with the 2026-11 security-audit fixes
+
+This release closes the findings of the 2026-11-14 security audit
+([`claude_dev/security-audit-2026-11-14.md`](../../claude_dev/security-audit-2026-11-14.md);
+fix plan [`claude_dev/security-audit-2026-11-14-fix-plan.md`](../../claude_dev/security-audit-2026-11-14-fix-plan.md)).
+Several of the fixes change behaviour a live deployment may rely on. Read the
+table first, then the sections it links to; the ones marked **act** need an
+operator step before or during the rollout, the others only need to be known.
+
+| Task | What changes | Operator action |
+|---|---|---|
+| SA-01 | Bootstrap always needs the setup token | **act** if you script bootstrap |
+| SA-02 | Four permissions withheld from Standard tenants | **act** if a tenant admin relied on them |
+| SA-03 | Access tokens are typed; `aud` is required | **act**: sessions renew once; see the section below |
+| SA-18 | New `roles` scope and claim; SDK `require_role` needs it | **act** for applications using `require_role` |
+| SA-12 | gRPC `UserService` is authorized | **act** for gRPC `ValidateCredentials` callers |
+| SA-13 | Tenant suspension is enforced | know it; clients must handle `tenant_suspended` |
+| SA-11 | SAML SP requires an `AudienceRestriction` | **act** if an IdP omits it |
+| SA-14 | Internal AMQP queues are signed | **act**: drain the queues |
+| SA-15 | Authz responses are signed and routed by `reply_to` | none; additive |
+| SA-10 | Guarded fetches ignore environment proxies | **act** if egress is proxy-only |
+| SA-16 | SurrealDB credentials move out of argv; dev image tag | **act** if you customised the SurrealDB command |
+| SA-09 | Erasure cancel restores the prior account status | none |
+| Wave 4 | Hardening: SA-40 to SA-45 | know them; see the last subsection |
+
+**Rolling the release out.** Schema migrations v119 (SA-06), v120 (SA-09) and
+v121 (SA-43) are additive and run at startup, as described under
+[Schema migrations at startup](#schema-migrations-at-startup). Roll the AMQP
+producers and consumers together (SA-14), keep
+`AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` for the length of a mixed-version
+rollout only (SA-03), and re-sync the SDKs afterwards: the SDK contract is
+1.68 and every SDK ships it as 1.4.0.
+
+### SA-01 — bootstrap needs the setup token on every path
+
+`POST /api/v1/admin/bootstrap` used to treat a matching
+`AXIAM_BOOTSTRAP_ADMIN_EMAIL` as a substitute for the one-time setup token. It
+is now only an **additional** restriction: a request needs a valid, unconsumed
+`setup_token` in every configuration, and a mismatched address is a `403` on
+top of that. No environment variable replaces the token.
+
+- A script or pipeline that bootstrapped by email alone must read the token
+  from the first-boot log (`scripts/first-boot-token.sh` does it for Compose
+  and Kubernetes) and send it as `setup_token`.
+- A second bootstrap call is now answered `403`, not `409`: the first call
+  consumed the token. `409` is left to two requests racing with one token.
+- Treat first-boot logs as secret until bootstrap has run.
+
+See [First-run admin bootstrap](../admin/README.md#first-run-admin-bootstrap)
+and [Recovering the bootstrap setup token](#recovering-the-bootstrap-setup-token).
+
+### SA-02 — organization-level permissions are withheld from Standard tenants
+
+`audit_logs:list_system`, `organizations:get_settings`,
+`organizations:update_settings` and `tenants:export_audit` are now
+organization-level actions. Their handlers
+(`GET /api/v1/audit-logs/system`, the organization settings and email-config
+reads and writes, and a sibling tenant's `GET` and audit export) accept only an
+organization principal, and the seeder withholds the four permissions from the
+`super_admin` and `admin` roles of every Standard tenant.
+
+- **Existing tenants are corrected at the next boot.** The server reconciles
+  default-role grants at every start, so the four actions are revoked from the
+  super-admin and admin roles of tenants that already hold them. No migration
+  is needed.
+- A **custom role** an operator granted one of these actions keeps the row, but
+  the handler still refuses a tenant principal. Use an organization principal
+  (see [Organization scope](../admin/organization-scope.md)) for these calls.
+- A tenant administrator who used to edit the organization's security baseline
+  or read the system audit partition now gets `403`. The admin console hides
+  those tabs for such users.
+
+See [Organization scope](../admin/organization-scope.md).
+
+### SA-03 and SA-18 — typed access tokens, the `roles` claim
+
+SA-03 is the section [Access-token type and upgrading](#access-token-type-typ-atjwt-and-upgrading)
+below; its two operator-visible effects are:
+
+- `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` defaults to `true`, so tokens minted
+  by the previous release (`typ: JWT`) are refused and every session renews
+  within one access-token lifetime (15 minutes by default). Set it to `false`
+  on the new replicas for the length of a rolling upgrade only.
+- `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` defaults to `false`: an access token
+  without `aud` is refused on user routes and on gRPC. A deployment that
+  depended on `aud`-less user tokens must mint tokens with an audience, or set
+  the variable to `true` explicitly and plan to remove it.
+
+SA-18 adds a `roles` scope and claim. A client receives the claim only if
+`roles` is in its registered scopes **and** the request asks for it; nothing is
+granted to existing clients. A client that already had an application scope
+literally named `roles` now gets the claim when it asks for that scope. Service
+accounts may send `scope=roles` on the client-credentials grant.
+
+**SDKs.** `require_role` in the SDKs no longer reads OAuth scopes. It reads the
+`roles` claim only and answers `403` when the claim is absent, so an application
+that uses `require_role` must request the `roles` scope on its sign-in. For a
+scope check, use the new `require_scope`. The claim is a snapshot, stale for at
+most one access-token lifetime; `require_access` stays authoritative
+([The `roles` scope and access-token claim](../api/roles-claim.md)).
+
+### SA-12 — gRPC `UserService` permissions
+
+- `GetUser` of another user now requires `users:get`; a caller can always read
+  itself.
+- `ValidateCredentials` is restricted to service accounts (`aud = axiam:m2m`)
+  holding the new permission `users:validate_credentials`. **No role holds it
+  after the upgrade**, so an SDK or service that calls it receives
+  `PERMISSION_DENIED` until an operator grants the permission to the service
+  account's role. It is seeded to no default role and reconciliation never adds
+  it.
+- Every answered `ValidateCredentials` call writes an
+  `auth.credentials_validated` audit row.
+
+See [gRPC](../api/grpc.md).
+
+### SA-13 — tenant suspension is enforced
+
+Setting a tenant to `Suspended` now ends its sessions and refresh tokens in the
+same transaction, and refuses sign-in, token issuance, refresh, REST, gRPC,
+SCIM and AMQP authorization for its principals with `tenant_suspended` (REST
+`403`, OAuth2 `400`, gRPC `PERMISSION_DENIED`). Its data is kept.
+
+- Setting the tenant back to `Active` does **not** restore the old sessions;
+  users sign in again.
+- The organization's own tenant cannot be suspended (`409
+  organization_tenant_not_suspendable`).
+- Organization principals can still read the tenant and change its status.
+- Clients and monitors that treated `Suspended` as cosmetic must handle the new
+  error code. Audit ingestion over AMQP is still accepted for a suspended
+  tenant.
+
+See [Tenant suspension](../admin/tenant-suspension.md).
+
+### SA-11 — the SAML SP requires an audience
+
+An assertion is accepted only if its `<Conditions>` carry an
+`AudienceRestriction` that names the SP entity ID, and its `Recipient` and
+`Destination` match the ACS URL the sign-in started with, on the form-POST ACS
+as well as the JSON one. There is no per-IdP opt-out. **An IdP that omits the
+audience restriction is now refused**: before the upgrade, ask the IdP
+administrator to add the AXIAM SP entity ID as an audience, and test one
+sign-in per IdP.
+
+### SA-14 and SA-15 — internal AMQP queues
+
+The mail, webhook, SSF-push, SCIM-push and CIBA-ping queues now carry a signed
+envelope. **Drain those queues and their `.retry` queues before the upgrade**,
+or set `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false` for one
+deployment on a vhost nobody else can publish to; old replicas cannot read the
+envelope, so roll producers and consumers together. Messages already in a
+`.dlq` replay only with the flag off. Mail to a user that cannot be read, and
+deliveries to a disabled or unsubscribed webhook, are no longer sent. Full
+procedure: [Upgrading: drain the queues](#upgrading-drain-the-queues-or-relax-the-check-for-one-deployment);
+operator summary: [Internal queue signing](../admin/internal-queue-signing.md).
+
+SA-15 is additive on the wire: an authorization response now carries
+`tenant_id`, the request's `nonce` and an `hmac_signature`, and goes to the
+request's `reply_to` queue when one is set. Consumers that ignore unknown
+fields are unaffected. A requester that sets `reply_to` now receives its answer
+on that queue instead of the shared `axiam.authz.response`.
+
+### SA-10 — no egress proxy for guarded fetches
+
+Webhooks, back-channel logout, SSF push, CIBA ping, CIMD, JWKS and discovery
+fetches, token exchange, social and SAML metadata fetches, outbound SCIM, HTTP
+mail providers and FIDO MDS now ignore `HTTP_PROXY`, `HTTPS_PROXY` and
+`ALL_PROXY`. If the network allows egress only through a proxy, these fetches
+fail until a network-layer rule (a firewall rule or a transparent egress
+gateway) allows them. See
+[Outbound SSRF guard](#outbound-ssrf-guard--same-network-idps-axiam__pki__ssrf_allowed_hosts).
+
+### SA-16 — SurrealDB credentials and the dev image
+
+- The Compose files and the Kubernetes StatefulSet now pass the SurrealDB root
+  credentials as `SURREAL_USER` and `SURREAL_PASS` instead of `--user` and
+  `--pass` on the command line, so they no longer appear in the process list.
+  An operator with a **customised SurrealDB command or StatefulSet** must make
+  the same move. That SurrealDB 4 honours these variables was not run-verified
+  in the audit's environment (no Docker daemon): smoke-test it before you roll
+  out.
+- The development Compose stack pulls
+  `ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:-1.3.1}`, the namespace the
+  release pipeline publishes to, not `…/axiamhq/…:latest`. Override the tag with
+  `AXIAM_IMAGE_TAG`; the default is bumped with each release.
+
+### SA-09 — erasure cancel restores the prior status
+
+Cancelling an account-erasure request now restores the account to the status it
+had before the request (`Locked`, `Inactive` and `PendingVerification` are no
+longer turned into `Active`). A request created before schema v120 has no
+recorded status and restores `Active`, as every cancel did.
+
+### Wave 4 hardening — SA-40 to SA-45
+
+- **SA-40, REST edge.** A path segment that percent-decodes (repeatedly) to `.`
+  or `..` is no longer treated as public; the CSRF exemption is an exact match;
+  a percent-encoded duplicate tenant selector (`tenant%5Fid`) is refused `400
+  invalid_request` before authentication.
+- **SA-41, OAuth2.** A `code_verifier` presented for a code with no stored
+  challenge is `invalid_grant`; another client presenting a PAR `request_uri`
+  no longer spends it; introspection (REST and gRPC) reports `active: false`
+  when the token's `sid` session is gone.
+- **SA-42, SSRF guard.** Cloud-metadata and other never-allowed addresses are
+  refused even when a deployment allows private addresses; `::1` stays reachable
+  there. `::ffff:0:0/96` is classified as special-purpose.
+- **SA-43, MFA.** A TOTP secret is now pending until confirmed (schema v121),
+  so re-enrolment cannot invalidate a confirmed authenticator. An MFA setup
+  token minted by the previous release cannot complete a sign-in (it expires in
+  five minutes), and setup tokens are single-use. A wrong second-factor code
+  now counts toward the per-account lockout; **for accounts with MFA, the
+  password step no longer resets `failed_login_attempts`** — only a completed
+  second factor does. A WebAuthn second factor refuses a deactivated or locked
+  account.
+- **SA-44, audit and health.** Audit rows redact the token of
+  `/api/v1/account/export/{token}`; `GET /health/jobs` reports `last_error` as a
+  category (for example `internal_error`, `directory_unavailable`), not the
+  error text; the detail stays in the warn log. Anything that parsed the old
+  text must read the category. The OpenAPI spec digest changed, so SDK
+  repositories re-sync `sdks/openapi.json`.
+- **SA-45, Kubernetes and Compose.** The `k8s/` pods no longer automount a
+  ServiceAccount token (`automountServiceAccountToken: false`); a workload that
+  needs the Kubernetes API must opt in. `allow-ingress-to-server` admits only
+  the ingress controller's pods, selected by the ingress-nginx chart labels:
+  **check the labels match your controller** (with a hostNetwork controller the
+  CNI may see node IPs and neither selector matches, as before). The dev and e2e
+  Compose files publish SurrealDB, RabbitMQ and dev Vault on `127.0.0.1` only.
+  `TRUSTED_PROXIES` is documented next to `TRUSTED_HOPS` in the ConfigMap.
+
 ## Access-token type (`typ: at+jwt`) and upgrading
 
 Every access token AXIAM mints carries the JOSE header `typ: at+jwt`

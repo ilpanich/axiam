@@ -39,6 +39,12 @@ bound on an outbound fetch a stranger chooses the target of),
 `id_token_hint` mean what they say, the two ACR values, why `max_age=0`
 is handled as `prompt=login`; `axiam_idp_hint` and `default_idp`: starting a
 sign-in at one identity provider),
+[Tenant suspension](tenant-suspension.md) (what `Suspended` stops, what it
+keeps, why the organization's own tenant cannot be suspended, and what lifting
+it does not bring back),
+[Internal AMQP queue signing](internal-queue-signing.md) (the signed envelope
+on the mail and outbound queues, the upgrade drain, and the audit rows a
+refused message leaves),
 [API docs](../api/README.md).
 
 All endpoints below require a bearer JWT (`Authorization: Bearer <token>`,
@@ -97,6 +103,14 @@ restriction is set and does not match, bootstrap is refused with `403`. The
 token is checked first, and every one of these refusals carries the same
 reason text, so a caller without the token can learn neither whether the email
 restriction is set nor whether a guessed address is the configured one.
+
+**Upgrading from a release before the 2026-11 security-audit fixes (SA-01).**
+Those releases accepted a matching `AXIAM_BOOTSTRAP_ADMIN_EMAIL` as a
+substitute for the token. A script, pipeline or runbook that bootstrapped by
+email alone now gets `403` and must read the token from the first-boot log and
+send it as `setup_token`. Setting the variable is no longer enough, and a
+deployment that is already bootstrapped is unaffected. See also the
+[upgrade notes](../deployment/README.md#sa-01--bootstrap-needs-the-setup-token-on-every-path).
 
 ### I lost the setup token
 

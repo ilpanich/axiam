@@ -9,7 +9,7 @@
 //! audiences. `federation.rs` is the tenant-admin CRUD surface, gated on
 //! `federation:*` permissions. Everything here is reachable with no credential
 //! at all, and every one of these routes therefore appears in **both**
-//! `PUBLIC_PATHS` and `CSRF_EXEMPT_SUFFIXES` and carries a rate limit.
+//! `PUBLIC_PATHS` and `CSRF_EXEMPT_PATHS` and carries a rate limit.
 //!
 //! See `claude_dev/federation-sso-login-design.md` §5.
 

@@ -38,12 +38,12 @@ pub const HEADER_CSRF: &str = "X-CSRF-Token";
 // Exempt path suffixes — no CSRF token needed on these endpoints
 // ---------------------------------------------------------------------------
 
-/// Path suffixes that are exempt from CSRF validation.
+/// Full request paths that are exempt from CSRF validation (exact match).
 ///
 /// These are either unauthenticated endpoints (login, MFA flows) that do not
 /// yet have a CSRF cookie, or token-based OAuth2 flows that use their own
 /// security model.
-const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
+const CSRF_EXEMPT_PATHS: &[&str] = &[
     "/api/v1/auth/login",
     // The OPAQUE endpoints are exempt on exactly the same grounds as /login:
     // the caller is unauthenticated and has no `axiam_csrf` cookie to echo.
@@ -133,7 +133,7 @@ fn is_csrf_exempt(path: &str) -> bool {
     // Exact equality on the full path (every entry is `/api/v1/...`, and the
     // middleware only wraps scopes that see that full path). `ends_with` would
     // exempt any future nested route whose tail happens to equal an entry.
-    if CSRF_EXEMPT_SUFFIXES.contains(&path) {
+    if CSRF_EXEMPT_PATHS.contains(&path) {
         return true;
     }
     for prefix in CSRF_EXEMPT_PREFIXES {
@@ -743,7 +743,7 @@ mod tests {
     fn every_csrf_exempt_auth_path_is_also_publicly_routable() {
         // A path exempted here but absent from PUBLIC_PATHS is 401'd by
         // AuthzMiddleware instead — the same drift in the other direction.
-        for path in CSRF_EXEMPT_SUFFIXES {
+        for path in CSRF_EXEMPT_PATHS {
             if !path.starts_with("/api/v1/auth/") {
                 continue;
             }

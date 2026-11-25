@@ -4570,6 +4570,7 @@ impl RaceWorld {
             ReadThenBumpUserRepo {
                 inner: user_repo,
                 armed: armed.clone(),
+                fail_pending_clear: false,
             },
             session_repo,
             fed_repo,
@@ -5827,5 +5828,195 @@ async fn sa43_reset_mfa_clears_the_pending_totp_secret() {
         users.pending_mfa_secret(tenant_id, user_id).await.unwrap(),
         None,
         "the reset leaves no enrolment to confirm"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Wave 4 gate, round 1 (SR1-2 / QR1-2, QR1-7): the TOTP setup confirm spends
+// the setup token before it stores the factor, and an MFA reset revokes
+// sessions whatever happens to the pending-secret clear
+// -----------------------------------------------------------------------
+
+/// Whether alice holds a TOTP factor: a promoted secret under the flag.
+async fn sr12_has_totp_factor(
+    db: &Surreal<surrealdb::engine::local::Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> bool {
+    let user = SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap();
+    user.mfa_enabled || user.mfa_secret.is_some()
+}
+
+/// SR1-2 / QR1-2: a setup token that has been spent — here as a WebAuthn setup
+/// finish spends it before a ceremony that then fails — can neither confirm a
+/// TOTP enrolment it started earlier nor start a new one. Before the fix the
+/// confirm promoted the secret and only then failed at the spend, so the
+/// factor was stored behind a refused request.
+#[tokio::test]
+async fn sr12_a_spent_setup_token_cannot_enrol_or_confirm_totp() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    // The enrolment is started while the token is still unspent.
+    let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
+    let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
+
+    // What the WebAuthn setup finish does before it stores a credential.
+    svc.spend_setup_token(&setup_token)
+        .await
+        .expect("the first spend wins");
+
+    let confirmed = svc
+        .confirm_mfa_with_setup_token(
+            &setup_token,
+            &totp.generate_current().to_string(),
+            None,
+            None,
+        )
+        .await;
+    assert!(confirmed.is_err(), "a spent token completes no sign-in");
+    assert!(
+        !sr12_has_totp_factor(&db, tenant_id, user_id).await,
+        "and stores no TOTP factor either"
+    );
+
+    let enrolled = svc.enroll_mfa_with_setup_token(&setup_token).await;
+    assert!(
+        enrolled.is_err(),
+        "a spent token cannot start a TOTP enrolment: {:?}",
+        enrolled.map(|_| ())
+    );
+}
+
+/// SR1-2 / QR1-2: a setup token minted before the `jti` claim existed cannot
+/// be spent, so it must not store anything either: neither a pending TOTP
+/// secret at `enroll` nor a factor at `confirm`.
+#[tokio::test]
+async fn sr12_a_setup_token_without_a_jti_stores_nothing() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let now = Utc::now().timestamp();
+    let legacy = token::sign_purpose_token(
+        &serde_json::json!({
+            "sub": user_id.to_string(),
+            "tenant_id": tenant_id.to_string(),
+            "org_id": org_id.to_string(),
+            "purpose": "mfa_setup",
+            "iss": "axiam-test",
+            "iat": now,
+            "exp": now + 300,
+        }),
+        token::TYP_MFA_SETUP,
+        &test_config(),
+    )
+    .unwrap();
+    let users = SurrealUserRepository::new(db.clone());
+
+    let enrolled = svc.enroll_mfa_with_setup_token(&legacy).await;
+    assert!(
+        enrolled.is_err(),
+        "a token with no jti cannot start an enrolment: {:?}",
+        enrolled.map(|_| ())
+    );
+    assert_eq!(
+        users.pending_mfa_secret(tenant_id, user_id).await.unwrap(),
+        None,
+        "and stages no pending secret"
+    );
+
+    // An enrolment in progress (started some other way) is not confirmed by it.
+    let pending = svc.enroll_mfa(tenant_id, user_id).await.unwrap();
+    let totp = totp_from_secret(&pending.secret_base32, "alice@example.com");
+    let confirmed = svc
+        .confirm_mfa_with_setup_token(&legacy, &totp.generate_current().to_string(), None, None)
+        .await;
+    assert!(
+        confirmed.is_err(),
+        "a token with no jti completes no sign-in"
+    );
+    assert!(
+        !sr12_has_totp_factor(&db, tenant_id, user_id).await,
+        "and stores no TOTP factor"
+    );
+}
+
+/// SR1-2 / QR1-2: a mistyped code still does not cost the token — the code is
+/// verified before the token is spent.
+#[tokio::test]
+async fn sr12_a_wrong_code_does_not_spend_the_setup_token() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let setup_token = match login_alice_with(&svc, tenant_id, org_id, mfa_enforced_policy()).await {
+        LoginResult::MfaSetupRequired(s) => s.setup_token,
+        other => panic!("expected MfaSetupRequired, got {other:?}"),
+    };
+    let enrollment = svc.enroll_mfa_with_setup_token(&setup_token).await.unwrap();
+    let totp = totp_from_secret(&enrollment.secret_base32, "alice@example.com");
+    let good = totp.generate_current().to_string();
+    let wrong = if good == "000000" { "111111" } else { "000000" };
+
+    svc.confirm_mfa_with_setup_token(&setup_token, wrong, None, None)
+        .await
+        .expect_err("a wrong code is refused");
+    assert!(!sr12_has_totp_factor(&db, tenant_id, user_id).await);
+
+    svc.confirm_mfa_with_setup_token(&setup_token, &good, None, None)
+        .await
+        .expect("the right code still completes the sign-in with the same token");
+    assert!(sr12_has_totp_factor(&db, tenant_id, user_id).await);
+}
+
+/// QR1-7: an administrator's MFA reset revokes the user's sessions even when
+/// the pending-secret clear fails. Before the fix that write sat between the
+/// user-row update and the session revocation, so its failure returned early
+/// with MFA off and every session still live.
+#[tokio::test]
+async fn qr17_a_failed_pending_clear_leaves_no_session_live() {
+    let (user_repo, session_repo, fed_repo, refresh_token_repo, org_id, tenant_id, user_id, db) =
+        setup().await;
+    let svc = sa43_svc(user_repo, session_repo, fed_repo, refresh_token_repo);
+    let out = match login_alice_with(&svc, tenant_id, org_id, None).await {
+        LoginResult::Success(out) => out,
+        other => panic!("expected Success, got {other:?}"),
+    };
+
+    let reset = MfaMethodService::new(
+        ReadThenBumpUserRepo {
+            inner: SurrealUserRepository::new(db.clone()),
+            armed: Arc::new(AtomicBool::new(false)),
+            fail_pending_clear: true,
+        },
+        SurrealWebauthnCredentialRepository::new(db.clone()),
+        SurrealSessionRepository::new(db.clone()),
+        SurrealRefreshTokenRepository::new(db.clone()),
+    )
+    .reset_mfa(tenant_id, user_id)
+    .await;
+    assert!(
+        reset.is_err(),
+        "the failed write is reported, so the administrator retries"
+    );
+
+    let refreshed = svc
+        .refresh(RefreshInput {
+            tenant_id,
+            org_id,
+            raw_refresh_token: out.refresh_token,
+            ip_address: None,
+            user_agent: None,
+        })
+        .await;
+    assert!(
+        refreshed.is_err(),
+        "no session survives the reset, whichever write failed"
     );
 }

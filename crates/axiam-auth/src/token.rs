@@ -491,6 +491,46 @@ pub struct AccessTokenClaims {
     pub ext: Option<std::collections::BTreeMap<String, String>>,
 }
 
+impl AccessTokenClaims {
+    /// Whether this token was minted by a grant that names **no session**: a
+    /// client's token without `sid` (the device grant, a code grant with no
+    /// session), an RPT, or an exchanged token (`axiam_exchanged`, and before
+    /// #819 `act` or `ext_exchange`).
+    ///
+    /// Its `jti` is minted fresh for that one token and names no session row,
+    /// so a lookup by it would find nothing and refuse a live token.
+    pub fn is_grant_without_session(&self) -> bool {
+        self.sid.is_none()
+            && (self.client_id.is_some()
+                || self.permissions.is_some()
+                || self.act.is_some()
+                || self.ext_exchange.is_some()
+                || self.axiam_exchanged.is_some())
+    }
+
+    /// The raw session identifier this token names, if it names one.
+    ///
+    /// The single statement of the rule every reader of a token's session
+    /// applies (the REST extractor, REST and gRPC introspection): `sid` first,
+    /// else `jti`, unless the token comes from a grant that names no session
+    /// ([`Self::is_grant_without_session`]), which names none.
+    ///
+    /// The `jti` fallback is what covers a first-party sign-in token (password,
+    /// OPAQUE, TOTP, WebAuthn, directory): the login path stores its session's
+    /// id in `jti` and sets no `sid` (see the `sid` field). Reading `sid` alone
+    /// would leave exactly those tokens active after logout.
+    ///
+    /// Returned unparsed so that each caller decides what an unusable
+    /// identifier means for it.
+    pub fn session_reference(&self) -> Option<&str> {
+        match self.sid.as_deref() {
+            Some(sid) => Some(sid),
+            None if self.is_grant_without_session() => None,
+            None => Some(&self.jti),
+        }
+    }
+}
+
 /// The `ext.` namespace prefix a `token.pre_issue` patch key carries, and the
 /// only prefix [`ext_claims_from_patch`] will accept.
 pub const EXT_CLAIM_PREFIX: &str = "ext.";
@@ -3781,6 +3821,39 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         assert_same_claims(&a, &b);
         // Both mint a fresh jti — a machine token has no session row behind it.
         assert_ne!(a.jti, b.jti, "each call must mint its own jti");
+    }
+
+    /// QR1-1: the one statement of "which session does this token name".
+    #[test]
+    fn session_reference_is_sid_else_jti_unless_the_grant_names_no_session() {
+        let config = test_config();
+        let (tenant, org) = (Uuid::new_v4(), Uuid::new_v4());
+        let (sid, jti) = (Uuid::new_v4(), Uuid::new_v4());
+
+        // A first-party sign-in token: `jti` is the session, no `sid`.
+        let sign_in = AccessTokenSpec::user(Uuid::new_v4(), tenant, org, jti.to_string())
+            .issue(&config)
+            .unwrap();
+        let claims = decode_claims(&sign_in, &config);
+        assert_eq!(claims.session_reference(), Some(jti.to_string().as_str()));
+
+        // `sid` wins over `jti`.
+        let oauth2 = AccessTokenSpec::user(Uuid::new_v4(), tenant, org, jti.to_string())
+            .session(Some(sid))
+            .client_id(Some("c"))
+            .issue(&config)
+            .unwrap();
+        let claims = decode_claims(&oauth2, &config);
+        assert_eq!(claims.session_reference(), Some(sid.to_string().as_str()));
+
+        // A grant that names no session: its `jti` is not one.
+        let device = AccessTokenSpec::user(Uuid::new_v4(), tenant, org, jti.to_string())
+            .client_id(Some("c"))
+            .issue(&config)
+            .unwrap();
+        let claims = decode_claims(&device, &config);
+        assert!(claims.is_grant_without_session());
+        assert_eq!(claims.session_reference(), None);
     }
 
     #[test]

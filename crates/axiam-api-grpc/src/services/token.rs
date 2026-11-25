@@ -71,17 +71,29 @@ impl<U: UserRepository> TokenServiceImpl<U> {
         self
     }
 
-    /// Whether the session a token's `sid` names is still live. A token with
-    /// no (or an unparseable-as-session) `sid` names none and is unaffected.
+    /// Whether the session a token names is still live.
+    ///
+    /// The session is named by `sid`, else by `jti`
+    /// (`AccessTokenClaims::session_reference`, the rule the REST extractor and
+    /// REST introspection apply): a first-party sign-in token carries its
+    /// session id in `jti` and no `sid`. Only a user token can name a session;
+    /// a client-credentials or service-account token, and a token of a grant
+    /// that names none (exchanged, RPT, device), is unaffected. A user token
+    /// whose reference is not a session id cannot be live.
     async fn session_is_live(&self, claims: &axiam_auth::token::AccessTokenClaims) -> bool {
         let Some(check) = &self.session_check else {
             return true;
         };
-        let (Some(sid), Ok(tenant_id)) = (
-            claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
-            claims.tenant_id.parse::<Uuid>(),
-        ) else {
+        if claims.sub_kind != axiam_auth::token::SubjectKind::User {
             return true;
+        }
+        let Some(reference) = claims.session_reference() else {
+            return true;
+        };
+        let (Ok(sid), Ok(tenant_id)) =
+            (Uuid::parse_str(reference), claims.tenant_id.parse::<Uuid>())
+        else {
+            return false;
         };
         check.is_session_active(tenant_id, sid).await
     }

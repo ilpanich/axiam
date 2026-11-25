@@ -1612,6 +1612,31 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .await
     }
 
+    async fn mfa_setup_token_spent(&self, tenant_id: Uuid, jti: &str) -> AxiamResult<bool> {
+        // SR1-2: the row `consume_mfa_setup_token` writes, looked up by the
+        // same `(tenant_id, kind, scope, jti)` its UNIQUE index covers.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE meta::id(id) FROM oauth2_proof_replay \
+                 WHERE tenant_id = $tenant_id AND kind = $kind \
+                 AND scope = 'mfa_setup' AND jti = $jti LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind((
+                "kind",
+                axiam_core::repository::ProofKind::WebauthnAssertion
+                    .as_str()
+                    .to_owned(),
+            ))
+            .bind(("jti", jti.to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<String> = result.take(0).map_err(DbError::from)?;
+        Ok(!rows.is_empty())
+    }
+
     async fn admit_unless_locked(
         &self,
         tenant_id: Uuid,

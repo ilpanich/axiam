@@ -536,6 +536,28 @@ pub trait UserRepository: Send + Sync {
         }
     }
 
+    /// Whether an MFA setup token's `jti` has already been spent
+    /// ([`Self::consume_mfa_setup_token`]) in `tenant_id`.
+    ///
+    /// A read, so it decides nothing on its own: a token it reports unspent
+    /// may still lose the spend. It lets the TOTP setup enrolment refuse a
+    /// spent token before it stages anything (SR1-2), as the spend already
+    /// refuses it at confirmation.
+    ///
+    /// The default implementation refuses, as for
+    /// [`Self::consume_mfa_setup_token`].
+    fn mfa_setup_token_spent(
+        &self,
+        _tenant_id: Uuid,
+        _jti: &str,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not record setup tokens".into(),
+            ))
+        }
+    }
+
     /// Anonymize a user row in-place for GDPR Art. 17 erasure (D-05).
     ///
     /// Implementations MUST scrub every PII column (email, username,

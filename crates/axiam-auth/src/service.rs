@@ -270,6 +270,14 @@ struct SetupTokenIds {
     exp: i64,
 }
 
+/// A TOTP enrolment code that verified and has not yet been recorded (SR1-2):
+/// the pending secret it was checked against (`None` for an enrolment started
+/// before the pending column existed) and the time step it used.
+struct VerifiedEnrolment {
+    pending: Option<String>,
+    used_step: u64,
+}
+
 /// The reason every refusal of an MFA challenge gives for a token that is not
 /// (or is no longer) a valid challenge: a forged or mistyped one, one that
 /// predates a credential change, and one for a user that is gone. A single
@@ -1413,6 +1421,24 @@ impl<
         user_id: Uuid,
         totp_code: &str,
     ) -> AxiamResult<()> {
+        let verified = self
+            .verify_enrolment_code(tenant_id, user_id, totp_code)
+            .await?;
+        self.activate_enrolment(tenant_id, user_id, verified).await
+    }
+
+    /// The read-only half of [`Self::confirm_mfa`] (SR1-2): check `totp_code`
+    /// against the enrolment in progress and write nothing.
+    ///
+    /// Split out so the setup-token confirmation can spend its token between
+    /// this check and [`Self::activate_enrolment`]: a mistyped code still does
+    /// not cost the token, and a token that cannot be spent stores nothing.
+    async fn verify_enrolment_code(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        totp_code: &str,
+    ) -> AxiamResult<VerifiedEnrolment> {
         let encryption_key = self
             .config
             .mfa_encryption_key
@@ -1454,6 +1480,19 @@ impl<
         if !valid {
             return Err(AuthError::MfaInvalidCode.into());
         }
+
+        Ok(VerifiedEnrolment { pending, used_step })
+    }
+
+    /// The writing half of [`Self::confirm_mfa`]: record the step the code
+    /// used and promote the secret it was verified against.
+    async fn activate_enrolment(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        verified: VerifiedEnrolment,
+    ) -> AxiamResult<()> {
+        let VerifiedEnrolment { pending, used_step } = verified;
 
         // Seed totp_last_used_step atomically. A lost CAS here means the
         // enrollment code was already consumed (e.g. a concurrent duplicate
@@ -2173,6 +2212,16 @@ impl<
         let ids = self.decode_mfa_setup_token(setup_token).await?;
         let (user_id, tenant_id) = (ids.user_id, ids.tenant_id);
 
+        // SR1-2: a token that cannot complete the sign-in stages nothing. One
+        // without a `jti` (minted before the claim existed) can never be
+        // spent; one already spent — by a WebAuthn setup finish whose ceremony
+        // then failed — has had its single use. The read decides nothing
+        // alone: `confirm_mfa_with_setup_token` spends before it stores.
+        let jti = ids.jti.as_deref().ok_or(AuthError::MfaSetupTokenInvalid)?;
+        if self.user_repo.mfa_setup_token_spent(tenant_id, jti).await? {
+            return Err(AuthError::MfaSetupTokenInvalid.into());
+        }
+
         // Guard: a setup token adds the account's FIRST factor, never a second
         // (SA-43). `mfa_enabled` is the account-has-a-factor flag — set by a
         // confirmed TOTP secret and by an enrolled passkey or security key
@@ -2203,21 +2252,33 @@ impl<
         user_agent: Option<String>,
     ) -> AxiamResult<LoginOutput> {
         let ids = self.decode_mfa_setup_token(setup_token).await?;
+        let (tenant_id, user_id) = (ids.tenant_id, ids.user_id);
+        // SR1-2: a token with no `jti` can never be spent, so it is refused
+        // before anything is read or stored.
+        if ids.jti.is_none() {
+            return Err(AuthError::MfaSetupTokenInvalid.into());
+        }
 
-        // Confirm MFA (validates code, flips mfa_enabled to true). SA-43: the
-        // token is spent after the code verifies, not before, so a mistyped
-        // code does not cost the user their sign-in. Two confirmations sent
-        // together cannot both store a factor anyway: the pending secret is
-        // promoted by a compare-and-set, once.
-        self.confirm_mfa(ids.tenant_id, ids.user_id, totp_code)
+        // SA-43 / SR1-2: verify the code, THEN spend the token, THEN store the
+        // factor — the order the WebAuthn setup finish uses (spend before
+        // store). A mistyped code fails the read-only check and leaves the
+        // token unspent. A spent token, or one that loses the spend to a
+        // concurrent WebAuthn finish or TOTP confirm, is refused before it
+        // promotes anything, so one setup token stores one factor. The cost,
+        // as on the WebAuthn path: a promotion that fails after the spend
+        // (a re-enrolment raced it) has used the token.
+        let verified = self
+            .verify_enrolment_code(tenant_id, user_id, totp_code)
             .await?;
-        let spent = self.spend_setup_token(setup_token).await?;
+        let spent = self.spend_decoded_setup_token(ids).await?;
+        self.activate_enrolment(tenant_id, user_id, verified)
+            .await?;
 
         self.complete_setup_token_login(
             spent,
             // Same evidence as `verify_mfa`: the setup token descends from a
             // verified password, and the TOTP code was just checked by
-            // `confirm_mfa` above.
+            // `verify_enrolment_code` above.
             AuthenticationEvidence::now(vec![Amr::Pwd, Amr::Otp, Amr::Mfa]),
             ip_address,
             user_agent,
@@ -2287,9 +2348,15 @@ impl<
     /// Callers spend before the step that must happen once: the WebAuthn setup
     /// finish before it stores the credential (two finishes sent together
     /// would otherwise both pass the factor-presence guard and both register
-    /// one), the TOTP setup confirm once its code has verified.
+    /// one), the TOTP setup confirm once its code has verified and before it
+    /// promotes the secret (SR1-2).
     pub async fn spend_setup_token(&self, setup_token: &str) -> AxiamResult<SpentSetupToken> {
         let ids = self.decode_mfa_setup_token(setup_token).await?;
+        self.spend_decoded_setup_token(ids).await
+    }
+
+    /// [`Self::spend_setup_token`] for a token the caller has already decoded.
+    async fn spend_decoded_setup_token(&self, ids: SetupTokenIds) -> AxiamResult<SpentSetupToken> {
         let jti = ids.jti.as_deref().ok_or(AuthError::MfaSetupTokenInvalid)?;
         let expires_at =
             DateTime::from_timestamp(ids.exp, 0).ok_or(AuthError::MfaSetupTokenInvalid)?;

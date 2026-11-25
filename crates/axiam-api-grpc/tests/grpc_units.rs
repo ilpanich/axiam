@@ -1809,3 +1809,95 @@ async fn sa41_introspection_reports_a_token_of_a_dead_session_inactive() {
         }
     }
 }
+
+/// Live for exactly one session id, so a test proves WHICH id the service
+/// asked about rather than that it asked.
+struct OnlySession(Uuid);
+
+impl axiam_api_grpc::middleware::strict_revocation::SessionRevocationCheck for OnlySession {
+    fn is_session_active(
+        &self,
+        _tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        let live = session_id == self.0;
+        Box::pin(async move { live })
+    }
+}
+
+/// QR1-1: gRPC introspection reads the session by the REST extractor's rule
+/// (`sid`, else `jti`, unless the token comes from a session-less grant).
+///
+/// A first-party sign-in token stores its session id in `jti` and has no
+/// `sid`: it is inactive once that session is gone and active while it is
+/// live. Client-credentials, service-account and device-grant tokens name no
+/// session and stay active whatever the session store holds.
+#[tokio::test]
+async fn qr1_1_introspection_reads_a_sign_in_tokens_session_from_jti() {
+    let tenant = Uuid::new_v4();
+    let org = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let cfg = auth_config();
+
+    let sign_in = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant,
+        org,
+        session_id.to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    let client_credentials = axiam_auth::token::AccessTokenSpec::oauth2_client("c-1", tenant, org)
+        .issue(&cfg)
+        .unwrap();
+    let service_account = axiam_auth::token::AccessTokenSpec::service_account(
+        Uuid::new_v4(),
+        tenant,
+        org,
+        Uuid::new_v4().to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    let device_grant = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant,
+        org,
+        Uuid::new_v4().to_string(),
+    )
+    .client_id(Some("c-1"))
+    .issue(&cfg)
+    .unwrap();
+
+    // (the one live session id, token, expected `active`, what)
+    let cases: Vec<(Uuid, &String, bool, &str)> = vec![
+        (session_id, &sign_in, true, "sign-in token, live session"),
+        (
+            Uuid::new_v4(),
+            &sign_in,
+            false,
+            "sign-in token, session deleted",
+        ),
+        (
+            Uuid::new_v4(),
+            &client_credentials,
+            true,
+            "client credentials",
+        ),
+        (Uuid::new_v4(), &service_account, true, "service account"),
+        (
+            Uuid::new_v4(),
+            &device_grant,
+            true,
+            "grant that names no session",
+        ),
+    ];
+    for (live_session, token, active, what) in cases {
+        let svc = token_service().with_session_check(Arc::new(OnlySession(live_session)));
+        let mut req = Request::new(IntrospectTokenRequest {
+            access_token: token.clone(),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let resp = svc.introspect_token(req).await.unwrap().into_inner();
+        assert_eq!(resp.active, active, "{what}");
+    }
+}

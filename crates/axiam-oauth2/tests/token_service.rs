@@ -1187,6 +1187,37 @@ fn build(
     build_with_upgrade_log(client, code, tenant, refresh).0
 }
 
+/// Same as [`build`], but the session store holds one live session, `session_id`
+/// (SA-41: introspection reads the session a sign-in token names, so a fixture
+/// token that is meant to be active needs a real session row behind it).
+fn build_with_live_session(
+    session_id: Uuid,
+    client: ClientOutcome,
+    code: MockCodeRepo,
+    tenant: TenantOutcome,
+    refresh: MockRefreshRepo,
+) -> Svc {
+    let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    TokenService::new(
+        MockClientRepo(client, log.clone()),
+        MockSaRepo(SaOutcome::NotFound, log.clone()),
+        code,
+        MockTenantRepo::new(tenant),
+        refresh,
+        MockUserRepo::default(),
+        MockSessionRepo(
+            Some(sa41_session(session_id, chrono::Duration::hours(1))),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+        ),
+        MockAuditRepo::default(),
+        test_config(),
+        2_592_000,
+        not_issued_here(),
+    )
+}
+
 /// Same as [`build`], but also hands back the log of
 /// `upgrade_client_secret_hash` calls so a test can assert that a legacy row
 /// was (or was not) migrated.
@@ -2783,18 +2814,21 @@ async fn introspect_valid_access_token_same_tenant_active() {
     // real deployment can produce.
     let tenant_id = client_tenant();
     let cfg = test_config();
+    // A sign-in token's `jti` is its session's id; the session is live.
+    let session_id = Uuid::new_v4();
     let token = issue_access_token(
         Uuid::new_v4(),
         tenant_id,
         Uuid::new_v4(),
         &["profile".to_string()],
         &cfg,
-        Uuid::new_v4().to_string(),
+        session_id.to_string(),
         AUD_USER,
     )
     .unwrap();
 
-    let svc = build(
+    let svc = build_with_live_session(
+        session_id,
         ClientOutcome::Found(make_client(&["refresh_token"], &[])),
         dummy_code_repo(),
         TenantOutcome::Found,
@@ -2899,17 +2933,19 @@ async fn p23w1_12_introspection_reports_a_suspended_accounts_tokens_inactive() {
         (LAPSED_PENDING_USER, true),
         (Uuid::new_v4(), true),
     ] {
+        let session_id = Uuid::new_v4();
         let access = issue_access_token(
             user,
             tenant_id,
             Uuid::new_v4(),
             &["openid".to_string()],
             &cfg,
-            Uuid::new_v4().to_string(),
+            session_id.to_string(),
             AUD_USER,
         )
         .unwrap();
-        let svc = build(
+        let svc = build_with_live_session(
+            session_id,
             ClientOutcome::Found(make_client(&["refresh_token"], &[])),
             dummy_code_repo(),
             TenantOutcome::Found,
@@ -7174,5 +7210,104 @@ async fn sa41_introspection_reports_a_token_of_a_dead_session_inactive() {
         if !active {
             assert!(resp.sub.is_none() && resp.scope.is_none() && resp.exp.is_none());
         }
+    }
+}
+
+/// QR1-1: introspection reads the session by the REST extractor's rule (`sid`,
+/// else `jti`, unless the token comes from a session-less grant).
+///
+/// A first-party sign-in token (password, OPAQUE, TOTP, WebAuthn, directory)
+/// stores its session id in `jti` and has NO `sid`. It must introspect inactive
+/// once its session row is gone, and active while it is live. Client
+/// credentials, service-account and device-grant tokens name no session and
+/// stay active whatever the session store holds.
+#[tokio::test]
+async fn qr1_1_introspection_reads_a_sign_in_tokens_session_from_jti() {
+    let tenant_id = client_tenant();
+    let cfg = test_config();
+    let session_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+
+    // The shape `AuthService::create_session_and_tokens` mints: `jti` is the
+    // session id, no `sid`, no `client_id`.
+    let sign_in = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant_id,
+        org_id,
+        session_id.to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    let client_credentials =
+        axiam_auth::token::AccessTokenSpec::oauth2_client("client-1", tenant_id, org_id)
+            .issue(&cfg)
+            .unwrap();
+    let service_account = axiam_auth::token::AccessTokenSpec::service_account(
+        Uuid::new_v4(),
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    // A user token of a grant that names no session (device grant): a fresh
+    // `jti` and a `client_id`, no `sid`.
+    let device_grant = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+    )
+    .client_id(Some("client-1"))
+    .issue(&cfg)
+    .unwrap();
+
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    // (stored session, token, expected `active`, what)
+    let cases: Vec<(Option<_>, &String, bool, &str)> = vec![
+        (
+            Some(sa41_session(session_id, chrono::Duration::hours(1))),
+            &sign_in,
+            true,
+            "sign-in token, live session",
+        ),
+        (None, &sign_in, false, "sign-in token, session deleted"),
+        (
+            Some(sa41_session(session_id, chrono::Duration::seconds(-5))),
+            &sign_in,
+            false,
+            "sign-in token, session expired",
+        ),
+        (None, &client_credentials, true, "client credentials"),
+        (None, &service_account, true, "service account"),
+        (None, &device_grant, true, "grant that names no session"),
+    ];
+    for (session, token, active, what) in cases {
+        let svc = TokenService::new(
+            MockClientRepo(
+                ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+                upgrade.clone(),
+            ),
+            MockSaRepo(SaOutcome::NotFound, upgrade.clone()),
+            dummy_code_repo(),
+            MockTenantRepo::new(TenantOutcome::Found),
+            MockRefreshRepo::new(),
+            MockUserRepo::default(),
+            MockSessionRepo(
+                session,
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                false,
+            ),
+            MockAuditRepo::default(),
+            test_config(),
+            2_592_000,
+            not_issued_here(),
+        );
+        let resp = svc
+            .introspect_token(tenant_id, introspect_req(token), &no_cert())
+            .await
+            .unwrap();
+        assert_eq!(resp.active, active, "{what}");
     }
 }

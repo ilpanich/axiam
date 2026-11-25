@@ -1555,7 +1555,12 @@ fn user_session_of(
     // Falling back to `jti` is what keeps every token issued before `sid`
     // existed working exactly as it did, so this needs no migration and no
     // flag day.
-    let raw = validated.0.sid.as_deref().unwrap_or(&validated.0.jti);
+    //
+    // The rule itself lives in `AccessTokenClaims::session_reference`, shared
+    // with REST and gRPC introspection. A token of a grant that names no
+    // session has no reference; it falls back to its own `jti` here so the
+    // session check refuses it, as it always has.
+    let raw = validated.0.session_reference().unwrap_or(&validated.0.jti);
     Uuid::parse_str(raw).map_err(|_| "invalid session identifier")
 }
 
@@ -1596,13 +1601,9 @@ pub fn admissible_session(
     path_tenant: Option<Uuid>,
 ) -> Option<Uuid> {
     let claims = &identity.claims.0;
-    let grant_without_session = claims.sid.is_none()
-        && (claims.client_id.is_some()
-            || claims.permissions.is_some()
-            || claims.act.is_some()
-            || claims.ext_exchange.is_some()
-            || claims.axiam_exchanged.is_some());
-    if grant_without_session || path_tenant.is_some_and(|tenant| tenant != identity.tenant_id) {
+    if claims.is_grant_without_session()
+        || path_tenant.is_some_and(|tenant| tenant != identity.tenant_id)
+    {
         return None;
     }
     user_session_of(&identity.claims, config.allow_missing_aud_as_user).ok()

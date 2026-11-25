@@ -24,8 +24,9 @@ kind: ServiceAccount
 metadata:
   name: vault
   namespace: axiam
-# SA-45: Vault here uses file storage and no Kubernetes auth or service
-# registration, so nothing needs the token.
+# SA-45: Raft storage with no `auto_join` (provider=k8s), no Kubernetes auth
+# method and no service registration, so nothing needs the token. Re-enable it
+# if any of those is added.
 automountServiceAccountToken: false
 ---
 apiVersion: v1

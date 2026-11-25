@@ -215,11 +215,11 @@ pub async fn resolve_and_pick(
 /// injected answer.
 fn pick_address(host: &str, addrs: &[IpAddr], allow_private: bool) -> Result<IpAddr, SsrfError> {
     // SA-42: `allow_private` waives the private-address rule only, never the
-    // metadata-endpoint rule. `::1` is the one address `is_never_allowed` flags
-    // (as part of the deprecated `::/96`) that is not a metadata endpoint: it
-    // is loopback, exactly like `127.0.0.1`, which the seam has always
-    // reached, and `localhost` resolves to both. The exemption is this seam's
-    // alone; SEC-107's allowlist below still refuses `::1`.
+    // metadata-endpoint rule. `::1` is IPv6 loopback, which this seam must
+    // reach exactly as it reaches `127.0.0.1` (`localhost` resolves to both);
+    // every other address `is_never_allowed` flags stays refused. The
+    // exemption is this seam's alone; SEC-107's allowlist below still refuses
+    // `::1`.
     if allow_private {
         let is_ipv6_loopback = |ip: &IpAddr| canonical(*ip) == IpAddr::V6(Ipv6Addr::LOCALHOST);
         if addrs

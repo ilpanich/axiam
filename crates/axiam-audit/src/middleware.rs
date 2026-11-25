@@ -863,27 +863,38 @@ where
     }
 }
 
-/// Extract `(subject_id, tenant_id, org_id, actor_type)` from cached
-/// extensions, or validate the JWT and cache it.
-///
-/// The organization is returned as well as the tenant because the notification
-/// dispatcher needs it to resolve the effective email configuration — it was
-/// already being parsed here for the cache and then thrown away.
+/// What a bearer-value path segment is replaced by in anything recorded.
+pub const REDACTED_PATH_SEGMENT: &str = "[redacted]";
+
 /// Route parameters whose path segment is a bearer value
-/// (`/account/export/{token}`). Mirrors the REST tracing span's list.
-const REDACTED_PATH_PARAMETERS: &[&str] = &["token"];
+/// (`/account/export/{token}`).
+///
+/// The single list: the audit row (`action`) and the REST tracing span both
+/// redact through [`redacted_path`], so a route added here is covered in both.
+pub const REDACTED_PATH_PARAMETERS: &[&str] = &["token"];
+
+/// Path segment pairs after which the next segment is a bearer value, for a
+/// request that matched no route pattern (see [`redacted_path`]). One entry per
+/// route in [`REDACTED_PATH_PARAMETERS`] (`/account/export/{token}`).
+const BEARER_PATH_PREFIXES: &[(&str, &str)] = &[("account", "export")];
 
 /// `path` with every segment that `pattern` (the matched route) marks with a
-/// [`REDACTED_PATH_PARAMETERS`] placeholder replaced by `[redacted]`.
-fn redacted_path(path: &str, pattern: Option<&str>) -> String {
-    let Some(pattern) = pattern else {
-        return path.to_owned();
-    };
+/// [`REDACTED_PATH_PARAMETERS`] placeholder replaced by [`REDACTED_PATH_SEGMENT`].
+///
+/// Fails **closed**. A request shaped wrongly for its route (a trailing `/`, a
+/// doubled `//`) matches no pattern, so the router answers 404 without ever
+/// consuming the single-use handle in it; the handle is still valid, and
+/// copying it verbatim into an append-only audit row would hand it to every
+/// reader of the log. With no usable pattern, any segment that follows a
+/// [`BEARER_PATH_PREFIXES`] pair is redacted instead.
+pub fn redacted_path(path: &str, pattern: Option<&str>) -> String {
     let segments: Vec<&str> = path.split('/').collect();
-    let placeholders: Vec<&str> = pattern.split('/').collect();
-    if segments.len() != placeholders.len() {
-        return path.to_owned();
-    }
+    let Some(placeholders) = pattern
+        .map(|pattern| pattern.split('/').collect::<Vec<_>>())
+        .filter(|placeholders| placeholders.len() == segments.len())
+    else {
+        return redacted_unmatched_path(&segments);
+    };
     segments
         .iter()
         .zip(placeholders)
@@ -893,7 +904,7 @@ fn redacted_path(path: &str, pattern: Option<&str>) -> String {
                 .and_then(|p| p.strip_suffix('}'))
                 .map(|p| p.split(':').next().unwrap_or_default());
             match name {
-                Some(name) if REDACTED_PATH_PARAMETERS.contains(&name) => "[redacted]",
+                Some(name) if REDACTED_PATH_PARAMETERS.contains(&name) => REDACTED_PATH_SEGMENT,
                 _ => segment,
             }
         })
@@ -901,6 +912,33 @@ fn redacted_path(path: &str, pattern: Option<&str>) -> String {
         .join("/")
 }
 
+/// [`redacted_path`] for a request with no usable route pattern.
+fn redacted_unmatched_path(segments: &[&str]) -> String {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let follows_prefix = index >= 2
+                && !segment.is_empty()
+                && BEARER_PATH_PREFIXES.iter().any(|(first, second)| {
+                    segments[index - 2] == *first && segments[index - 1] == *second
+                });
+            if follows_prefix {
+                REDACTED_PATH_SEGMENT
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Extract `(subject_id, tenant_id, org_id, actor_type)` from cached
+/// extensions, or validate the JWT and cache it.
+///
+/// The organization is returned as well as the tenant because the notification
+/// dispatcher needs it to resolve the effective email configuration — it was
+/// already being parsed here for the cache and then thrown away.
 fn extract_or_cache_user_info(req: &ServiceRequest) -> Option<(Uuid, Uuid, Uuid, ActorType)> {
     use actix_web::web;
     use axiam_auth::config::AuthConfig;

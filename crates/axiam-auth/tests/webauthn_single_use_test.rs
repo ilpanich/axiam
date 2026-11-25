@@ -751,6 +751,7 @@ async fn qr11_2_webauthn_second_factor_refuses_a_credential_change_after_the_fin
         read_then_bump_support::ReadThenBumpUserRepo {
             inner: SurrealUserRepository::new(w.db.clone()),
             armed: armed.clone(),
+            fail_pending_clear: false,
         },
         SurrealSessionRepository::new(w.db.clone()),
         SurrealFederationLinkRepository::new(w.db.clone()),

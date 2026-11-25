@@ -13,10 +13,15 @@ use uuid::Uuid;
 
 /// A user repository that, once armed, replaces the user's password right
 /// after the next `get_by_id` has returned (the caller holds the old row).
+///
+/// With `fail_pending_clear` set, `clear_pending_mfa_secret` fails as a
+/// transient datastore error would (QR1-7: an administrator's MFA reset must
+/// not leave sessions live because that one write failed).
 #[derive(Clone)]
 pub struct ReadThenBumpUserRepo<U> {
     pub inner: U,
     pub armed: Arc<AtomicBool>,
+    pub fail_pending_clear: bool,
 }
 
 impl<U: UserRepository> UserRepository for ReadThenBumpUserRepo<U> {
@@ -99,6 +104,11 @@ impl<U: UserRepository> UserRepository for ReadThenBumpUserRepo<U> {
             .await
     }
     async fn clear_pending_mfa_secret(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        if self.fail_pending_clear {
+            return Err(axiam_core::error::AxiamError::Internal(
+                "injected: pending-secret clear failed".into(),
+            ));
+        }
         self.inner
             .clear_pending_mfa_secret(tenant_id, user_id)
             .await
@@ -112,6 +122,9 @@ impl<U: UserRepository> UserRepository for ReadThenBumpUserRepo<U> {
         self.inner
             .consume_mfa_setup_token(tenant_id, jti, expires_at)
             .await
+    }
+    async fn mfa_setup_token_spent(&self, tenant_id: Uuid, jti: &str) -> AxiamResult<bool> {
+        self.inner.mfa_setup_token_spent(tenant_id, jti).await
     }
     async fn list(
         &self,

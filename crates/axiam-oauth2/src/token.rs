@@ -3855,12 +3855,26 @@ where
                 });
             }
 
-            // SA-41 — and only while the session the token names (`sid`) is
-            // still live: a token of a logged-out or expired session is
-            // inactive at once, not at `exp`. Tokens that name no session
-            // (client credentials, exchanged, RPT) are unaffected.
-            if let Some(sid) = claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok())
-                && !self.introspected_session_is_live(tenant_id, sid).await?
+            // SA-41 — and only while the session the token names is still
+            // live: a token of a logged-out or expired session is inactive at
+            // once, not at `exp`.
+            //
+            // The session is named by `sid`, else by `jti`
+            // (`AccessTokenClaims::session_reference`, the rule the REST
+            // extractor applies): a first-party sign-in token (password, OPAQUE,
+            // TOTP, WebAuthn, directory) carries its session id in `jti` and no
+            // `sid`. Only a user token can name a session. A client-credentials
+            // or service-account token is not tied to one (its `jti` is minted
+            // fresh), and neither is a token of a grant that names none
+            // (exchanged, RPT, device), which `session_reference` answers
+            // `None` for. A user token whose reference is not a session id
+            // cannot be live.
+            if claims.sub_kind == axiam_auth::token::SubjectKind::User
+                && let Some(reference) = claims.session_reference()
+                && !match Uuid::parse_str(reference) {
+                    Ok(sid) => self.introspected_session_is_live(tenant_id, sid).await?,
+                    Err(_) => false,
+                }
             {
                 return Ok(IntrospectionResponse {
                     active: false,

@@ -1130,7 +1130,11 @@ pub async fn device_auth<C: Connection + Clone>(
     request_body = MfaSetupEnrollRequest,
     responses(
         (status = 200, description = "MFA enrollment initiated", body = MfaEnrollResponse),
-        (status = 401, description = "Invalid or expired setup token"),
+        (status = 400, description = "This account already has an MFA factor — a \
+                                      setup token adds the first one, never a second. \
+                                      The same answer POST /auth/webauthn/setup/register/start \
+                                      gives for the same reason."),
+        (status = 401, description = "Invalid, expired or already used setup token"),
     )
 )]
 pub async fn setup_enroll_mfa<C: Connection + Clone>(
@@ -1163,7 +1167,11 @@ pub async fn setup_enroll_mfa<C: Connection + Clone>(
     responses(
         (status = 200, description = "MFA confirmed, login complete",
          body = LoginSuccessResponse),
-        (status = 401, description = "Invalid or expired setup token / TOTP code"),
+        (status = 400, description = "This account already has an MFA factor — a \
+                                      setup token adds the first one, never a second. \
+                                      The same answer POST /auth/webauthn/setup/register/start \
+                                      gives for the same reason."),
+        (status = 401, description = "Invalid, expired or already used setup token / TOTP code"),
     )
 )]
 #[allow(clippy::too_many_arguments)] // Actix DI extractors

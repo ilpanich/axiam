@@ -4535,6 +4535,47 @@ impl<C: Connection + Send + Sync + 'static> CleanupTask<C> {
     }
 }
 
+/// The fixed tags `axiam_directory::sync::SyncError::tag` can produce. The
+/// directory sweep reports its failure as `AxiamError::Internal` carrying these
+/// tags in parentheses; only a tag on this list is ever passed through.
+const DIRECTORY_SYNC_TAGS: &[&str] = &[
+    "directory_unavailable",
+    "directory_misconfigured",
+    "directory_refused",
+    "store",
+    "safety_valve",
+    "too_many_accounts",
+    "deadline",
+];
+
+/// A coarse, fixed-vocabulary category for a failed sweep, safe to expose on the
+/// unauthenticated `/health/jobs` (SA-44). Never contains error text: the
+/// result is always a literal from this function or [`DIRECTORY_SYNC_TAGS`].
+fn error_category(e: &AxiamError) -> &'static str {
+    match e {
+        AxiamError::Database(_) => "database_error",
+        AxiamError::Certificate(_) => "certificate_error",
+        AxiamError::Crypto(_) => "crypto_error",
+        AxiamError::EmailDelivery(_) | AxiamError::EmailConfig(_) => "email_error",
+        AxiamError::WebhookDelivery(_) => "webhook_error",
+        AxiamError::ServiceUnavailable(_) => "service_unavailable",
+        AxiamError::Internal(message) => directory_sync_tag(message).unwrap_or("internal_error"),
+        _ => "internal_error",
+    }
+}
+
+/// The first whitelisted directory-sync tag in a directory-sweep failure
+/// message (`directory sync ... (tag, tag)`), if it is one.
+fn directory_sync_tag(message: &str) -> Option<&'static str> {
+    if !message.starts_with("directory sync ") {
+        return None;
+    }
+    let inner = message.rsplit_once('(')?.1.strip_suffix(')')?;
+    inner
+        .split(", ")
+        .find_map(|t| DIRECTORY_SYNC_TAGS.iter().copied().find(|k| *k == t))
+}
+
 #[cfg(test)]
 mod personal_data_export_tests {
     use std::collections::BTreeSet;
@@ -4643,47 +4684,6 @@ mod personal_data_export_tests {
 /// integration tests in `tests/cleanup_task.rs` drive the happy paths against a
 /// migrated in-memory datastore; these reach the arms that only a failing one
 /// or a stop opens, through the private helpers themselves.
-/// The fixed tags `axiam_directory::sync::SyncError::tag` can produce. The
-/// directory sweep reports its failure as `AxiamError::Internal` carrying these
-/// tags in parentheses; only a tag on this list is ever passed through.
-const DIRECTORY_SYNC_TAGS: &[&str] = &[
-    "directory_unavailable",
-    "directory_misconfigured",
-    "directory_refused",
-    "store",
-    "safety_valve",
-    "too_many_accounts",
-    "deadline",
-];
-
-/// A coarse, fixed-vocabulary category for a failed sweep, safe to expose on the
-/// unauthenticated `/health/jobs` (SA-44). Never contains error text: the
-/// result is always a literal from this function or [`DIRECTORY_SYNC_TAGS`].
-fn error_category(e: &AxiamError) -> &'static str {
-    match e {
-        AxiamError::Database(_) => "database_error",
-        AxiamError::Certificate(_) => "certificate_error",
-        AxiamError::Crypto(_) => "crypto_error",
-        AxiamError::EmailDelivery(_) | AxiamError::EmailConfig(_) => "email_error",
-        AxiamError::WebhookDelivery(_) => "webhook_error",
-        AxiamError::ServiceUnavailable(_) => "service_unavailable",
-        AxiamError::Internal(message) => directory_sync_tag(message).unwrap_or("internal_error"),
-        _ => "internal_error",
-    }
-}
-
-/// The first whitelisted directory-sync tag in a directory-sweep failure
-/// message (`directory sync ... (tag, tag)`), if it is one.
-fn directory_sync_tag(message: &str) -> Option<&'static str> {
-    if !message.starts_with("directory sync ") {
-        return None;
-    }
-    let inner = message.rsplit_once('(')?.1.strip_suffix(')')?;
-    inner
-        .split(", ")
-        .find_map(|t| DIRECTORY_SYNC_TAGS.iter().copied().find(|k| *k == t))
-}
-
 #[cfg(test)]
 mod w1_failure_arm_tests {
     use std::io::Write;

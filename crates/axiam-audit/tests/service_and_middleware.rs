@@ -264,6 +264,48 @@ async fn a_token_path_segment_is_redacted_from_the_recorded_action() {
     assert!(actions.contains(&"GET /api/v1/users/42"), "{actions:?}");
 }
 
+/// SR1-3: redaction fails closed. A request shaped wrongly for its route (a
+/// trailing `/`, a doubled `//`) matches no route pattern and is answered 404
+/// without consuming the single-use handle in it, so the handle must still not
+/// reach the audit row.
+#[actix_web::test]
+async fn a_token_path_segment_is_redacted_even_when_no_route_matches() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    let app = test::init_service(App::new().wrap(mw).service(web::scope("/api/v1").route(
+        "/account/export/{token}",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    )))
+    .await;
+
+    for uri in [
+        "/api/v1/account/export/super-secret-handle/",
+        "/api/v1//account/export/super-secret-handle",
+        "/api/v1/account/export/super-secret-handle/extra",
+    ] {
+        let req = test::TestRequest::get().uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 404, "{uri} must not match the route");
+    }
+
+    wait_for_entries(&repo, 3).await;
+    let entries = repo.snapshot();
+    let actions: Vec<&str> = entries.iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.iter().all(|a| !a.contains("super-secret-handle")),
+        "token leaked into audit action of an unmatched request: {actions:?}"
+    );
+    assert!(
+        actions.contains(&"GET /api/v1/account/export/[redacted]/"),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&"GET /api/v1//account/export/[redacted]"),
+        "{actions:?}"
+    );
+}
+
 #[actix_web::test]
 async fn middleware_maps_403_to_denied() {
     let repo = RecordingRepo::new();

@@ -990,6 +990,131 @@ async fn sa43_concurrent_setup_finishes_register_one_credential() {
     );
 }
 
+/// SR1-2 / QR1-2: a TOTP setup confirm and a WebAuthn setup finish sent
+/// together with ONE setup token — say the user's passkey enrolment and the
+/// TOTP enrolment of whoever captured the token — leave exactly one factor.
+/// Both pass the factor-presence guard; the token's single spend decides, and
+/// the TOTP side spends before it promotes its secret. Before the fix the TOTP
+/// confirm promoted first and only then lost the spend, so the account ended
+/// with a passkey AND the other party's TOTP secret.
+#[actix_web::test]
+async fn sr12_concurrent_totp_confirm_and_webauthn_finish_leave_one_factor() {
+    use axiam_core::repository::WebauthnCredentialRepository;
+
+    // `surrealkv`, as in `sa43_concurrent_setup_finishes_register_one_credential`.
+    let dir = tempfile::TempDir::new().unwrap();
+    let db: Surreal<TestDb> = Surreal::new::<surrealdb::engine::local::SurrealKv>(
+        dir.path().join("race.db").to_string_lossy().into_owned(),
+    )
+    .await
+    .unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let auth = test_auth_config();
+
+    // A few rounds, alternating which request is polled first, so both
+    // orders of the race are exercised.
+    for (round, suffix) in ["r0", "r1", "r2", "r3"].into_iter().enumerate() {
+        let (org_id, tenant_id, user_id) = setup_tenant(&db, suffix).await;
+        enforce_mfa(&db, org_id).await;
+        let app = test_app!(db, auth);
+        let token = setup_token_for(&app, org_id, tenant_id, &format!("wa-user-{suffix}")).await;
+
+        // The TOTP side: enrol, and compute a valid code.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri("/api/v1/auth/mfa/setup/enroll")
+                .set_json(json!({ "setup_token": token }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200, "round {round}: TOTP enrol");
+        let body: Value = test::read_body_json(resp).await;
+        let secret = totp_rs::Secret::try_from_base32(body["secret_base32"].as_str().unwrap())
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let code = totp_rs::Builder::new()
+            .with_algorithm(totp_rs::Algorithm::SHA1)
+            .with_digits(6)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(secret)
+            .with_issuer(Some("AXIAM-Test"))
+            .with_account_name(format!("wa-user-{suffix}@example.com"))
+            .build()
+            .unwrap()
+            .generate_current()
+            .to_string();
+        let confirm = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/mfa/setup/confirm")
+            .set_json(json!({ "setup_token": token, "totp_code": code }))
+            .to_request();
+
+        // The WebAuthn side: start, and build a valid registration.
+        let resp = test::call_service(&app, setup_start(&token).to_request()).await;
+        assert_eq!(resp.status().as_u16(), 200, "round {round}: WebAuthn start");
+        let body: Value = test::read_body_json(resp).await;
+        let challenge = body["challenge"]["publicKey"]["challenge"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let state_token = body["state_token"].as_str().unwrap().to_owned();
+        let finish = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/webauthn/setup/register/finish")
+            .set_json(json!({
+                "setup_token": token,
+                "state_token": state_token,
+                "credential_name": "key",
+                "response": sa43_none_registration(&challenge),
+            }))
+            .to_request();
+
+        let (totp_status, webauthn_status) = if round % 2 == 0 {
+            let (w, t) = futures::future::join(
+                test::call_service(&app, finish),
+                test::call_service(&app, confirm),
+            )
+            .await;
+            (t.status().as_u16(), w.status().as_u16())
+        } else {
+            let (t, w) = futures::future::join(
+                test::call_service(&app, confirm),
+                test::call_service(&app, finish),
+            )
+            .await;
+            (t.status().as_u16(), w.status().as_u16())
+        };
+
+        let passkeys = axiam_db::repository::SurrealWebauthnCredentialRepository::new(db.clone())
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .len();
+        let user = SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user_id)
+            .await
+            .unwrap();
+        let totp_factors = usize::from(user.mfa_secret.is_some());
+        assert!(
+            totp_status == 200 || webauthn_status == 200,
+            "round {round}: one of the two completes the sign-in \
+             (totp {totp_status}, webauthn {webauthn_status})"
+        );
+        assert_eq!(
+            passkeys + totp_factors,
+            1,
+            "round {round}: one setup token registers one factor \
+             (passkeys {passkeys}, totp {totp_factors}; \
+             totp {totp_status}, webauthn {webauthn_status})"
+        );
+    }
+}
+
 #[actix_web::test]
 async fn setup_register_finish_refuses_the_same_tokens_start_refuses() {
     // Both halves take the token, so both must check it. A `finish` that

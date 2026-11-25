@@ -32,7 +32,7 @@ struct ResourceRow {
 }
 
 #[derive(Debug, SurrealValue)]
-struct ResourceRowWithId {
+pub(crate) struct ResourceRowWithId {
     record_id: String,
     tenant_id: String,
     name: String,
@@ -93,6 +93,35 @@ fn row_to_resource(row: ResourceRow, id: Uuid) -> Result<Resource, DbError> {
 
 /// Maximum depth for ancestor traversal to prevent infinite loops.
 const MAX_ANCESTOR_DEPTH: usize = 50;
+
+/// `get_ancestors`' statement, over the resource id in `id_param` and the
+/// tenant in `tenant_param` — shared with the one-round-trip authorization read
+/// (`SurrealRoleRepository::authorization_inputs`) so the two cannot drift.
+/// See [`SurrealResourceRepository::get_ancestors`] for the shape and why it is
+/// one recursive query.
+pub(crate) fn ancestors_sql(id_param: &str, tenant_param: &str) -> String {
+    format!(
+        "SELECT meta::id(id) AS record_id, tenant_id, name, resource_type, \
+                parent_id, metadata, created_at, updated_at \
+         FROM array::flatten(\
+             type::record('resource', {id_param}).{{..{depth}+path}}(\
+                 ->child_of->(resource WHERE tenant_id = {tenant_param})));",
+        depth = MAX_ANCESTOR_DEPTH,
+    )
+}
+
+/// `get_ancestors`' answer from its rows: nearest-first, or the possible-cycle
+/// error when the walk reached the depth cap (CQ-B08).
+pub(crate) fn ancestors_from_rows(rows: Vec<ResourceRowWithId>) -> Result<Vec<Resource>, DbError> {
+    if rows.len() >= MAX_ANCESTOR_DEPTH {
+        return Err(DbError::Migration(
+            "resource hierarchy exceeds maximum depth — possible cycle".into(),
+        ));
+    }
+    rows.into_iter()
+        .map(|row| row.try_into_resource())
+        .collect()
+}
 
 /// SurrealDB implementation of the Resource repository.
 #[derive(Clone)]
@@ -825,36 +854,16 @@ impl<C: Connection> ResourceRepository for SurrealResourceRepository<C> {
         // MAX_ANCESTOR_DEPTH and treat a result of that length as an
         // overflow/cycle — surfacing the same error rather than silently
         // truncating.
-        let query = format!(
-            "SELECT meta::id(id) AS record_id, tenant_id, name, resource_type, \
-                    parent_id, metadata, created_at, updated_at \
-             FROM array::flatten(\
-                 type::record('resource', $id).{{..{depth}+path}}(\
-                     ->child_of->(resource WHERE tenant_id = $tenant_id)));",
-            depth = MAX_ANCESTOR_DEPTH,
-        );
-
         let mut result = self
             .db
             .current()
-            .query(query)
+            .query(ancestors_sql("$id", "$tenant_id"))
             .bind(("id", id_str))
             .bind(("tenant_id", tenant_id_str))
             .await
             .map_err(DbError::from)?;
 
         let rows: Vec<ResourceRowWithId> = result.take(0).map_err(DbError::from)?;
-
-        if rows.len() >= MAX_ANCESTOR_DEPTH {
-            return Err(DbError::Migration(
-                "resource hierarchy exceeds maximum depth — possible cycle".into(),
-            )
-            .into());
-        }
-
-        rows.into_iter()
-            .map(|row| row.try_into_resource())
-            .collect::<Result<Vec<_>, DbError>>()
-            .map_err(Into::into)
+        ancestors_from_rows(rows).map_err(Into::into)
     }
 }

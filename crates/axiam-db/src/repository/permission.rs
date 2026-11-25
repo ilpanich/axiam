@@ -77,7 +77,7 @@ struct PermissionGrantRow {
 /// Row for the batched grant lookup — carries the owning role id so callers can
 /// group the flattened result set back per role.
 #[derive(Debug, SurrealValue)]
-struct RolePermissionGrantRow {
+pub(crate) struct RolePermissionGrantRow {
     role_id: String,
     record_id: String,
     tenant_id: String,
@@ -87,6 +87,61 @@ struct RolePermissionGrantRow {
     updated_at: DateTime<Utc>,
     scope_ids: Option<Vec<String>>,
     effect: Option<String>,
+}
+
+/// `get_role_permission_grants_for_roles`' statement, over the role records in
+/// `$role_records` and the tenant in `$tenant_id` — shared with the
+/// one-round-trip authorization read (`SurrealRoleRepository::authorization_inputs`)
+/// so the two cannot drift. See that method for why `in` is compared raw.
+pub(crate) const GRANTS_FOR_ROLES_SQL: &str = "SELECT \
+         meta::id(in) AS role_id, \
+         meta::id(out.id) AS record_id, \
+         out.tenant_id AS tenant_id, \
+         out.action AS action, \
+         out.description AS description, \
+         out.created_at AS created_at, \
+         out.updated_at AS updated_at, \
+         scope_ids, \
+         effect \
+     FROM grants \
+     WHERE in IN $role_records \
+     AND out.tenant_id = $tenant_id";
+
+/// The grant rows of several roles, grouped per role, each role keeping its own
+/// outcome: a row that cannot be read fails its role and no other.
+///
+/// `get_role_permission_grants_for_roles` fails the whole call on such a row;
+/// that call only ever reads the roles that apply. The one-round-trip
+/// authorization read fetches every assigned role's grants, so a broken row on
+/// a role that does not apply must not fail a check the three-read path would
+/// have answered — the engine surfaces a role's error only if it uses the role.
+/// A row whose role id itself cannot be read is attributed to no role and fails
+/// the whole read, as it does on the three-read path.
+pub(crate) fn grants_by_role_isolated(
+    rows: Vec<RolePermissionGrantRow>,
+) -> Result<HashMap<Uuid, AxiamResult<Vec<PermissionGrant>>>, DbError> {
+    let mut grouped: HashMap<Uuid, AxiamResult<Vec<PermissionGrant>>> = HashMap::new();
+    for row in rows {
+        let role_id = Uuid::parse_str(&row.role_id)
+            .map_err(|e| DbError::Migration(format!("invalid role UUID: {e}")))?;
+        let outcome = row.try_into_role_grant();
+        match outcome {
+            // SEC-092: a dropped grant contributes no entry at all.
+            Ok(None) => {}
+            Ok(Some((_, grant))) => {
+                if let Ok(grants) = grouped.entry(role_id).or_insert_with(|| Ok(Vec::new())) {
+                    grants.push(grant);
+                }
+            }
+            Err(e) => {
+                let slot = grouped.entry(role_id).or_insert_with(|| Ok(Vec::new()));
+                if slot.is_ok() {
+                    *slot = Err(e.into());
+                }
+            }
+        }
+    }
+    Ok(grouped)
 }
 
 impl RolePermissionGrantRow {
@@ -867,21 +922,7 @@ impl<C: Connection> PermissionRepository for SurrealPermissionRepository<C> {
         let mut result = self
             .db
             .current()
-            .query(
-                "SELECT \
-                     meta::id(in) AS role_id, \
-                     meta::id(out.id) AS record_id, \
-                     out.tenant_id AS tenant_id, \
-                     out.action AS action, \
-                     out.description AS description, \
-                     out.created_at AS created_at, \
-                     out.updated_at AS updated_at, \
-                     scope_ids, \
-                     effect \
-                 FROM grants \
-                 WHERE in IN $role_records \
-                 AND out.tenant_id = $tenant_id",
-            )
+            .query(GRANTS_FOR_ROLES_SQL)
             .bind(("role_records", role_records))
             .bind(("tenant_id", tenant_id_str))
             .await

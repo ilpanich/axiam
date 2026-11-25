@@ -643,6 +643,26 @@ pub trait UserRepository: Send + Sync {
     }
 }
 
+/// What [`RoleRepository::authorization_inputs`] reads for one check.
+///
+/// Each part keeps the outcome its own read would have had, so the engine can
+/// raise an error at exactly the step the three-read path would have raised it
+/// — and not at all when that path would have stopped earlier (no assignment
+/// reaches the tenant, no role applies) and never made the read.
+#[derive(Debug)]
+pub struct AuthorizationInputs {
+    /// As [`RoleRepository::get_user_role_assignments`] returns them.
+    pub assignments: Vec<RoleAssignment>,
+    /// As [`ResourceRepository::get_ancestors`] returns them, error included
+    /// (a hierarchy deeper than the cap is refused as a possible cycle).
+    pub ancestors: AxiamResult<Vec<Resource>>,
+    /// The grants of every assigned role, by role. A role with no grant is
+    /// absent, as from
+    /// [`PermissionRepository::get_role_permission_grants_for_roles`]; a role
+    /// one of whose grant rows could not be read maps to that read's error.
+    pub grants_by_role: HashMap<Uuid, AxiamResult<Vec<PermissionGrant>>>,
+}
+
 pub trait RoleRepository: Send + Sync {
     fn create(&self, input: CreateRole) -> impl Future<Output = AxiamResult<Role>> + Send;
     fn get_by_id(
@@ -706,6 +726,32 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
+
+    /// Everything one uncached authorization check reads, in one round trip.
+    ///
+    /// The same three reads the engine otherwise makes in sequence —
+    /// [`Self::get_user_role_assignments`] in `assignment_tenant_id`,
+    /// [`ResourceRepository::get_ancestors`] of `resource_id` in `tenant_id`,
+    /// and [`PermissionRepository::get_role_permission_grants_for_roles`] in
+    /// `assignment_tenant_id` — answered by one request to the datastore. The
+    /// grants are read for **every** role assigned to the subject, a superset
+    /// of the roles that apply to the resource; the engine picks the applicable
+    /// ones exactly as it does on the three-read path, so the decision cannot
+    /// differ (see [`AuthorizationInputs`]).
+    ///
+    /// `Ok(None)` means the repository does not offer this, and the engine
+    /// makes the three reads. That is the default, so a test double or a
+    /// wrapper that does not forward this method keeps today's behaviour.
+    fn authorization_inputs(
+        &self,
+        assignment_tenant_id: Uuid,
+        subject_id: Uuid,
+        tenant_id: Uuid,
+        resource_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<AuthorizationInputs>>> + Send {
+        let _ = (assignment_tenant_id, subject_id, tenant_id, resource_id);
+        async { Ok(None) }
+    }
 
     /// Assign a role to a **service account**, optionally scoped to a resource.
     ///

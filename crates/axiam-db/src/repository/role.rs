@@ -6,7 +6,7 @@ use axiam_core::models::role::{
     AssignmentScope, CreateRole, Role, RoleAssignment, RoleClaim, RoleEpochs,
     RoleSubjectAssignment, UpdateRole, default_inherit,
 };
-use axiam_core::repository::{PaginatedResult, Pagination, RoleRepository};
+use axiam_core::repository::{AuthorizationInputs, PaginatedResult, Pagination, RoleRepository};
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
@@ -18,6 +18,10 @@ use crate::helpers::{
     CountRow, classify_write_error, parse_uuid, retry_hot_row, retry_on_write_conflict,
     search_bind, search_filter,
 };
+use crate::repository::permission::{
+    GRANTS_FOR_ROLES_SQL, RolePermissionGrantRow, grants_by_role_isolated,
+};
+use crate::repository::resource::{ResourceRowWithId, ancestors_from_rows, ancestors_sql};
 
 #[derive(Debug, SurrealValue)]
 struct RoleRow {
@@ -57,6 +61,19 @@ impl RoleRowWithId {
 }
 
 /// Row for querying has_role edges with the role data joined in.
+/// The columns `get_user_role_assignments` projects from a `has_role` edge,
+/// shared with `authorization_inputs` so both read a [`RoleAssignmentRow`].
+const ASSIGNMENT_COLUMNS: &str = "meta::id(out.id) AS record_id, \
+     out.tenant_id AS tenant_id, \
+     out.name AS name, \
+     out.description AS description, \
+     out.is_global AS is_global, \
+     out.created_at AS created_at, \
+     out.updated_at AS updated_at, \
+     resource_id, \
+     tenant_scope, \
+     inherit";
+
 #[derive(Debug, SurrealValue)]
 struct RoleAssignmentRow {
     record_id: String,
@@ -1377,6 +1394,92 @@ impl<C: Connection> RoleRepository for SurrealRoleRepository<C> {
         }
 
         Ok(assignments)
+    }
+
+    async fn authorization_inputs(
+        &self,
+        assignment_tenant_id: Uuid,
+        subject_id: Uuid,
+        tenant_id: Uuid,
+        resource_id: Uuid,
+    ) -> AxiamResult<Option<AuthorizationInputs>> {
+        // The three reads of an uncached check — role assignments, the
+        // resource's ancestors, the roles' grants — as one request, so the
+        // datastore parses, authenticates and plans one HTTP request instead
+        // of three (claude_dev/db-query-optimization.md: about a third of the
+        // database CPU of a check on SurrealDB 4.0.1).
+        //
+        // Each statement is the one its own repository method runs, with the
+        // same plan:
+        // - statements 0–3 are `get_user_role_assignments` (the membership
+        //   set hoisted into `$group_records`, I7(a)), with each SELECT bound
+        //   to a variable instead of returned;
+        // - statement 6 is `get_ancestors`' recursive walk, from the shared
+        //   `ancestors_sql`;
+        // - statement 8 is `get_role_permission_grants_for_roles`' read, from
+        //   the shared `GRANTS_FOR_ROLES_SQL`, over every role assigned to the
+        //   subject: which of them apply depends on the ancestors and on the
+        //   assignments' tenant scope and `inherit` flag, and that decision
+        //   stays in the engine, in Rust, where it is tested — not repeated
+        //   here in SurrealQL. Reading a role or two too many costs little;
+        //   deciding twice would cost a second implementation of the rules.
+        //
+        // Tenancy is unchanged: assignments and grants are read in the tenant
+        // the subject lives in, the ancestors in the tenant being acted on.
+        let query = format!(
+            "LET $subject_records = [\
+                 type::record('user', $user_id), \
+                 type::record('service_account', $user_id)\
+             ]; \
+             LET $direct = (SELECT {ASSIGNMENT_COLUMNS} FROM has_role \
+                 WHERE in IN $subject_records AND out.tenant_id = $tenant_id); \
+             LET $group_records = (SELECT VALUE out FROM member_of \
+                 WHERE in IN $subject_records AND out.tenant_id = $tenant_id); \
+             LET $inherited = (SELECT {ASSIGNMENT_COLUMNS} FROM has_role \
+                 WHERE in IN $group_records AND out.tenant_id = $tenant_id); \
+             RETURN $direct; \
+             RETURN $inherited; \
+             {ancestors} \
+             LET $role_records = array::distinct(array::concat(\
+                 (SELECT VALUE type::record('role', record_id) FROM $direct), \
+                 (SELECT VALUE type::record('role', record_id) FROM $inherited))); \
+             {GRANTS_FOR_ROLES_SQL};",
+            ancestors = ancestors_sql("$resource_id", "$target_tenant_id"),
+        );
+        let mut result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("tenant_id", assignment_tenant_id.to_string()))
+            .bind(("user_id", subject_id.to_string()))
+            .bind(("target_tenant_id", tenant_id.to_string()))
+            .bind(("resource_id", resource_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+
+        // Statement indices: 4 = direct assignments, 5 = group-inherited,
+        // 6 = ancestors, 8 = grants.
+        let direct: Vec<RoleAssignmentRow> = result.take(4).map_err(DbError::from)?;
+        let inherited: Vec<RoleAssignmentRow> = result.take(5).map_err(DbError::from)?;
+        let mut assignments = Vec::with_capacity(direct.len() + inherited.len());
+        for row in direct.into_iter().chain(inherited) {
+            assignments.push(row.try_into_assignment()?);
+        }
+
+        let ancestors = result
+            .take::<Vec<ResourceRowWithId>>(6)
+            .map_err(DbError::from)
+            .and_then(ancestors_from_rows)
+            .map_err(AxiamError::from);
+
+        let grant_rows: Vec<RolePermissionGrantRow> = result.take(8).map_err(DbError::from)?;
+        let grants_by_role = grants_by_role_isolated(grant_rows)?;
+
+        Ok(Some(AuthorizationInputs {
+            assignments,
+            ancestors,
+            grants_by_role,
+        }))
     }
 
     async fn assign_to_group(

@@ -40,8 +40,8 @@ use axiam_core::models::role::{
 use axiam_core::models::scope::{CreateScope, Scope, UpdateScope};
 use axiam_core::models::user::User;
 use axiam_core::repository::{
-    GroupRepository, PaginatedResult, Pagination, PermissionRepository, ResourceRepository,
-    RoleRepository, ScopeRepository,
+    AuthorizationInputs, GroupRepository, PaginatedResult, Pagination, PermissionRepository,
+    ResourceRepository, RoleRepository, ScopeRepository,
 };
 use chrono::Utc;
 use uuid::Uuid;
@@ -115,6 +115,17 @@ impl Counters {
 struct MockRoleRepo {
     counter: Arc<AtomicUsize>,
     by_subject: HashMap<Uuid, Vec<RoleAssignment>>,
+    /// When set, the repository also answers `authorization_inputs` — the
+    /// one-round-trip read of a single check — from this data.
+    one_round_trip: Option<OneRoundTrip>,
+}
+
+/// What `MockRoleRepo::authorization_inputs` answers from, and how often it
+/// was asked.
+struct OneRoundTrip {
+    counter: Arc<AtomicUsize>,
+    ancestors: HashMap<Uuid, Vec<Resource>>,
+    by_role: HashMap<Uuid, Vec<PermissionGrant>>,
 }
 
 impl RoleRepository for MockRoleRepo {
@@ -125,6 +136,38 @@ impl RoleRepository for MockRoleRepo {
     ) -> AxiamResult<Vec<RoleAssignment>> {
         self.counter.fetch_add(1, Ordering::SeqCst);
         Ok(self.by_subject.get(&user_id).cloned().unwrap_or_default())
+    }
+
+    async fn authorization_inputs(
+        &self,
+        _assignment_tenant_id: Uuid,
+        subject_id: Uuid,
+        _tenant_id: Uuid,
+        resource_id: Uuid,
+    ) -> AxiamResult<Option<AuthorizationInputs>> {
+        let Some(one) = &self.one_round_trip else {
+            return Ok(None);
+        };
+        one.counter.fetch_add(1, Ordering::SeqCst);
+        let assignments = self
+            .by_subject
+            .get(&subject_id)
+            .cloned()
+            .unwrap_or_default();
+        // Every assigned role's grants, as the SurrealDB repository reads them.
+        let grants_by_role = assignments
+            .iter()
+            .filter_map(|a| {
+                one.by_role
+                    .get(&a.role.id)
+                    .map(|g| (a.role.id, Ok(g.clone())))
+            })
+            .collect();
+        Ok(Some(AuthorizationInputs {
+            assignments,
+            ancestors: Ok(one.ancestors.get(&resource_id).cloned().unwrap_or_default()),
+            grants_by_role,
+        }))
     }
 
     // --- unused by the engine hot path ---
@@ -447,6 +490,7 @@ fn build_engine(
         MockRoleRepo {
             counter: counters.role_assignments.clone(),
             by_subject,
+            one_round_trip: None,
         },
         MockPermissionRepo {
             counter: counters.grants.clone(),
@@ -595,6 +639,7 @@ async fn distinct_groups_coalesce_per_group_and_preserve_order() {
         MockRoleRepo {
             counter: counters.role_assignments.clone(),
             by_subject,
+            one_round_trip: None,
         },
         MockPermissionRepo {
             counter: counters.grants.clone(),
@@ -843,6 +888,7 @@ async fn coalesced_batch_resolves_scope_allow_and_not_found() {
         MockRoleRepo {
             counter: counters.role_assignments.clone(),
             by_subject,
+            one_round_trip: None,
         },
         MockPermissionRepo {
             counter: counters.grants.clone(),
@@ -889,4 +935,170 @@ async fn coalesced_batch_resolves_scope_allow_and_not_found() {
     );
     // Scope list shared across both items -> fetched exactly once.
     assert_eq!(Counters::get(&counters.scopes), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Single checks: one round trip when the role repository offers it
+// ---------------------------------------------------------------------------
+
+/// `subject` holds one role on `parent_id` (inherited by `resource_id`) whose
+/// grant allows `action`, and one role on an unrelated resource whose grant
+/// allows `delete` — which must never apply to `resource_id`.
+///
+/// With `one_round_trip`, the role repository also answers
+/// `authorization_inputs`, as `SurrealRoleRepository` does. Returns the engine,
+/// the per-method counters, and how often `authorization_inputs` was answered.
+fn build_single_check_engine(
+    tenant: Uuid,
+    subject: Uuid,
+    resource_id: Uuid,
+    parent_id: Uuid,
+    action: &str,
+    one_round_trip: bool,
+) -> (MockEngine, Counters, Arc<AtomicUsize>) {
+    let counters = Counters::default();
+    let one_rt = Arc::new(AtomicUsize::new(0));
+    let applicable = Uuid::new_v4();
+    let elsewhere = Uuid::new_v4();
+
+    let mut by_subject = HashMap::new();
+    by_subject.insert(
+        subject,
+        vec![
+            RoleAssignment {
+                role: role(applicable, tenant, false),
+                resource_id: Some(parent_id),
+                tenant_scope: None,
+                inherit: true,
+            },
+            RoleAssignment {
+                role: role(elsewhere, tenant, false),
+                resource_id: Some(Uuid::new_v4()),
+                tenant_scope: None,
+                inherit: true,
+            },
+        ],
+    );
+    let grant = |a: &str| PermissionGrant {
+        permission: permission(a, tenant),
+        scope_ids: vec![],
+        effect: Default::default(),
+    };
+    let mut by_role = HashMap::new();
+    by_role.insert(applicable, vec![grant(action)]);
+    by_role.insert(elsewhere, vec![grant("delete")]);
+    let mut ancestors = HashMap::new();
+    ancestors.insert(resource_id, vec![resource(parent_id, tenant)]);
+
+    let engine = AuthorizationEngine::new(
+        MockRoleRepo {
+            counter: counters.role_assignments.clone(),
+            by_subject,
+            one_round_trip: one_round_trip.then(|| OneRoundTrip {
+                counter: one_rt.clone(),
+                ancestors: ancestors.clone(),
+                by_role: by_role.clone(),
+            }),
+        },
+        MockPermissionRepo {
+            counter: counters.grants.clone(),
+            by_role,
+        },
+        MockResourceRepo {
+            counter: counters.ancestors.clone(),
+            ancestors,
+        },
+        MockScopeRepo {
+            counter: counters.scopes.clone(),
+            by_resource: HashMap::new(),
+        },
+        MockGroupRepo,
+    );
+    (engine, counters, one_rt)
+}
+
+fn single(tenant: Uuid, subject: Uuid, resource_id: Uuid, action: &str) -> AccessRequest {
+    AccessRequest {
+        tenant_id: tenant,
+        subject_scope: SubjectScope::Tenant,
+        subject_id: subject,
+        action: action.into(),
+        resource_id,
+        scope: None,
+    }
+}
+
+fn ids() -> (Uuid, Uuid, Uuid, Uuid) {
+    (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    )
+}
+
+/// An uncached check costs ONE round trip — not the three of the
+/// assignment, ancestor and grant reads — and none of the three is made.
+#[tokio::test]
+async fn single_check_is_one_round_trip() {
+    let (tenant, subject, res, parent) = ids();
+    let (engine, c, one_rt) = build_single_check_engine(tenant, subject, res, parent, "read", true);
+
+    let d = engine
+        .check_access(&single(tenant, subject, res, "read"))
+        .await
+        .unwrap();
+    assert_eq!(d, AccessDecision::Allow, "inherited from the parent");
+    assert_eq!(one_rt.load(Ordering::SeqCst), 1);
+    assert_eq!(Counters::get(&c.role_assignments), 0);
+    assert_eq!(Counters::get(&c.ancestors), 0);
+    assert_eq!(Counters::get(&c.grants), 0);
+}
+
+/// Without the one-round-trip read (a repository that does not offer it), the
+/// same check makes the three reads it always made.
+#[tokio::test]
+async fn single_check_without_the_one_round_trip_read_makes_three() {
+    let (tenant, subject, res, parent) = ids();
+    let (engine, c, one_rt) =
+        build_single_check_engine(tenant, subject, res, parent, "read", false);
+
+    let d = engine
+        .check_access(&single(tenant, subject, res, "read"))
+        .await
+        .unwrap();
+    assert_eq!(d, AccessDecision::Allow);
+    assert_eq!(one_rt.load(Ordering::SeqCst), 0);
+    assert_eq!(Counters::get(&c.role_assignments), 1);
+    assert_eq!(Counters::get(&c.ancestors), 1);
+    assert_eq!(Counters::get(&c.grants), 1);
+}
+
+/// Grants are read for every assigned role, but only the applicable roles'
+/// count, and both paths decide alike on every case — including the unrelated
+/// role's `delete` grant, which must not leak onto this resource.
+#[tokio::test]
+async fn one_round_trip_and_three_reads_decide_alike() {
+    let (tenant, subject, res, parent) = ids();
+    let (one, _, _) = build_single_check_engine(tenant, subject, res, parent, "read", true);
+    let (three, _, _) = build_single_check_engine(tenant, subject, res, parent, "read", false);
+
+    for (action, target) in [
+        ("read", res),
+        ("delete", res),
+        ("read", parent),
+        ("delete", parent),
+        ("read", Uuid::new_v4()),
+    ] {
+        let req = single(tenant, subject, target, action);
+        let a = one.check_access(&req).await.unwrap();
+        let b = three.check_access(&req).await.unwrap();
+        assert_eq!(a, b, "{action} on {target}");
+        if action == "delete" {
+            assert!(
+                matches!(a, AccessDecision::Deny(_)),
+                "{action} on {target}: {a:?}"
+            );
+        }
+    }
 }

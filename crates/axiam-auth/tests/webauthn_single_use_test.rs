@@ -603,7 +603,11 @@ async fn reset_the_password(w: &World) {
             w.user_id,
             axiam_core::models::user::UpdateUser {
                 password_hash: Some(
-                    axiam_auth::password::hash_password(&axiam_test_support::other_password(), None).unwrap(),
+                    axiam_auth::password::hash_password(
+                        &axiam_test_support::other_password(),
+                        None,
+                    )
+                    .unwrap(),
                 ),
                 ..Default::default()
             },

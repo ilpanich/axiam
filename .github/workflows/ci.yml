@@ -319,10 +319,15 @@ jobs:
       #     unmaintained (no CVE, no successor release). humantime is transitive via SurrealDB;
       #     chrono is a direct dependency of every crate. cargo-audit only warns on these, but
       #     cargo-deny fails, so both lists carry them. Reasons and review date: deny.toml.
+      #   RUSTSEC-2026-0594 — cookie 0.16.2, private-cookie AES-GCM nonces can repeat across
+      #     fork(). Held by actix-web 4.20.0 (newest; pins cookie 0.16, patched only >=0.18.3).
+      #     Not reachable: actix-web enables only cookie's `percent-encode` feature, so
+      #     `PrivateJar` — the sole affected API — is not compiled, and AXIAM never forks.
+      #     Full note in deny.toml. Drop when actix-web moves to cookie >=0.18.3.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387,RUSTSEC-2026-0542,RUSTSEC-2026-0543
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387,RUSTSEC-2026-0542,RUSTSEC-2026-0543,RUSTSEC-2026-0594
 
       # axiam-opaque-wasm is outside the workspace and carries its own
       # lockfile, which the step above never reads. That lockfile is what

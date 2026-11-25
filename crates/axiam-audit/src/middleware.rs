@@ -135,6 +135,17 @@ pub const CHANNEL_CAPACITY: usize = 4096;
 /// another capacity keeps a quarter of that (none below four slots).
 pub const REQUEST_RESERVE: usize = CHANNEL_CAPACITY / 4;
 
+/// The most rows the worker writes in one statement.
+///
+/// The worker appends whatever is already queued when it is ready for more, up
+/// to this many rows, with one [`AuditLogRepository::append_many`] — one round
+/// trip — instead of one round trip per row. It never waits to fill a batch, so
+/// a quiet server still writes each row as it arrives. 64 is past the knee
+/// measured in `claude_dev/db-query-optimization.md`: by then the statement's
+/// fixed cost is a few percent of the batch's, and a batch the store refuses is
+/// retried row by row, which a smaller batch makes cheaper.
+pub const MAX_APPEND_BATCH: usize = 64;
+
 /// How often the sink's task calls [`AuditEventSink::flush`].
 pub const SINK_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -400,45 +411,84 @@ async fn audit_worker<A: AuditLogRepository>(
 ) {
     let mut written: u64 = 0;
     let mut last_drop_report: Option<Instant> = None;
+    let mut batch: Vec<(AuditEvent, DateTime<Utc>)> = Vec::with_capacity(MAX_APPEND_BATCH);
     while let Some(queued) = rx.recv().await {
-        let (event, occurred_at) = match queued {
-            Queued::Event { event, occurred_at } => (event, occurred_at),
-            Queued::Barrier(reached) => {
-                // Everything queued before the barrier has been appended (or
-                // failed and been logged). The caller may have given up.
-                let _ = reached.send(());
-                continue;
+        // Take what is already queued, up to `MAX_APPEND_BATCH` rows, without
+        // waiting for more: a lone row is written alone and at once, and only a
+        // backlog — the case where one row per round trip falls behind — is
+        // written several rows to a statement. A barrier ends the batch, and is
+        // acknowledged only once every row queued before it has been through
+        // the append, exactly as when rows were appended one at a time.
+        let mut barrier = None;
+        let mut next = Some(queued);
+        while let Some(queued) = next.take() {
+            match queued {
+                Queued::Event { event, occurred_at } => batch.push((event, occurred_at)),
+                Queued::Barrier(reached) => {
+                    barrier = Some(reached);
+                    break;
+                }
             }
-        };
-        // Append first. The audit record is the guarantee; a notification is
-        // best-effort on top of it, and an event nobody was emailed about is a
-        // far smaller failure than one that was never recorded.
-        if let Err(e) = repo.append(event.entry.clone()).await {
-            // Counted, logged (rate-limited) and sent to the dead-letter file
-            // when there is one — see `RequestAuditLoss`.
-            loss.record_failed(event.entry.clone(), occurred_at, &e);
+            if batch.len() < MAX_APPEND_BATCH {
+                next = rx.try_recv().ok();
+            }
         }
 
-        written += 1;
+        if !batch.is_empty() {
+            // Append first. The audit record is the guarantee; a notification
+            // is best-effort on top of it, and an event nobody was emailed
+            // about is a far smaller failure than one that was never recorded.
+            //
+            // One result per row, in order: a row the store refused is counted,
+            // logged (rate-limited) and dead-lettered on its own, as it was
+            // when each row had a round trip of its own — see
+            // `RequestAuditLoss` and `AuditLogRepository::append_many`.
+            let entries = batch.iter().map(|(event, _)| event.entry.clone()).collect();
+            let mut results = repo.append_many(entries).await.into_iter();
+            for (event, occurred_at) in batch.drain(..) {
+                // A repository that answered for fewer rows than it was given
+                // breaks `append_many`'s contract; a row it said nothing about
+                // is treated as not written rather than silently forgotten.
+                let result = results.next().unwrap_or_else(|| {
+                    Err(axiam_core::error::AxiamError::Database(
+                        "the audit store reported no outcome for this row".into(),
+                    ))
+                });
+                if let Err(e) = result {
+                    loss.record_failed(event.entry.clone(), occurred_at, &e);
+                }
 
-        // Queued, never awaited: the sink's work — a rule read, a window claim
-        // that may contend with every other replica's — runs on its own task.
-        // A full queue costs this row its notification, not the next row its
-        // place in the audit channel (R1W2-01).
-        if let Some(ref queue) = sink
-            && queue.sink.wants(&event)
-            && queue.tx.try_send(event).is_err()
-        {
-            let dropped = queue.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            if last_drop_report.is_none_or(|t| t.elapsed() >= NOTIFICATION_DROP_REPORT_INTERVAL) {
-                last_drop_report = Some(Instant::now());
-                tracing::warn!(
-                    target: "axiam.audit.notification",
-                    notifications_dropped_total = dropped,
-                    "the notification queue is full: rows are being recorded without being \
-                     offered to the notification rules (logged at most once a minute)"
-                );
+                written += 1;
+
+                // Queued, never awaited: the sink's work — a rule read, a
+                // window claim that may contend with every other replica's —
+                // runs on its own task. A full queue costs this row its
+                // notification, not the next row its place in the audit
+                // channel (R1W2-01).
+                if let Some(ref queue) = sink
+                    && queue.sink.wants(&event)
+                    && queue.tx.try_send(event).is_err()
+                {
+                    let dropped = queue.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                    if last_drop_report
+                        .is_none_or(|t| t.elapsed() >= NOTIFICATION_DROP_REPORT_INTERVAL)
+                    {
+                        last_drop_report = Some(Instant::now());
+                        tracing::warn!(
+                            target: "axiam.audit.notification",
+                            notifications_dropped_total = dropped,
+                            "the notification queue is full: rows are being recorded without being \
+                             offered to the notification rules (logged at most once a minute)"
+                        );
+                    }
+                }
             }
+        }
+
+        if let Some(reached) = barrier {
+            // Everything queued before the barrier has been appended (or
+            // failed and been logged). The caller may have given up.
+            let _ = reached.send(());
         }
     }
     if shutting_down.load(Ordering::SeqCst) {

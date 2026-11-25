@@ -1617,6 +1617,29 @@ pub trait AuditLogRepository: Send + Sync {
         &self,
         input: CreateAuditLogEntry,
     ) -> impl Future<Output = AxiamResult<AuditLogEntry>> + Send;
+    /// Append several entries, in order, and report each one's outcome.
+    ///
+    /// The result has one element per input, in input order, so a caller can
+    /// account for every row it handed over exactly as it would have with one
+    /// [`Self::append`] per row: a row whose result is `Err` was not written.
+    ///
+    /// The default appends one row at a time, which is what every wrapper and
+    /// test double gets unless it says otherwise. The SurrealDB repository
+    /// writes the whole slice in one statement and one round trip, which is
+    /// what lets the request-audit worker keep up with the request rate
+    /// (see `claude_dev/db-query-optimization.md`).
+    fn append_many(
+        &self,
+        inputs: Vec<CreateAuditLogEntry>,
+    ) -> impl Future<Output = Vec<AxiamResult<()>>> + Send {
+        async move {
+            let mut results = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                results.push(self.append(input).await.map(|_| ()));
+            }
+            results
+        }
+    }
     /// List audit logs scoped to a specific tenant.
     fn list(
         &self,

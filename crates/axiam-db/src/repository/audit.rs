@@ -29,7 +29,7 @@ use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use surrealdb::Connection;
-use surrealdb_types::SurrealValue;
+use surrealdb_types::{RecordId, SurrealValue};
 use uuid::Uuid;
 
 use crate::error::DbError;
@@ -88,6 +88,50 @@ struct AuditLogRowWithId {
     ip_address: Option<String>,
     metadata: serde_json::Value,
     timestamp: DateTime<Utc>,
+}
+
+/// [`AuditLogRepository::append_many`]'s statement: every row of the batch,
+/// in order, in one `INSERT`. `RETURN NONE` because the worker that calls it
+/// needs to know only that the rows were written, and returning them would
+/// serialise every row back over the wire for nothing.
+///
+/// `timestamp` is left to the field's `DEFAULT time::now()`, exactly as the
+/// single-row `CREATE` leaves it: the datastore stamps audit rows, never the
+/// application.
+const INSERT_MANY_SQL: &str = "INSERT INTO audit_log $rows RETURN NONE";
+
+/// One row of [`INSERT_MANY_SQL`]: the fields `append`'s `CREATE` sets, with
+/// the same types. `None` options are sent as NONE, as the bound parameters
+/// of the `CREATE` are, because the schema's `option<string>` refuses NULL.
+#[derive(Debug, SurrealValue)]
+struct AuditInsertRow {
+    id: RecordId,
+    tenant_id: String,
+    actor_id: String,
+    actor_type: String,
+    action: String,
+    resource_id: Option<String>,
+    outcome: String,
+    ip_address: Option<String>,
+    metadata: serde_json::Value,
+}
+
+impl AuditInsertRow {
+    fn new(id: Uuid, input: CreateAuditLogEntry) -> Self {
+        Self {
+            id: RecordId::new("audit_log", id.to_string()),
+            tenant_id: input.tenant_id.to_string(),
+            actor_id: input.actor_id.to_string(),
+            actor_type: actor_type_str(&input.actor_type).to_string(),
+            action: input.action,
+            resource_id: input.resource_id.map(|r| r.to_string()),
+            outcome: outcome_str(&input.outcome).to_string(),
+            ip_address: input.ip_address,
+            metadata: input
+                .metadata
+                .unwrap_or(serde_json::Value::Object(Default::default())),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -298,32 +342,10 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
     }
 }
 
-impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
-    async fn datastore_now(&self) -> AxiamResult<DateTime<Utc>> {
-        // The same function that stamps `audit_log.timestamp` (`DEFAULT
-        // time::now()`), read from the same server: a bound taken here and a
-        // row stamped by an append share one clock, whatever the application
-        // host's says.
-        let mut result = self
-            .db
-            .current()
-            .query("RETURN time::now()")
-            .await
-            .map_err(DbError::from)?
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-        let now: Option<DateTime<Utc>> = result.take(0).map_err(DbError::from)?;
-        Ok(now.ok_or_else(|| DbError::Migration("RETURN time::now() returned no value".into()))?)
-    }
-
-    async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
-        let id = new_id();
+impl<C: Connection> SurrealAuditLogRepository<C> {
+    /// Write one already-minimised entry under `id`.
+    async fn create_one(&self, id: Uuid, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
         let id_str = id.to_string();
-
-        // T-110: the last thing before the write, because the table is
-        // append-only and there is no second chance by construction.
-        let mut input = input;
-        self.minimisation.apply(&mut input);
 
         let metadata = input
             .metadata
@@ -366,6 +388,88 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
 
         Ok(row.into_entry(id)?)
     }
+}
+
+impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
+    async fn datastore_now(&self) -> AxiamResult<DateTime<Utc>> {
+        // The same function that stamps `audit_log.timestamp` (`DEFAULT
+        // time::now()`), read from the same server: a bound taken here and a
+        // row stamped by an append share one clock, whatever the application
+        // host's says.
+        let mut result = self
+            .db
+            .current()
+            .query("RETURN time::now()")
+            .await
+            .map_err(DbError::from)?
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let now: Option<DateTime<Utc>> = result.take(0).map_err(DbError::from)?;
+        Ok(now.ok_or_else(|| DbError::Migration("RETURN time::now() returned no value".into()))?)
+    }
+
+    async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
+        // T-110: the last thing before the write, because the table is
+        // append-only and there is no second chance by construction.
+        let mut input = input;
+        self.minimisation.apply(&mut input);
+        self.create_one(new_id(), input).await
+    }
+
+    async fn append_many(&self, inputs: Vec<CreateAuditLogEntry>) -> Vec<AxiamResult<()>> {
+        if inputs.len() <= 1 {
+            let mut out = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                out.push(self.append(input).await.map(|_| ()));
+            }
+            return out;
+        }
+
+        // T-110, as in `append`: minimised once, here, before either write
+        // path below sees the row.
+        let rows: Vec<(Uuid, CreateAuditLogEntry)> = inputs
+            .into_iter()
+            .map(|mut input| {
+                self.minimisation.apply(&mut input);
+                (new_id(), input)
+            })
+            .collect();
+
+        // One statement, one round trip, every row. A statement is one
+        // transaction on SurrealDB 3.x and 4.x, so it either writes every row
+        // or none (pinned by `audit_repository_test`): there is no
+        // partly-written batch to reconcile.
+        let batch: Vec<AuditInsertRow> = rows
+            .iter()
+            .map(|(id, input)| AuditInsertRow::new(*id, input.clone()))
+            .collect();
+        let written = match self
+            .db
+            .current()
+            .query(INSERT_MANY_SQL)
+            .bind(("rows", batch))
+            .await
+        {
+            Ok(response) => response.check().is_ok(),
+            Err(_) => false,
+        };
+        if written {
+            return rows.iter().map(|_| Ok(())).collect();
+        }
+
+        // The batch was refused as a whole. Write the rows one at a time, so
+        // one row the schema refuses costs that row alone, and every row
+        // reports the error its own write met: the caller dead-letters exactly
+        // the rows `append` would have failed. The same ids are reused, so a
+        // batch that was in fact committed before its response was lost is
+        // not written a second time here: its rows are refused as existing and
+        // reported failed — the answer a lost response to `append` gives.
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, input) in rows {
+            out.push(self.create_one(id, input).await.map(|_| ()));
+        }
+        out
+    }
 
     async fn list(
         &self,
@@ -389,10 +493,21 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
 
         // Data query.
+        //
+        // `id DESC` breaks ties. A batched append (`append_many`) is one
+        // statement, and SurrealDB 4.x evaluates `time::now()` once per
+        // statement, so every row of a batch carries the same `timestamp`.
+        // Without a tiebreak those rows would come back in no defined order and
+        // a page boundary falling among them could repeat or skip a row. Ids
+        // are UUIDv7 minted in append order by one worker, so `id` restores
+        // exactly the order the rows were written in. The index
+        // `idx_audit_tenant_time` (tenant_id, timestamp) still serves the scan:
+        // its entries are keyed by record id after the columns, so a backward
+        // scan already yields this order (pinned by `audit_repository_test`).
         let data_sql = format!(
             "SELECT meta::id(id) AS record_id, * FROM audit_log \
              WHERE {where_clause} \
-             ORDER BY timestamp DESC \
+             ORDER BY timestamp DESC, id DESC \
              LIMIT $limit START $offset"
         );
         let db = self.db.current();

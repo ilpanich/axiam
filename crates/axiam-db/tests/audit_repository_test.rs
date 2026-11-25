@@ -736,3 +736,158 @@ async fn pseudonymize_actor_adds_no_key_to_the_network_role_rows_it_clears() {
     assert_eq!(unassign_refused["before"]["user"], nil);
     assert!(unassign_refused.get("after").is_none() && unassign_refused.get("grantee").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// append_many — the request-audit worker's batched write
+// ---------------------------------------------------------------------------
+
+/// Every row is written, with the fields a single `append` writes, and the
+/// datastore's stamps follow the order the rows were handed over.
+#[tokio::test]
+async fn append_many_writes_every_row_in_order() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db.clone());
+    let actor = Uuid::new_v4();
+    let resource = Uuid::new_v4();
+
+    let inputs: Vec<CreateAuditLogEntry> = (0..50)
+        .map(|i| {
+            let mut e = entry(
+                tenant_id,
+                actor,
+                &format!("batch.{i:02}"),
+                AuditOutcome::Success,
+                (i % 2 == 0).then_some(resource),
+            );
+            e.ip_address = (i % 3 == 0).then(|| "203.0.113.7".to_string());
+            e
+        })
+        .collect();
+    let results = repo.append_many(inputs.clone()).await;
+    assert_eq!(results.len(), 50);
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+
+    let page = repo
+        .list(
+            tenant_id,
+            AuditLogFilter::default(),
+            Pagination {
+                offset: 0,
+                limit: 100,
+                ..Pagination::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.total, 50);
+    // `list` is newest first; the oldest row must be the first one handed over.
+    let mut rows = page.items;
+    rows.reverse();
+    let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+    let expected: Vec<String> = (0..50).map(|i| format!("batch.{i:02}")).collect();
+    assert_eq!(actions, expected, "stamped in the order handed over");
+    for (row, input) in rows.iter().zip(&inputs) {
+        assert_eq!(row.tenant_id, input.tenant_id);
+        assert_eq!(row.actor_id, input.actor_id);
+        assert_eq!(row.resource_id, input.resource_id);
+        assert_eq!(row.ip_address, input.ip_address);
+        assert_eq!(row.metadata, input.metadata.clone().unwrap_or_default());
+    }
+}
+
+/// A row the schema refuses costs that row alone: the batch falls back to one
+/// write per row, the others are written once each, and the refused row reports
+/// its own error.
+#[tokio::test]
+async fn append_many_isolates_a_refused_row() {
+    let (db, tenant_id) = setup().await;
+    // Stand-in for any row the store refuses: an event that throws on one
+    // action. A statement that throws writes nothing, so the batch is refused
+    // whole and retried row by row.
+    db.query(
+        "DEFINE EVENT refuse_poison ON TABLE audit_log \
+         WHEN $event = 'CREATE' AND $after.action = 'poison' THEN { THROW 'refused' };",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    let repo = SurrealAuditLogRepository::new(db.clone());
+    let actor = Uuid::new_v4();
+    let actions = ["a", "b", "poison", "c", "d"];
+    let inputs: Vec<CreateAuditLogEntry> = actions
+        .iter()
+        .map(|a| entry(tenant_id, actor, a, AuditOutcome::Success, None))
+        .collect();
+
+    let results = repo.append_many(inputs).await;
+    let failed: Vec<usize> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.is_err().then_some(i))
+        .collect();
+    assert_eq!(failed, vec![2], "only the refused row fails: {results:?}");
+
+    let page = repo
+        .list(
+            tenant_id,
+            AuditLogFilter::default(),
+            Pagination {
+                offset: 0,
+                limit: 100,
+                ..Pagination::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut written: Vec<String> = page.items.into_iter().map(|r| r.action).collect();
+    written.sort();
+    assert_eq!(
+        written,
+        vec!["a", "b", "c", "d"],
+        "each other row exactly once"
+    );
+}
+
+/// One row, or none, behaves as `append` does.
+#[tokio::test]
+async fn append_many_of_one_or_none() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealAuditLogRepository::new(db.clone());
+    assert!(repo.append_many(Vec::new()).await.is_empty());
+    let one = repo
+        .append_many(vec![entry(
+            tenant_id,
+            Uuid::new_v4(),
+            "single",
+            AuditOutcome::Failure,
+            None,
+        )])
+        .await;
+    assert_eq!(one.len(), 1);
+    assert!(one[0].is_ok());
+}
+
+/// The listing's `ORDER BY timestamp DESC, id DESC` is still served by
+/// `idx_audit_tenant_time`, backwards, with the page pushed into the scan: the
+/// `id` tiebreak costs no sort and no table scan.
+#[tokio::test]
+async fn the_listing_order_is_index_served() {
+    let (db, tenant_id) = setup().await;
+    let mut r = db
+        .query(
+            "SELECT meta::id(id) AS record_id, * FROM audit_log \
+             WHERE tenant_id = $tenant_id \
+             ORDER BY timestamp DESC, id DESC LIMIT 50 START 0 EXPLAIN",
+        )
+        .bind(("tenant_id", tenant_id.to_string()))
+        .await
+        .unwrap();
+    let plan: surrealdb::types::Value = r.take(0).unwrap();
+    let plan = plan.into_json_value().to_string();
+    assert!(plan.contains("\"IndexScan\""), "{plan}");
+    assert!(plan.contains("idx_audit_tenant_time"), "{plan}");
+    assert!(plan.contains("Backward"), "{plan}");
+    assert!(!plan.contains("TableScan"), "{plan}");
+    assert!(!plan.contains("Sort"), "no sort over the rows: {plan}");
+}

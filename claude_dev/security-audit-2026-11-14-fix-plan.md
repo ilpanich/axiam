@@ -1451,6 +1451,32 @@ N14 only.
 
 ## 7. Wave 4 — hardening, and what is left out
 
+> **REVIEW GATE — PASSED (2026-11-25), 2 rounds.**
+>
+> **Shape.**
+> - 2 review rounds. Each had one code-quality and one security review, both by Opus 5.5 reviewers who wrote none of the code.
+> - 1 fix round, one signed commit: `d9e086a` (wave 4, round 1). Sonnet 5.5 fixed the findings on Sonnet tasks, Opus 5.5 those on SA-43.
+> - Round 1 reviewers received the complete wave diff (base `4d1982e` to `2a950a0`, plan excluded), this plan's §1–§3 and §7, the report's hardening notes and the owner decisions. Round 2 reviewers received the fix diff `2a950a0..d9e086a` and the round-1 reports, with the full wave diff as context. No reviewer received implementer summaries.
+> - The gate closed under the owner's wrap-up rule: round 2 found nothing at medium or higher.
+>
+> **Findings.**
+> - **Round 1:** 14 findings. SR1-1 (medium, unbounded percent-decoding in the public-path check), QR1-1 (medium, introspection ignored the session in a sign-in token's `jti`), SR1-2/QR1-2 (medium, TOTP setup confirm stored the factor before spending the token); SR1-3, QR1-3…QR1-7 (low); SR1-4, QR1-8…QR1-10 (nit). All were fixed in `d9e086a`; none was rejected.
+> - **Round 1 fix, unplanned addition:** `UserRepository::mfa_setup_token_spent` (`axiam-core`, `axiam-db`), so that a spent setup token cannot start an enrolment. Internal API only; no wire or stored-data change.
+> - **Round 2:** no finding at medium or higher. Filed as issues:
+>   - #889, SR2-1 (low) and QR2-4 (nit): unmatched-request audit redaction misses `export//<token>`, and its prefix list is synced by comment only;
+>   - #890, QR2-1, QR2-2, QR2-3 (nit): stale comments in `reset_mfa`, the gRPC cap test and the CSRF/session wording.
+>
+> **Owner decisions taken during the wave.**
+> - **R2:** the MCP no-credential branch answers 400 `invalid_request`; the test was updated.
+> - **MFA counter:** for MFA accounts the password step does not reset `failed_login_attempts`; only a completed second factor does.
+> - **SA-43 residuals:** the setup token is spent before a WebAuthn credential is stored, and `reset_mfa` clears the pending secret.
+> - **RUSTSEC-2026-0594:** ignored with a reason (`2b4f639`).
+>
+> **Out-of-band commits on the branch.**
+> - `69630b0`: CI regressions from SA-40/41/42 and SA-06 (wave 4 follow-up; see the note before SA-43).
+>
+> **Follow-up outside this repository.** The OpenAPI spec digest changed (SA-44, QR1-6); the eleven SDK repositories must re-sync `sdks/openapi.json`.
+
 ### SA-40 — REST edge matchers — Sonnet 5.5
 
 > **EXECUTED (2026-11-23, Sonnet 5.5). All three hardening leads (h01-rest-authn): reproduced.**

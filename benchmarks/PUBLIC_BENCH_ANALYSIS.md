@@ -1,740 +1,1151 @@
-# AXIAM Benchmark Analysis — Sixth Draft (Run 5: the release-image run)
+# AXIAM Benchmark Analysis — Seventh Draft (Runs 6, 6b and 6c: the cloud-VM runs)
 
-> **Status: sixth benchmark draft — the first measured against a published
-> release artifact rather than a working tree.** Run 5 (2026-08-05/06)
-> benchmarks `ghcr.io/ilpanich/axiam/server:1.0.0-alpha24`, pinned by digest
-> (`@sha256:a7d415bf…`), pulled exactly as any reader would pull it. It is
-> also the first run with the **full three-profile matrix in the run of
-> record** (plaintext, TLS 1.3, native mTLS — median-of-3 everywhere), and
-> the first **median-of-3 SDK pass with a matched-concurrency wire
-> baseline**. Beyond re-measuring, run 5 had three questions to answer —
-> the three open mysteries draft 5 published: the TLS token-issuance
-> plateau, the REST/gRPC authorization asymmetry, and the database ceiling.
-> **All three are closed, with data** (§3). It also found two new problems,
-> published in §6 with the same candor as their predecessors. Numbers are
-> reproducible from the published raw data; the platform is named at every
-> number.
+> **Status: seventh benchmark draft — the first on server-class hardware,
+> the first with four targets, and the first that sizes a datastore
+> regression with a controlled experiment.** Three runs on one qualified
+> 16-vCPU AMD EPYC Genoa cloud VM:
+>
+> - **Run 6** (2026-11-20/21) — the run of record: AXIAM **1.3.0**, the
+>   published image by digest, on SurrealDB **4.0.1**, against Keycloak
+>   26.8.1, Zitadel v4.19.5 and — new — authentik 2026.8.5; three profiles
+>   (plaintext, TLS 1.3, native mTLS), median-of-3, 2-CPU caps; plus
+>   resting footprints and the 11-SDK pass.
+> - **Run 6b** (2026-11-21/22) — the same plaintext comparison with every
+>   server and every database at **4 CPUs** instead of 2, and a 2-CPU
+>   control pass of AXIAM **1.3.1**.
+> - **Run 6c** (2026-11-23/24) — the same AXIAM 1.3.1 image against a
+>   SurrealDB **3.3.5** server (unsupported, benchmark-only) at both cap
+>   levels, to measure what the 4.0.1 server costs AXIAM.
+>
+> The story of this draft is not flattering, and it is told first: AXIAM
+> is **database-bound on every cell that touches data**, its lead narrowed,
+> and **Keycloak now wins two head-to-head cells** (introspection and REST
+> userinfo). Run 6b shows the 2-CPU caps, not the products, set run 6's
+> numbers — doubling them doubles AXIAM and Keycloak alike and changes no
+> winner. Run 6c measures the SurrealDB 4.0.1 server as costing AXIAM
+> **13–38% of its throughput at 2 CPUs and 8–37% at 4** — a real part of
+> the drop since run 5, not all of it. §5 answers the question that
+> follows: what is left to optimise.
+
+**Reading rule for this whole document.** Run 6 is not comparable with
+run 5 (§2). Runs 6b and 6c are labelled sensitivity passes: they are never
+medianed with run 6, and run 6c never enters a head-to-head table. Every
+number names its run. The previous (sixth) draft, run 5 on the laptop, is
+in this file's git history; the parts of it this draft carries forward are
+labelled as such (§9, Appendix A).
 
 ## 0. Setup at a glance
 
 | | |
 |---|---|
-| Hardware | Dell XPS 15 9570 ("G-box": i7-8750H, 12 logical CPUs, ~31 GiB RAM) — same box as every prior draft; consumer laptop, server-class re-run still pending |
-| Load | k6 v2.1.0, 50 VUs closed-loop, 30 s warmup + 120 s measure, median-of-3 repeats per cell |
-| Caps | every server container: 2 CPUs / 2 048 MiB; every DB container: 2 CPUs / 1 024 MiB; broker 1 CPU / 512 MiB |
-| Targets | **AXIAM 1.0.0-alpha24** (released image, digest-pinned; SurrealDB v3 digest-pinned + RabbitMQ 4) vs **Keycloak 26.7.0** (Postgres 16) vs **Zitadel v4.16.2** (Postgres 16) |
-| Profiles | p0-plaintext, p2-tls13 (in-process TLS 1.3), **p3-mtls (in-process mutual TLS) — now a full matrix profile, not a sensitivity pass** |
-| Validity | **64/72 matrix cells valid**; every invalid cell listed with its reason (§8); settle gate cleared first-probe on every session, zero refused cells |
-| Provenance | image + digest recorded in every cell's metadata; harness checkout on `main` (`1df1a83`, a descendant of the alpha24 tag differing only in benchmark/docs files) |
+| Host | Infomaniak Public Cloud, flavor `a16-ram64-disk80-perf1`: **AMD EPYC Genoa, 16 vCPUs, 64 GiB**, local disk, Ubuntu 24.04, kernel 6.8.0. One instance for all three runs (created 2026-11-20). |
+| Qualification | sysbench 3 runs within **0.32%**; CPU steal **0.00%** under load; no period above 5% steal during any run (`vmstat` sampled throughout) |
+| Load | k6 v2.3.0, 50 VUs closed-loop, 30 s warm-up + 120 s measure, median-of-3 repeats per cell |
+| Caps — runs 6, 6b A, 6c A | every server 2 CPU / 2 048 MiB; every database 2 CPU / 1 024 MiB; RabbitMQ 1 CPU / 512 MiB; authentik's worker carries the server cap |
+| Caps — runs 6b B, 6c B | every server **and** every database **4 CPU**; memory and RabbitMQ unchanged. Stack ceilings: Keycloak, Zitadel 8 CPU; AXIAM 9; authentik 12 |
+| Targets | **AXIAM 1.3.0** (run 6) / **1.3.1** (runs 6b, 6c), `ghcr.io/ilpanich/axiam/server`, by digest; SurrealDB **4.0.1** (runs 6, 6b) / **3.3.5** (run 6c), by digest; RabbitMQ 4 over TLS · **Keycloak 26.8.1** · **Zitadel v4.19.5** · **authentik 2026.8.5** (server + worker, no Redis) — competitors on PostgreSQL 16, uniformly tuned, the same digests in every run |
+| Profiles | run 6 and run 6c: p0-plaintext, p2-tls13, p3-mtls (in-process; authentik's p2 is its own TLS listener over HTTP/1.1 and it has no p3) · run 6b: p0 only |
+| Validity | run 6 **66/84** · run 6b **11/11** (A) and **22/30** (B) · run 6c **33/33** + **33/33**. The invalid cells are the same in every run: all of authentik's, and Zitadel's login and fallback refresh (§6) |
+| Provenance | every container's image and digest in every cell's `meta.json`; settle gate cleared first-probe on every cell. Harness-only local changes (SDK bench manifests, the AXIAM target compose file) recorded in `provenance/run-after.txt`; the C# SDK bench retargeted to .NET 10 for the SDK pass |
 
-**Comparability warning (run 4 → run 5).** Run 5 is *not* a like-for-like
-re-run: between the runs, two authorization-path table scans were removed,
-Nagle was disabled on the REST listener, the gRPC rate-limiter units bug
-was fixed, the shipped rate-limit defaults were revised, and the batch
-default the harness measures finally matches the batch default the product
-ships. Treat run 5 as the new baseline; where a controlled comparison was
-wanted, a one-variable A/B was run and is reported as such (§3).
+**SurrealDB, the two open upstream bugs.** Both are open with no fix
+merged, both report 4.0.x as a regression from 3.3.x:
 
-## 1. Headline results (median-of-3, valid cells)
+- [surrealdb/surrealdb#7667](https://github.com/surrealdb/surrealdb/issues/7667):
+  every write statement costs ~350 µs of CPU in `exec::ir`, 10–17× more
+  than 3.3.5; a later comment finds 4.0.1 unchanged. It is on AXIAM's
+  request path.
+- [surrealdb/surrealdb#7716](https://github.com/surrealdb/surrealdb/issues/7716):
+  every `CREATE` that fires a `DEFINE EVENT` re-plans the whole event body.
+  **AXIAM's shipped schema defines no events** (`git grep 'DEFINE EVENT'
+  v1.3.1 -- crates/` finds two, both in test code), so #7716 does not
+  affect these measurements. It is listed because it is a regression of
+  the exact build pinned.
+
+Run 6c (§4) measures the cost of the whole 4.0.1 server against 3.3.5 —
+#7667 plus anything else that changed in 4.0.
+
+## 1. Headline results (p0-plaintext, median-of-3)
+
+Each table lists, per scenario, run 6 (2/2, all targets), run 6b's AXIAM
+control at 2/2 (1.3.1 on 4.0.1), run 6c's AXIAM at 2/2 (1.3.1 on 3.3.5),
+run 6b at 4/4 (all targets) and run 6c at 4/4. `stack cores` is the
+whole-stack CPU actually used; `cpu·ms/req` is whole-stack CPU per request
+(lower is better); `bottleneck` names the container at ≥ 95% of its cap.
+Rows marked ✗ failed the validity gate and are shown so no target goes
+silently missing; they are never part of a claim. TLS and mTLS results
+are in §6, every profile and every row in §10.
+
+**Which rows are the comparison.** Head-to-head claims use run 6 (2/2)
+and run 6b B (4/4), all on SurrealDB 4.0.1 — the only server AXIAM 1.3
+supports. The run-6c rows (marked 3.3.5) are a sensitivity pass that
+sizes the SurrealDB 4.0.1 regression; they are, in our reading, the
+figures that represent AXIAM's own performance, and the level we expect
+back once SurrealDB fixes the 4.0 regressions — but a supported
+deployment gets the 4.0.1 rows today.
 
 ### Machine-to-machine token issuance (`oauth2_client_credentials`)
 
-| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core | cpu·ms per request |
-|---|---|---|---|---|---|---|
-| p0 | **AXIAM** | **2 804** | 8.8 | **57.5** | **816** | **1.23** |
-| p0 | Zitadel | 431 | 108.7 | 131.9 | 122 | 8.21 |
-| p0 | Keycloak | 354 | 103.3 | 206.8 | 171 | 5.85 |
-| p2 | **AXIAM** | **2 746** | 9.1 | **57.3** | 818 | 1.22 |
-| p2 | Zitadel | 417 | 112.5 | 136.5 | 118 | 8.47 |
-| p2 | Keycloak | 340 | 104.6 | 211.4 | 164 | 6.09 |
-| p3 | **AXIAM** | **2 697** | 9.2 | **57.8** | 782 | 1.28 |
-| p3 | Zitadel | 416 | 112.4 | 137.3 | 117 | 8.51 |
-| p3 | Keycloak | 346 | 104.1 | 208.5 | 167 | 5.99 |
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 1 610 | 14.9 | 69.1 | 2.96 | 1.836 | axiam-surrealdb | ✓ 3/3 |
+| run 6 | 2/2 | keycloak | 411 | 99.5 | 201.0 | 2.14 | 5.214 | keycloak | ✓ 3/3 |
+| run 6 | 2/2 | zitadel | 425 | 109.2 | 135.7 | 3.82 | 8.986 | zitadel | ✓ 3/3 |
+| run 6 | 2/2 | authentik | 5 | 6340.2 | 27855.0 | 3.83 | 832.023 | none | ✗ 0/3 |
+| run 6b A | 2/2 | axiam | 1 448 | 16.6 | 71.4 | 3.02 | 2.085 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 1 970 | 12.0 | 65.7 | 3.22 | 1.635 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 3 234 | 13.7 | 19.9 | 6.13 | 1.894 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | keycloak | 934 | 20.8 | 96.9 | 4.32 | 4.621 | keycloak | ✓ 3/3 |
+| run 6b B | 4/4 | zitadel | 704 | 65.3 | 79.1 | 7.04 | 9.998 | none | ✓ 3/3 |
+| run 6b B | 4/4 | authentik | 4 | 6766.9 | 32616.0 | 4.07 | 1025.501 | none | ✗ 0/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 3 853 | 11.3 | 17.6 | 6.42 | 1.666 | axiam-surrealdb | ✓ 3/3 |
 
-AXIAM issues **7.9× more tokens/s than Keycloak and 6.5× more than
-Zitadel** at plaintext — and, new this run, **~8× under TLS 1.3 and mTLS
-too**. Draft 5's one glaring asterisk — a −57% drop on this endpoint under
-TLS — is gone: the cause was found (Nagle's algorithm interacting with
-delayed ACKs, §3.1), fixed, and the TLS penalty is now −2.0%.
+AXIAM issues **3.9× Keycloak's and 3.8× Zitadel's tokens/s at 2 CPUs,
+3.5× and 4.6× at 4**, at a 15 ms p50 against 99–109 ms. Its lead was 7.9×
+/ 6.5× in run 5; the AXIAM server used 0.70 of its 2 cores here while
+SurrealDB sat at its cap, so this cell now measures the database tier.
+Zitadel is the one competitor that reaches no cap at 4/4 (server 3.65,
+PostgreSQL 3.38 of 4).
 
 ### Token introspection (RFC 7662)
 
-| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core | cpu·ms per request |
-|---|---|---|---|---|---|---|
-| p0 | **AXIAM** | **4 504** | 5.7 | **47.7** | **1 269** | **0.79** |
-| p0 | Keycloak | 1 888 | 7.3 | 81.8 | 799 | 1.25 |
-| p0 | Zitadel | 941 | 47.4 | 64.7 | 252 | 3.98 |
-| p2 | **AXIAM** | **4 391** | 6.1 | **45.2** | 1 282 | 0.78 |
-| p2 | Keycloak | 1 715 | 8.2 | 82.7 | 730 | 1.37 |
-| p2 | Zitadel | 915 | 50.0 | 67.9 | 239 | 4.18 |
-| p3 | **AXIAM** | **4 376** | 6.2 | **45.5** | 1 260 | 0.79 |
-| p3 | Keycloak | 1 731 | 8.0 | 82.6 | 740 | 1.35 |
-| p3 | Zitadel | 904 | 50.5 | 68.4 | 238 | 4.20 |
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 1 582 | 15.2 | 69.4 | 2.94 | 1.859 | axiam-surrealdb | ✓ 3/3 |
+| run 6 | 2/2 | keycloak | 1 940 | 5.4 | 85.1 | 2.51 | 1.296 | keycloak | ✓ 3/3 |
+| run 6 | 2/2 | zitadel | 827 | 53.6 | 75.9 | 3.90 | 4.715 | zitadel,zitadel-postgres | ✓ 3/3 |
+| run 6 | 2/2 | authentik | 19 | 2505.2 | 3483.4 | 2.73 | 146.066 | authentik-postgres | ✗ 0/3 |
+| run 6b A | 2/2 | axiam | 1 438 | 16.8 | 71.9 | 2.95 | 2.050 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 1 661 | 14.3 | 69.3 | 3.16 | 1.904 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 3 272 | 13.5 | 19.7 | 6.01 | 1.836 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | keycloak | 3 952 | 4.9 | 57.5 | 5.07 | 1.283 | keycloak | ✓ 3/3 |
+| run 6b B | 4/4 | zitadel | 1 522 | 30.4 | 39.8 | 7.33 | 4.819 | none | ✓ 3/3 |
+| run 6b B | 4/4 | authentik | 36 | 1248.5 | 1754.8 | 5.37 | 148.453 | authentik-postgres | ✗ 1/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 3 609 | 12.2 | 18.6 | 6.27 | 1.736 | axiam-surrealdb | ✓ 3/3 |
 
-**2.4× Keycloak, 4.8× Zitadel**, with a ~1.8× better p95 than Keycloak and
-a near-zero TLS/mTLS penalty (−2.5% / −2.8%).
+**Keycloak wins this cell** — 1,940 vs 1,582 req/s at 2/2, 3,952 vs 3,272
+at 4/4 — with a lower p50 (5 vs 15 ms) and, at 2/2, a higher p95 (85 vs
+69 ms). AXIAM led 2.4× in run 5. On 3.3.5 AXIAM gains among the least here
+(+16% / +10%), so even the 3.3.5 figure stays behind Keycloak. Server-only, AXIAM spends 0.42 cpu·ms per introspection against
+Keycloak's 1.04 (§7); the difference is database work per request (§5).
 
 ### JWKS fetch (RFC 7517)
 
-| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core |
-|---|---|---|---|---|---|
-| p0 | **AXIAM** | **26 680** | 1.4 | **3.1** | **15 855** |
-| p0 | Keycloak | 4 573 | 2.7 | 72.6 | 2 288 |
-| p0 | Zitadel | 2 091 | 11.1 | 64.8 | 701 |
-| p2 | **AXIAM** | **24 097** | 1.6 | **3.0** | 12 696 |
-| p2 | Keycloak | 4 167 | 3.0 | 72.8 | 2 075 |
-| p2 | Zitadel | 2 053 | 12.9 | 60.0 | 652 |
-| p3 | **AXIAM** | **23 954** | 1.6 | **3.1** | 12 599 |
-| p3 | Keycloak | 3 786 | 3.2 | 75.0 | 1 887 |
-| p3 | Zitadel | 2 052 | 12.9 | 60.1 | 654 |
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 43 640 | 0.8 | 1.8 | 2.15 | 0.049 | none | ✓ 3/3 |
+| run 6 | 2/2 | keycloak | 5 529 | 1.9 | 73.5 | 2.02 | 0.366 | keycloak | ✓ 3/3 |
+| run 6 | 2/2 | zitadel | 2 031 | 10.4 | 69.3 | 3.04 | 1.498 | zitadel-postgres | ✓ 3/3 |
+| run 6 | 2/2 | authentik | 24 | 1905.3 | 2790.4 | 2.93 | 122.444 | authentik-postgres | ✗ 0/3 |
+| run 6b A | 2/2 | axiam | 41 523 | 0.8 | 1.9 | 2.18 | 0.052 | none | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 40 430 | 0.8 | 2.0 | 1.83 | 0.045 | none | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 43 232 | 0.8 | 1.9 | 2.37 | 0.055 | none | ✓ 3/3 |
+| run 6b B | 4/4 | keycloak | 10 832 | 1.9 | 5.6 | 4.06 | 0.375 | keycloak | ✓ 3/3 |
+| run 6b B | 4/4 | zitadel | 3 953 | 8.5 | 36.8 | 6.36 | 1.608 | zitadel-postgres | ✓ 3/3 |
+| run 6b B | 4/4 | authentik | 45 | 1041.7 | 1528.7 | 4.75 | 105.503 | none | ✗ 1/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 41 737 | 0.8 | 1.9 | 2.04 | 0.049 | none | ✓ 3/3 |
 
-A 5.8–12.8× gap, still limited by the load generator rather than AXIAM
-(k6 burned ~5 CPU cores on these cells; the AXIAM server sat below 1.7/2).
+The one cell that never touches the database, and the cleanest read of
+AXIAM's own request path: **43,640 req/s at a 1.8 ms p95 — 7.9× Keycloak
+and 21× Zitadel** at 2/2. It is load-generator-bound: k6 used 7.5 cores
+and the AXIAM server 1.3 of its 2, in every pass, so its 4/4 cell is
+flagged `generator_saturated` and is not a capacity figure (Keycloak at
+4/4: 10,832). The SurrealDB version makes no difference here (within 3%).
 
 ### OIDC userinfo — REST and gRPC
 
-| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | req/s per stack core | server-only cpu·ms/req |
-|---|---|---|---|---|---|---|
-| p0 | **AXIAM (gRPC)** | **12 307** | 4.0 | **6.0** | **5 866** | — |
-| p0 | **AXIAM (REST)** | **4 752** | 5.1 | 50.9 | 1 437 | **0.25** |
-| p0 | Keycloak | 3 721 | 3.0 | 77.1 | **1 863** | 0.53 |
-| p0 | Zitadel* | 995 | 23.3 | 80.4 | 346 | 0.86 |
-| p2 | **AXIAM (gRPC)** | **11 954** | 4.0 | **6.0** | 5 740 | — |
-| p2 | **AXIAM (REST)** | **4 585** | 5.4 | 50.6 | 1 371 | 0.27 |
-| p2 | Keycloak | 3 486 | 3.2 | 77.7 | **1 737** | 0.57 |
-| p2 | Zitadel* | 980 | 25.7 | 79.1 | 332 | 0.95 |
-| p3 | **AXIAM (gRPC)** | **11 937** | 4.0 | **6.0** | 5 777 | — |
-| p3 | **AXIAM (REST)** | **4 437** | 5.5 | 51.2 | 1 255 | 0.28 |
-| p3 | Keycloak | 3 490 | 3.2 | 77.9 | **1 741** | 0.57 |
-| p3 | Zitadel* | 978 | 25.3 | 79.3 | 331 | 0.96 |
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 1 411 | 17.4 | 71.9 | 2.83 | 2.007 | axiam-surrealdb | ✓ 3/3 |
+| run 6 | 2/2 | keycloak | 3 862 | 2.4 | 80.4 | 2.02 | 0.522 | keycloak | ✓ 3/3 |
+| run 6 | 2/2 | zitadel | 859 | 51.9 | 85.9 | 2.94 | 3.421 | zitadel-postgres | ✓ 3/3 |
+| run 6 | 2/2 | authentik | 20 | 2343.3 | 3022.4 | 3.08 | 154.855 | authentik-postgres | ✗ 0/3 |
+| run 6b A | 2/2 | axiam | 1 320 | 18.7 | 73.8 | 2.87 | 2.172 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 2 081 | 11.2 | 65.1 | 3.27 | 1.572 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 2 963 | 15.1 | 21.5 | 5.79 | 1.952 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | keycloak | 7 807 | 2.3 | 51.2 | 4.05 | 0.518 | keycloak | ✓ 3/3 |
+| run 6b B | 4/4 | zitadel | 1 677 | 19.4 | 54.4 | 6.25 | 3.727 | zitadel-postgres | ✓ 3/3 |
+| run 6b B | 4/4 | authentik | 30 | 1706.0 | 2465.7 | 5.60 | 189.514 | none | ✗ 0/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 4 372 | 10.0 | 15.5 | 6.60 | 1.510 | axiam-surrealdb | ✓ 2/3 |
 
-*\* Zitadel authenticated with a machine-user token minted once in setup
-(its user-login flow returns a session token the harness can't convert);
-the measured endpoint and semantics are the same.*
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 3 078 | 7.0 | 59.0 | 3.11 | 1.010 | axiam-surrealdb | ✓ 3/3 |
+| run 6b A | 2/2 | axiam | 2 795 | 8.0 | 61.0 | 3.08 | 1.104 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 4 026 | 6.0 | 54.0 | 3.36 | 0.835 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 6 369 | 7.0 | 11.0 | 6.25 | 0.981 | axiam-surrealdb | ✓ 3/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 8 743 | 5.0 | 8.0 | 7.00 | 0.801 | axiam-surrealdb | ✓ 2/3 |
 
-On REST, AXIAM leads 1.3× Keycloak / 4.8× Zitadel while its DB is pegged.
-On whole-stack req/s-per-core Keycloak again wins the REST cell; on
-server-only CPU per request AXIAM is 2.1× cheaper — both published, as
-before. The real story stays gRPC: **12.3 k identity reads/s at p95 6 ms**.
-Zitadel's own gRPC userinfo measured 191–201/s (−80% vs its REST) on the
-same harness — its gRPC management API is not built as a hot path, which
-is fair, and exactly why AXIAM treating gRPC as a first-class data plane
-is a differentiator (§10).
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | zitadel | 245 | 200.0 | 203.0 | 1.94 | 7.913 | none | ✓ 3/3 |
+| run 6b B | 4/4 | zitadel | 226 | 200.0 | 270.0 | 2.29 | 10.125 | none | ✓ 3/3 |
+
+**Keycloak serves 2.7× AXIAM's REST userinfo** (3,862 vs 1,411 at 2/2;
+7,807 vs 2,963 at 4/4) and answers it without touching PostgreSQL (0.01
+cores) — AXIAM reads SurrealDB on every call and SurrealDB is pegged.
+AXIAM still leads Zitadel by 1.6–1.8×. This is the cell where 3.3.5 helps
+AXIAM most among the identity reads (+58% at 2/2), and it still does not
+close the gap (2,081 / 4,372 on 3.3.5). AXIAM's **gRPC userinfo** serves
+3,078 req/s at 2/2 and 6,369 at 4/4 — 2.2× its own REST path and 12.6× /
+28× Zitadel's gRPC userinfo, which holds a flat **200 ms p50** at both cap
+levels with neither of its containers busy (a fixed floor, not CPU; its
+gRPC surface is a management API, which is fair). Keycloak and authentik
+expose no gRPC equivalent. Zitadel's userinfo token is minted with
+client credentials in setup (`cc-token-setup`); the endpoint measured is
+the labelled one.
 
 ### Authorization decisions (AXIAM-only — no competitor equivalent)
 
 Full RBAC evaluation (tenant-scoped roles, resource hierarchy, scopes)
-against live data, decision cache **off**:
+against live data, decision cache **off**. Batch rows are operations/s; a
+batch is five checks.
 
-| scenario | profile | thr | p50 (ms) | p95 (ms) | note |
-|---|---|---|---|---|---|
-| authz_check_grpc | p0 | **1 268** | 21 | 74 | +43% vs draft 5 (table-scan fix, §3.3) |
-| authz_check_rest | p0 | **1 032** | 27 | 79 | +37% vs draft 5 |
-| authz_batch_grpc | p0 | 928 ops/s = **4 640 checks/s** | 33 | 84 | 3.7× singles |
-| authz_batch_rest | p0 | 1 026 ops/s = **5 130 checks/s** | 28 | 80 | **4.97× singles** |
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 492 | 96.3 | 152.5 | 2.66 | 5.400 | axiam-surrealdb | ✓ 3/3 |
+| run 6b A | 2/2 | axiam | 451 | 100.2 | 163.8 | 2.69 | 5.957 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 714 | 77.3 | 94.8 | 2.95 | 4.140 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 1 007 | 45.0 | 60.2 | 5.30 | 5.267 | axiam-surrealdb | ✓ 3/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 1 593 | 28.4 | 40.1 | 5.83 | 3.660 | axiam-surrealdb | ✓ 3/3 |
 
-p2 and p3 are within 1.5% of p0 on all four (§8). Two things resolved
-here. First, **the shipped batch default (`coalesced`) is finally the
-strategy the matrix measured** — draft 5's cells had accidentally measured
-a non-default strategy through a harness pin. The settled claim ("batching
-5 checks per call ≈ 5× the decision rate") reproduces at matrix scale:
-4.97×. Second, the +37/43% on single checks is the direct, predicted
-result of removing two full-table scans found via `EXPLAIN` after run 4 —
-a fix that is now guarded by CI tests that fail if any hot authorization
-query ever regresses to a table scan (§3.3).
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 645 | 83.0 | 100.0 | 2.59 | 4.024 | axiam-surrealdb | ✓ 3/3 |
+| run 6b A | 2/2 | axiam | 572 | 88.0 | 106.0 | 2.69 | 4.713 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 914 | 33.0 | 86.0 | 2.82 | 3.089 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 1 320 | 34.0 | 48.0 | 5.25 | 3.976 | axiam-surrealdb | ✓ 3/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 1 955 | 23.0 | 33.0 | 5.68 | 2.903 | axiam-surrealdb | ✓ 3/3 |
+
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 485 | 96.9 | 152.9 | 2.69 | 5.541 | axiam-surrealdb | ✓ 3/3 |
+| run 6b A | 2/2 | axiam | 445 | 100.6 | 165.0 | 2.74 | 6.160 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 716 | 77.0 | 96.9 | 2.92 | 4.073 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 974 | 46.6 | 62.6 | 5.40 | 5.541 | axiam-surrealdb | ✓ 3/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 1 556 | 29.0 | 40.7 | 5.82 | 3.744 | axiam-surrealdb | ✓ 3/3 |
+
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 620 | 85.0 | 102.0 | 2.65 | 4.276 | axiam-surrealdb | ✓ 3/3 |
+| run 6b A | 2/2 | axiam | 577 | 88.0 | 106.0 | 2.69 | 4.674 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 679 | 79.0 | 99.0 | 2.79 | 4.103 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 1 229 | 37.0 | 52.0 | 5.23 | 4.257 | axiam-surrealdb | ✓ 3/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 1 540 | 29.0 | 42.0 | 5.50 | 3.572 | axiam-surrealdb | ✓ 3/3 |
+
+In checks/s at 2/2 (run 6): REST 492 single / 2,425 batched; gRPC 645 /
+3,100 — batching still multiplies the decision rate by ~4.9× on REST, as
+in run 5. At 4/4: 1,007 / 4,870 and 1,320 / 6,145. On 3.3.5 every
+authorization cell rises 1.18–1.61× at 2/2 — among the largest gains of
+run 6c (§4). Run 5 measured 1,032 / 1,268 singles and 5,130 / 4,640
+batched checks on the laptop; the database tier is the whole difference
+(SurrealDB at its cap, server 0.38–0.43 of 2 cores).
 
 ### Session/token refresh — published under the protocol-variant label
 
 > ⚠️ **Comparability: protocol-variant.** AXIAM has no ROPC/password grant
 > by design; its cell measures **session cookie refresh**
 > (`POST /api/v1/auth/refresh`, CSRF double-submit, single-use rotation).
-> Keycloak's cell measures the **OAuth2 refresh-token grant**. Related
-> jobs, different protocols — informational, not a like-for-like race.
+> Keycloak's measures the **OAuth2 refresh-token grant**. Zitadel's and
+> authentik's cells are fallback operations and are excluded.
 
-| profile | target | thr (req/s) | p50 (ms) | p95 (ms) |
-|---|---|---|---|---|
-| p0 | AXIAM | **545** | 88.8 | 111.1 |
-| p0 | Keycloak | 377 | 101.5 | 203.9 |
-| p2 | AXIAM | **540** | 89.0 | 113.2 |
-| p2 | Keycloak | 368 | 102.3 | 204.4 |
-| p3 | AXIAM | **542** | 89.5 | 112.8 |
-| p3 | Keycloak | 365 | 102.5 | 204.9 |
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 347 | 115.8 | 191.8 | 2.51 | 7.233 | axiam-surrealdb | ✓ 3/3 |
+| run 6 | 2/2 | keycloak | 435 | 98.2 | 201.4 | 2.07 | 4.769 | keycloak | ✓ 3/3 |
+| run 6 | 2/2 | zitadel | 1 | 5648.8 | 9411.8 | 2.06 | 1426.974 | zitadel | ✗ 0/3 |
+| run 6 | 2/2 | authentik | 3 | 9839.9 | 37470.5 | 4.01 | 1529.849 | none | ✗ 0/3 |
+| run 6b A | 2/2 | axiam | 305 | 129.6 | 210.2 | 2.54 | 8.311 | axiam-surrealdb | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 450 | 98.9 | 162.2 | 2.64 | 5.866 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 707 | 61.9 | 88.7 | 4.87 | 6.892 | axiam-surrealdb | ✓ 3/3 |
+| run 6b B | 4/4 | keycloak | 943 | 18.0 | 100.4 | 4.09 | 4.340 | keycloak | ✓ 3/3 |
+| run 6b B | 4/4 | zitadel | 3 | 2183.9 | 4522.4 | 4.11 | 1268.068 | zitadel | ✗ 0/3 |
+| run 6b B | 4/4 | authentik | 3 | 9642.7 | 36407.6 | 4.40 | 1554.479 | none | ✗ 0/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 771 | 54.5 | 82.9 | 4.67 | 6.049 | none | ✓ 2/3 |
 
-**Honesty first: AXIAM's refresh regressed −35% since draft 5** (839 →
-545/s, p50 47.5 → 88.8 ms; both tight medians). No harness change touched
-this path; the suspects are the post-run-4 security hardening series
-and/or database version drift, and the investigation is open (§6). The
-cross-vendor position is unchanged (AXIAM ahead, with the label), but we'd
-rather flag our own regression than let the ratio hide it. Zitadel's
-refresh still needs an `offline_access` flow the harness doesn't
-implement (upstream limitation, tracked) and stays excluded.
+**Keycloak is ahead this run** (435 vs 347 at 2/2; 943 vs 707 at 4/4).
+AXIAM's refresh is three database round trips with SurrealDB pegged.
+On 3.3.5 at 4/4 its limit is no longer database CPU (SurrealDB 3.73 of 4,
+server 0.68, bottleneck none) — something else bounds it (§5).
 
 ### Password login (all targets hash for real)
 
-AXIAM **Argon2id** (OWASP params), Keycloak 26 **Argon2id** (default),
-Zitadel **bcrypt** (default cost — far more expensive per verification;
-tunable). Hash configuration dominates this scenario.
+AXIAM Argon2id (OWASP parameters), Keycloak Argon2id (default), Zitadel
+bcrypt (default cost), authentik its default hasher (protocol-variant
+cell).
 
-| profile | target | thr (req/s) | p50 (ms) | p95 (ms) | valid (p95 < 2 s, ≥2/3 runs) |
-|---|---|---|---|---|---|
-| p0 | **AXIAM** | **69** | 699 | **761** | ✓ 3/3 |
-| p0 | Keycloak | (47) | (990) | (1 129) | ✗ 1/3 runs valid |
-| p0 | Zitadel | (2) | (21 786) | (25 414) | ✗ 0/3 (bcrypt) |
-| p2 | **AXIAM** | **70** | 696 | **764** | ✓ 3/3 |
-| p2 | Keycloak | **51** | 890 | 1 095 | ✓ 2/3 — Keycloak's first valid login cell in this series |
-| p2 | Zitadel | (2) | (22 031) | (25 348) | ✗ 0/3 |
-| p3 | **AXIAM** | **68** | 704 | **791** | ✓ 3/3 |
-| p3 | Keycloak | (22) | (2 179) | (2 309) | ✗ 0/3 |
-| p3 | Zitadel | (2) | (21 915) | (25 611) | ✗ 0/3 |
+| pass | caps | target | thr (req/s) | p50 (ms) | p95 (ms) | stack cores | cpu·ms/req | bottleneck | valid |
+|---|---|---|---|---|---|---|---|---|---|
+| run 6 | 2/2 | axiam | 49 | 1004.9 | 1046.1 | 2.63 | 53.638 | none | ✓ 3/3 |
+| run 6 | 2/2 | keycloak | 47 | 1010.2 | 1213.2 | 2.07 | 44.294 | keycloak | ✓ 3/3 |
+| run 6 | 2/2 | zitadel | 2 | 29243.8 | 33365.0 | 2.04 | 1333.228 | zitadel | ✗ 0/3 |
+| run 6 | 2/2 | authentik | 1 | 25908.5 | 54250.8 | 4.19 | 3437.963 | authentik-postgres | ✗ 0/3 |
+| run 6b A | 2/2 | axiam | 46 | 1053.3 | 1128.4 | 2.73 | 59.037 | none | ✓ 3/3 |
+| run 6c A (3.3.5) | 2/2 | axiam | 47 | 1033.7 | 1117.3 | 2.50 | 53.553 | none | ✓ 3/3 |
+| run 6b B | 4/4 | axiam | 93 | 523.6 | 561.7 | 5.17 | 55.706 | none | ✓ 3/3 |
+| run 6b B | 4/4 | keycloak | 98 | 473.2 | 586.3 | 4.15 | 42.144 | keycloak | ✓ 3/3 |
+| run 6b B | 4/4 | zitadel | 3 | 15067.6 | 16803.9 | 4.06 | 1292.769 | zitadel | ✗ 0/3 |
+| run 6b B | 4/4 | authentik | 1 | 29557.5 | 66803.4 | 4.11 | 3030.012 | none | ✗ 0/3 |
+| run 6c B (3.3.5) | 4/4 | axiam | 89 | 545.6 | 572.0 | 4.65 | 52.043 | none | ✓ 3/3 |
 
-AXIAM remains the only target valid at every profile, at ≤ ~120 MiB of
-average server memory during the burst (§5). Two updates in fairness to
-Keycloak: it produced its **first valid login cell** (p2, 51/s), and we
-ran the promised **4 GiB labeled attempt** — which did *not* rescue it:
-at 4 096 MiB Keycloak ran stably but at ~21/s with p95 ≈ 2.5 s (still
-failing the validity gate, and slower than its 2 GiB survivor runs).
-Keycloak's login behavior appears memory-*sensitive* rather than simply
-memory-starved; we'll say so rather than keep raising its cap. Zitadel's
-exclusion remains its default bcrypt cost — expected and tunable.
+**A draw.** AXIAM 49 vs Keycloak 47 logins/s at 2/2 (AXIAM's p95 tighter,
+1,046 vs 1,213 ms); 93 vs 98 at 4/4, inside Keycloak's ±4.3% spread. Both
+are CPU-bound on hashing and both double with the cores. **Keycloak's
+login is valid at every profile for the first time in this series**, at
+the same 2 GiB cap as everyone else. AXIAM's server holds 73 MiB during
+the burst against Keycloak's 708. Zitadel's default bcrypt cost keeps it
+at a ~29 s p50 (expected and tunable).
 
-## 2. What changed since draft 5, and why the numbers moved
+## 2. What changed since draft six (run 5), and why the numbers moved
 
-Every fix below shipped in the released alpha24 image measured here — none
-is a benchmark-only tweak:
+Run 6 is **not a like-for-like re-run of run 5**. Four things changed at
+once, and each is named wherever a run-5 figure is quoted:
 
-| Change | Measured consequence in run 5 |
-|---|---|
-| Nagle disabled on the REST listener (`TCP_NODELAY`, default on) | TLS token issuance −57% → **−2%** (§3.1) |
-| Two authorization table scans → index scans | REST checks +37%, gRPC checks +43%, cache-off (§3.3) |
-| Batch strategy measured = batch strategy shipped (`coalesced`) | batch REST = **4.97× singles** at matrix scale (§1) |
-| gRPC rate-limiter ×60 units bug fixed; per-method-family ceilings | prod-posture partially re-verified; **a new flood-behavior problem found, see §6** |
-| Revised `internet` machine-endpoint defaults (token 120/min, introspect 600/min, authz 1 800/min, revoke 60/min) | enforcement re-measured under flood (§7) |
-| SDK harness: real refresh calls, async Python driver, client CPU/RSS telemetry, wire baseline, median-of-3 | §9's overhead column exists and is trustworthy |
+| Change | Run 5 | Runs 6–6c | Effect |
+|---|---|---|---|
+| Host | Dell XPS 15 laptop (i7-8750H, 12 threads, thermally limited) | Cloud VM, AMD EPYC Genoa, 16 vCPUs, qualified, 0% steal | Competitors are the control: on the same cells Keycloak moved **+3% to +21%** and Zitadel **−14% to −1%** — a host effect is small and not one-directional |
+| AXIAM | 1.0.0-alpha24 | 1.3.0 (run 6), 1.3.1 (6b, 6c) | ~40 releases: OPAQUE, CIBA, SAML IdP, SCIM outbound, directory sources, AMQP over TLS, refresh in three round trips, two-layer single-use redemption (schema v84) |
+| Datastore | SurrealDB 3 | **SurrealDB 4.0.1** (runs 6, 6b); 3.3.5 (run 6c) | AXIAM 1.3 requires 4.0. Run 6c sizes the server's share (§4) |
+| Targets | AXIAM, Keycloak 26.7.0, Zitadel v4.16.2 | + **authentik 2026.8.5**; Keycloak 26.8.1, Zitadel v4.19.5 | authentik produced no valid cell (§8) |
 
-## 3. Three mysteries, closed (the benchmark as debugger)
+**What moved, run 5 → run 6 (AXIAM, p0, 2/2):** client credentials 2,804
+→ 1,610 (−43%), introspection 4,504 → 1,582 (−65%), REST userinfo 4,752 →
+1,411 (−70%), gRPC userinfo 12,307 → 3,078 (−75%), single authorization
+checks 1,032 → 492 (−52%) — while **JWKS rose 26,680 → 43,640 (+64%)**. A
+host change cannot move database-bound and database-free cells in
+opposite directions: the drop lives in the database tier. Run 6c puts a
+number on the SurrealDB 4.0.1 server's share (13–38%); the remainder —
+on 3.3.5, token issuance is 1,970 against run 5's 2,804 on a different
+host — is not yet explained, and §5 names the candidates.
 
-This section is why we benchmark in the open. Draft 5 published three
-unexplained results as open questions with named hypotheses. Run 5 tested
-all three.
+**AXIAM 1.3.0 → 1.3.1 at equal caps (run 6b A against run 6): −5% to
+−12%** on every cell (client credentials −10%, introspection −9%,
+userinfo −6%, gRPC userinfo −9%, refresh −12%, authorization −7% to
+−11%, JWKS −5%, login −6%). That is outside run 6's ±0.3–4.5% run-to-run
+spread. 1.3.1's changelog lists dependency bumps and test fixes and no
+performance change; the control pass ran a day later with no competitor
+alongside it, so release and day-to-day host drift cannot be separated.
+It is reported, not absorbed: the run-6b cap factors and the run-6c
+server factors both use 1.3.1 at 2/2 as AXIAM's baseline, so neither is
+contaminated by it.
 
-### 3.1 The TLS plateau was Nagle's algorithm — confirmed by A/B
+## 3. Run 6b: twice the cores — was it the caps?
 
-Draft 5's flat ~43 ms per TLS token request (nothing saturated, p50≈p95)
-had a hypothesis: actix-web never set `TCP_NODELAY`, so Nagle's algorithm
-held the second TLS record of each HTTP/2 response until the peer's
-**40 ms delayed-ACK timer** fired — plaintext HTTP/1.1 responses fit one
-write and never noticed. The controlled A/B on the TLS profile:
+In run 6 nearly every cell stopped at the 2-CPU cap of one container
+while the host had more than half its CPU free: SurrealDB for AXIAM
+(2.00–2.04 cores on all 27 database-bound cells, the server at
+0.27–0.84), the server for Keycloak (2.01 everywhere), the server or
+PostgreSQL for Zitadel, PostgreSQL for authentik. Run 6b raised **every
+server and every database to 4 CPUs** — the same step for every target
+and role, memory unchanged — on the same competitor and SurrealDB
+digests. AXIAM's factor is measured against its own 1.3.1 control at 2/2.
 
-| arm | thr | p50 / p95 |
-|---|---|---|
-| `TCP_NODELAY=false` (old behavior) | 1 172/s | 42.8 / 44.1 ms — draft 5's plateau, reproduced |
-| `TCP_NODELAY=true` (shipped default now) | **2 642/s** | 9.5 / 57.5 ms |
-| plaintext control | 2 757/s | 8.9 / 57.6 ms |
+| scenario | AXIAM 2/2 → 4/4 | Keycloak 2/2 → 4/4 | Zitadel 2/2 → 4/4 |
+|---|---|---|---|
+| client credentials | 1,448 → 3,234 · **2.23×** · SurrealDB | 411 → 934 · **2.27×** · server | 425 → 704 · **1.66×** · none ≥ 95% |
+| token introspection | 1,438 → 3,272 · **2.28×** · SurrealDB | 1,940 → 3,952 · **2.04×** · server | 827 → 1,522 · **1.84×** · none ≥ 95% |
+| userinfo REST | 1,320 → 2,963 · **2.24×** · SurrealDB | 3,862 → 7,807 · **2.02×** · server | 859 → 1,677 · **1.95×** · PostgreSQL |
+| userinfo gRPC | 2,795 → 6,369 · **2.28×** · SurrealDB | — | 245 → 226 · **0.92×** · none (200 ms floor) |
+| JWKS | 41,523 → 43,232 · 1.04× · load generator | 5,529 → 10,832 · **1.96×** · server | 2,031 → 3,953 · **1.95×** · PostgreSQL |
+| password login | 46 → 93 · **2.02×** · none ≥ 95% (server 3.7) | 47 → 98 · **2.09×** · server | ✗ |
+| refresh | 305 → 707 · **2.32×** · SurrealDB | 435 → 943 · **2.17×** · server | ✗ |
+| authz check REST / gRPC | 451 / 572 → 1,007 / 1,320 · **2.23× / 2.31×** · SurrealDB | — | — |
+| authz batch REST / gRPC (ops/s) | 445 / 577 → 974 / 1,229 · **2.19× / 2.13×** · SurrealDB | — | — |
 
-A VU sweep (1→100) at both profiles shows TLS tracking plaintext within
-2–6% at every concurrency, both saturating ~2.7 k/s from 20 VUs — a small
-constant TLS cost plus the database ceiling, no serialization anywhere.
-And the wire-level photograph, from an `ss -ti` snapshot inside the
-server's network namespace during the old-behavior arm: **18 of 20
-established connections frozen with bytes sitting in the send queue
-(`Send-Q 707`, `notsent:31`) behind a single unacked segment, each
-waiting out the peer's 40 ms delayed-ACK timer** — versus zero held-back
-connections in the control. Closed, at every layer we can observe.
+What it shows:
 
-### 3.2 The REST/gRPC authorization asymmetry was the session-revocation read — confirmed by a 2×2
+1. **AXIAM and Keycloak were cap-limited, not product-limited.** Both
+   roughly double and stay bound in the same container.
+2. **SurrealDB's per-statement cost parallelises.** If #7667's cost could
+   not run in parallel, more database cores would not help; AXIAM's
+   database-bound cells more than doubled. The regression costs cores; it
+   does not serialise.
+3. **Zitadel has a limit that is not CPU** on token issuance and
+   introspection (no container at 95% at 4/4), and a fixed 200 ms floor on
+   gRPC userinfo.
+4. **No head-to-head winner changed** (§1).
+5. **Run 6's shared 65–90 ms p95 band was CPU-quota throttling.** At 4/4
+   AXIAM's token-issuance p95 fell 69 → 20 ms with its p50 almost unchanged
+   (14.9 → 13.7 ms), introspection 69 → 20 ms, gRPC userinfo 59 → 11 ms;
+   Keycloak's JWKS p95 73.5 → 5.6 ms. A tail that collapses when a
+   container stops hitting its quota while the median stays put is what
+   CFS throttling looks like. Every run-6 p95 on a pegged container
+   carries it, for every target alike.
 
-Draft 5: with the decision cache on, gRPC checks reached 13× but REST
-barely moved. Code review traced it to one extra database round-trip: the
-REST path checks session revocation on every request; the gRPC path
-validates the JWT and stops. Run 5 ran the 2×2 (decision cache ×
-session-validation cache, plaintext, checks/s):
+## 4. Run 6c: what the SurrealDB 4.0.1 server costs AXIAM
 
-| | session cache off | session cache on (TTL 5 s) |
-|---|---|---|
-| decision cache off | REST 1 013 / gRPC 1 248 | REST 1 177 / gRPC 1 244 |
-| decision cache on | REST 5 597 / gRPC 11 122 | REST **11 647** / gRPC 11 172 |
+**One variable: the database server.** The same AXIAM 1.3.1 image, by
+digest, ran the matrix (all three profiles) against a **SurrealDB 3.3.5**
+server — the last release before 4.0 — at both cap levels, on the same
+VM, on a freshly created database volume for every block (a 4.x volume
+cannot be opened by 3.x). The dry runs passed at both caps and all 66
+cells are valid. It is compared at p0-plaintext with run 6b's AXIAM 1.3.1
+on 4.0.1 at equal caps.
 
-The session cache does nothing for gRPC (it never did the read) and lifts
-fully-cached REST to parity with gRPC — mechanism confirmed. Both caches
-remain **off by default**: these are best-case (hot-key) ceilings, not
-expectations.
+> **Label on every run-6c number: SurrealDB 3.3.5 server, unsupported,
+> benchmark-only.** AXIAM 1.3 requires 4.0. Its locked 4.0.0 client
+> accepts a 3.x server (`SUPPORTED_VERSIONS = ">=3.0.0-alpha.1, <5.0.0"`),
+> and the only SurrealQL change between the last 3.x commit and v1.3.1 is
+> a bound `$cutoff` in the rate-limit sweep — but CI last ran these
+> queries against 3.3.4, not 3.3.5, and never with a 4.0 client against a
+> 3.x server. Passing dry runs show the benchmarked paths work, not that
+> the product does. 3.3.5 also carries RUSTSEC-2026-0452 and
+> RUSTSEC-2026-0454, which 4.0 fixed.
 
-**Does caching break revocation? Measured, not assumed.** The revocation
-regression cell ran with caching on (TTL 5 s), twice over: (A) revoke a
-role through the API — the cache invalidation hook fires end to end and a
-**deny is served 262 ms after the revocation call**; (B) delete the
-grant *behind the server's back*, directly in the database, suppressing
-every invalidation hook — stale allows persist for up to the TTL and
-stop at 5.2 s, inside the promised TTL-plus-slack bound. In short:
-revoke through the API and revocation is immediate even with caches on;
-only out-of-band database surgery waits out the TTL, which is the
-documented contract. The flip side is stated with the same candor: part
-of gRPC's speed *is* that it does not re-check session revocation per
-call — token expiry (15 min max) is its revocation bound. That is a
-documented posture choice, and a strict mode is on the roadmap.
+| scenario (p0) | 2/2: 4.0.1 → 3.3.5 · ratio · **4.0.1's cost** | 4/4: 4.0.1 → 3.3.5 · ratio · **4.0.1's cost** | SurrealDB cores per 1,000 req, 2/2 |
+|---|---|---|---|
+| client credentials | 1,448 → 1,970 · 1.36× · **26%** | 3,234 → 3,853 · 1.19× · **16%** | 1.40 → 1.04 (−26%) |
+| token introspection | 1,438 → 1,661 · 1.16× · **13%** | 3,272 → 3,609 · 1.10× · **9%** | 1.41 → 1.23 (−13%) |
+| userinfo REST | 1,320 → 2,081 · 1.58× · **37%** | 2,963 → 4,372 · 1.48× · **32%** | 1.54 → 0.98 (−36%) |
+| userinfo gRPC | 2,795 → 4,026 · 1.44× · **31%** | 6,369 → 8,743 · 1.37× · **27%** | 0.73 → 0.51 (−30%) |
+| refresh | 305 → 450 · 1.48× · **32%** | 707 → 771 · 1.09× · **8%** | 6.62 → 4.49 (−32%) |
+| authz check REST | 451 → 714 · 1.58× · **37%** | 1,007 → 1,593 · 1.58× · **37%** | 4.48 → 2.84 (−37%) |
+| authz check gRPC | 572 → 914 · 1.60× · **37%** | 1,320 → 1,955 · 1.48× · **32%** | 3.53 → 2.22 (−37%) |
+| authz batch REST (ops/s) | 445 → 716 · 1.61× · **38%** | 974 → 1,556 · 1.60× · **37%** | 4.54 → 2.84 (−38%) |
+| authz batch gRPC (ops/s) | 577 → 679 · 1.18× · **15%** | 1,229 → 1,540 · 1.25× · **20%** | 3.50 → 2.99 (−15%) |
+| password login | 46 → 47 · 1.02× | 93 → 89 · 0.96× | 14.8 → 8.1 |
+| JWKS (no database) | 41,523 → 40,430 · 0.97× | 43,232 → 41,737 · 0.97× | — |
 
-### 3.3 The database ceiling: per-query waste removed, concurrency remains
+"4.0.1's cost" is `1 − thr(4.0.1) ÷ thr(3.3.5)`: how much throughput the
+4.0.1 server takes from AXIAM.
 
-After run 4, `EXPLAIN` on the live schema found two full-table scans on
-the hot authorization read path (both fixable without schema changes; both
-now CI-guarded against regression). Run 5 measures the result: cache-off
-capped checks went 753 → 1 010–1 032/s (the pre-registered success bar was
-1 000). The capped→uncapped (2→4 DB cores) delta narrowed from ~+90% to
-**+75–79%** — so per-query cost is no longer the dominant waste, and what
-remains is database *concurrency*. That reframes the roadmap: read-scaling
-(with its staleness semantics stated honestly) now outranks further
-per-query tuning. "Give the database cores first" remains the operative
-sizing guidance for authz-heavy workloads.
+**How much the two bugs cost AXIAM, measured.** On the nine
+database-bound cells the **SurrealDB 4.0.1 server costs AXIAM 13–38% of
+its throughput at 2 CPUs (median 32%) and 8–37% at 4 CPUs (median
+27%)**; on 3.3.5 the database needs 13–38% less CPU per request.
+Attributed carefully:
 
-## 4. Security cost of TLS 1.3 and mutual TLS (vs p0, valid cells)
+- **#7716 contributes nothing**: AXIAM defines no events.
+- **#7667 is the known candidate**, and the measurement is of the whole
+  4.0.1 server against 3.3.5 — #7667 plus anything else that changed in
+  4.0. The shape **does not follow #7667 alone**. #7667 describes a cost on
+  write statements with reads almost unchanged, so the write-heavy cells
+  (token issuance, refresh, login) should gain most on 3.3.5. At 4 CPUs
+  they gain least — 4.0.1 costs token issuance, introspection and refresh
+  **8–16%** — and the read-heavy authorization checks and userinfo gain
+  most, **20–37%**. The gRPC cells settle which explanation holds: gRPC
+  userinfo is **one read** per request and gRPC authorization **three
+  reads**, with no session check and no audit row by default (§5.1) — no
+  write at all — and 4.0.1 still costs them **15–37%** (single checks and userinfo 27–37%, batches 15–20%). **4.0.1's extra
+  cost is not only on writes.** The REST cells also write one audit row
+  per request (§5.1), which is #7667's territory, but the read cost alone
+  is enough to explain most of the loss.
+- **The bottleneck does not move.** SurrealDB stays at its cap in every
+  database-bound cell except refresh at 4/4 (3.73 of 4 cores, server 0.68,
+  bottleneck none). Each request simply costs the database less.
+- **Login and JWKS do not depend on the server version** (within ±5% and
+  ±3%), as predicted.
+- **3.3.5 recovers part of the drop since run 5, not all of it** (§2), and
+  even on 3.3.5 Keycloak would still lead introspection and REST userinfo
+  at both cap levels.
+
+**Our reading.** The run-6c figures are the ones that represent AXIAM's
+own performance; the 4.0.1 figures carry the server regression on top.
+We expect AXIAM to return to the 3.3.5 level once SurrealDB fixes its 4.0
+regressions, and the database-bound cells will be re-measured on this VM
+when a fixed release ships. Until then, the 4.0.1 figures are what a
+supported deployment gets.
+
+## 5. Is there more to optimise? Yes — and it is the database work per request
+
+Runs 6–6c point the same way. The AXIAM server is not the constraint: it
+used 0.27–2.7 cores on cells where the database was pegged, and
+server-only it spends the least CPU per request of any target on every
+cell (§7). TLS and mTLS cost nothing measurable on database-bound cells,
+and RabbitMQ stays near 0.2 cores. **What limits every data-touching cell
+is how much database work each request asks for**, multiplied by what
+each statement costs on the server version. A fixed SurrealDB release
+would lower the second factor by 8–38% (§4); everything in this section is
+about the first, which is ours, and it matters on 3.3.5 as much as on
+4.0.1 — even on 3.3.5 Keycloak leads introspection and REST userinfo.
+
+### 5.1 What each request asks of the database (from source, v1.3.1 defaults)
+
+Decision cache and session-validation cache off (the shipped defaults);
+every step is one SurrealDB query over the HTTP engine, and **every step
+within a request is awaited sequentially** (no concurrent fan-out on any
+single-request path).
+
+| endpoint | DB round trips per request | SurrealDB cores per 1,000 req (run 6c, 3.3.5, 2/2) | Keycloak's database for the same cell (run 6, 2/2) |
+|---|---|---|---|
+| REST userinfo | **2 reads** — session revocation (`is_session_active_checked`), then user — + 1 audit write | 0.98 | PostgreSQL 0.01 cores in total: served from memory |
+| gRPC userinfo | **1 read** (user); no session check (`strict_revocation=false`), no audit | 0.51 | — |
+| introspection (user access token) | **3 reads** — client, tenant liveness, user — + 1 audit write | 1.23 | PostgreSQL 0.51 cores ≈ 0.26 per 1,000 req |
+| client credentials | **2 reads** — client, tenant liveness — + 1 audit write; no token row persisted | 1.04 | PostgreSQL 0.13 cores ≈ 0.32 per 1,000 req |
+| authz check, REST (user token) | **1 + 3 reads** — session, then role assignments, ancestors, grants (4 with a scope) — + 1 audit write | 2.84 | — |
+| authz check, gRPC | **3 reads** (4 with a scope); no session check, no audit | 2.22 | — |
+| session refresh | **3 round trips** — consume (delete + read), user, create — + 1 audit write; tenant→org cached 60 s | 4.49 | — |
+
+Two things in that table are worth stating separately:
+
+- **Every REST request writes one `audit_log` row**, through an in-process
+  channel and **a single background task that appends one row per round
+  trip** (`axiam-audit/src/middleware.rs`, `audit_worker`). It is off the
+  request path, but it is a write statement per request — #7667's cost —
+  and one worker appending one row at a time has a throughput ceiling of
+  its own. When the 4,096-slot channel is full, new rows are shed to the
+  dead-letter file and counted (`RequestAuditLoss`, reported on
+  `/health/jobs`). **At the REST rates measured here (1,000–4,400 req/s)
+  it is likely that the worker did not keep up and rows were shed during
+  the benchmark.** The run did not capture the loss counter, so this is
+  an inference from the code, not a measurement; it is the first thing to
+  check, because if it holds, the benchmark's REST database cost is
+  *understated* by the rows that were never written, and the audit trail
+  under sustained load is incomplete — a compliance issue before it is a
+  performance one.
+- **Keycloak answers userinfo without its database** and introspects with
+  a fraction of AXIAM's database work. That is the two cells AXIAM loses,
+  and it is a design difference, not an engine one: Keycloak keeps
+  sessions and users in an in-memory cache (Infinispan), AXIAM re-reads
+  them on every call so that a revocation or a disabled account takes
+  effect on the next request.
+
+### 5.2 The levers, in the order the evidence ranks them
+
+1. **Batch the audit writes.** Replace the one-row-per-round-trip worker
+   with a multi-row insert (drain up to N queued rows, one statement, one
+   round trip). It removes most of a write statement per REST request —
+   the cost #7667 inflates — and lifts the worker's ceiling far above the
+   request rate. Measure first: add the lost-row counter to the harness's
+   per-cell capture, then re-run the REST cells before and after.
+2. **One round trip per request instead of two to four.** The
+   authorization engine already runs its reads in sequence over one
+   handle; role assignments, ancestors and grants can be issued as one
+   multi-statement query (the repository layer already uses
+   multi-statement queries for role assignments). The same applies to
+   introspection's client + tenant + user and to REST userinfo's session +
+   user. Each round trip on the HTTP engine is a separate authenticated
+   HTTP request that SurrealDB parses, authenticates and plans; fewer
+   round trips cut fixed per-request cost on either server version and
+   shorten the serial chain that sets latency. This needs a database-side
+   CPU profile per query shape before it is built, so the gain is
+   predicted rather than hoped for.
+3. **Cache what is read on every request, with the revocation contract
+   stated.** The mechanisms exist and are measured: the session-validation
+   cache and the decision cache lifted REST authorization from 1,013 to
+   11,647 checks/s in run 5's 2×2, and revocation through the API still
+   took effect 262 ms after the call with them on (Appendix A). Both ship
+   **off** on purpose. Candidates, each with an explicit staleness bound:
+   tenant liveness and OAuth client records on token issuance and
+   introspection (today read on every call, deliberately, so a suspended
+   tenant stops immediately); the user record behind userinfo; the
+   session check behind REST requests. Turning any of them on by default
+   is a security-posture decision, not a benchmark one, and belongs in the
+   threat model first; offering a measured "throughput" profile beside the
+   strict default is the honest middle.
+4. **Find which reads got more expensive on 4.0.1, and report them.** The
+   gRPC cells (no writes) lose 15–37% on 4.0.1 (§4): a read regression
+   that #7667 does not describe. A per-statement timing of AXIAM's hot
+   queries on 3.3.5 and 4.0.1 — `EXPLAIN` plus server-side CPU — names the
+   statements, and a reproduction belongs upstream next to #7667. If a
+   query shape that 4.0's planner handles badly can be rewritten, that part
+   is ours to fix without waiting.
+5. **Explain the 1.3.0 → 1.3.1 drop of 5–12%** (§2) with a same-day
+   control that runs both images and one competitor in the same session.
+   Until it is explained it is a regression on the books.
+6. **Refresh's non-CPU limit.** On 3.3.5 at 4/4, refresh stops at 771
+   req/s with no container at its cap (SurrealDB 3.73 of 4, server 0.68).
+   The consume step is a single-winner delete under concurrency;
+   write-conflict retries or the single client handle (`DB__POOL_SIZE=1`,
+   the shipped default) are the suspects, and the existing pool knob
+   (`AXIAM__DB__POOL_SIZE`) is a cheap first sensitivity cell.
+7. **Read scaling.** The read-replica routing primitive exists and is off.
+   With the database the ceiling on every read-heavy cell, it is the
+   architectural lever after the per-request work is reduced — but it
+   adds replicas to operate and staleness to document, so it comes last.
+
+What is **not** worth optimising on this evidence: the AXIAM server's own
+CPU path, TLS, the broker, and the SDKs (eight of nine concurrent SDKs
+add 0.5–3.2 ms at p95, §11).
+
+## 6. Security cost of TLS 1.3 and mutual TLS (run 6, vs p0, valid cells)
 
 | target / scenario | Δ thr p2 (TLS 1.3) | Δ thr p3 (mTLS) |
 |---|---|---|
-| axiam / oauth2_client_credentials | **−2.0%** | −3.8% |
-| axiam / token_introspection | −2.5% | −2.8% |
-| axiam / userinfo REST / gRPC | −3.5% / −2.9% | −6.6% / −3.0% |
-| axiam / authz check REST / gRPC | −0.8% / −0.2% | −1.5% / −0.7% |
-| axiam / authz batch REST / gRPC | −1.1% / −1.2% | −2.2% / −0.3% |
-| axiam / token_refresh | −0.9% | −0.5% |
-| axiam / oauth2_password_login | +0.3% | −2.1% |
-| axiam / jwks_fetch | −9.7% | −10.2% |
-| keycloak (valid cells) | −2.4% … −9.2% | −2.2% … **−17.2%** (jwks); login invalid at p3 |
-| zitadel (valid cells) | −1.5% … −3.3% | −1.7% … −3.9% |
+| axiam / oauth2_client_credentials | −0.9% | −1.9% |
+| axiam / token_introspection | −1.4% | +0.4% |
+| axiam / userinfo REST / gRPC | +1.0% / −0.1% | +0.6% / −0.4% |
+| axiam / authz check REST / gRPC | −1.2% / −1.4% | +0.8% / 0.0% |
+| axiam / authz batch REST / gRPC | +0.8% / +2.1% | +1.9% / +1.3% |
+| axiam / token_refresh | +0.3% | −2.0% |
+| axiam / oauth2_password_login | 0.0% | 0.0% |
+| axiam / jwks_fetch | **−16.0%** | **−12.7%** |
+| keycloak / jwks, introspection, userinfo | −5.6%, −6.5%, −9.2% | **−17.0%**, −9.8%, −10.1% |
+| keycloak / client credentials, refresh, login | −2.9%, +2.8%, −2.1% | +3.2%, −1.8%, −2.1% (valid at p3 this run) |
+| zitadel (valid cells) | −2.1% … +2.6% | −2.0% … 0.0% |
 
-Most REST rows measure TLS *plus* an HTTP/1.1→2 protocol change together
-(labeled as such in the raw report). The headline stands its third and
-strongest re-measurement, now in the run of record at median-of-3:
-**native mTLS — client certificates verified in-process, no sidecar, no
-proxy — costs AXIAM ≈1% over plain TLS 1.3 on every scenario.** For an IoT
-or zero-trust deployment that needs client certs on every connection,
-AXIAM is the only one of the three that offers this in-process, and it is
-effectively free. Keycloak pays measurably for mTLS on its hottest
-read (−17% on JWKS) and could not produce a valid login cell under it.
+**Native mTLS — client certificates verified in-process, no sidecar —
+stays within ±2% of plaintext on every database-bound AXIAM cell**, for a
+reason that must be stated with it: TLS work lands on the AXIAM server,
+which has spare cores, while the ceiling is the database. JWKS, the one
+cell where the server works hardest, shows the cost of the cryptography
+itself: −16.0% / −12.7%. Run 6c measured all three profiles on 3.3.5 as
+well and tells the same story at both cap levels: database-bound cells
+within −5% to +6% of plaintext, JWKS −12% to −15% (§10.4, §10.5). Most REST rows
+measure TLS *plus* an HTTP/1.1 → 2 change together (the `http` column of
+the raw report says which).
 
-## 5. Resource usage during the tests (graph-ready)
+## 7. Resource usage (graph-ready)
 
-Same load, same 2-CPU / 2-GiB server envelope. Whole-run p0 matrix,
-median-of-3, average RSS of the *server* container:
+Average RSS of the *server* container, MiB, p0, median-of-3 (run 6, 2/2):
 
 | scenario | AXIAM | Keycloak | Zitadel |
 |---|---|---|---|
-| jwks_fetch | **88** | 836 | 154 |
-| oauth2_client_credentials | **90** | 710 | 138 |
-| token_introspection | **95** | 752 | 153 |
-| token_refresh | **95** | 755 | — |
-| userinfo | **94** | 756 | 153 |
-| oauth2_password_login | **119** | 853* | 154 |
-| authz check/batch (no competitor equivalent) | 86–94 | — | — |
+| jwks_fetch | **54** | 784 | 133 |
+| oauth2_client_credentials | **57** | 782 | 129 |
+| token_introspection | **58** | 941 | 130 |
+| token_refresh | **57** | 877 | — |
+| userinfo | **57** | 878 | 127 |
+| oauth2_password_login | **73** | 708 | — |
+| authz check/batch | 57 | — | — |
 
-*\* Keycloak login cells are only partially valid (§1); its 4 GiB labeled
-attempt is excluded from this table and reported in §1's login section.*
+Across the whole run-6 matrix AXIAM's server averaged **54–75 MiB**,
+Keycloak's 708–941 MiB and Zitadel's 127–137 MiB, all against the same
+2 GiB cap. At 4/4 (run 6b) AXIAM's server rose to 89–133 MiB and
+Keycloak's to 1,082–1,170 MiB. **Keycloak 26.8.1 shows no reduction
+against the 710–853 MiB Keycloak 26.7.0 averaged in run 5** — a different
+host, so a direction, not a measurement of its release-note claim.
 
-**AXIAM's server averaged 86–120 MiB across the entire matrix — mostly
-under 5% of its allowance — while delivering §1's throughput.** Zitadel's
-Go server remains respectably small (135–169 MiB); its costs surface in
-CPU-per-request instead. Keycloak runs 674–853 MiB at the same envelope.
-Whole-stack (server + DB + broker), **under load**: AXIAM 375–533 MiB
-(SurrealDB and RabbitMQ included), Keycloak 816–973 MiB, Zitadel 281–457
-MiB — Zitadel's stack is the smallest; AXIAM's does the most work per byte
-(AXIAM's *resting* footprint, with and without the broker, is measured
-below the table):
+Whole stack, CPU and memory efficiency (run 6, p0, 2/2):
 
-| scenario (p0) | metric | AXIAM | Keycloak | Zitadel |
+| scenario | metric | AXIAM | Keycloak | Zitadel |
 |---|---|---|---|---|
-| oauth2_client_credentials | cpu·ms per request (stack) | **1.23** | 5.85 | 8.21 |
-| token_introspection | 〃 | **0.79** | 1.25 | 3.98 |
-| jwks_fetch | 〃 | **0.06** | 0.44 | 1.43 |
-| userinfo (REST, stack) | 〃 | 0.70 | **0.54** | 2.89 |
-| userinfo (server-only) | 〃 | **0.25** | 0.53 | 0.86 |
-| oauth2_client_credentials | req/s per GiB of stack RAM | **6 528** | 416 | 1 239 |
-| token_introspection | 〃 | **9 312** | 2 134 | 2 228 |
-| userinfo | 〃 | **11 522** | 4 319 | 2 319 |
-| jwks_fetch | 〃 | **66 270** | 5 022 | 7 351 |
+| client credentials | cpu·ms/req, whole stack | **1.84** | 5.21 | 8.99 |
+| 〃 | cpu·ms/req, server only | **0.44** | 4.89 | 4.61 |
+| token introspection | cpu·ms/req, whole stack | 1.86 | **1.30** | 4.72 |
+| 〃 | cpu·ms/req, server only | **0.42** | 1.04 | 2.31 |
+| jwks_fetch | cpu·ms/req, whole stack | **0.05** | 0.37 | 1.50 |
+| userinfo REST | cpu·ms/req, whole stack | 2.01 | **0.52** | 3.42 |
+| 〃 | cpu·ms/req, server only | **0.42** | 0.52 | 1.05 |
+| client credentials | req/s per GiB of stack RAM | **4 554** | 456 | 1 240 |
+| token introspection | 〃 | **3 913** | 1 798 | 2 122 |
+| userinfo REST | 〃 | 3 630 | **3 777** | 2 205 |
+| jwks_fetch | 〃 | **140 970** | 6 493 | 7 908 |
 
-The one cell Keycloak wins (whole-stack userinfo CPU/req — AXIAM's figure
-carries a pegged SurrealDB plus RabbitMQ) is kept in the open, as in every
-draft. Every other cell, both axes, AXIAM leads by 1.6× to 24×.
+Whole-stack, **Keycloak now wins introspection and userinfo** on CPU per
+request, and userinfo per GiB narrowly; server-only, AXIAM is the
+cheapest on every row. The whole-stack gap is the database work of §5.
 
-**Whole-stack resting footprint, with and without the broker (T23.8.3,
-measured 2026-10-05 — at rest, not under load).** The numbers above were taken
-while the stack served load. The *minimal* profile
-(`AXIAM__AMQP__ENABLED=false`, [deployment guide](../docs/deployment/README.md#minimal-profile-no-broker))
-runs AXIAM on SurrealDB alone, and its idle footprint was measured next to the
-full stack's, with one method for both:
+**At rest** (whole stack, freshly started, median of 6–8 samples):
 
-| AXIAM stack, at rest | server | SurrealDB | RabbitMQ | **whole stack** |
-|---|---|---|---|---|
-| **minimal** (server + SurrealDB) | 120.7 MiB | 86.6 MiB | — | **207.3 MiB** |
-| full (server + SurrealDB + RabbitMQ) | 130.3 MiB | 86.0 MiB | 114.6 MiB | **330.9 MiB** |
+| target | RSS, fresh / with fixture (MiB) | cgroup working set, fresh (MiB) | what's in it |
+|---|---|---|---|
+| AXIAM | **373** / 398 | 216 | server 92 + SurrealDB 119 + RabbitMQ 162 (RSS) |
+| Zitadel | 593 / 639 | **172** | server 167 + PostgreSQL 427 (RSS) |
+| Keycloak | 1 074 / 1 102 | 934 | server 891 + PostgreSQL 183 (RSS) |
+| authentik | 1 668 / 1 682 | 819 | server 983 + worker 347 + PostgreSQL 338 (RSS) |
 
-*Method.* Median resident set (`VmRSS`, summed over a component's processes) of
-each component, sampled for 120 s starting 60 s after `/ready` first answered
-`200`, on a freshly migrated empty datastore with no traffic; script, raw
-samples and logs in
-[`benchmarks/resting-footprint/`](resting-footprint/2026-10-05/). SurrealDB
-(2 CPU / 1 GiB) and RabbitMQ (1 CPU / 512 MiB) ran as containers under the caps
-of §0; **the server was the native release binary** (jemalloc, as the image is
-built; commit `21f1521`), uncapped — a measurement of the server image has not
-been taken. SurrealDB 3.2.5 and RabbitMQ 4 (digests, host and settings in the run's
-`environment.txt`), a 4-vCPU Linux 6.18 sandbox, not the §0 machine. Repeat runs of the minimal
-stack agreed to within 2 MiB.
+Which stack is smallest at rest depends on the measure: by resident set
+AXIAM's, by cgroup working set Zitadel's — PostgreSQL's shared buffers
+count in its resident set. The minimal profile (no broker) was not
+re-measured in this round; Appendix A carries its 2026-10-05 figures.
 
-*How to read it.* Resident set counts file-backed pages (the server's own
-binary, about 32 MiB of its 121 MiB; SurrealDB's mapped datastore, about 62 MiB
-of its 87 MiB), which a container's cgroup accounting largely does not; the
-anonymous parts are 113.5 MiB (minimal) and 185.0 MiB (full). These resting
-figures are therefore **not comparable cell for cell** with the under-load,
-container-averaged figures above, and no Keycloak or Zitadel stack was measured
-at rest by this method, so the table makes no claim against them. What it does
-say is how much the broker costs: about 124 MiB, 37 % of the full stack, at
-rest.
+## 8. Weaknesses and caveats (the honest section)
 
-## 6. Weaknesses and caveats (the honest section)
+- **AXIAM lost two head-to-head cells it used to win** — introspection
+  and REST userinfo, to Keycloak, at both cap levels and even on 3.3.5
+  (§1, §5). We publish the losses as plainly as the wins.
+- **The SurrealDB 4.0.1 server costs AXIAM 13–38% at 2 CPUs and 8–37% at
+  4** (§4), and AXIAM 1.3 cannot run on anything else in support. The two
+  upstream issues are open with no fix merged.
+- **AXIAM 1.3.1 measured 5–12% below 1.3.0 at equal caps**, unexplained
+  (§2).
+- **The audit worker may shed rows under sustained REST load** (§5.1) —
+  inferred from the code, not measured; to be checked first.
+- **authentik produced no valid cell** in any run. Its PostgreSQL is
+  pegged at 2/2; at 4/4 it roughly doubles and stays above the 2 s p95
+  gate (two cells 1/3 valid). With the worker carrying the server cap its
+  stack has 6 CPU / 5 GiB at 2/2 against Keycloak's 4 / 3. Its p2 is its
+  own TLS listener over HTTP/1.1, it has no p3, its login is
+  protocol-variant and its refresh a fallback operation. **We make no
+  performance statement about authentik from these runs.**
+- **Zitadel**: login invalid (default bcrypt cost, ~29 s p50 at 2/2),
+  refresh a fallback operation, userinfo via a client-credentials token;
+  a non-CPU limit on token issuance and introspection and a fixed 200 ms
+  gRPC userinfo floor that we have not explained and do not quote as
+  product ceilings.
+- **The p95 of every pegged container at 2/2 carries CPU-quota
+  throttling** (§3); p50 is the better cross-target latency figure for
+  run 6, and run 6b's p95 the better tail figure.
+- **Run 6c is an unsupported pairing** (a 4.0 client on a 3.3.5 server,
+  never in AXIAM's CI) carrying two RUSTSEC advisories; it sizes the bug
+  and is not a deployment recommendation.
+- **Scope.** This round measured the comparison only. Deferred, and
+  therefore **not** re-verified: the production rate-limit table (§9
+  carries run 5's, with its failing rows), the new-feature cells, the
+  minimal profile, and the investigation passes (refresh stage timings,
+  strict revocation, decision-cache sensitivity).
+- **One cloud VM, shared tenancy.** Qualified and steal-free throughout,
+  but its vCPUs are SMT threads; absolute figures describe this instance
+  class. AXIAM's JWKS cell saturates the load generator in every pass.
 
-- **Token/session refresh regressed −35% since draft 5** (839 → 545/s) on
-  our own measurements, with no harness change on that path. The suspects
-  are the post-run-4 security-hardening commits and/or database version
-  drift; a stage-timed bisection is queued. We found it, we're publishing
-  it, and the next draft will explain it — the same treatment the
-  rate-limit write and the ×60 bug got.
-- **The rate limiter fails our own enforcement assertions — in both
-  directions.** This run added an automated check that compares
-  configured limits against admitted rates under a single-IP flood, with
-  a ±10% bar. Verdicts: login **passes** (11/min vs 10 configured);
-  the REST machine endpoints **over-admit** (+12% token, +48%
-  introspect, +50% authz check — token-bucket burst bleeding into the
-  sustained window); and the gRPC families **under-admit by ×20–33**
-  (181/min admitted vs 6 000 configured on authz) — the ×60 units bug
-  draft 5 reported is fixed, but two cooperating limiter layers with
-  mismatched windows appear to compound under overload. Three limiter
-  families (revoke, gRPC admin, gRPC infra) have no test scenario yet,
-  so their ceilings are asserted only in code review. Compliant clients
-  under the limit are unaffected by any of this, but until it's fixed
-  and re-measured, **we do not advertise gRPC throughput under the abuse
-  posture**, and we publish the failing table rather than the passing
-  subset (§7).
-- **Keycloak's login story is genuinely hard to measure fairly.** We
-  raised its cap to 4 GiB as promised; it got *slower* (§1). We report its
-  one valid cell (51/s at p2/2 GiB) and our failed rescue attempt rather
-  than either hiding the cells or pretending the 4 GiB number is
-  representative.
-- **SDK caveats**: Python remains the slow outlier even after moving to a
-  genuinely async driver (check p50 ~40 ms vs ~10 ms for Go/Java/Rust —
-  now attributable to the SDK/runtime, not the old harness artifact);
-  the C++ SDK's reconnect-shaped p95 tail persists despite the connection-
-  age fix and is still under investigation; the TypeScript-vs-wire
-  overhead reads implausibly *negative* and its baseline comparability is
-  being audited before we publish TS overhead claims; C# merged 2 of 3
-  passes. All flagged inline in §9.
-- **Consumer-laptop hardware**, package temperatures 95–100 °C on hot
-  cells, clock 3.1–3.9 GHz across cells; medians-of-3 keep AXIAM spreads
-  ≤ ±2% (batch cells ±13–17% — coalescing is phase-sensitive), but a
-  server-class re-run remains the standing caveat on absolute numbers.
-- AXIAM stack figures include RabbitMQ and SurrealDB; k6 skips cert
-  verification at p2/p3 (handshake and record crypto are real);
-  closed-loop 50 VUs floors the fastest endpoints (JWKS) — those cells
-  measure latency, not capacity.
-- The investigation passes (§3) are single labeled runs by design, not
-  median-of-3; the matrix cells they explain are median-of-3.
+## 9. Production rate limits — carried from run 5, not re-measured
 
-## 7. Production rate limits: measured capacity, and what to set
+Run 6 deferred the production-posture pass, so **nothing in this section
+was measured on the cloud VM**. The table below is run 5's (laptop,
+1.0.0-alpha24) and is kept because the failing rows are still open: they
+have been neither confirmed fixed nor re-measured. The capacity column is
+run 5's capacity. **Run 6's lower database-bound capacities narrow the
+margins, and one falls below the bar the codebase itself asserts.** The
+unit test `revised_machine_defaults_stay_far_below_measured_capacity`
+(`axiam-api-rest/src/config/rate_limit.rs`) requires every machine default
+to sit at least 25× below measured capacity, with run-5 capacities. With
+run 6's REST authorization capacity at 2/2 — 492 checks/s ≈ 29,500/min
+on SurrealDB 4.0.1 — the 1,800/min `authz_check` default is **16×**
+below it, under the bar (on 3.3.5, 714/s ≈ 42,800/min, 24×; at 4/4,
+1,007/s, 34×). Token issuance (≈96,600/min, 805×) and introspection
+(≈94,900/min, 158×) stay far above it. Whether the default or the bar
+moves is a posture decision; it is recorded here so it is taken with the
+current numbers.
 
-AXIAM ships enforcing abuse limits by default; the competitors ship none.
-The revised `internet` defaults (draft 5 §7.2) are now re-measured on the
-released image against a single-IP 50-VU flood:
+| endpoint | shipped default (`internet`, per-IP) | run-5 capacity (2c server / 2c DB) | flood enforcement in run 5 (admitted vs configured, ±10% bar) |
+|---|---|---|---|
+| `POST /api/v1/auth/login` | 10/min | ~69/s (Argon2id-bound) | ✅ PASS — 11/min |
+| `POST /oauth2/token` | 120/min | ~2 804/s | ❌ FAIL — 135/min (+12%) |
+| `POST /oauth2/introspect` | 600/min | ~4 504/s | ❌ FAIL — 889/min (+48%) |
+| `POST /api/v1/authz/check` | 1 800/min | ~1 032/s | ❌ FAIL — 2 699/min (+50%) |
+| gRPC authz | 100/s | ~1 268/s | ❌ FAIL — 181/min (~1/33) |
+| gRPC identity | 500/s | ~12 307/s | ❌ FAIL — 1 504/min (~1/20) |
+| `POST /oauth2/revoke`, gRPC admin / infra | 60/min, 10/s / 100/s | — | not covered by a scenario |
 
-| endpoint | shipped default (`internet`, per-IP) | measured capacity (this run, 2c server / 2c DB) | default as % of capacity | flood enforcement (admitted vs configured, ±10% bar) |
-|---|---|---|---|---|
-| `POST /api/v1/auth/login` | 10/min | ~69/s ≈ 4 100/min (Argon2id-bound) | 0.2% | ✅ **PASS** — 11/min admitted |
-| `POST /oauth2/token` | 120/min | ~2 804/s ≈ 168 000/min | 0.07% | ❌ FAIL — 135/min (+12%) |
-| `POST /oauth2/introspect` | 600/min | ~4 504/s ≈ 270 000/min | 0.22% | ❌ FAIL — 889/min (+48%) |
-| `POST /api/v1/authz/check` | 1 800/min | ~1 032/s ≈ 62 000/min (REST; batch shares this bucket) | 2.9% | ❌ FAIL — 2 699/min (+50%) |
-| gRPC authz | 100/s (= 6 000/min) | ~1 268/s checks | 8% | ❌ FAIL — **181/min admitted (~1/33)** |
-| gRPC identity | 500/s (= 30 000/min) | ~12 307/s reads | 4% | ❌ FAIL — 1 504/min (~1/20) |
-| `POST /oauth2/revoke` | 60/min | (tracks issuance) | — | not yet covered by a test scenario |
-| gRPC admin / gRPC infra | 10/s / 100/s | — | — | not yet covered by a test scenario |
-
-Yes, that column is mostly FAIL, and we're publishing it anyway: the
-assertion script and its ±10% bar are ours, this is the second limiter
-bug class it has caught (the ×60 units bug was the first), and a public
-failing table is what makes the fix verifiable next run. The abuse
-*direction* of the posture is intact — the critical human endpoint
-(login) enforces exactly, and every machine endpoint still throttles a
-flood to within 1.5× of its configured trickle — but "within 1.5×" is
-not "as configured", and the gRPC starvation is a real availability bug
-under attack. Both are open work items.
-
-The margin between defaults and capacity is **25–2 700×, with authz the
-tightest** — deliberate on an internet edge. Posture guidance is unchanged
-from draft 5: pick `internet` (default), `gateway`, or `mesh`; human
-endpoints (login, register, password-reset, MFA) keep strict per-IP limits
-in every profile by design. The standing security caveat, verbatim:
-`client_id`-keyed modes are fairness controls between authenticated
-well-behaved clients, not abuse controls — the client_id is
+Posture guidance is unchanged: `internet` (default), `gateway` or `mesh`;
+human endpoints keep strict per-IP limits in every profile. The standing
+caveat, verbatim: `client_id`-keyed modes are fairness controls between
+authenticated well-behaved clients, not abuse controls — the client_id is
 attacker-mintable before authentication — so use them only behind an edge
 that authenticates callers. `ip` remains the only attacker-resistant key
 and stays the default.
 
-## 8. Full result matrix (graph-ready)
+## 10. Full result matrix (graph-ready)
 
-One row per (scenario, profile, target); `±` is the throughput spread
-across the three runs; cpu = whole-stack cores avg; mem = whole-stack MiB
-avg. Rows failing a validity gate or carrying a comparability label say so
-and **must not be charted as an unqualified head-to-head**.
+One row per (scenario, profile, target) and pass; `±` is the throughput
+spread across the three repeats; `cpu` whole-stack cores; `mem`
+whole-stack MiB; `bottleneck` the container at ≥ 95% of its cap. Rows
+failing a validity gate or carrying a label say so and **must not be
+charted as an unqualified head-to-head**. Run-6c rows are SurrealDB 3.3.5,
+unsupported, benchmark-only.
 
-| scenario | profile | target | thr (req/s) | ± | p50 (ms) | p95 (ms) | p99 (ms) | cpu | mem | valid / label |
-|---|---|---|---|---|---|---|---|---|---|---|
-| oauth2_client_credentials | p0 | axiam | 2804 | 0.6% | 8.8 | 57.5 | 61.9 | 3.44 | 440 | ✓ |
-| oauth2_client_credentials | p0 | keycloak | 354 | 11.1% | 103.3 | 206.8 | 299.5 | 2.07 | 871 | ✓ |
-| oauth2_client_credentials | p0 | zitadel | 431 | 0.9% | 108.7 | 131.9 | 156.1 | 3.54 | 356 | ✓ |
-| oauth2_client_credentials | p2 | axiam | 2746 | 1.5% | 9.1 | 57.3 | 61.8 | 3.36 | 428 | ✓ |
-| oauth2_client_credentials | p2 | keycloak | 340 | 17.2% | 104.6 | 211.4 | 301.0 | 2.07 | 846 | ✓ |
-| oauth2_client_credentials | p2 | zitadel | 417 | 0.8% | 112.5 | 136.5 | 160.6 | 3.53 | 352 | ✓ |
-| oauth2_client_credentials | p3 | axiam | 2697 | 0.6% | 9.2 | 57.8 | 62.0 | 3.45 | 430 | ✓ |
-| oauth2_client_credentials | p3 | keycloak | 346 | 14.9% | 104.1 | 208.5 | 300.0 | 2.07 | 816 | ✓ |
-| oauth2_client_credentials | p3 | zitadel | 416 | 1.4% | 112.4 | 137.3 | 161.0 | 3.54 | 354 | ✓ |
-| token_introspection | p0 | axiam | 4504 | 0.5% | 5.7 | 47.7 | 52.7 | 3.55 | 495 | ✓ |
-| token_introspection | p0 | keycloak | 1888 | 3.2% | 7.3 | 81.8 | 85.8 | 2.36 | 906 | ✓ |
-| token_introspection | p0 | zitadel | 941 | 0.9% | 47.4 | 64.7 | 72.3 | 3.74 | 432 | ✓ |
-| token_introspection | p2 | axiam | 4391 | 0.9% | 6.1 | 45.2 | 50.7 | 3.43 | 476 | ✓ |
-| token_introspection | p2 | keycloak | 1715 | 0.9% | 8.2 | 82.7 | 86.9 | 2.35 | 964 | ✓ |
-| token_introspection | p2 | zitadel | 915 | 2.4% | 50.0 | 67.9 | 75.0 | 3.83 | 430 | ✓ |
-| token_introspection | p3 | axiam | 4376 | 0.4% | 6.2 | 45.5 | 50.8 | 3.47 | 489 | ✓ |
-| token_introspection | p3 | keycloak | 1731 | 5.8% | 8.0 | 82.6 | 86.7 | 2.34 | 913 | ✓ |
-| token_introspection | p3 | zitadel | 904 | 1.4% | 50.5 | 68.4 | 76.3 | 3.80 | 442 | ✓ |
-| jwks_fetch | p0 | axiam | 26680 | 0.9% | 1.4 | 3.1 | 4.4 | 1.68 | 412 | ✓ |
-| jwks_fetch | p0 | keycloak | 4573 | 3.7% | 2.7 | 72.6 | 76.6 | 2.00 | 932 | ✓ |
-| jwks_fetch | p0 | zitadel | 2091 | 1.6% | 11.1 | 64.8 | 67.1 | 2.98 | 291 | ✓ |
-| jwks_fetch | p2 | axiam | 24097 | 1.6% | 1.6 | 3.0 | 4.2 | 1.90 | 408 | ✓ |
-| jwks_fetch | p2 | keycloak | 4167 | 9.6% | 3.0 | 72.8 | 76.8 | 2.01 | 927 | ✓ |
-| jwks_fetch | p2 | zitadel | 2053 | 0.8% | 12.9 | 60.0 | 63.2 | 3.15 | 281 | ✓ |
-| jwks_fetch | p3 | axiam | 23954 | 0.6% | 1.6 | 3.1 | 4.3 | 1.90 | 413 | ✓ |
-| jwks_fetch | p3 | keycloak | 3786 | 11.2% | 3.2 | 75.0 | 78.6 | 2.01 | 890 | ✓ |
-| jwks_fetch | p3 | zitadel | 2052 | 1.0% | 12.9 | 60.1 | 63.1 | 3.14 | 292 | ✓ |
-| userinfo | p0 | axiam | 4752 | 0.5% | 5.1 | 50.9 | 55.1 | 3.31 | 422 | ✓ |
-| userinfo | p0 | keycloak | 3721 | 0.6% | 3.0 | 77.1 | 80.8 | 2.00 | 882 | ✓ |
-| userinfo | p0 | zitadel | 995 | 1.0% | 23.3 | 80.4 | 83.1 | 2.87 | 439 | ✓ machine-user token |
-| userinfo | p2 | axiam | 4585 | 0.8% | 5.4 | 50.6 | 55.0 | 3.34 | 466 | ✓ |
-| userinfo | p2 | keycloak | 3486 | 0.7% | 3.2 | 77.7 | 81.3 | 2.01 | 973 | ✓ |
-| userinfo | p2 | zitadel | 980 | 2.1% | 25.7 | 79.1 | 84.3 | 2.95 | 449 | ✓ machine-user token |
-| userinfo | p3 | axiam | 4437 | 2.1% | 5.5 | 51.2 | 55.5 | 3.53 | 437 | ✓ |
-| userinfo | p3 | keycloak | 3490 | 0.4% | 3.2 | 77.9 | 81.5 | 2.00 | 929 | ✓ |
-| userinfo | p3 | zitadel | 978 | 2.9% | 25.3 | 79.3 | 83.4 | 2.95 | 457 | ✓ machine-user token |
-| userinfo_grpc (AXIAM-only) | p0 | axiam | 12307 | 1.9% | 4.0 | 6.0 | 7.0 | 2.10 | 422 | ✓ |
-| userinfo_grpc (AXIAM-only) | p2 | axiam | 11954 | 1.6% | 4.0 | 6.0 | 7.0 | 2.08 | 526 | ✓ |
-| userinfo_grpc (AXIAM-only) | p3 | axiam | 11937 | 1.0% | 4.0 | 6.0 | 7.0 | 2.07 | 533 | ✓ |
-| zitadel_userinfo_grpc | p0 | zitadel | 191 | 4.4% | 230.0 | 320.0 | 823.0 | 1.13 | 437 | ✓ machine-user token |
-| zitadel_userinfo_grpc | p2 | zitadel | 201 | 3.1% | 230.0 | 263.0 | 697.9 | 1.24 | 446 | ✓ machine-user token |
-| zitadel_userinfo_grpc | p3 | zitadel | 192 | 3.2% | 230.0 | 289.0 | 886.0 | 1.24 | 448 | ✓ machine-user token |
-| oauth2_password_login | p0 | axiam | 69 | 2.0% | 699.1 | 760.6 | 940.0 | 2.12 | 495 | ✓ |
-| oauth2_password_login | p0 | keycloak | (47) | n=1 | (990.4) | (1129.0) | (1218.8) | 2.05 | 966 | ✗ 1/3 runs valid |
-| oauth2_password_login | p0 | zitadel | (2) | — | (21786) | (25414) | (27451) | 2.02 | 413 | ✗ p95>2s (bcrypt) |
-| oauth2_password_login | p2 | axiam | 70 | 1.6% | 696.4 | 763.9 | 1050.6 | 2.11 | 481 | ✓ |
-| oauth2_password_login | p2 | keycloak | 51 | 4.8% | 890.3 | 1094.7 | 1186.0 | 2.05 | 961 | ✓ 2/3 |
-| oauth2_password_login | p2 | zitadel | (2) | — | (22031) | (25348) | (27107) | 2.02 | 412 | ✗ p95>2s (bcrypt) |
-| oauth2_password_login | p3 | axiam | 68 | 0.9% | 704.0 | 790.9 | 1199.8 | 2.05 | 482 | ✓ |
-| oauth2_password_login | p3 | keycloak | (22) | — | (2178.6) | (2308.5) | (2422.3) | 2.03 | 863 | ✗ 0/3 |
-| oauth2_password_login | p3 | zitadel | (2) | — | (21915) | (25611) | (27418) | 2.02 | 409 | ✗ p95>2s (bcrypt) |
-| token_refresh | p0 | axiam | 545 | 1.2% | 88.8 | 111.1 | 155.0 | 2.59 | 484 | ✓ ⚠ protocol-variant (session refresh) |
-| token_refresh | p0 | keycloak | 377 | 2.4% | 101.5 | 203.9 | 297.2 | 2.05 | 916 | ✓ ⚠ protocol-variant (OAuth2 grant) |
-| token_refresh | p2 | axiam | 540 | 3.3% | 89.0 | 113.2 | 156.2 | 2.68 | 482 | ✓ ⚠ protocol-variant |
-| token_refresh | p2 | keycloak | 368 | 0.4% | 102.3 | 204.4 | 297.4 | 2.05 | 973 | ✓ ⚠ protocol-variant |
-| token_refresh | p3 | axiam | 542 | 1.3% | 89.5 | 112.8 | 155.8 | 2.69 | 495 | ✓ ⚠ protocol-variant |
-| token_refresh | p3 | keycloak | 365 | 0.6% | 102.5 | 204.9 | 298.1 | 2.05 | 948 | ✓ ⚠ protocol-variant |
-| token_refresh | all | zitadel | — | — | — | — | — | — | — | ✗ fallback-op (no offline_access flow) |
-| authz_check_rest (AXIAM-only) | p0 | axiam | 1032 | 0.3% | 27.2 | 79.4 | 84.9 | 2.87 | 390 | ✓ |
-| authz_check_rest (AXIAM-only) | p2 | axiam | 1024 | 0.3% | 27.8 | 79.8 | 85.2 | 2.99 | 395 | ✓ |
-| authz_check_rest (AXIAM-only) | p3 | axiam | 1016 | 0.8% | 28.0 | 80.1 | 85.7 | 2.95 | 383 | ✓ |
-| authz_check_grpc (AXIAM-only) | p0 | axiam | 1268 | 1.1% | 21.0 | 74.0 | 79.0 | 2.81 | 383 | ✓ |
-| authz_check_grpc (AXIAM-only) | p2 | axiam | 1265 | 0.6% | 21.0 | 74.0 | 79.0 | 2.84 | 380 | ✓ |
-| authz_check_grpc (AXIAM-only) | p3 | axiam | 1259 | 0.3% | 21.0 | 74.0 | 79.0 | 2.83 | 390 | ✓ |
-| authz_batch_rest (AXIAM-only, `coalesced` default) | p0 | axiam | 1026 (=5 130 checks/s) | 13.0% | 27.5 | 79.6 | 85.2 | 2.96 | 375 | ✓ |
-| authz_batch_rest 〃 | p2 | axiam | 1015 | 13.2% | 28.0 | 79.9 | 85.5 | 2.86 | 375 | ✓ |
-| authz_batch_rest 〃 | p3 | axiam | 1004 | 12.0% | 28.6 | 80.3 | 85.8 | 2.88 | 379 | ✓ |
-| authz_batch_grpc (AXIAM-only, `coalesced` default) | p0 | axiam | 928 (=4 640 checks/s) | 17.0% | 33.0 | 84.0 | 90.0 | 2.83 | 435 | ✓ |
-| authz_batch_grpc 〃 | p2 | axiam | 917 | 17.1% | 34.0 | 84.0 | 90.0 | 2.72 | 420 | ✓ |
-| authz_batch_grpc 〃 | p3 | axiam | 926 | 16.4% | 33.0 | 84.0 | 90.0 | 2.67 | 423 | ✓ |
+### 10.1 Run 6 — AXIAM 1.3.0, SurrealDB 4.0.1, 2/2, all profiles
 
-## 9. SDK client benchmarks — median-of-3, with a real wire baseline
+| scenario | profile | target | thr (req/s) | ± | p50 (ms) | p95 (ms) | p99 (ms) | cpu | mem | bottleneck | valid / label |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| authz_batch_grpc | p0 | axiam | 620 | 1.6% | 85.0 | 102.0 | 112.0 | 2.65 | 398 | axiam-surrealdb | ✓ |
+| authz_batch_grpc | p2 | axiam | 633 | 2.0% | 84.0 | 101.0 | 109.0 | 2.66 | 397 | axiam-surrealdb | ✓ |
+| authz_batch_grpc | p3 | axiam | 628 | 0.5% | 84.0 | 101.0 | 109.0 | 2.65 | 403 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p0 | axiam | 485 | 1.9% | 96.9 | 152.9 | 169.0 | 2.69 | 287 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p2 | axiam | 489 | 3.9% | 96.7 | 154.7 | 169.5 | 2.68 | 289 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p3 | axiam | 494 | 2.5% | 96.1 | 123.1 | 167.3 | 2.69 | 290 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p0 | axiam | 645 | 0.6% | 83.0 | 100.0 | 107.0 | 2.59 | 292 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p2 | axiam | 636 | 4.5% | 84.0 | 100.0 | 109.0 | 2.65 | 299 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p3 | axiam | 645 | 1.1% | 83.0 | 100.0 | 107.0 | 2.63 | 294 | axiam-surrealdb | ✓ |
+| authz_check_rest | p0 | axiam | 492 | 1.4% | 96.3 | 152.5 | 168.4 | 2.66 | 298 | axiam-surrealdb | ✓ |
+| authz_check_rest | p2 | axiam | 486 | 3.1% | 96.9 | 154.4 | 168.4 | 2.68 | 302 | axiam-surrealdb | ✓ |
+| authz_check_rest | p3 | axiam | 496 | 2.0% | 95.8 | 118.3 | 166.7 | 2.65 | 301 | axiam-surrealdb | ✓ |
+| jwks_fetch | p0 | axiam | 43640 | 3.6% | 0.8 | 1.8 | 2.5 | 2.15 | 312 | none | ✓ |
+| jwks_fetch | p0 | keycloak | 5529 | 8.6% | 1.9 | 73.5 | 77.9 | 2.02 | 917 | keycloak | ✓ |
+| jwks_fetch | p0 | zitadel | 2031 | 2.0% | 10.4 | 69.3 | 72.2 | 3.04 | 263 | zitadel-postgres | ✓ |
+| jwks_fetch | p0 | authentik | 24 | 0.8% | 1905.3 | 2790.4 | 3167.7 | 2.93 | 1250 | authentik-postgres | ✗ invalid |
+| jwks_fetch | p2 | axiam | 36648 | 1.3% | 1.0 | 2.1 | 2.8 | 2.45 | 316 | none | ✓ |
+| jwks_fetch | p2 | keycloak | 5218 | 7.4% | 2.2 | 72.3 | 76.6 | 2.03 | 1058 | keycloak | ✓ |
+| jwks_fetch | p2 | zitadel | 2084 | 2.4% | 11.5 | 64.3 | 67.6 | 3.20 | 274 | zitadel-postgres | ✓ |
+| jwks_fetch | p2 | authentik | 24 | 1.8% | 1894.4 | 2715.2 | 3113.2 | 2.91 | 1265 | authentik-postgres | ✗ invalid |
+| jwks_fetch | p3 | axiam | 38117 | 2.5% | 0.9 | 2.0 | 2.7 | 2.43 | 315 | none | ✓ |
+| jwks_fetch | p3 | keycloak | 4589 | 5.0% | 2.4 | 74.7 | 78.5 | 2.02 | 976 | keycloak | ✓ |
+| jwks_fetch | p3 | zitadel | 2030 | 2.8% | 11.9 | 65.1 | 68.8 | 3.20 | 272 | zitadel-postgres | ✓ |
+| oauth2_client_credentials | p0 | axiam | 1610 | 0.5% | 14.9 | 69.1 | 73.4 | 2.96 | 359 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p0 | keycloak | 411 | 10.4% | 99.5 | 201.0 | 293.6 | 2.14 | 938 | keycloak | ✓ |
+| oauth2_client_credentials | p0 | zitadel | 425 | 5.1% | 109.2 | 135.7 | 148.1 | 3.82 | 352 | zitadel | ✓ |
+| oauth2_client_credentials | p0 | authentik | 5 | 10.7% | 6340.2 | 27855.0 | 41836.8 | 3.83 | 1280 | none | ✗ invalid |
+| oauth2_client_credentials | p2 | axiam | 1596 | 0.5% | 15.0 | 69.2 | 73.5 | 3.01 | 366 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p2 | keycloak | 399 | 13.4% | 100.1 | 201.1 | 293.6 | 2.13 | 890 | keycloak | ✓ |
+| oauth2_client_credentials | p2 | zitadel | 416 | 3.1% | 111.3 | 139.6 | 152.5 | 3.83 | 353 | zitadel | ✓ |
+| oauth2_client_credentials | p2 | authentik | 5 | 16.3% | 6518.5 | 25132.5 | 38588.1 | 3.91 | 1265 | none | ✗ invalid |
+| oauth2_client_credentials | p3 | axiam | 1580 | 0.7% | 15.3 | 69.4 | 73.8 | 3.13 | 364 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p3 | keycloak | 424 | 8.8% | 99.1 | 198.9 | 288.8 | 2.15 | 983 | keycloak | ✓ |
+| oauth2_client_credentials | p3 | zitadel | 417 | 3.5% | 111.3 | 140.4 | 153.3 | 3.85 | 354 | zitadel | ✓ |
+| oauth2_password_login | p0 | axiam | 49 | 0.6% | 1004.9 | 1046.1 | 1062.3 | 2.63 | 393 | none | ✓ |
+| oauth2_password_login | p0 | keycloak | 47 | 3.4% | 1010.2 | 1213.2 | 1315.9 | 2.07 | 856 | keycloak | ✓ |
+| oauth2_password_login | p0 | zitadel | 2 | 1.4% | 29243.8 | 33365.0 | 35445.9 | 2.04 | 393 | zitadel | ✗ invalid |
+| oauth2_password_login | p0 | authentik | 1 | 17.4% | 25908.5 | 54250.8 | 56366.8 | 4.19 | 1329 | authentik-postgres | ✗ invalid, protocol-variant, protocol-variant |
+| oauth2_password_login | p2 | axiam | 49 | 1.4% | 995.8 | 1043.6 | 1067.9 | 2.65 | 392 | none | ✓ |
+| oauth2_password_login | p2 | keycloak | 46 | 14.4% | 1002.4 | 1216.4 | 1352.3 | 2.07 | 866 | keycloak | ✓ |
+| oauth2_password_login | p2 | zitadel | 2 | 1.1% | 28819.5 | 32851.2 | 34455.4 | 2.04 | 398 | zitadel | ✗ invalid |
+| oauth2_password_login | p2 | authentik | 1 | 28.5% | 31277.5 | 43472.6 | 50303.5 | 4.17 | 1298 | authentik-postgres | ✗ invalid, protocol-variant, protocol-variant |
+| oauth2_password_login | p3 | axiam | 49 | 0.8% | 999.5 | 1040.2 | 1051.6 | 2.67 | 389 | none | ✓ |
+| oauth2_password_login | p3 | keycloak | 46 | 6.7% | 1029.2 | 1185.3 | 1293.0 | 2.07 | 853 | keycloak | ✓ |
+| oauth2_password_login | p3 | zitadel | 2 | 1.2% | 29339.2 | 33680.4 | 35659.6 | 2.04 | 399 | zitadel | ✗ invalid |
+| token_introspection | p0 | axiam | 1582 | 0.6% | 15.2 | 69.4 | 73.9 | 2.94 | 414 | axiam-surrealdb | ✓ |
+| token_introspection | p0 | keycloak | 1940 | 3.2% | 5.4 | 85.1 | 88.6 | 2.51 | 1107 | keycloak | ✓ |
+| token_introspection | p0 | zitadel | 827 | 1.9% | 53.6 | 75.9 | 83.6 | 3.90 | 399 | zitadel,zitadel-postgres | ✓ |
+| token_introspection | p0 | authentik | 19 | 14.0% | 2505.2 | 3483.4 | 3851.3 | 2.73 | 1258 | authentik-postgres | ✗ invalid |
+| token_introspection | p2 | axiam | 1560 | 2.7% | 15.4 | 69.7 | 74.2 | 2.95 | 415 | axiam-surrealdb | ✓ |
+| token_introspection | p2 | keycloak | 1814 | 3.2% | 5.9 | 85.7 | 89.5 | 2.49 | 1034 | keycloak | ✓ |
+| token_introspection | p2 | zitadel | 824 | 1.6% | 55.0 | 77.5 | 85.8 | 3.93 | 406 | zitadel,zitadel-postgres | ✓ |
+| token_introspection | p2 | authentik | 19 | 24.0% | 2499.7 | 3462.9 | 3892.5 | 2.82 | 1271 | authentik-postgres | ✗ invalid |
+| token_introspection | p3 | axiam | 1588 | 0.6% | 15.1 | 69.2 | 73.7 | 2.98 | 415 | axiam-surrealdb | ✓ |
+| token_introspection | p3 | keycloak | 1749 | 4.3% | 6.1 | 86.3 | 90.2 | 2.49 | 973 | keycloak | ✓ |
+| token_introspection | p3 | zitadel | 817 | 3.1% | 55.1 | 77.0 | 85.6 | 3.95 | 407 | zitadel,zitadel-postgres | ✓ |
+| token_refresh | p0 | axiam | 347 | 0.3% | 115.8 | 191.8 | 207.3 | 2.51 | 397 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| token_refresh | p0 | keycloak | 435 | 2.9% | 98.2 | 201.4 | 296.5 | 2.07 | 1046 | keycloak | ✓, protocol-variant, protocol-variant |
+| token_refresh | p0 | zitadel | 1 | 0.6% | 5648.8 | 9411.8 | 9965.9 | 2.06 | 400 | zitadel | ✗ invalid, fallback-op+protocol-variant, fallback-op |
+| token_refresh | p0 | authentik | 3 | 20.1% | 9839.9 | 37470.5 | 59235.5 | 4.01 | 1290 | none | ✗ invalid, fallback-op+protocol-variant, fallback-op |
+| token_refresh | p2 | axiam | 348 | 2.5% | 115.7 | 192.0 | 208.4 | 2.52 | 394 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| token_refresh | p2 | keycloak | 447 | 1.0% | 97.9 | 199.0 | 292.4 | 2.08 | 1047 | keycloak | ✓, protocol-variant, protocol-variant |
+| token_refresh | p2 | zitadel | 1 | 0.3% | 6250.0 | 8846.2 | 9336.0 | 2.06 | 406 | zitadel | ✗ invalid, fallback-op+protocol-variant, fallback-op |
+| token_refresh | p2 | authentik | 2 | 13.7% | 10068.8 | 41873.2 | 57036.5 | 3.88 | 1290 | none | ✗ invalid, fallback-op+protocol-variant, fallback-op |
+| token_refresh | p3 | axiam | 340 | 0.2% | 116.8 | 193.4 | 210.0 | 2.51 | 401 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| token_refresh | p3 | keycloak | 427 | 1.5% | 98.8 | 200.5 | 295.2 | 2.07 | 985 | keycloak | ✓, protocol-variant, protocol-variant |
+| token_refresh | p3 | zitadel | 1 | 0.2% | 6406.5 | 9407.2 | 9996.8 | 2.06 | 408 | zitadel | ✗ invalid, fallback-op+protocol-variant, fallback-op |
+| userinfo | p0 | axiam | 1411 | 1.6% | 17.4 | 71.9 | 76.4 | 2.83 | 398 | axiam-surrealdb | ✓ |
+| userinfo | p0 | keycloak | 3862 | 0.6% | 2.4 | 80.4 | 83.6 | 2.02 | 1047 | keycloak | ✓ |
+| userinfo | p0 | zitadel | 859 | 1.6% | 51.9 | 85.9 | 92.3 | 2.94 | 402 | zitadel-postgres | ✓, cc-token-setup |
+| userinfo | p0 | authentik | 20 | 2.4% | 2343.3 | 3022.4 | 3289.6 | 3.08 | 1229 | authentik-postgres | ✗ invalid |
+| userinfo | p2 | axiam | 1425 | 0.3% | 17.2 | 71.7 | 76.0 | 2.91 | 401 | axiam-surrealdb | ✓ |
+| userinfo | p2 | keycloak | 3505 | 3.1% | 2.6 | 81.3 | 84.4 | 2.02 | 1046 | keycloak | ✓ |
+| userinfo | p2 | zitadel | 845 | 1.6% | 53.1 | 86.4 | 94.1 | 3.02 | 412 | zitadel-postgres | ✓, cc-token-setup |
+| userinfo | p2 | authentik | 20 | 0.8% | 2389.5 | 3030.0 | 3303.3 | 3.13 | 1249 | authentik-postgres | ✗ invalid |
+| userinfo | p3 | axiam | 1419 | 0.2% | 17.3 | 71.7 | 76.0 | 2.87 | 399 | axiam-surrealdb | ✓ |
+| userinfo | p3 | keycloak | 3471 | 3.2% | 2.6 | 81.1 | 84.5 | 2.02 | 956 | keycloak | ✓ |
+| userinfo | p3 | zitadel | 851 | 3.3% | 51.6 | 86.3 | 94.1 | 3.03 | 410 | zitadel-postgres | ✓, cc-token-setup |
+| userinfo_grpc | p0 | axiam | 3078 | 4.1% | 7.0 | 59.0 | 63.0 | 3.11 | 407 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p2 | axiam | 3076 | 3.9% | 7.0 | 59.0 | 63.0 | 3.10 | 408 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p3 | axiam | 3066 | 1.6% | 8.0 | 59.0 | 63.0 | 3.14 | 406 | axiam-surrealdb | ✓ |
+| zitadel_userinfo_grpc | p0 | zitadel | 245 | 1.5% | 200.0 | 203.0 | 227.0 | 1.94 | 404 | none | ✓, cc-token-setup |
+| zitadel_userinfo_grpc | p2 | zitadel | 241 | 2.6% | 200.0 | 229.0 | 248.0 | 1.92 | 412 | none | ✓, cc-token-setup |
+| zitadel_userinfo_grpc | p3 | zitadel | 240 | 4.6% | 200.0 | 227.0 | 244.0 | 1.85 | 410 | none | ✓, cc-token-setup |
 
-All eleven SDKs (Rust, TypeScript, Python, Java, Kotlin, C#, Go, PHP,
-Swift, C, C++) ran the same four ops against the same seeded AXIAM at
-plaintext, **three passes each, medianed**, with a **matched-concurrency
-k6 wire baseline** measured on the same host first — so the "overhead vs
-wire" column finally exists and means what it says. Client CPU and peak
-RSS are now recorded per SDK as well. Concurrency-16 SDKs (p0):
+### 10.2 Run 6b pass A — AXIAM 1.3.1 control, SurrealDB 4.0.1, 2/2, p0
+
+| scenario | profile | target | thr (req/s) | ± | p50 (ms) | p95 (ms) | p99 (ms) | cpu | mem | bottleneck | valid / label |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| authz_batch_grpc | p0 | axiam | 577 | 1.2% | 88.0 | 106.0 | 156.0 | 2.69 | 378 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p0 | axiam | 445 | 2.8% | 100.6 | 165.0 | 177.6 | 2.74 | 290 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p0 | axiam | 572 | 1.6% | 88.0 | 106.0 | 156.0 | 2.69 | 293 | axiam-surrealdb | ✓ |
+| authz_check_rest | p0 | axiam | 451 | 1.9% | 100.2 | 163.8 | 176.8 | 2.69 | 302 | axiam-surrealdb | ✓ |
+| jwks_fetch | p0 | axiam | 41523 | 0.5% | 0.8 | 1.9 | 2.7 | 2.18 | 312 | none | ✓ |
+| oauth2_client_credentials | p0 | axiam | 1448 | 1.6% | 16.6 | 71.4 | 76.2 | 3.02 | 365 | axiam-surrealdb | ✓ |
+| oauth2_password_login | p0 | axiam | 46 | 0.8% | 1053.3 | 1128.4 | 1159.1 | 2.73 | 384 | none | ✓ |
+| token_introspection | p0 | axiam | 1438 | 3.3% | 16.8 | 71.9 | 76.8 | 2.95 | 405 | axiam-surrealdb | ✓ |
+| token_refresh | p0 | axiam | 305 | 3.7% | 129.6 | 210.2 | 277.2 | 2.54 | 419 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| userinfo | p0 | axiam | 1320 | 2.7% | 18.7 | 73.8 | 78.7 | 2.87 | 374 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p0 | axiam | 2795 | 1.8% | 8.0 | 61.0 | 64.0 | 3.08 | 381 | axiam-surrealdb | ✓ |
+
+### 10.3 Run 6b pass B — all targets, 4/4, p0
+
+| scenario | profile | target | thr (req/s) | ± | p50 (ms) | p95 (ms) | p99 (ms) | cpu | mem | bottleneck | valid / label |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| authz_batch_grpc | p0 | axiam | 1229 | 5.3% | 37.0 | 52.0 | 59.0 | 5.23 | 457 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p0 | axiam | 974 | 7.5% | 46.6 | 62.6 | 70.2 | 5.40 | 335 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p0 | axiam | 1320 | 3.9% | 34.0 | 48.0 | 54.0 | 5.25 | 339 | axiam-surrealdb | ✓ |
+| authz_check_rest | p0 | axiam | 1007 | 3.1% | 45.0 | 60.2 | 67.2 | 5.30 | 357 | axiam-surrealdb | ✓ |
+| jwks_fetch | p0 | axiam | 43232 | 8.2% | 0.8 | 1.9 | 2.7 | 2.37 | 370 | none | ✓, generator_saturated |
+| jwks_fetch | p0 | keycloak | 10832 | 2.2% | 1.9 | 5.6 | 49.7 | 4.06 | 1268 | keycloak | ✓ |
+| jwks_fetch | p0 | zitadel | 3953 | 1.5% | 8.5 | 36.8 | 40.1 | 6.36 | 359 | zitadel-postgres | ✓ |
+| jwks_fetch | p0 | authentik | 45 | 0.0% | 1041.7 | 1528.7 | 1868.5 | 4.75 | 1231 | none | ✗ invalid |
+| oauth2_client_credentials | p0 | axiam | 3234 | 1.6% | 13.7 | 19.9 | 23.2 | 6.13 | 432 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p0 | keycloak | 934 | 3.5% | 20.8 | 96.9 | 108.1 | 4.32 | 1254 | keycloak | ✓ |
+| oauth2_client_credentials | p0 | zitadel | 704 | 2.6% | 65.3 | 79.1 | 95.4 | 7.04 | 424 | none | ✓ |
+| oauth2_client_credentials | p0 | authentik | 4 | 18.5% | 6766.9 | 32616.0 | 44174.1 | 4.07 | 1319 | none | ✗ invalid |
+| oauth2_password_login | p0 | axiam | 93 | 1.6% | 523.6 | 561.7 | 575.2 | 5.17 | 500 | none | ✓ |
+| oauth2_password_login | p0 | keycloak | 98 | 4.3% | 473.2 | 586.3 | 633.9 | 4.15 | 1222 | keycloak | ✓ |
+| oauth2_password_login | p0 | zitadel | 3 | 1.5% | 15067.6 | 16803.9 | 17555.0 | 4.06 | 530 | zitadel | ✗ invalid |
+| oauth2_password_login | p0 | authentik | 1 | 22.3% | 29557.5 | 66803.4 | 67913.3 | 4.11 | 1243 | none | ✗ invalid, protocol-variant, protocol-variant |
+| token_introspection | p0 | axiam | 3272 | 1.9% | 13.5 | 19.7 | 22.8 | 6.01 | 511 | axiam-surrealdb | ✓ |
+| token_introspection | p0 | keycloak | 3952 | 1.8% | 4.9 | 57.5 | 62.6 | 5.07 | 1268 | keycloak | ✓ |
+| token_introspection | p0 | zitadel | 1522 | 2.1% | 30.4 | 39.8 | 43.0 | 7.33 | 518 | none | ✓ |
+| token_introspection | p0 | authentik | 36 | 0.0% | 1248.5 | 1754.8 | 2342.0 | 5.37 | 1259 | authentik-postgres | ✗ invalid |
+| token_refresh | p0 | axiam | 707 | 3.3% | 61.9 | 88.7 | 105.3 | 4.87 | 459 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| token_refresh | p0 | keycloak | 943 | 0.7% | 18.0 | 100.4 | 177.3 | 4.09 | 1330 | keycloak | ✓, protocol-variant, protocol-variant |
+| token_refresh | p0 | zitadel | 3 | 1.7% | 2183.9 | 4522.4 | 5350.8 | 4.11 | 527 | zitadel | ✗ invalid, fallback-op+protocol-variant, fallback-op |
+| token_refresh | p0 | authentik | 3 | 8.7% | 9642.7 | 36407.6 | 54499.9 | 4.40 | 1311 | none | ✗ invalid, fallback-op+protocol-variant, fallback-op |
+| userinfo | p0 | axiam | 2963 | 0.1% | 15.1 | 21.5 | 24.7 | 5.79 | 455 | axiam-surrealdb | ✓ |
+| userinfo | p0 | keycloak | 7807 | 2.0% | 2.3 | 51.2 | 59.0 | 4.05 | 1353 | keycloak | ✓ |
+| userinfo | p0 | zitadel | 1677 | 5.9% | 19.4 | 54.4 | 57.0 | 6.25 | 521 | zitadel-postgres | ✓, cc-token-setup |
+| userinfo | p0 | authentik | 30 | 1.3% | 1706.0 | 2465.7 | 2880.4 | 5.60 | 1171 | none | ✗ invalid |
+| userinfo_grpc | p0 | axiam | 6369 | 1.2% | 7.0 | 11.0 | 13.0 | 6.25 | 459 | axiam-surrealdb | ✓ |
+| zitadel_userinfo_grpc | p0 | zitadel | 226 | 2.3% | 200.0 | 270.0 | 288.0 | 2.29 | 524 | none | ✓, cc-token-setup |
+
+### 10.4 Run 6c pass A — AXIAM 1.3.1, SurrealDB 3.3.5 (unsupported, benchmark-only), 2/2, all profiles
+
+| scenario | profile | target | thr (req/s) | ± | p50 (ms) | p95 (ms) | p99 (ms) | cpu | mem | bottleneck | valid / label |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| authz_batch_grpc | p0 | axiam | 679 | 10.4% | 79.0 | 99.0 | 106.0 | 2.79 | 270 | axiam-surrealdb | ✓ |
+| authz_batch_grpc | p2 | axiam | 691 | 14.3% | 79.0 | 98.0 | 105.0 | 2.75 | 257 | axiam-surrealdb | ✓ |
+| authz_batch_grpc | p3 | axiam | 688 | 15.8% | 79.0 | 99.0 | 106.0 | 2.75 | 269 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p0 | axiam | 716 | 9.6% | 77.0 | 96.9 | 104.5 | 2.92 | 230 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p2 | axiam | 748 | 14.7% | 74.9 | 93.3 | 99.5 | 2.99 | 236 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p3 | axiam | 728 | 12.9% | 76.1 | 95.0 | 101.6 | 3.02 | 238 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p0 | axiam | 914 | 0.7% | 33.0 | 86.0 | 92.0 | 2.82 | 236 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p2 | axiam | 903 | 2.8% | 34.0 | 86.0 | 92.0 | 2.84 | 242 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p3 | axiam | 867 | 3.1% | 58.0 | 88.0 | 94.0 | 2.85 | 244 | axiam-surrealdb | ✓ |
+| authz_check_rest | p0 | axiam | 714 | 0.7% | 77.3 | 94.8 | 101.0 | 2.95 | 249 | axiam-surrealdb | ✓ |
+| authz_check_rest | p2 | axiam | 740 | 2.1% | 75.4 | 93.8 | 100.1 | 2.97 | 251 | axiam-surrealdb | ✓ |
+| authz_check_rest | p3 | axiam | 733 | 2.0% | 75.8 | 93.7 | 99.6 | 2.93 | 249 | axiam-surrealdb | ✓ |
+| jwks_fetch | p0 | axiam | 40430 | 2.7% | 0.8 | 2.0 | 2.8 | 1.83 | 274 | none | ✓ |
+| jwks_fetch | p2 | axiam | 35535 | 1.6% | 1.0 | 2.2 | 3.0 | 2.08 | 271 | none | ✓ |
+| jwks_fetch | p3 | axiam | 34281 | 0.8% | 1.0 | 2.3 | 3.1 | 2.08 | 278 | none | ✓ |
+| oauth2_client_credentials | p0 | axiam | 1970 | 0.3% | 12.0 | 65.7 | 70.5 | 3.22 | 308 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p2 | axiam | 1923 | 1.6% | 12.3 | 66.2 | 71.0 | 3.29 | 310 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p3 | axiam | 1922 | 0.8% | 12.3 | 65.9 | 70.9 | 3.44 | 307 | axiam-surrealdb | ✓ |
+| oauth2_password_login | p0 | axiam | 47 | 2.6% | 1033.7 | 1117.3 | 1154.2 | 2.50 | 334 | none | ✓ |
+| oauth2_password_login | p2 | axiam | 47 | 1.1% | 1031.3 | 1108.1 | 1140.9 | 2.44 | 336 | none | ✓ |
+| oauth2_password_login | p3 | axiam | 47 | 1.0% | 1033.7 | 1110.9 | 1148.5 | 2.46 | 342 | none | ✓ |
+| token_introspection | p0 | axiam | 1661 | 7.9% | 14.3 | 69.3 | 74.4 | 3.16 | 248 | axiam-surrealdb | ✓ |
+| token_introspection | p2 | axiam | 1758 | 3.6% | 13.6 | 67.9 | 73.0 | 3.21 | 252 | axiam-surrealdb | ✓ |
+| token_introspection | p3 | axiam | 1658 | 7.6% | 14.2 | 68.9 | 73.9 | 3.18 | 255 | axiam-surrealdb | ✓ |
+| token_refresh | p0 | axiam | 450 | 1.6% | 98.9 | 162.2 | 180.3 | 2.64 | 324 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| token_refresh | p2 | axiam | 436 | 1.4% | 100.3 | 166.1 | 184.3 | 2.66 | 324 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| token_refresh | p3 | axiam | 445 | 1.9% | 98.8 | 164.8 | 185.9 | 2.62 | 327 | axiam-surrealdb | ✓, protocol-variant, protocol-variant |
+| userinfo | p0 | axiam | 2081 | 2.0% | 11.2 | 65.1 | 70.0 | 3.27 | 261 | axiam-surrealdb | ✓ |
+| userinfo | p2 | axiam | 2058 | 2.2% | 11.3 | 65.2 | 70.0 | 3.31 | 257 | axiam-surrealdb | ✓ |
+| userinfo | p3 | axiam | 2030 | 1.7% | 11.5 | 65.3 | 70.1 | 3.30 | 258 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p0 | axiam | 4026 | 1.2% | 6.0 | 54.0 | 59.0 | 3.36 | 272 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p2 | axiam | 4000 | 2.0% | 6.0 | 53.0 | 58.0 | 3.40 | 272 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p3 | axiam | 4072 | 0.9% | 6.0 | 53.0 | 58.0 | 3.41 | 267 | axiam-surrealdb | ✓ |
+
+### 10.5 Run 6c pass B — AXIAM 1.3.1, SurrealDB 3.3.5 (unsupported, benchmark-only), 4/4, all profiles
+
+| scenario | profile | target | thr (req/s) | ± | p50 (ms) | p95 (ms) | p99 (ms) | cpu | mem | bottleneck | valid / label |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| authz_batch_grpc | p0 | axiam | 1540 | 12.1% | 29.0 | 42.0 | 48.0 | 5.50 | 311 | axiam-surrealdb | ✓ |
+| authz_batch_grpc | p2 | axiam | 1557 | 9.8% | 29.0 | 42.0 | 48.0 | 5.56 | 329 | axiam-surrealdb | ✓ |
+| authz_batch_grpc | p3 | axiam | 1535 | 14.6% | 29.0 | 42.0 | 47.0 | 5.50 | 316 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p0 | axiam | 1556 | 10.6% | 29.0 | 40.7 | 46.2 | 5.82 | 276 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p2 | axiam | 1520 | 9.7% | 29.7 | 43.0 | 49.3 | 5.86 | 280 | axiam-surrealdb | ✓ |
+| authz_batch_rest | p3 | axiam | 1615 | 9.8% | 28.0 | 39.3 | 44.4 | 5.85 | 280 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p0 | axiam | 1955 | 1.6% | 23.0 | 33.0 | 37.0 | 5.68 | 291 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p2 | axiam | 1944 | 3.8% | 23.0 | 33.0 | 38.0 | 5.75 | 293 | axiam-surrealdb | ✓ |
+| authz_check_grpc | p3 | axiam | 1975 | 1.6% | 23.0 | 33.0 | 38.0 | 5.73 | 295 | axiam-surrealdb | ✓ |
+| authz_check_rest | p0 | axiam | 1593 | 4.1% | 28.4 | 40.1 | 45.6 | 5.83 | 307 | axiam-surrealdb | ✓ |
+| authz_check_rest | p2 | axiam | 1569 | 1.3% | 28.5 | 39.8 | 45.2 | 5.85 | 309 | axiam-surrealdb | ✓ |
+| authz_check_rest | p3 | axiam | 1609 | 1.4% | 28.1 | 39.4 | 44.6 | 5.84 | 308 | axiam-surrealdb | ✓ |
+| jwks_fetch | p0 | axiam | 41737 | 1.5% | 0.8 | 1.9 | 2.7 | 2.04 | 338 | none | ✓, generator_saturated |
+| jwks_fetch | p2 | axiam | 36672 | 2.2% | 1.0 | 2.2 | 2.9 | 2.42 | 336 | none | ✓, generator_saturated |
+| jwks_fetch | p3 | axiam | 36159 | 2.2% | 1.0 | 2.2 | 3.0 | 2.46 | 337 | none | ✓, generator_saturated |
+| oauth2_client_credentials | p0 | axiam | 3853 | 3.3% | 11.3 | 17.6 | 20.8 | 6.42 | 320 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p2 | axiam | 3895 | 2.8% | 11.2 | 17.4 | 20.5 | 6.60 | 313 | axiam-surrealdb | ✓ |
+| oauth2_client_credentials | p3 | axiam | 3748 | 5.6% | 11.6 | 17.7 | 20.8 | 6.74 | 312 | axiam-surrealdb | ✓ |
+| oauth2_password_login | p0 | axiam | 89 | 1.5% | 545.6 | 572.0 | 593.7 | 4.65 | 342 | none | ✓ |
+| oauth2_password_login | p2 | axiam | 88 | 1.0% | 547.7 | 595.4 | 614.3 | 4.56 | 343 | none | ✓ |
+| oauth2_password_login | p3 | axiam | 89 | 2.0% | 547.5 | 582.1 | 625.9 | 4.56 | 344 | none | ✓ |
+| token_introspection | p0 | axiam | 3609 | 1.4% | 12.2 | 18.6 | 21.8 | 6.27 | 359 | axiam-surrealdb | ✓ |
+| token_introspection | p2 | axiam | 3682 | 1.0% | 11.9 | 18.2 | 21.2 | 6.36 | 360 | axiam-surrealdb | ✓ |
+| token_introspection | p3 | axiam | 3628 | 0.9% | 12.0 | 18.4 | 21.4 | 6.42 | 357 | axiam-surrealdb | ✓ |
+| token_refresh | p0 | axiam | 771 | 5.5% | 54.5 | 82.9 | 101.3 | 4.67 | 365 | none | ✓, protocol-variant, protocol-variant |
+| token_refresh | p2 | axiam | 796 | 0.9% | 52.8 | 77.2 | 96.5 | 4.72 | 377 | none | ✓, protocol-variant, protocol-variant |
+| token_refresh | p3 | axiam | 756 | 4.4% | 55.7 | 81.5 | 100.0 | 4.71 | 371 | none | ✓, protocol-variant, protocol-variant |
+| userinfo | p0 | axiam | 4372 | 0.4% | 10.0 | 15.5 | 18.0 | 6.60 | 311 | axiam-surrealdb | ✓ |
+| userinfo | p2 | axiam | 4402 | 1.8% | 9.9 | 15.4 | 18.0 | 6.62 | 320 | axiam-surrealdb | ✓ |
+| userinfo | p3 | axiam | 4413 | 1.1% | 9.9 | 15.4 | 17.8 | 6.64 | 306 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p0 | axiam | 8743 | 0.5% | 5.0 | 8.0 | 10.0 | 7.00 | 315 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p2 | axiam | 8699 | 1.1% | 5.0 | 8.0 | 10.0 | 7.05 | 341 | axiam-surrealdb | ✓ |
+| userinfo_grpc | p3 | axiam | 8753 | 1.0% | 5.0 | 8.0 | 10.0 | 7.09 | 313 | axiam-surrealdb | ✓ |
+
+
+## 11. SDK client benchmarks — median-of-3, with a matched wire baseline (run 6)
+
+All eleven SDKs (1.3.1) ran the same four operations against the same
+seeded AXIAM (1.3.0 on SurrealDB 4.0.1, 2/2) at plaintext, three passes
+each, medianed, with a k6 wire baseline at the same concurrency on the
+same host (authorization-check p95 71.1 ms at 16 VUs). Every SDK ran all
+three passes with zero errors. Concurrency-16 SDKs:
 
 | sdk | login p50 (ms) | refresh p50 (ms) | check p50 (ms) | check p95 (ms) | check thr (rps) | check p95 overhead vs wire (ms) |
 |---|---|---|---|---|---|---|
-| rust | 257.5 | 17.3 | 10.0 | 59.8 | 869 | **+2.7** |
-| go | 253.8 | 17.3 | 10.1 | 60.0 | 840 | +2.9 |
-| java | 254.7 | 17.3 | 10.3 | 60.1 | 835 | +3.0 |
-| csharp* | 234.6 | 17.2 | 10.3 | 60.8 | 821 | +3.7 |
-| typescript* | 255.7 | 16.7 | 18.1 | 34.2 | 805 | (−22.9)* |
-| kotlin | 233.4 | 17.2 | 11.0 | 61.7 | 773 | +4.6 |
-| swift | 231.7 | 17.3 | 11.3 | 61.4 | 747 | +4.3 |
-| python* | 238.9 | 17.3 | 40.2 | 116.8 | 311 | +59.7 |
-| cpp* | 242.2 | 17.2 | 3.2 | 280.2 | 313 | +223.1 |
+| cpp | 327.1 | 10.4 | 18.4 | 72.0 | 465 | +0.8 |
+| go | 332.9 | 11.1 | 18.7 | 71.8 | 462 | +0.7 |
+| java | 326.6 | 11.2 | 18.7 | 71.8 | 456 | +0.7 |
+| kotlin | 324.6 | 10.5 | 18.9 | 71.9 | 453 | +0.7 |
+| csharp | 336.0 | 12.1 | 19.4 | 73.3 | 436 | +2.2 |
+| swift | 323.8 | 10.3 | 18.7 | 71.6 | 434 | **+0.5** |
+| rust | 329.4 | 10.9 | 20.3 | 73.8 | 424 | +2.7 |
+| typescript | 331.7 | 11.5 | 21.7 | 74.3 | 414 | +3.2 |
+| python | 327.0 | 11.4 | 39.3 | 92.4 | 344 | +21.2 |
 
-Serial harnesses, labeled and excluded from cross-SDK throughput
-comparison (single worker, by their harness design): **C** (check p50
-3.0 ms, p95 3.8 ms, 318 rps) and **PHP** (3.6 / 4.3 ms, 272 rps).
+Serial harnesses, excluded from cross-SDK throughput comparison (one
+worker by design; their login never queues behind other hashes): **C**
+login 49.0 / refresh 11.5 / check 5.6 p50, 7.0 p95, 176 rps; **PHP** 52.8 /
+10.4 / 6.6, 8.2, 150 rps.
 
-**Client-side footprint (new this run — first pass of this telemetry).**
-Each SDK's own process CPU (total over its bench) and peak RSS, which is
-half the story for IoT and sidecar deployments:
+Client-side footprint (median of three passes):
 
 | sdk | runtime | client CPU (s, whole bench) | peak RSS (MiB) |
 |---|---|---|---|
-| go | go 1.26 | **3.3** | 36 |
-| c *(serial)* | gcc 16, C11 | 13.9 | **13** |
-| php *(serial)* | php 8.5 | 5.6 | 59 |
-| csharp | .NET 8 | 10.3 | 105 |
-| typescript | node 22 | 13.1 | 125 |
-| swift | swift 6.3 | 13.3 | 48 |
-| kotlin | JVM 21 | 17.1 | 458 |
-| cpp | g++ 16 | 17.6 | 39 |
-| java | JVM 21 | 21.1 | 306 |
-| rust | cargo | 23.4 | **23** |
-| python | python 3.14 | 40.0 | 88 |
+| c *(serial)* | gcc 13, C11 | **2.7** | **10** |
+| cpp | g++ 13, C++17 | **3.0** | 15 |
+| go | go 1.27 | 4.4 | 35 |
+| swift | swift 6.4 | 7.9 | 54 |
+| php *(serial)* | php 8.3 | 8.7 | 39 |
+| csharp | .NET 10 | 13.9 | 91 |
+| typescript | node 22 | 14.5 | 127 |
+| kotlin | JVM 21 | 19.4 | 623 |
+| rust | rustc 1.99 | 22.1 | 23 |
+| java | JVM 21 | 24.0 | 335 |
+| python | python 3.12, uvloop | 62.1 | 89 |
 
-Highlights: Go is by far the cheapest concurrent client on CPU; C and
-Rust are the smallest on memory (13/23 MiB — the embedded/IoT lane); the
-JVM SDKs pay the expected 300–460 MiB runtime tax at equal wire
-performance; Python is the most expensive on CPU *and* the slowest, a
-consistent picture. One number we flag rather than explain: Rust's
-client CPU reads high relative to its (excellent) latency profile —
-this is the first run of this telemetry and that figure gets a second
-look before we draw conclusions from it.
+- **The server sets the floor**: login 324–336 ms p50 and refresh
+  10.3–12.1 ms across the nine concurrent SDKs; check throughput is bounded
+  by the same pegged SurrealDB as the matrix.
+- **Hot-path overhead is under 3.5 ms at p95** for eight of nine
+  concurrent SDKs (+0.5 to +3.2 ms).
+- **Two run-5 flags are cleared**: C++'s reconnect-shaped tail is gone
+  (p95 72.0 ms against a 71.1 ms baseline), and TypeScript's negative
+  overhead is a coherent +3.2 ms.
+- **Python remains the outlier** (check p50 39 ms, +21 ms p95) on uvloop
+  with one worker thread; the gap belongs to the SDK/runtime.
+- **Rust's client CPU (22 s) reads high** against its 23 MiB footprint
+  and its latency, for the second run in a row; to be traced.
+- Some login overheads read negative (down to −7.9 ms); login latency is
+  queuing behind server-side hashing, so those deltas are noise and no
+  login overhead is claimed.
 
-What the table shows, and the flags (\*), stated plainly:
+## 12. Why build AXIAM at all?
 
-- **The server, not the SDKs, sets the floor**: ten SDKs measure refresh
-  at 16.7–17.3 ms p50 and login at 232–257 ms (server-side Argon2id
-  dominates identically from every language).
-- **SDK overhead on the hot path is single-digit milliseconds at p95** for
-  seven of the nine concurrent SDKs (+2.7 to +4.6 ms over raw k6 at the
-  same concurrency) — the headline the wire baseline was built to
-  establish.
-- **C# refresh is now a real measurement** (17.2 ms — draft 5's cached
-  no-op is fixed by the harness forcing expiry); its record merged 2 of 3
-  passes.
-- **Python** moved to a genuinely async driver and is *still* the outlier
-  (p50 40 ms, +60 ms p95 overhead) — draft 5 blamed the harness; the
-  harness is now clean, so the remaining gap belongs to the SDK/runtime
-  and is being profiled.
-- **C++** keeps its reconnect-shaped tail (p50 3.2 ms / p95 280 ms)
-  despite the connection-age fix — investigation continues, now on
-  server-side idle-timeout suspects.
-- **TypeScript's negative "overhead"** is flagged, not celebrated: a
-  client shouldn't beat the wire baseline on the same box, so its
-  baseline comparability is under audit before we publish TS overhead
-  claims.
+A fair question given this field, and a sharper one after this round:
+Keycloak is mature and ubiquitous, Zitadel is modern and well-engineered,
+and on two cells of this draft Keycloak is simply faster. The answer,
+from the measurements, with the cons attached:
 
-## 10. Why build AXIAM at all?
-
-A fair question given this field: Keycloak is mature and ubiquitous,
-Zitadel is modern and well-engineered, Auth0/Okta are excellent managed
-products. Five drafts of measurements into this project, our answer has
-sharpened rather than softened:
-
-**1. The efficiency gap is real, large, and it is the product.** These
-are not micro-optimizations: on identical hardware, identical caps and
-identical scenarios, AXIAM issues ~8× the tokens, introspects ~2.4–4.8×
-the tokens, and serves ~6–13× the JWKS reads of the incumbents — in
-86–120 MiB of server RSS, under 8% of what Keycloak uses for less
-throughput. IAM is infrastructure that runs 24/7 in front of everything;
-its cost floor and its p95 are a tax every request in the system pays.
-Rust with no GC pauses, no JVM warm-up, and CPU-shaped-per-request
-economics moves that floor by close to an order of magnitude — that is a
-capability difference, not a benchmark trophy.
+**1. The server is efficient; the database tier is the work in front of
+us.** Server-only, AXIAM spends the least CPU per request on every cell
+— 0.44 cpu·ms per token against Keycloak's 4.89 and Zitadel's 4.61, 0.42
+per introspection and per userinfo — and serves 43,640 JWKS reads/s from
+a 54 MiB server. That is the floor Rust buys. Runs 6–6c also say plainly
+that the stack is as fast as its slowest tier: SurrealDB 4.0.1 takes
+13–38% of AXIAM's throughput, and the database work per request (§5) is
+what Keycloak's in-memory design avoids. Both are now the measured
+priority, with a ranked plan.
 
 **2. Nobody else treats the machine/IoT edge as the main stage.**
-Authorization *decisions* as a first-class, benchmarked hot path (5 100+
-hierarchy-aware RBAC checks/s on 2+2 cores, batch API at the shipped
-default); a gRPC data plane that does 12 000+ identity reads/s at 6 ms
-p95 (the competitors' gRPC surfaces are management APIs, and it shows —
-Zitadel's measures 200/s); and in-process mutual TLS at ~1% cost, no
-sidecar — which makes per-device client certificates *the cheap option*
-for IoT fleets rather than an architecture project. If your workload is
-humans logging into web apps, Keycloak serves you well today. If it is
-services and devices asking "may I?" tens of thousands of times a second,
-that workload is what AXIAM is shaped around.
+Authorization decisions as a first-class, benchmarked hot path
+(2,425–6,145 hierarchy-aware RBAC checks/s batched, cache off, at 2–4
+database cores); a gRPC data plane that serves 12.6–28× Zitadel's gRPC
+userinfo; and in-process mutual TLS at no measurable cost on
+database-bound cells, which makes per-device client certificates the
+cheap option for IoT fleets. If your workload is humans logging into web
+apps, Keycloak serves you well today. If it is services and devices
+asking "may I?" many times a second, that workload is what AXIAM is
+shaped around.
 
-**3. Security posture as measured defaults, not documentation.** AXIAM is
-the only target here that ships abuse rate-limits on by default — sized
-from these measurements, with human endpoints locked strictly regardless
-of posture (and login enforcement measured exact under flood; the
-machine-endpoint enforcement gaps §7 reports are published, tracked
-bugs, not fine print).
-Argon2id, EdDSA short-lived tokens, single-use rotating refresh
-tokens, append-only audit, encrypted-at-rest secrets are defaults, not
-options. And the process is part of the posture: this benchmark series
-has now found, published, and fixed a synchronous rate-limit write, a
-×60 limiter units bug, a Nagle-induced TLS latency cliff, two
-authorization table scans — and currently carries an open refresh
-regression and a gRPC flood-behavior bug in public view. We think an IAM
-vendor that measures itself adversarially and publishes the misses is
-itself a security feature.
+**3. Security posture as defaults, and the costs it carries, measured.**
+AXIAM re-reads the session and the user on every REST request so that a
+revocation or a disabled account takes effect on the next call, writes an
+audit row per request, and ships abuse rate limits on by default —
+Argon2id, EdDSA short-lived tokens, single-use rotating refresh tokens,
+append-only audit and encrypted-at-rest secrets are defaults, not
+options. Part of the userinfo and introspection gap to Keycloak is that
+posture's price, and §5 says how to lower it without giving the posture
+up silently. The process is part of the posture too: this series has
+found and published a synchronous rate-limit write, a ×60 limiter units
+bug, a Nagle TLS cliff, two authorization table scans, and now a
+datastore regression and a possible audit-shedding path — in public,
+before each was understood.
 
-**4. Protocol surface has grown since this run, and is not yet in these
-numbers.** Deny-override RBAC (an explicit `effect: deny` that beats every
-allow, at any hierarchy depth), the OAuth2 Device Authorization Grant
-(RFC 8628), Token Exchange (RFC 8693), and the RP-initiated / back-channel
-logout and PAR triad have all landed since the run-5 measurements below.
-Two of those were in this document's own cons list until now. They are
-listed here as **shipped and unmeasured**: the deny-ratio seeding that
-exercises the deny path exists in the harness (`--deny-ratio`, default
-`0.05`), but the labelled cells are a run-6 deliverable, and every number
-in §§1–9 is from the pre-B-track build. A feature we have not measured is
-a feature we will not claim a cost for.
+**4. Deny-override RBAC and a real device flow.** An explicit deny grant
+beats every allow, at any depth of the resource hierarchy; the OAuth2
+Device Authorization Grant ships end to end for headless devices and
+CLIs.
 
-**And the honest cons, in the same breath.** AXIAM is alpha: it has a
-fraction of Keycloak's protocol surface, extension ecosystem, hosting
-options and community; Zitadel's resting stack is smaller than ours
-(SurrealDB + RabbitMQ ride along in every AXIAM deployment); Keycloak
-wins one whole-stack efficiency cell outright (§5); SurrealDB is a younger
-storage engine than Postgres by a decade; and every number in this
-document comes from one consumer laptop until the server-class re-run
-lands. Choosing AXIAM today means choosing a young system whose
-performance-per-watt, machine-first design, and measurement culture you
-value over incumbent breadth. That trade is exactly the niche the
-incumbents leave open — and the measurements above are why we believe the
-niche is worth serving.
+**And the honest cons, in the same breath.** AXIAM is young: a fraction of
+Keycloak's protocol surface, extension ecosystem, hosting options and
+community. In this draft Keycloak beats it on introspection and REST
+userinfo throughput and on whole-stack CPU for both; AXIAM's full stack
+carries SurrealDB and RabbitMQ, and by working set Zitadel's stack is
+smaller at rest; SurrealDB is a decade younger than PostgreSQL, and its
+4.0 line is the tier this round found regressed. Choosing AXIAM today
+means choosing a young system whose server efficiency, machine-first
+design and measurement culture you value over incumbent breadth — with
+its database tier as the open item.
 
-## 11. Summary and what happens next
+## 13. Summary and what happens next
 
-**Strengths.** The first release-image, full-three-profile, median-of-3
-matrix: token issuance **7.9×/6.5×** (Keycloak/Zitadel) now sustained
-under TLS and mTLS; introspection **2.4×/4.8×**; JWKS **5.8–12.8×**;
-userinfo **1.3×/4.8×** REST and **12.3 k/s** gRPC; authz checks up
-**+37/43%** with the batch default measured at **4.97× singles**; native
-mTLS at ~1% cost in the run of record; the only login valid at every
-profile; ≤ ~120 MiB average server RSS; and all three of draft 5's open
-mysteries closed with controlled experiments (§3).
+**Strengths.** The first server-class, four-target, median-of-3 matrix:
+token issuance **3.8–3.9×** Keycloak and Zitadel at 2 CPUs and
+**3.5–4.6×** at 4; JWKS **7.9×/21×**; gRPC userinfo **12.6–28×**
+Zitadel's; login on par with Keycloak; native mTLS at no measurable cost
+on database-bound cells; a 54–75 MiB server under load against
+708–941 MiB for Keycloak; the cheapest server-only CPU per request on
+every cell; and an SDK fleet within +0.5 to +3.2 ms of the wire on eight
+of nine concurrent clients.
 
-**Weaknesses, stated as plainly.** A −35% refresh regression we
-introduced ourselves and are now chasing; a gRPC limiter that starves
-under flood; a Keycloak login cell that resists fair measurement in both
-directions; Python and C++ SDK outliers that survived their first fixes;
-laptop hardware.
+**Weaknesses, as plainly.** Database-bound on every data cell; Keycloak
+ahead on introspection and REST userinfo; SurrealDB 4.0.1 costing 13–38%;
+an unexplained 5–12% between 1.3.0 and 1.3.1; a possible audit-shedding
+path under load; the rate-limit enforcement failures of run 5 still
+un-re-measured; no valid authentik cell.
 
-**Next round:** the refresh-regression bisection, the limiter-enforcement
-fixes (gRPC starvation and REST overshoot) re-verified by the same
-assertion script that failed them here, scenario coverage for the three
-untested limiter families, the TypeScript baseline audit — and the
-long-promised server-class hardware re-run, which remains the biggest
-single upgrade this series can make.
+**Next round**, in order:
+
+1. Re-run the database-bound cells on this VM once surrealdb/surrealdb#7667
+   is fixed in a SurrealDB release.
+2. Capture the audit-loss counter per cell; batch the audit writes; re-run
+   the REST cells (§5.2.1).
+3. A database-side CPU profile of AXIAM's hot queries on 3.3.5 and 4.0.1 —
+   names the read regression for upstream and sizes the single-round-trip
+   rewrite (§5.2.2, §5.2.4).
+4. A same-day 1.3.0 / 1.3.1 control with one competitor alongside.
+5. A labelled cache-profile pass (session-validation, decision, client and
+   tenant caches) with the revocation cell repeated, to put numbers on the
+   posture trade-off (§5.2.3).
+6. The deferred passes: production rate limits, minimal profile,
+   new-feature cells, refresh stage timings, strict revocation.
+7. Zitadel's non-CPU limit and 200 ms gRPC floor; a larger authentik
+   envelope or an explanation.
 
 ---
-*Sources: G-box run-5 of 2026-08-05/06 (median-of-3 capped matrix ×
-p0/p2/p3 × 3 targets; §12.3–12.7 labeled investigation passes: KC-login
-4 GiB, TCP_NODELAY A/B + VU sweep + in-namespace `ss -ti` socket
-captures, session/decision cache 2×2, cache-on revocation cell, DB
-capped/uncapped, prod rate-limit posture with the `rl-prod-summary.md`
-assertion artifact; 11-SDK median-of-3 pass with matched-VU wire
-baseline and client CPU/RSS telemetry; per-cell k6 summaries, 1 s
-container + host telemetry, digest-recorded image metadata), aggregated
-by `runner/report.py`. Target versions: AXIAM 1.0.0-alpha24 (digest-pinned),
-Keycloak 26.7.0, Zitadel v4.16.2, SurrealDB v3 (digest-pinned),
-Postgres 16. Metric definitions: [`docs/methodology.md`](docs/methodology.md).*
+
+## Appendix A. Carried forward from draft six (run 5, laptop) — not re-measured
+
+These results come from run 5 (1.0.0-alpha24, SurrealDB 3, Dell XPS 15)
+and are kept because later sections rely on them. None was re-measured
+on the cloud VM.
+
+**The three run-5 investigations, closed.**
+
+- *The TLS plateau was Nagle's algorithm.* With `TCP_NODELAY=false`, TLS
+  token issuance sat at 1,172 req/s on a flat 42.8 / 44.1 ms p50/p95
+  plateau; with it on (the shipped default since), 2,642 req/s against a
+  2,757 plaintext control. An in-namespace `ss -ti` capture showed 18 of
+  20 connections frozen behind one unacked segment, waiting out the
+  peer's 40 ms delayed-ACK timer.
+- *The REST/gRPC authorization asymmetry was the session-revocation
+  read.* The 2×2 (decision cache × session-validation cache, checks/s):
+  both off REST 1,013 / gRPC 1,248; decision cache on REST 5,597 / gRPC
+  11,122; both on REST **11,647** / gRPC 11,172. Revocation with caches on
+  (TTL 5 s): through the API a deny was served **262 ms** after the call;
+  by out-of-band database deletion, stale allows stopped at 5.2 s, inside
+  the TTL-plus-slack bound. Part of gRPC's speed is that it does not
+  re-check session revocation per call (`strict_revocation=false` by
+  default); token expiry (15 min max) is its revocation bound.
+- *The database ceiling.* Two full-table scans on the authorization read
+  path were removed (CI now fails on any regression to a table scan);
+  capped checks went 753 → 1,010–1,032/s, and the 2 → 4 database-core
+  delta narrowed to +75–79%, reframing the ceiling as database
+  concurrency rather than per-query waste. Run 6b's doubling (§3) is
+  consistent with it.
+
+**Minimal-profile resting footprint (T23.8.3, 2026-10-05, sandbox, native
+server binary, SurrealDB 3.2.5).** Minimal (server + SurrealDB) **207.3
+MiB** RSS; full (+ RabbitMQ) **330.9 MiB**; the broker is about 124 MiB,
+37% of the full stack, at rest. Method and raw samples in
+[`benchmarks/resting-footprint/`](resting-footprint/2026-10-05/). Not
+comparable cell for cell with §7's container figures.
+
+---
+*Sources: run 6 (2026-11-20/21: median-of-3 capped matrix × p0/p2/p3 × four
+targets, 66/84 valid; resting footprints of four stacks at two stages;
+11-SDK median-of-3 pass with matched-VU wire baseline and client CPU/RSS),
+run 6b (2026-11-21/22: AXIAM 1.3.1 control at 2/2, 11/11; all four targets
+at 4/4, p0, 22/30) and run 6c (2026-11-23/24: AXIAM 1.3.1 on SurrealDB
+3.3.5 at 2/2 and 4/4, p0/p2/p3, 66/66), all on one Infomaniak Public Cloud
+`a16-ram64-disk80-perf1` instance (AMD EPYC Genoa, 16 vCPUs, 64 GiB);
+per-cell k6 summaries, 1-second container and host telemetry, steal
+sampled throughout, every image digest in every cell's metadata;
+aggregated by `runner/report.py`. Execution runbook:
+`claude_dev/bench-vm-runbook.md` §§9, 13, 14. Images: AXIAM 1.3.0
+(`sha256:c0e3a2ec…`) and 1.3.1 (`sha256:ca4c5afd…`); SurrealDB 4.0.1
+(`sha256:408eb8e5…`) and 3.3.5 (`sha256:3db515b8…`); Keycloak 26.8.1,
+Zitadel v4.19.5, authentik 2026.8.5, PostgreSQL 16, RabbitMQ 4 — digests
+in `results/provenance/images.txt`. Per-endpoint round-trip counts in §5.1
+read from source at v1.3.1. Metric definitions:
+[`docs/methodology.md`](docs/methodology.md).*

@@ -7,6 +7,8 @@ import type {
   BenchResourceRow,
   BenchSdkRow,
   BenchSdkFootprintRow,
+  BenchCapsRow,
+  BenchSurrealRow,
 } from "./types";
 
 /**
@@ -1692,7 +1694,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "AXIAM issues 3.9× the tokens/s of Keycloak and 3.8× those of Zitadel, at a 15 ms p50 against their 99–109 ms, and holds within 2% under TLS 1.3 and mutual TLS. The lead is half what run 5 measured (7.9×): AXIAM's server used 0.70 of its 2 cores while SurrealDB sat at its 2-core cap, so this cell now measures the database tier, not the token service.",
-    note: "SurrealDB 4 bug #7667 open — re-run pending",
+    note: "SurrealDB 4.0.1 costs 26% here (run 6c)",
   },
   {
     id: "introspection",
@@ -1706,7 +1708,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "Keycloak wins this cell: 1,940 against AXIAM's 1,582 req/s, with a lower p50 (5.4 vs 15.2 ms) though a higher p95 (85 vs 69 ms). AXIAM led by 2.4× in run 5. Its server was at 0.67 cores with SurrealDB pegged, and server-only AXIAM still spends the least CPU per request (0.42 cpu·ms against Keycloak's 1.04) — but throughput is what a client sees, and on throughput this is a loss.",
-    note: "SurrealDB 4 bug #7667 open — re-run pending",
+    note: "SurrealDB 4.0.1 costs 13% here (run 6c)",
   },
   {
     id: "jwks",
@@ -1733,7 +1735,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "Keycloak serves 2.7× AXIAM's userinfo reads (3,862 vs 1,411 req/s); AXIAM still leads Zitadel by 1.6×. Keycloak answers this endpoint without touching PostgreSQL (0.01 cores), whereas AXIAM reads SurrealDB on every call and SurrealDB is pegged. Server-only, AXIAM costs 0.42 cpu·ms per request against Keycloak's 0.52, so the gap is the database round trip, not the server.",
-    note: "SurrealDB 4 bug #7667 open · Zitadel token via client_credentials",
+    note: "SurrealDB 4.0.1 costs 37% here (run 6c) · Zitadel token via client_credentials",
   },
   {
     id: "userinfo_grpc",
@@ -1745,7 +1747,7 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
     ],
     takeaway:
       "3,078 identity reads/s at a 59 ms p95 — 2.2× AXIAM's own REST path and 12.6× Zitadel's gRPC userinfo, which runs 71% below Zitadel's REST cell (its gRPC surface is a management API, which is fair). Keycloak and authentik expose no gRPC equivalent. Run 5 measured 12,307/s here; the same pegged database explains the fall.",
-    note: "SurrealDB 4 bug #7667 open — re-run pending",
+    note: "SurrealDB 4.0.1 costs 31% here (run 6c)",
   },
   {
     id: "password_login",
@@ -1770,8 +1772,8 @@ export const BENCH_SCENARIOS: BenchScenario[] = [
       { target: "AXIAM", value: 347, display: "347", axiam: true },
     ],
     takeaway:
-      "Informational, not a like-for-like race: AXIAM has no ROPC/password grant by design, so its cell measures session-cookie refresh (CSRF double-submit, single-use rotation) while Keycloak's measures the OAuth2 refresh-token grant. Keycloak is ahead this run; AXIAM's server sat at 0.27 cores with SurrealDB pegged, and refresh is three database round trips. Zitadel's and authentik's cells are fallback operations and are excluded.",
-    note: "protocol-variant · SurrealDB 4 bug #7667 open",
+      "Informational, not a like-for-like race. AXIAM supports the OAuth2 refresh-token grant, but the harness obtains user tokens through a password login, and AXIAM's token endpoint has no password (ROPC) grant. So AXIAM's cell measures session-cookie refresh (CSRF double-submit, single-use rotation), while Keycloak's measures the OAuth2 refresh-token grant. Keycloak is ahead this run; AXIAM's server sat at 0.27 cores with SurrealDB pegged, and session refresh is three database round trips. Zitadel's and authentik's cells are fallback operations and are excluded.",
+    note: "protocol-variant · SurrealDB 4.0.1 costs 32% here (run 6c)",
   },
 ];
 
@@ -1806,7 +1808,7 @@ export const BENCH_AUTHZ: BenchScenario = {
   ],
   takeaway:
     "gRPC delivers 31% more single checks than REST at a lower p95 (100 vs 153 ms), and a batch of five turns 485 REST operations/s into 2,425 checks/s — 4.9× singles, the same amplification run 5 measured. The absolute figures are half or less of run 5's (1,032 / 1,268 / 5,130 / 4,640): on every authorization cell SurrealDB used 2.02 of its 2 cores while AXIAM's server used 0.38–0.43. These are database-tier numbers; the cache-on sensitivity pass was not part of this run.",
-  note: "AXIAM-only · SurrealDB 4 bug #7667 open — re-run pending",
+  note: "AXIAM-only · SurrealDB 4.0.1 costs 15–38% here (run 6c)",
 };
 
 /**
@@ -1919,6 +1921,111 @@ export const BENCH_SDK_FOOTPRINT: BenchSdkFootprintRow[] = [
   { sdk: "Rust", runtime: "rustc 1.99", cpu: 22.1, rss: 23 },
   { sdk: "Java", runtime: "JVM 21", cpu: 24.0, rss: 335 },
   { sdk: "Python", runtime: "python 3.12, uvloop", cpu: 62.1, rss: 89 },
+];
+
+/**
+ * Run 6b (2026-11-21/22, same VM) — the p0-plaintext comparison with every
+ * server and every database capped at 4 CPU instead of 2 (memory unchanged,
+ * RabbitMQ unchanged), median of 3. The 2/2 baseline is run 6 for the
+ * competitors (the same images, by digest) and run 6b's control pass for
+ * AXIAM (1.3.1 at 2/2), so AXIAM's factor is a cap effect only. Authorization
+ * batch rows are checks/s (operations × 5). Values `[AXIAM, Keycloak, Zitadel]`.
+ */
+export const BENCH_CAPS: BenchCapsRow[] = [
+  {
+    scenario: "Client credentials",
+    cells: [
+      { from: "1,448", to: "3,234", factor: "2.23×", bound: "SurrealDB" },
+      { from: "411", to: "934", factor: "2.27×", bound: "server" },
+      { from: "425", to: "704", factor: "1.66×", bound: "none ≥ 95%" },
+    ],
+  },
+  {
+    scenario: "Token introspection",
+    cells: [
+      { from: "1,438", to: "3,272", factor: "2.28×", bound: "SurrealDB" },
+      { from: "1,940", to: "3,952", factor: "2.04×", bound: "server" },
+      { from: "827", to: "1,522", factor: "1.84×", bound: "none ≥ 95%" },
+    ],
+  },
+  {
+    scenario: "OIDC userinfo — REST",
+    cells: [
+      { from: "1,320", to: "2,963", factor: "2.24×", bound: "SurrealDB" },
+      { from: "3,862", to: "7,807", factor: "2.02×", bound: "server" },
+      { from: "859", to: "1,677", factor: "1.95×", bound: "PostgreSQL" },
+    ],
+  },
+  {
+    scenario: "OIDC userinfo — gRPC",
+    cells: [
+      { from: "2,795", to: "6,369", factor: "2.28×", bound: "SurrealDB" },
+      null,
+      { from: "245", to: "226", factor: "0.92×", bound: "none — 200 ms floor" },
+    ],
+  },
+  {
+    scenario: "JWKS fetch",
+    cells: [
+      { from: "41,523", to: "43,232", factor: "1.04×", bound: "load generator" },
+      { from: "5,529", to: "10,832", factor: "1.96×", bound: "server" },
+      { from: "2,031", to: "3,953", factor: "1.95×", bound: "PostgreSQL" },
+    ],
+  },
+  {
+    scenario: "Password login",
+    cells: [
+      { from: "46", to: "93", factor: "2.02×", bound: "none ≥ 95% (server 3.7)" },
+      { from: "47", to: "98", factor: "2.09×", bound: "server" },
+      null,
+    ],
+  },
+  {
+    scenario: "Session / token refresh",
+    cells: [
+      { from: "305", to: "707", factor: "2.32×", bound: "SurrealDB" },
+      { from: "435", to: "943", factor: "2.17×", bound: "server" },
+      null,
+    ],
+  },
+  {
+    scenario: "Authz check — REST / gRPC",
+    cells: [
+      { from: "451 / 572", to: "1,007 / 1,320", factor: "2.23× / 2.31×", bound: "SurrealDB" },
+      null,
+      null,
+    ],
+  },
+  {
+    scenario: "Authz batch — REST / gRPC (checks/s)",
+    cells: [
+      { from: "2,225 / 2,885", to: "4,870 / 6,145", factor: "2.19× / 2.13×", bound: "SurrealDB" },
+      null,
+      null,
+    ],
+  },
+];
+
+/**
+ * Run 6c (2026-11-23/24, same VM as runs 6 and 6b) — the same AXIAM 1.3.1
+ * image against a SurrealDB **3.3.5** server (unsupported, benchmark-only),
+ * compared cell by cell with run 6b's AXIAM 1.3.1 on 4.0.1 at equal caps.
+ * All three profiles were measured (33/33 valid per pass); this table compares
+ * p0-plaintext only, against run 6b's p0 cells. Median of 3. "costs" is
+ * how much lower 4.0.1's throughput is than 3.3.5's: 1 − thr(4.0.1)/thr(3.3.5).
+ */
+export const BENCH_SURREAL: BenchSurrealRow[] = [
+  { scenario: "Client credentials", caps2: "1,448 → 1,970 · 1.36× · 26%", caps4: "3,234 → 3,853 · 1.19× · 16%", dbCost: "1.40 → 1.04" },
+  { scenario: "Token introspection", caps2: "1,438 → 1,661 · 1.16× · 13%", caps4: "3,272 → 3,609 · 1.10× · 9%", dbCost: "1.41 → 1.23" },
+  { scenario: "OIDC userinfo — REST", caps2: "1,320 → 2,081 · 1.58× · 37%", caps4: "2,963 → 4,372 · 1.48× · 32%", dbCost: "1.54 → 0.98" },
+  { scenario: "OIDC userinfo — gRPC", caps2: "2,795 → 4,026 · 1.44× · 31%", caps4: "6,369 → 8,743 · 1.37× · 27%", dbCost: "0.73 → 0.51" },
+  { scenario: "Session refresh", caps2: "305 → 450 · 1.48× · 32%", caps4: "707 → 771 · 1.09× · 8%", dbCost: "6.62 → 4.49" },
+  { scenario: "Authz check — REST", caps2: "451 → 714 · 1.58× · 37%", caps4: "1,007 → 1,593 · 1.58× · 37%", dbCost: "4.48 → 2.84" },
+  { scenario: "Authz check — gRPC", caps2: "572 → 914 · 1.60× · 37%", caps4: "1,320 → 1,955 · 1.48× · 32%", dbCost: "3.53 → 2.22" },
+  { scenario: "Authz batch — REST", caps2: "445 → 716 · 1.61× · 38%", caps4: "974 → 1,556 · 1.60× · 37%", dbCost: "4.54 → 2.84" },
+  { scenario: "Authz batch — gRPC", caps2: "577 → 679 · 1.18× · 15%", caps4: "1,229 → 1,540 · 1.25× · 20%", dbCost: "3.50 → 2.99" },
+  { scenario: "Password login", caps2: "46 → 47 · 1.02×", caps4: "93 → 89 · 0.96×", dbCost: "14.8 → 8.1" },
+  { scenario: "JWKS fetch (no database)", caps2: "41,523 → 40,430 · 0.97×", caps4: "43,232 → 41,737 · 0.97×", dbCost: "—" },
 ];
 
 export const GITHUB_URL = "https://github.com/ilpanich/axiam";

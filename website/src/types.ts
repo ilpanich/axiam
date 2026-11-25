@@ -159,6 +159,38 @@ export interface BenchSdkRow {
   best?: boolean;
 }
 
+/** One target's throughput at the 2/2 caps and at the raised 4/4 caps (run 6b). */
+export interface BenchCapsCell {
+  /** Throughput at 2 CPU per server and per database, req/s (pre-formatted). */
+  from: string;
+  /** Throughput at 4 CPU per server and per database, req/s (pre-formatted). */
+  to: string;
+  /** `to ÷ from`, pre-formatted (e.g. "2.23×"). */
+  factor: string;
+  /** Which container was at ≥ 95% of its cap at 4/4, or why none was. */
+  bound: string;
+}
+
+/** One scenario's row of the raised-caps table, `[AXIAM, Keycloak, Zitadel]`. */
+export interface BenchCapsRow {
+  scenario: string;
+  cells: [BenchCapsCell | null, BenchCapsCell | null, BenchCapsCell | null];
+}
+
+/**
+ * One scenario's row of the run-6c comparison: the same AXIAM 1.3.1 image on
+ * a SurrealDB 4.0.1 server and on a 3.3.5 server, at equal caps.
+ */
+export interface BenchSurrealRow {
+  scenario: string;
+  /** At 2 CPU per server and per database: 4.0.1 → 3.3.5 req/s, ratio, 4.0.1's cost. */
+  caps2: string;
+  /** The same at 4 CPU. */
+  caps4: string;
+  /** SurrealDB cores per 1,000 requests at 2/2, 4.0.1 → 3.3.5. */
+  dbCost: string;
+}
+
 /** One SDK's own client-process cost over the whole benchmark. */
 export interface BenchSdkFootprintRow {
   sdk: string;

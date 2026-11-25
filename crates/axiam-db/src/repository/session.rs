@@ -602,20 +602,29 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {
         let id_str = id.to_string();
+        let tenant_id_str = tenant_id.to_string();
 
+        // The tenant predicate is applied here, to the fetched row, rather than
+        // as `WHERE tenant_id = $tenant_id` on the fetch. The two answer alike —
+        // the same exact string comparison, a row of another tenant is the same
+        // NotFound — but on SurrealDB 4.0.1 a predicate that references a bound
+        // parameter is planned afresh on every execution, which made this
+        // single-record read cost about 2.7× the CPU of the bare fetch
+        // (claude_dev/db-query-optimization.md §4). This read is on the path of
+        // every authenticated request, so the difference is paid everywhere.
         let mut result = self
             .db
             .current()
-            .query(
-                "SELECT * FROM type::record('session', $id) \
-                 WHERE tenant_id = $tenant_id",
-            )
+            .query("SELECT * FROM type::record('session', $id)")
             .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id.to_string()))
             .await
             .map_err(DbError::from)?;
 
         let rows: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
+        let rows: Vec<SessionRow> = rows
+            .into_iter()
+            .filter(|row| row.tenant_id == tenant_id_str)
+            .collect();
         let row = take_first_or_not_found(rows, "session", &id_str)?;
 
         row_to_session(row, id).map_err(Into::into)

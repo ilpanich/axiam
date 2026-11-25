@@ -1088,6 +1088,44 @@ fn scenarios<C: Connection>() -> Vec<(&'static str, Op<C>)> {
     ));
     // REST authorization as this branch runs it: the session check (tenant
     // checked in the repository) and the one-round-trip read.
+    // A and B as implemented: one round trip each.
+    v.push((
+        "client_credentials.after",
+        op!(|c, _i| {
+            let l = c
+                .clients
+                .get_by_client_id_with_context(c.fx.tenant_id, &c.fx.client_id, None)
+                .await?;
+            l.tenant.ok_or_else(|| anyhow!("no tenant"))??;
+            Ok(())
+        }),
+    ));
+    v.push((
+        "introspection.after",
+        op!(|c, _i| {
+            let l = c
+                .clients
+                .get_by_client_id_with_context(c.fx.tenant_id, &c.fx.client_id, Some(c.fx.user_id))
+                .await?;
+            l.tenant.ok_or_else(|| anyhow!("no tenant"))??;
+            l.user.ok_or_else(|| anyhow!("no user"))??;
+            Ok(())
+        }),
+    ));
+    v.push((
+        "userinfo_rest.after",
+        op!(|c, i| {
+            let (active, account) = c
+                .sessions
+                .is_session_active_checked_with_account(c.fx.tenant_id, c.session(i), c.fx.user_id)
+                .await;
+            if !active {
+                return Err(anyhow!("session inactive"));
+            }
+            account.ok_or_else(|| anyhow!("no account"))??;
+            Ok(())
+        }),
+    ));
     v.push((
         "authz_rest.after",
         op!(|c, i| {
@@ -1751,6 +1789,69 @@ async fn probe() -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// WebSocket reconnect probe (the SDK #5750 question)
+// ---------------------------------------------------------------------------
+
+/// Issue a namespaced record read every `interval_ms` for `secs` seconds over
+/// the chosen engine, printing every outcome change. Restart or stop the
+/// server while it runs: a healthy engine recovers on its own and keeps
+/// finding the record (no "not found" from a lost `use_ns`/`use_db`).
+async fn reconnect_probe(engine: &str, secs: u64, interval_ms: u64, fx: &Fixture) -> Result<()> {
+    async fn one<C: Connection>(
+        db: &Surreal<C>,
+        fx: &Fixture,
+    ) -> std::result::Result<bool, String> {
+        let mut r = db
+            .query("SELECT * FROM type::record('user', $id)")
+            .bind(("id", fx.user_id.to_string()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<surrealdb::types::Value> = r.take(0).map_err(|e| e.to_string())?;
+        Ok(!rows.is_empty())
+    }
+    let t0 = Instant::now();
+    let (mut ok, mut missing, mut errors) = (0u64, 0u64, 0u64);
+    let mut last = String::new();
+    macro_rules! run {
+        ($db:expr) => {{
+            let db = $db;
+            while t0.elapsed() < Duration::from_secs(secs) {
+                let outcome = match tokio::time::timeout(Duration::from_secs(5), one(&db, fx)).await
+                {
+                    Ok(Ok(true)) => {
+                        ok += 1;
+                        "found".to_owned()
+                    }
+                    Ok(Ok(false)) => {
+                        missing += 1;
+                        "NOT FOUND (namespace lost?)".to_owned()
+                    }
+                    Ok(Err(e)) => {
+                        errors += 1;
+                        format!("error: {}", e.chars().take(120).collect::<String>())
+                    }
+                    Err(_) => {
+                        errors += 1;
+                        "timeout (5 s)".to_owned()
+                    }
+                };
+                if outcome != last {
+                    println!("{:>7.1}s  {outcome}", t0.elapsed().as_secs_f64());
+                    last = outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+            }
+        }};
+    }
+    match engine {
+        "ws" => run!(ws().await?),
+        _ => run!(http().await?),
+    }
+    println!("reconnect-probe\tengine={engine}\tfound={ok}\tnot_found={missing}\terrors={errors}");
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -1785,6 +1886,12 @@ async fn main() -> Result<()> {
         }
         "explain" => explain(&fx).await,
         "probe" => probe().await,
+        "reconnect-probe" => {
+            let engine = args.get(2).cloned().unwrap_or_else(|| "ws".into());
+            let secs: u64 = args.get(3).map_or(Ok(60), |s| s.parse())?;
+            let interval: u64 = args.get(4).map_or(Ok(200), |s| s.parse())?;
+            reconnect_probe(&engine, secs, interval, &fx).await
+        }
         "audit-shed" => {
             let rate: u64 = args.get(2).context("rate")?.parse()?;
             let secs: u64 = args.get(3).context("secs")?.parse()?;

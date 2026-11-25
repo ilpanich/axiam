@@ -41,10 +41,9 @@ Measured statement by statement against SurrealDB 4.0.1 and 3.3.5:
    3,748 µs in two runs; −40% on surrealkv) and 12–14% on 3.3.5. *Implemented, behind a repository method the engine uses when
    offered.*
 4. **Merging the remaining round trips** (REST userinfo: session + user;
-   introspection: client + tenant + user; client credentials: client + tenant)
-   saves 15–48% per endpoint on 4.0.1, but each one reorders a read that today
-   happens only after client authentication, or crosses the extractor/handler
-   boundary. *Not implemented: options for you to decide (§8).*
+   introspection: client + tenant + user; client credentials: client + tenant).
+   *Implemented after review (§8.1–8.3):* userinfo REST reads −36%,
+   introspection −26%, client credentials −8% (medians, on top of item 2).
 5. **What got more expensive on 4.0.1** is not one thing: a fixed per-request
    cost (2.5× on a trivial `RETURN 1`, over HTTP and WebSocket alike), every
    write statement (session `CREATE` 2.8×, audit `CREATE` 3.2× — #7667), and
@@ -425,24 +424,107 @@ measured on the VM will be smaller than this table — while the audit trail
 becomes complete. That is the right trade, and the reason to report the loss
 counter alongside every REST cell.
 
-## 8. Options that need a decision (not implemented)
+## 8. Options and decisions
 
 Ranked by database CPU saved per request on 4.0.1. Each is a change of
-security posture or of an established design decision, so each is yours.
+security posture or of an established design decision; the decisions taken so
+far are recorded with them.
 
-| option | saves (4.0.1) | what it costs |
+### 8.1 A — tenant and account read with the client: **approved, implemented**
+
+`OAuth2ClientRepository::get_by_client_id_with_context` reads the client, its
+tenant and (for introspection) the token's account in one round trip; the
+token service still consults them only after the credential, with the same
+answers. A refused request now costs one round trip of three statements
+instead of one of one — the SEC-086 "no extra read before proof" ordering,
+traded for fewer round trips. Used by client credentials, the refresh grant,
+introspection and revocation.
+
+### 8.2 B — userinfo's session check and account read: **implemented, in the secure form**
+
+Not a second authentication path: `/oauth2/userinfo` carries a route marker
+(`PrefetchAccount`) that makes the **same** session check, in the same place,
+read the principal's account in its round trip
+(`SessionValidator::is_session_active_with_account`). The verdict is the same;
+the account is handed on only after admission, only for that principal, at
+most once; the handler falls back to its own read when there is none. Every
+other route makes the plain check and reads nothing more.
+
+### 8.3 Measured effect of A and B (4.0.1, three interleaved runs, medians)
+
+| cell (reads only) | before | after | change | p50 at c=1 |
+|---|---:|---:|---:|---|
+| userinfo REST | 607 (577–702) | 391 (331–469) | **−36%** | 1,225 → 842 µs |
+| token introspection | 1,474 (1,423–2,022) | 1,093 (1,026–1,160) | **−26%** | 2,590 → 1,603 µs |
+| client credentials | 1,156 (1,137–1,589) | 1,065 (960–1,147) | −8% (−31% at c=1) | 2,015 → 1,377 µs |
+
+"before" already includes §7.3. The spread between runs is wide on this
+machine, which is why these are medians of interleaved rounds rather than one
+run.
+
+### 8.4 C — the WebSocket engine: what changed since AXIAM left it
+
+AXIAM moved to the HTTP engine because the WebSocket engine lost its
+`use_ns`/`use_db` after a reconnect (SDK #5750) and AXIAM then answered "not
+found" for records that existed. In the SDK AXIAM now pins (4.0.1) the
+WebSocket engine keeps a **replay log** of `use`, `signin`/`authenticate` and
+`set` and re-sends it on every reconnect, before any queued request, and
+retries an expired token with its refresh half; it reconnects every second
+until it succeeds and pings the server to keep idle connections alive.
+
+Probe (`db-query-bench reconnect-probe`, a namespaced record read every
+200 ms for 75 s against surrealkv; the server killed with `-9` at 10 s,
+restarted at 18 s, restarted gracefully at 30 s, killed and restarted at 45 s):
+
+| engine | reads found | "not found" | errors | behaviour during the outage |
+|---|---:|---:|---:|---|
+| WebSocket | 301 | **0** | 2 | requests **wait** for the reconnect (one hit the probe's 5 s timeout); recovered ~1 s after each restart |
+| HTTP | 313 | 0 | 56 | every request **fails fast** while the server is down; recovered on the first request after |
+
+So the failure AXIAM left the WebSocket engine for does not reproduce on
+4.0.1. What remains to weigh:
+
+- **Waiting instead of failing.** During an outage a WebSocket request does
+  not fail; it waits for the reconnect. AXIAM would need a per-query timeout
+  so a request cannot hang behind a dead database (the HTTP engine gives that
+  failure for free).
+- **One socket per handle.** Every query of a pooled handle shares one
+  connection; `AXIAM__DB__POOL_SIZE` would then matter more.
+- **Evidence.** This is a 75-second probe with four restarts, not the weeks of
+  idle, network blips and load-balancer timeouts that produced the original
+  failure.
+
+The saving is the fixed per-request cost: ~240–290 µs of database CPU per
+round trip on 4.0.1 (§6). Recommended path, if wanted: an opt-in
+`AXIAM__DB__ENGINE=ws` with a query timeout, soaked on the benchmark VM for
+days (idle, restarts, a TCP-killing proxy) before it is considered as a
+default. Not implemented.
+
+### 8.5 D–F — caches: what "revocation latency" means
+
+The 262 ms of run 5 is **not** the staleness bound. It was the time for a
+revocation made through the API to be visible on the same replica, where the
+caches are invalidated in the same call. The bounds are:
+
+| cache | single replica, revoked through the API | change made outside the API (DB edit, restore, purge) | several replicas |
+|---|---|---|---|
+| D. session validation (`AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`) | immediate | ≤ TTL | **≤ TTL** on the other replicas — no cross-replica invalidation exists for this cache |
+| E. decision (`AXIAM__AUTHZ__DECISION_CACHE_ENABLED`, TTL default 5 s, max 300 s) | immediate | ≤ TTL (run 5: 5.2 s at TTL 5 s) | ≤ TTL; with `DECISION_CACHE_BROADCAST_ENABLED` (RabbitMQ) the other replicas are invalidated within milliseconds, the heartbeat bounding a lost broadcast |
+| F. tenant / client / user records | does not exist yet | — | — |
+
+With a 5 s TTL, then: milliseconds on one replica, and up to 5 seconds for a
+logout, password change or role removal to reach the other replicas (the
+decision cache can be brought back to milliseconds with the broadcast; the
+session cache cannot, today). F would have to be built, with the same kind of
+bound, and invalidation hooks in tenant suspension, client secret rotation and
+account locking.
+
+| option | saves (4.0.1) | worst-case staleness |
 |---|---|---|
-| **A. Read the tenant (and, for introspection, the user) in the same round trip as the client**, before the credential is verified | introspection −48% (2,310 → 1,208); client credentials −15% | Today the tenant is read only after the credential, so "a caller who has not proven possession of anything costs no extra read" (SEC-086 ordering, `token.rs`). Merged, a failing request costs one round trip with three statements instead of one with one — more work per bad request, never a different answer. Introspection would also verify the token's signature before the client is authenticated, to know which user to read. |
-| **B. Merge REST userinfo's session check and user read** | −42% of its reads, measured before §7.3 (1,750 → 1,011); with §7.3 in, what remains is one round trip's fixed cost, ≈ 250–400 µs | The session check runs in the extractor for every route; merging needs a userinfo-specific path that defers it to the handler. A second way to authenticate a route is the kind of thing that gets forgotten. |
-| **C. WebSocket engine** | ~240–290 µs per round trip (authz −17%, userinfo −35%) | Re-opens SDK #5750 unless the reconnect path re-issues `use_ns`/`use_db` and is tested against an idle-reconnect; that failure was silent and in production. |
-| **D. Session-validation cache on by default** | the whole session read on a hit (337 µs after §7.3) | A revoked session keeps working on a replica for up to the TTL. Run 5 measured 262 ms revocation latency with it on. |
-| **E. Decision cache on by default** | all of an authz check's database work on a hit | A revoked grant keeps allowing for up to the TTL, unless cross-replica invalidation is on. |
-| **F. Cache tenant liveness / client records / user records** | 324 / 1,017 / 379 µs per read | A suspended tenant, a rotated client secret or a locked account takes effect after the TTL instead of on the next request. |
-| **G. Refresh: consume and user read in one round trip** | −5% (4.0.1), −10% (3.3.5) | A new repository method across session and user; small gain, not worth it alone. |
-
-The defaults stay strict; the honest middle the analysis proposes (§5.2 lever
-3) — a measured "throughput" profile beside the strict default — is where D–F
-belong.
+| D. session-validation cache on | the session read on a hit (≈ 340 µs) | TTL on other replicas |
+| E. decision cache on (+ broadcast) | all of an authz check's reads on a hit | TTL without broadcast; ms with it |
+| F. tenant / client / user caches | 324 / 1,017 / 379 µs per read | TTL (to be built) |
+| G. refresh: consume and user read in one round trip | −5% (4.0.1), −10% (3.3.5) | none; small gain |
 
 ## 9. Re-run on the benchmark VM
 

@@ -811,20 +811,22 @@ operator step before or during the rollout, the others only need to be known.
 |---|---|---|
 | SA-01 | Bootstrap always needs the setup token | **act** if you script bootstrap |
 | SA-02 | Four permissions withheld from Standard tenants | **act** if a tenant admin relied on them |
+| SA-04 | A token minted for an OAuth2 client is refused on a user's own-account routes | **act** for relying parties that call them; see [SA-04 and SA-06](#sa-04-and-sa-06--own-account-routes-and-scim-passwords) |
 | SA-03 | Access tokens are typed; `aud` is required | **act**: sessions renew once; see the section below |
 | SA-18 | New `roles` scope and claim; SDK `require_role` needs it | **act** for applications using `require_role` |
 | SA-12 | gRPC `UserService` is authorized | **act** for gRPC `ValidateCredentials` callers |
-| SA-13 | Tenant suspension is enforced | know it; clients must handle `tenant_suspended` |
+| SA-13 | Tenant suspension is enforced | **act** if any tenant is already `Suspended`: list them before the upgrade and re-suspend them after; clients must handle `tenant_suspended` |
 | SA-11 | SAML SP requires an `AudienceRestriction` | **act** if an IdP omits it |
 | SA-14 | Internal AMQP queues are signed | **act**: drain the queues |
 | SA-15 | Authz responses are signed and routed by `reply_to` | none; additive |
 | SA-10 | Guarded fetches ignore environment proxies | **act** if egress is proxy-only |
 | SA-16 | SurrealDB credentials move out of argv; dev image tag | **act** if you customised the SurrealDB command |
 | SA-09 | Erasure cancel restores the prior account status | none |
+| SA-06 | A SCIM password write is refused under OPAQUE `required` | know it; see [SA-04 and SA-06](#sa-04-and-sa-06--own-account-routes-and-scim-passwords) |
 | Wave 4 | Hardening: SA-40 to SA-45 | know them; see the last subsection |
 
-**Rolling the release out.** Schema migrations v119 (SA-06), v120 (SA-09) and
-v121 (SA-43) are additive and run at startup, as described under
+**Rolling the release out.** Schema migrations v116 (SA-02), v117 to v119
+(SA-06), v120 (SA-09) and v121 (SA-43) are additive and run at startup, as described under
 [Schema migrations at startup](#schema-migrations-at-startup). Roll the AMQP
 producers and consumers together (SA-14), keep
 `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` for the length of a mixed-version
@@ -855,8 +857,9 @@ and [Recovering the bootstrap setup token](#recovering-the-bootstrap-setup-token
 `organizations:update_settings` and `tenants:export_audit` are now
 organization-level actions. Their handlers
 (`GET /api/v1/audit-logs/system`, the organization settings and email-config
-reads and writes, and a sibling tenant's `GET` and audit export) accept only an
-organization principal, and the seeder withholds the four permissions from the
+reads and writes, and any tenant's `GET` and audit export under
+`/organizations/{org_id}/tenants/{tenant_id}`, a tenant administrator's own
+tenant included) accept only an organization principal, and the seeder withholds the four permissions from the
 `super_admin` and `admin` roles of every Standard tenant.
 
 - **Existing tenants are corrected at the next boot.** The server reconciles
@@ -918,11 +921,35 @@ See [gRPC](../api/grpc.md).
 
 Setting a tenant to `Suspended` now ends its sessions and refresh tokens in the
 same transaction, and refuses sign-in, token issuance, refresh, REST, gRPC,
-SCIM and AMQP authorization for its principals with `tenant_suspended` (REST
-`403`, OAuth2 `400`, gRPC `PERMISSION_DENIED`). Its data is kept.
+and AMQP authorization for its principals with `tenant_suspended` (REST `403`,
+OAuth2 `400`, gRPC `PERMISSION_DENIED`); a SCIM provisioning token of a
+suspended tenant gets the plain `401` an unknown token gets, with no code. Its
+data is kept.
 
-- Setting the tenant back to `Active` does **not** restore the old sessions;
-  users sign in again.
+**Before the upgrade, for any tenant that is already `Suspended`.** Until now
+the status was stored but not enforced, so a tenant may already hold it. The
+release performs no migration for that state: the revocation runs only inside
+the status write. Do this:
+
+1. List the tenants whose status is `Suspended`
+   (`GET /api/v1/organizations/{org_id}/tenants`).
+2. If the **organization's own tenant** is among them, set it back to `Active`
+   first. Its principals are the only ones that can lift a suspension, and the
+   new checks refuse them with `tenant_suspended` while it is suspended; only a
+   direct datastore write recovers that.
+3. After the upgrade, send `{"status":"Suspended"}` again for every tenant that
+   should stay suspended
+   (`PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}`). Any write with
+   that status runs the revocation. Until you do, such a tenant is refused at
+   every door, but still holds its pre-upgrade sessions and refresh tokens, and
+   lifting the suspension would bring them back.
+
+- Setting the tenant back to `Active` does **not** restore the sessions revoked
+  by a suspension written after the upgrade; users sign in again.
+- Suspension revokes sessions and OAuth2 refresh tokens only. SCIM provisioning
+  tokens, OAuth2 client and service-account secrets, certificates and passwords
+  are untouched, and scheduled directory sync keeps running. After a compromise,
+  revoke or rotate those **before** lifting the suspension.
 - The organization's own tenant cannot be suspended (`409
   organization_tenant_not_suspendable`).
 - Organization principals can still read the tenant and change its status.
@@ -931,6 +958,26 @@ SCIM and AMQP authorization for its principals with `tenant_suspended` (REST
   tenant.
 
 See [Tenant suspension](../admin/tenant-suspension.md).
+
+### SA-04 and SA-06 — own-account routes and SCIM passwords
+
+**SA-04.** An access token AXIAM minted for an OAuth2 client (one carrying a
+`client_id` claim, as a relying party holds for its user) is now refused `403`
+(`authorization_denied`) on the user's own-account acts: the `/oauth2/authorize`
+consent step, account deletion and export, the credential-management routes
+(passwords, MFA, passkeys), self-updates, the own-account SCIM `PUT`, `PATCH`
+and `DELETE`, and `DELETE /api/v1/users/{id}` for oneself. A console sign-in
+(the first-party sign-ins) is unaffected. A relying party that called such a
+route with its user's access token worked before the upgrade and gets `403`
+now: send the user to the AXIAM console for the act instead. See
+[`sdks/CONTRACT.md`](../../sdks/CONTRACT.md) (contract 1.67) and
+[SCIM provisioning](../api/scim-provisioning.md).
+
+**SA-06.** A SCIM `PUT` or `PATCH` that carries a `password` is answered `400`
+with `scimType: "mutability"` in a tenant whose effective OPAQUE mode is
+`required`; the user sets a password through the self-service change or reset
+flow. The credential-version behaviour is described under "A credential change
+ends the artefacts of the old credential (SA-06)" earlier in this guide.
 
 ### SA-11 — the SAML SP requires an audience
 
@@ -945,7 +992,7 @@ sign-in per IdP.
 ### SA-14 and SA-15 — internal AMQP queues
 
 The mail, webhook, SSF-push, SCIM-push and CIBA-ping queues now carry a signed
-envelope. **Drain those queues and their `.retry` queues before the upgrade**,
+envelope. **Drain those queues and the `.retry` queues of the four outbound kinds before the upgrade**,
 or set `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false` for one
 deployment on a vhost nobody else can publish to; old replicas cannot read the
 envelope, so roll producers and consumers together. Messages already in a
@@ -958,7 +1005,9 @@ SA-15 is additive on the wire: an authorization response now carries
 `tenant_id`, the request's `nonce` and an `hmac_signature`, and goes to the
 request's `reply_to` queue when one is set. Consumers that ignore unknown
 fields are unaffected. A requester that sets `reply_to` now receives its answer
-on that queue instead of the shared `axiam.authz.response`.
+on that queue instead of the shared `axiam.authz.response`, except a queue
+named `axiam.…`, which is reserved: such a request is answered on the shared
+queue.
 
 ### SA-10 — no egress proxy for guarded fetches
 
@@ -977,8 +1026,8 @@ gateway) allows them. See
   `--pass` on the command line, so they no longer appear in the process list.
   An operator with a **customised SurrealDB command or StatefulSet** must make
   the same move. That SurrealDB 4 honours these variables was not run-verified
-  in the audit's environment (no Docker daemon): smoke-test it before you roll
-  out.
+  against a running database (the fix was checked with `docker compose config`
+  and a YAML parse only): smoke-test it before you roll out.
 - The development Compose stack pulls
   `ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:-1.3.1}`, the namespace the
   release pipeline publishes to, not `…/axiamhq/…:latest`. Override the tag with
@@ -1000,14 +1049,18 @@ recorded status and restores `Active`, as every cancel did.
 - **SA-41, OAuth2.** A `code_verifier` presented for a code with no stored
   challenge is `invalid_grant`; another client presenting a PAR `request_uri`
   no longer spends it; introspection (REST and gRPC) reports `active: false`
-  when the token's `sid` session is gone.
+  when the session a user token names is gone: the `sid` claim, else `jti`,
+  which is where a first-party sign-in token carries its session id. A
+  service-account, client-credentials, exchanged, RPT or device token names no
+  session and is unaffected.
 - **SA-42, SSRF guard.** Cloud-metadata and other never-allowed addresses are
   refused even when a deployment allows private addresses; `::1` stays reachable
   there. `::ffff:0:0/96` is classified as special-purpose.
 - **SA-43, MFA.** A TOTP secret is now pending until confirmed (schema v121),
   so re-enrolment cannot invalidate a confirmed authenticator. An MFA setup
-  token minted by the previous release cannot complete a sign-in (it expires in
-  five minutes), and setup tokens are single-use. A wrong second-factor code
+  token minted by the previous release cannot complete an enrolment (it has no
+  `jti`, so TOTP enrol and confirm refuse it; the user signs in again, and it
+  expires in five minutes anyway), and setup tokens are single-use. A wrong second-factor code
   now counts toward the per-account lockout; **for accounts with MFA, the
   password step no longer resets `failed_login_attempts`** — only a completed
   second factor does. A WebAuthn second factor refuses a deactivated or locked

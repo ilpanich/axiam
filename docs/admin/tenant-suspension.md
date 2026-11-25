@@ -25,6 +25,15 @@ PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}
 `{ "status": "Active" }` lifts it. The admin console's tenant page sends the
 same request.
 
+**A tenant that was already `Suspended` before the upgrade** keeps its sessions
+and refresh tokens: the revocation runs only inside the status write, and no
+migration performs it. Before upgrading, set the organization's own tenant back
+to `Active` if it is suspended (it cannot be suspended any more, and while it is
+the organization's principals are refused). After upgrading, send
+`{ "status": "Suspended" }` again for every tenant that should stay suspended;
+that write runs the revocation. See the
+[upgrade notes](../deployment/README.md#sa-13--tenant-suspension-is-enforced).
+
 ## What stops
 
 Everything that authenticates or authorizes one of the tenant's own principals
@@ -42,8 +51,9 @@ verified, so the code tells an anonymous caller nothing about the tenant.
 **Sessions and refresh tokens are revoked** in the same transaction as the
 status write. Nothing is revoked if the write itself fails.
 
-**What keeps working.** The tenant's data is kept as it is. AMQP **audit
-ingestion** is still recorded, so the tenant's trail loses nothing while it is
+**What keeps working.** The tenant's data is kept as it is, and scheduled
+directory (LDAP/AD) sync keeps writing the tenant's users while it is
+suspended. AMQP **audit ingestion** is still recorded, so the tenant's trail loses nothing while it is
 suspended. Organization principals can read the tenant, export its audit trail,
 change its status and delete it; any other write to it (creating users or
 roles, changing settings, issuing signing CAs) is refused with
@@ -54,6 +64,18 @@ roles, changing settings, issuing signing CAs) is refused with
 Setting the status back to `Active` restores sign-in, but through **new**
 sessions: the revoked sessions and refresh tokens are not brought back, so users
 sign in again, and applications refresh from a fresh login.
+
+**Suspension is not a credential reset.** It revokes sessions and OAuth2 refresh
+tokens, nothing else. These survive it:
+
+- SCIM provisioning tokens: refused while the tenant is suspended, valid again
+  the moment it is lifted;
+- OAuth2 client secrets and service-account secrets;
+- certificates (device and service);
+- user passwords.
+
+If the suspension answers a compromise, revoke or rotate these **before**
+lifting it.
 
 ## Limits
 

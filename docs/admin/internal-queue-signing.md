@@ -25,14 +25,16 @@ an internal message.
 
 | When | Action |
 |---|---|
-| **Upgrading** | Drain the five queues and their `.retry` queues, then roll producers and consumers together. Old replicas cannot read the envelope. The alternative, `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false` for one rollout, reopens the hole while it is set. |
-| **Always** | Do not give AMQP SDK principals a way to publish on AXIAM's vhost beyond what they need: RabbitMQ authorizes publishing on the exchange, not the queue, so a per-queue publish rule does not stop a principal that may publish to the default exchange. Keep SDK producers on a separate vhost, or deny consuming on these queues. |
+| **Upgrading** | Drain the five queues and the four outbound `.retry` queues (mail has none), then roll producers and consumers together. Old replicas cannot read the envelope. The alternative, `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false` for one rollout, reopens the hole while it is set: use it only where no principal other than AXIAM can publish on AXIAM's vhost, and remove the variable and redeploy once no old replica is left and the `.retry` queues have turned over (an hour by default). |
+| **Always** | Do not give AMQP SDK principals a way to publish on AXIAM's vhost beyond what they need: RabbitMQ authorizes publishing on the exchange, not the queue, so a per-queue publish rule does not stop a principal that may publish to the default exchange. Keep SDK producers on a separate vhost (the only way to stop them publishing here), and deny them consume on these queues (which closes replay through a requeue). |
 | **Capacity** | Messages may wait up to `AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS` (86400, 24 h) before they are refused as stale. Raise it only if your mail or outbound consumers can be down longer. |
 
 Messages already sitting in a `.dlq` from before the upgrade are in the old,
 unsigned shape and can be replayed only with the flag off. A message
-dead-lettered after the upgrade is refused as stale if replayed after
-`MAX_AGE_SECS`; re-send the event from its source instead.
+dead-lettered after the upgrade is refused as a replay at once if the consumer
+had admitted it before dead-lettering it (an exhausted delivery, the common
+case), and as stale after `MAX_AGE_SECS` in any case; re-send the event from its
+source instead.
 
 ## Watching it
 

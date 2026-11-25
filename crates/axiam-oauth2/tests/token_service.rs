@@ -272,6 +272,34 @@ impl OAuth2ClientRepository for MockClientRepo {
             ClientOutcome::Db => Err(AxiamError::Database("outage".into())),
         }
     }
+    async fn get_by_client_id_with_context(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        user_id: Option<Uuid>,
+    ) -> AxiamResult<axiam_core::repository::ClientLookup> {
+        let client = self.get_by_client_id(tenant_id, client_id).await?;
+        // By default this double behaves like a repository that cannot read
+        // anything alongside the client (the trait's default). A test that
+        // sets `PREFETCH` gets a repository that can, answering from it.
+        let prefetch = PREFETCH.with(|p| p.borrow().clone());
+        let Some(prefetch) = prefetch else {
+            return Ok(axiam_core::repository::ClientLookup {
+                client,
+                tenant: None,
+                user: None,
+            });
+        };
+        PREFETCH_CALLS.with(|c| c.set(c.get() + 1));
+        Ok(axiam_core::repository::ClientLookup {
+            client,
+            tenant: Some(tenant_answer(&prefetch.tenant, tenant_id)),
+            user: user_id.map(|_| match prefetch.user {
+                UserPrefetch::NotFound => Err(not_found()),
+                UserPrefetch::Db => Err(AxiamError::Database("outage".into())),
+            }),
+        })
+    }
     async fn update(
         &self,
         _t: Uuid,
@@ -416,6 +444,52 @@ impl AuthorizationCodeRepository for MockCodeRepo {
 // Mock: TenantRepository
 // ---------------------------------------------------------------------------
 
+/// What [`MockTenantRepo::get_by_id`] — and a prefetching client lookup —
+/// answers for `id`.
+fn tenant_answer(outcome: &TenantOutcome, id: Uuid) -> AxiamResult<Tenant> {
+    match outcome {
+        TenantOutcome::Found => Ok(Tenant {
+            kind: axiam_core::models::tenant::TenantKind::Standard,
+            id,
+            organization_id: Uuid::new_v4(),
+            name: "T".into(),
+            slug: "t".into(),
+            status: TenantStatus::Active,
+            metadata: serde_json::Value::Null,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }),
+        TenantOutcome::NotFound => Err(not_found()),
+        TenantOutcome::Db => Err(AxiamError::Database("outage".into())),
+    }
+}
+
+/// The account a prefetching client lookup answers for the token's user —
+/// deliberately never what [`MockUserRepo`] would answer (an active account),
+/// so a test can tell which of the two the service used.
+#[derive(Clone)]
+enum UserPrefetch {
+    NotFound,
+    Db,
+}
+
+/// A prefetching client lookup's answers ([`MockClientRepo`]).
+#[derive(Clone)]
+struct Prefetch {
+    tenant: TenantOutcome,
+    user: UserPrefetch,
+}
+
+thread_local! {
+    /// Set by a test to make [`MockClientRepo`] read the tenant and the
+    /// account alongside the client (`get_by_client_id_with_context`).
+    /// `#[tokio::test]` runs each test on its own current-thread runtime, so
+    /// a value set here is seen by that test alone.
+    static PREFETCH: std::cell::RefCell<Option<Prefetch>> = const { std::cell::RefCell::new(None) };
+    /// How many prefetching lookups this thread's test made.
+    static PREFETCH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone)]
 enum TenantOutcome {
     Found,
@@ -447,21 +521,7 @@ impl TenantRepository for MockTenantRepo {
     }
     async fn get_by_id(&self, id: Uuid) -> AxiamResult<Tenant> {
         self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        match self.0 {
-            TenantOutcome::Found => Ok(Tenant {
-                kind: axiam_core::models::tenant::TenantKind::Standard,
-                id,
-                organization_id: Uuid::new_v4(),
-                name: "T".into(),
-                slug: "t".into(),
-                status: TenantStatus::Active,
-                metadata: serde_json::Value::Null,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            }),
-            TenantOutcome::NotFound => Err(not_found()),
-            TenantOutcome::Db => Err(AxiamError::Database("outage".into())),
-        }
+        tenant_answer(&self.0, id)
     }
     async fn get_by_slug(&self, _o: Uuid, _s: &str) -> AxiamResult<Tenant> {
         unimplemented!()
@@ -6811,4 +6871,169 @@ async fn r681_a_confidential_clients_refresh_is_unchanged() {
         .expect("a confidential client's refresh needs no bound key");
     assert_eq!(resp.token_type, "DPoP");
     assert_eq!(created.lock().unwrap()[0].dpop_jkt, None);
+}
+
+// ---------------------------------------------------------------------------
+// One round trip for the client, its tenant and the token's account
+// (OAuth2ClientRepository::get_by_client_id_with_context)
+// ---------------------------------------------------------------------------
+
+fn prefetching(tenant: TenantOutcome, user: UserPrefetch) {
+    PREFETCH.with(|p| *p.borrow_mut() = Some(Prefetch { tenant, user }));
+    PREFETCH_CALLS.with(|c| c.set(0));
+}
+
+fn prefetch_calls() -> usize {
+    PREFETCH_CALLS.with(std::cell::Cell::get)
+}
+
+/// The client-credentials grant reads the tenant in the client lookup's round
+/// trip and never reads it again: one database round trip before minting.
+#[tokio::test]
+async fn client_credentials_reads_the_tenant_with_the_client() {
+    prefetching(TenantOutcome::Found, UserPrefetch::NotFound);
+    let (svc, tenant_reads) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        TenantOutcome::Found,
+    );
+    svc.exchange(client_tenant(), base_req("client_credentials"), &no_cert())
+        .await
+        .unwrap();
+    assert_eq!(prefetch_calls(), 1);
+    assert_eq!(
+        tenant_reads.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the tenant came with the client"
+    );
+}
+
+/// The prefetched tenant answers exactly as the tenant read did: a tombstoned
+/// tenant is `invalid_client`, a datastore fault `server_error` — and a wrong
+/// secret is refused for the secret, before the tenant is consulted.
+#[tokio::test]
+async fn a_prefetched_tenant_answers_as_the_read_did() {
+    for (tenant, expected) in [
+        (TenantOutcome::NotFound, "invalid_client"),
+        (TenantOutcome::Db, "server_error"),
+    ] {
+        prefetching(tenant, UserPrefetch::NotFound);
+        let (svc, tenant_reads) = build_counting_tenant_reads(
+            ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+            TenantOutcome::Found,
+        );
+        assert_eq!(
+            svc.exchange(client_tenant(), base_req("client_credentials"), &no_cert())
+                .await
+                .unwrap_err()
+                .error_code(),
+            expected
+        );
+        assert_eq!(tenant_reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    prefetching(TenantOutcome::NotFound, UserPrefetch::NotFound);
+    let (svc, _) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["client_credentials"], &["api"])),
+        TenantOutcome::Found,
+    );
+    let mut req = base_req("client_credentials");
+    req.client_secret = Some("not-the-secret".into());
+    assert_eq!(
+        svc.exchange(client_tenant(), req, &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
+}
+
+/// Introspection reads the token's account with the client and decides on that
+/// read: the prefetching double answers "no such account" where the user
+/// repository would answer an active one, and the token is reported inactive.
+#[tokio::test]
+async fn introspection_decides_on_the_account_read_with_the_client() {
+    let tenant_id = client_tenant();
+    let token = issue_access_token(
+        Uuid::new_v4(),
+        tenant_id,
+        Uuid::new_v4(),
+        &["profile".to_string()],
+        &test_config(),
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .unwrap();
+
+    // Without prefetching: the user repository's active account.
+    PREFETCH.with(|p| *p.borrow_mut() = None);
+    let (svc, _) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        TenantOutcome::Found,
+    );
+    assert!(
+        svc.introspect_token(tenant_id, introspect_req(&token), &no_cert())
+            .await
+            .unwrap()
+            .active
+    );
+
+    // With it: the account read alongside the client, and no tenant read.
+    prefetching(TenantOutcome::Found, UserPrefetch::NotFound);
+    let (svc, tenant_reads) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        TenantOutcome::Found,
+    );
+    assert!(
+        !svc.introspect_token(tenant_id, introspect_req(&token), &no_cert())
+            .await
+            .unwrap()
+            .active
+    );
+    assert_eq!(prefetch_calls(), 1);
+    assert_eq!(tenant_reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // A failed account read is a server error, as it was.
+    prefetching(TenantOutcome::Found, UserPrefetch::Db);
+    let (svc, _) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        TenantOutcome::Found,
+    );
+    assert_eq!(
+        svc.introspect_token(tenant_id, introspect_req(&token), &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "server_error"
+    );
+}
+
+/// A refused client learns nothing about the token's account, whatever was
+/// read alongside it: the answer is the credential's refusal.
+#[tokio::test]
+async fn a_refused_client_is_told_only_about_its_credential() {
+    let tenant_id = client_tenant();
+    let token = issue_access_token(
+        Uuid::new_v4(),
+        tenant_id,
+        Uuid::new_v4(),
+        &[],
+        &test_config(),
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .unwrap();
+    prefetching(TenantOutcome::Found, UserPrefetch::Db);
+    let (svc, _) = build_counting_tenant_reads(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        TenantOutcome::Found,
+    );
+    let mut req = introspect_req(&token);
+    req.client_secret = Some("not-the-secret".into());
+    assert_eq!(
+        svc.introspect_token(tenant_id, req, &no_cert())
+            .await
+            .unwrap_err()
+            .error_code(),
+        "invalid_client"
+    );
 }

@@ -1762,6 +1762,19 @@ pub trait AuditLogRepository: Send + Sync {
 // OAuth2 & Federation (tenant-scoped)
 // ---------------------------------------------------------------------------
 
+/// What [`OAuth2ClientRepository::get_by_client_id_with_context`] read.
+#[derive(Debug)]
+pub struct ClientLookup {
+    /// The client.
+    pub client: OAuth2Client,
+    /// The client lookup's tenant, as `TenantRepository::get_by_id` answers
+    /// (a tombstoned tenant is `NotFound`); `None` when it was not read.
+    pub tenant: Option<AxiamResult<Tenant>>,
+    /// The requested account, as `UserRepository::get_by_id` answers in the
+    /// same tenant; `None` when none was asked for or it was not read.
+    pub user: Option<AxiamResult<User>>,
+}
+
 pub trait OAuth2ClientRepository: Send + Sync {
     /// Create a client, returning it and the **plaintext secret** the caller
     /// must show the operator once and never again.
@@ -1785,6 +1798,37 @@ pub trait OAuth2ClientRepository: Send + Sync {
         tenant_id: Uuid,
         client_id: &str,
     ) -> impl Future<Output = AxiamResult<OAuth2Client>> + Send;
+
+    /// [`Self::get_by_client_id`], with the reads a token endpoint makes right
+    /// after it — the tenant's liveness and, when the caller names one, the
+    /// account behind the token — in the same round trip.
+    ///
+    /// The client's own outcome is the method's: an unknown client is the same
+    /// `NotFound`, a datastore fault the same error. The other two ride along
+    /// as [`ClientLookup::tenant`] and [`ClientLookup::user`], each with the
+    /// outcome its own read would have had (`TenantRepository::get_by_id`,
+    /// `UserRepository::get_by_id`), for the caller to use *after* it has
+    /// authenticated the client exactly as before. Reading them first changes
+    /// what a failed authentication costs the datastore — one round trip of
+    /// three statements instead of one of one — never what it answers.
+    ///
+    /// The default reads the client alone and leaves both `None`, so a caller
+    /// falls back to its own reads; every test double keeps today's behaviour.
+    fn get_by_client_id_with_context(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        user_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<ClientLookup>> + Send {
+        let _ = user_id;
+        async move {
+            Ok(ClientLookup {
+                client: self.get_by_client_id(tenant_id, client_id).await?,
+                tenant: None,
+                user: None,
+            })
+        }
+    }
     fn update(
         &self,
         tenant_id: Uuid,

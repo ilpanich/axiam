@@ -8,7 +8,7 @@ use axiam_core::models::oauth2_client::{
     AuthnRequestParamsMode, ClientAuthMethod, ClientProfile, ConfidentialGrantCount,
     CreateOAuth2Client, DcrRegistrationReplacement, ManagedBy, OAuth2Client, UpdateOAuth2Client,
 };
-use axiam_core::repository::{OAuth2ClientRepository, PaginatedResult, Pagination};
+use axiam_core::repository::{ClientLookup, OAuth2ClientRepository, PaginatedResult, Pagination};
 use chrono::{DateTime, Utc};
 use rand::RngExt;
 use surrealdb::Connection;
@@ -21,6 +21,8 @@ use crate::helpers::{
     CountRow, classify_write_error, is_transaction_conflict, paginate, retry_hot_row,
     retry_on_write_conflict, search_bind, search_filter, take_first_or_not_found,
 };
+use crate::repository::tenant::{TenantRow, live_tenant_by_id_sql, live_tenant_from_rows};
+use crate::repository::user::{UserRow, user_by_id_sql, user_in_tenant_from_rows};
 
 /// An engine conflict that outlived the update's retries is contention (`503`),
 /// not a database fault; anything else passes through.
@@ -1036,6 +1038,11 @@ impl<C: Connection> SurrealOAuth2ClientRepository<C> {
     }
 }
 
+/// `get_by_client_id`'s statement, shared with
+/// `get_by_client_id_with_context`.
+const CLIENT_BY_CLIENT_ID_SQL: &str = "SELECT meta::id(id) AS record_id, * FROM oauth2_client \
+     WHERE tenant_id = $tenant_id AND client_id = $client_id";
+
 impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> {
     async fn create(&self, input: CreateOAuth2Client) -> AxiamResult<(OAuth2Client, String)> {
         self.create_row(input, None, None)
@@ -1265,10 +1272,7 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         let mut result = self
             .db
             .current()
-            .query(
-                "SELECT meta::id(id) AS record_id, * FROM oauth2_client \
-                 WHERE tenant_id = $tenant_id AND client_id = $client_id",
-            )
+            .query(CLIENT_BY_CLIENT_ID_SQL)
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("client_id", client_id_owned.clone()))
             .await
@@ -1282,6 +1286,70 @@ impl<C: Connection> OAuth2ClientRepository for SurrealOAuth2ClientRepository<C> 
         )?;
 
         row.try_into_client().map_err(Into::into)
+    }
+
+    async fn get_by_client_id_with_context(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        user_id: Option<Uuid>,
+    ) -> AxiamResult<ClientLookup> {
+        // One request for what a token endpoint reads in sequence: the
+        // client, its tenant's liveness and — for introspection — the
+        // account behind the token. Each statement is its repository's own
+        // (`get_by_client_id`'s, `live_tenant_by_id_sql`,
+        // `user_by_id_sql`), so each part has the plan and the answer its own
+        // read would have. The caller still authenticates the client before
+        // it looks at the tenant or the user; reading them in the same round
+        // trip changes what a refused request costs, never what it is told.
+        let client_id_owned = client_id.to_string();
+        let query = match user_id {
+            Some(_) => format!(
+                "{CLIENT_BY_CLIENT_ID_SQL}; {}; {};",
+                live_tenant_by_id_sql("$tenant_id"),
+                user_by_id_sql("$user_id"),
+            ),
+            None => format!(
+                "{CLIENT_BY_CLIENT_ID_SQL}; {};",
+                live_tenant_by_id_sql("$tenant_id"),
+            ),
+        };
+        let mut result = self
+            .db
+            .current()
+            .query(query)
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("client_id", client_id_owned.clone()))
+            .bind(("user_id", user_id.map(|u| u.to_string())))
+            .await
+            .map_err(DbError::from)?;
+
+        let rows: Vec<OAuth2ClientRowWithId> = result.take(0).map_err(DbError::from)?;
+        let row = take_first_or_not_found(
+            rows,
+            "oauth2_client",
+            &format!("client_id={client_id_owned}"),
+        )?;
+        let client = row.try_into_client()?;
+
+        let tenant = result
+            .take::<Vec<TenantRow>>(1)
+            .map_err(DbError::from)
+            .and_then(|rows| live_tenant_from_rows(rows, tenant_id))
+            .map_err(AxiamError::from);
+        let user = user_id.map(|user_id| {
+            result
+                .take::<Vec<UserRow>>(2)
+                .map_err(DbError::from)
+                .and_then(|rows| user_in_tenant_from_rows(rows, tenant_id, user_id))
+                .map_err(AxiamError::from)
+        });
+
+        Ok(ClientLookup {
+            client,
+            tenant: Some(tenant),
+            user,
+        })
     }
 
     async fn update(

@@ -44,7 +44,7 @@ const SAML_ERASURE_STATEMENTS: &str = "\
 /// `totp_last_used_step` (SEC-043 — AES-256-GCM ciphertext must not leak into
 /// logs or debug output).
 #[derive(SurrealValue)]
-struct UserRow {
+pub(crate) struct UserRow {
     tenant_id: String,
     username: String,
     email: String,
@@ -534,6 +534,33 @@ impl<C: Connection> SurrealUserRepository<C> {
     }
 }
 
+/// `get_by_id`'s statement over the user id in `id_param` — the bare record
+/// fetch; the tenant is checked on the row ([`user_in_tenant_from_rows`]).
+/// Shared with the one-round-trip client lookup
+/// (`SurrealOAuth2ClientRepository::get_by_client_id_with_context`).
+pub(crate) fn user_by_id_sql(id_param: &str) -> String {
+    format!("SELECT * FROM type::record('user', {id_param})")
+}
+
+/// `get_by_id`'s answer from that statement's rows: the user if it lives in
+/// `tenant_id` — the same exact string comparison a `WHERE` would make — and
+/// `NotFound` otherwise.
+pub(crate) fn user_in_tenant_from_rows(
+    rows: Vec<UserRow>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<User, DbError> {
+    let tenant_id = tenant_id.to_string();
+    let row = rows
+        .into_iter()
+        .find(|row| row.tenant_id == tenant_id)
+        .ok_or_else(|| DbError::NotFound {
+            entity: "user".into(),
+            id: id.to_string(),
+        })?;
+    row.into_user(id)
+}
+
 impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     async fn create(&self, input: CreateUser) -> AxiamResult<User> {
         let id = new_id();
@@ -589,9 +616,6 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
-        let id_str = id.to_string();
-        let tenant_id_str = tenant_id.to_string();
-
         // The tenant predicate is applied here, to the fetched row, rather than
         // as `WHERE tenant_id = $tenant_id` on the fetch. The two answer alike —
         // the same exact string comparison, a row of another tenant is the same
@@ -603,21 +627,13 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         let mut result = self
             .db
             .current()
-            .query("SELECT * FROM type::record('user', $id)")
-            .bind(("id", id_str.clone()))
+            .query(user_by_id_sql("$id"))
+            .bind(("id", id.to_string()))
             .await
             .map_err(DbError::from)?;
 
         let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows
-            .into_iter()
-            .find(|row| row.tenant_id == tenant_id_str)
-            .ok_or_else(|| DbError::NotFound {
-                entity: "user".into(),
-                id: id_str,
-            })?;
-
-        Ok(row.into_user(id)?)
+        user_in_tenant_from_rows(rows, tenant_id, id).map_err(Into::into)
     }
 
     async fn get_by_username(&self, tenant_id: Uuid, username: &str) -> AxiamResult<User> {

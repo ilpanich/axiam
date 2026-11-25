@@ -100,7 +100,7 @@ fn kind_to_str(k: TenantKind) -> &'static str {
 
 /// DB-side row struct for queries where the UUID is already known.
 #[derive(Debug, SurrealValue)]
-struct TenantRow {
+pub(crate) struct TenantRow {
     organization_id: String,
     name: String,
     slug: String,
@@ -887,6 +887,19 @@ impl<C: Connection> SurrealTenantRepository<C> {
     }
 }
 
+/// `get_by_id`'s statement over the tenant id in `id_param`: the live tenant
+/// (`deleted_at = NONE`), shared with the one-round-trip client lookup
+/// (`SurrealOAuth2ClientRepository::get_by_client_id_with_context`).
+pub(crate) fn live_tenant_by_id_sql(id_param: &str) -> String {
+    format!("SELECT * FROM type::record('tenant', {id_param}) WHERE deleted_at = NONE")
+}
+
+/// `get_by_id`'s answer from that statement's rows.
+pub(crate) fn live_tenant_from_rows(rows: Vec<TenantRow>, id: Uuid) -> Result<Tenant, DbError> {
+    let row = take_first_or_not_found(rows, "tenant", &id.to_string())?;
+    row.into_tenant(id)
+}
+
 impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     async fn create(&self, input: CreateTenant) -> AxiamResult<Tenant> {
         let id = new_id();
@@ -959,20 +972,16 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     }
 
     async fn get_by_id(&self, id: Uuid) -> AxiamResult<Tenant> {
-        let id_str = id.to_string();
-
         let mut result = self
             .db
             .current()
-            .query("SELECT * FROM type::record('tenant', $id) WHERE deleted_at = NONE")
-            .bind(("id", id_str.clone()))
+            .query(live_tenant_by_id_sql("$id"))
+            .bind(("id", id.to_string()))
             .await
             .map_err(DbError::from)?;
 
         let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;
-        let row = take_first_or_not_found(rows, "tenant", &id_str)?;
-
-        Ok(row.into_tenant(id)?)
+        live_tenant_from_rows(rows, id).map_err(Into::into)
     }
 
     async fn get_by_slug(&self, organization_id: Uuid, slug: &str) -> AxiamResult<Tenant> {

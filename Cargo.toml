@@ -24,7 +24,7 @@ members = [
 # measure whether a given engine serialises concurrent read-modify-writes. It is
 # run by hand on a SurrealDB bump or an engine change — see its README — and CI
 # should not pay for that dependency tree on every commit.
-exclude = ["tools/surreal-race-probe"]
+exclude = ["tools/surreal-race-probe", "tools/db-query-bench"]
 resolver = "3"
 
 # ---------------------------------------------------------------------------

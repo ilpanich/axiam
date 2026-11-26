@@ -1225,7 +1225,7 @@ async fn sign_in_reveals_a_suspension_only_after_the_password_verifies() {
 
     set_status!(app, fx, admin_token, "Suspended");
 
-    let (status, body) = login_status(&app, &fx, "not-the-password".into()).await;
+    let (status, body) = login_status(&app, &fx, axiam_test_support::other_password()).await;
     assert_eq!(status, 401, "wrong password on a suspended tenant: {body}");
     assert_ne!(body["error"], "tenant_suspended", "{body}");
 

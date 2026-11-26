@@ -238,8 +238,11 @@ impl Principal {
         let now = chrono::Utc::now().timestamp();
         claims.iat = now - 4_000;
         claims.exp = now - 3_600;
+        // Typed as an access token (SA-03), so the expiry is what refuses it.
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.typ = Some(axiam_auth::token::TYP_ACCESS_TOKEN.into());
         jsonwebtoken::encode(
-            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
+            &header,
             &claims,
             &jsonwebtoken::EncodingKey::from_ed_pem(auth.jwt_private_key_pem.as_bytes()).unwrap(),
         )

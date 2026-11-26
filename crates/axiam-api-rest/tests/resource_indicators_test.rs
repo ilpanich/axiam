@@ -37,7 +37,9 @@ use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
-use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+use axiam_core::repository::{
+    OrganizationRepository, SessionRepository, TenantRepository, UserRepository,
+};
 use axiam_db::repository::{
     SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
 };
@@ -130,13 +132,30 @@ async fn setup() -> Fixture {
         .unwrap();
 
     let auth = test_auth_config();
+    // SA-41: introspection reports a token inactive once the session its `sid`
+    // names is gone, so the signed-in user needs a session row, as in production.
+    let session = axiam_db::repository::SurrealSessionRepository::new(db.clone())
+        .create(axiam_core::models::session::CreateSession {
+            tenant_id: tenant.id,
+            user_id: user.id,
+            token_hash: Uuid::new_v4().to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            authenticated_at: chrono::Utc::now(),
+            amr: vec![],
+            browser_token_hash: None,
+            lineage_id: None,
+        })
+        .await
+        .expect("session");
     let user_token = issue_access_token(
         user.id,
         tenant.id,
         org.id,
         &[],
         &auth,
-        Uuid::new_v4().to_string(),
+        session.id.to_string(),
         axiam_auth::token::AUD_USER,
     )
     .unwrap();

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="_response-id-scd-no-audience-1" Version="2.0" InResponseTo="_axiam-req-1" Destination="https://sp.example.com/api/v1/federation/saml/acs" IssueInstant="2099-01-01T00:00:00Z">
+  <saml:Issuer>https://idp.example.com</saml:Issuer>
+  <samlp:Status>
+    <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+  </samlp:Status>
+  <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="scd-no-audience-1" Version="2.0" IssueInstant="2099-01-01T00:00:00Z">
+    <saml:Issuer>https://idp.example.com</saml:Issuer>
+    <ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+      <ds:SignedInfo>
+        <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+        <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+        <ds:Reference URI="#scd-no-audience-1">
+          <ds:Transforms>
+            <ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/>
+            <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+          </ds:Transforms>
+          <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+          <ds:DigestValue>sZ63EwF4relDRKdkPxxcVrh+K8aOkzmauui3Xi2XyGs=</ds:DigestValue>
+        </ds:Reference>
+      </ds:SignedInfo>
+      <ds:SignatureValue>fGtstyZT3COAI0AfEL4IPbFoSF3glNuWm/NAzf7MGkhvMHgGkScr7Es1fG97Qc8+
+aXWPGUB4aAmlLhjXs1jC1Wa+VKuxctwqBExbXZiwXqz3eAFKK7rH/RJbXGjf/w6p
+bifU40Gljty4Hp9eMfXre5yVKZQX31dTe36MHB0kTR9NvADV04g7zwqTIu4J8lh9
+J4RhA+OFtRSFUKSSHxUkEOPl5MQSgUzpZ043onxlU+4OdtarDkXZmcgim0T+N3BE
+5nfQhZIUTbob+GMFxZa+DJ7hiQfZnUIxo/GmyFinImbj/qUwDbetH/SMoIwTm7GH
+VFQWfHOswLl3bJ8sq3zMwA==</ds:SignatureValue>
+      <ds:KeyInfo>
+        <ds:X509Data>
+          <ds:X509Certificate>MIIDVzCCAj+gAwIBAgIUGTuYuUVKxcQXh2dM4H5nBy1L5UMwDQYJKoZIhvcNAQEL
+BQAwOzEXMBUGA1UEAwwOQVhJQU0gVGVzdCBJZFAxEzARBgNVBAoMCkFYSUFNIFRl
+c3QxCzAJBgNVBAYTAlVTMB4XDTI2MTEyMDE1NTE1MVoXDTM2MTExNzE1NTE1MVow
+OzEXMBUGA1UEAwwOQVhJQU0gVGVzdCBJZFAxEzARBgNVBAoMCkFYSUFNIFRlc3Qx
+CzAJBgNVBAYTAlVTMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz1Tx
+nB+5s7Nl24emdrZCNVl5kZnFtYbo7hFpypkhdFf/Dc//W9F3j/vpQlp2qvGGiqF1
+UnC0ulX7Ff1wuyvazqNahwkZfczKxKEciR11FReBVwYulk7YOwUxAVhnHKSegSNT
+G52JsLqtxaIhYb4nve/+mkXt8HmR4XmroiI+/A4XLD5CP+VocTo/WiqbwnfXWizJ
+HnSPxzqiB79duViNJdyXglOeZHXniixrris2HGWZbbd0dp/OWSecOADDvZ0bb3oP
+jJS+nb97wGATSxs0Hn46/r4xzJd0WeuUcBdzpZikRXqvREAzeSMowTkY6HJ55WCo
+FayjEPitqlLR5IdxKQIDAQABo1MwUTAdBgNVHQ4EFgQUsDe/zwb6N7YhSUg+NfWi
+ofL8bsgwHwYDVR0jBBgwFoAUsDe/zwb6N7YhSUg+NfWiofL8bsgwDwYDVR0TAQH/
+BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVShYkp7On5HBtNzgbKyYGayfduYJ
+GA2r1m2Njl8hujHwbToqhR6Vxe3oWGLaE+ma5VYhDSfS16J33IN35NFNZnM/0K4u
+eMKpgZWDMZH6rwYE+UD1zUvHz+TZ5iOGc1x/WujvJ0BCtOq8LEIp+9UlQuwm1A2T
+xgL2aInTrBvl7CIxpoQvJn6kw+RZxmC0o3TbFmAv+4JEVe+f7kKKzj/gdqWJkNCU
+medLdFQIzMAFcovJFCHBi5XwD/5Ok6ZbqHwxEOjcTtUHk332Hl31ijT8G+8VWo3I
+3hjEnijxWWyQxSVBrUaHJ3BnU2CMFbcQ1ptfcbmayucDISYPYu7vhCXs0w==
+</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </ds:Signature>
+    <saml:Subject>
+      <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">user@example.com</saml:NameID>
+      <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+        <saml:SubjectConfirmationData NotOnOrAfter="2099-01-01T01:00:00Z" Recipient="https://sp.example.com/api/v1/federation/saml/acs" InResponseTo="_axiam-req-1"/>
+      </saml:SubjectConfirmation>
+    </saml:Subject>
+    <saml:Conditions NotBefore="2026-01-01T00:00:00Z" NotOnOrAfter="2099-01-01T01:00:00Z">
+      
+    </saml:Conditions>
+    <saml:AuthnStatement AuthnInstant="2099-01-01T00:00:00Z">
+      <saml:AuthnContext>
+        <saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:Password</saml:AuthnContextClassRef>
+      </saml:AuthnContext>
+    </saml:AuthnStatement>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="email">
+        <saml:AttributeValue>user@example.com</saml:AttributeValue>
+      </saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>

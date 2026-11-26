@@ -20,9 +20,15 @@ services:
         condition: service_completed_successfully
     # Persist the datastore on the mounted volume. Without a PATH arg the
     # default is `memory` and all state is wiped on restart.
-    command: start --user root --pass root --log info surrealkv:/data/axiam.db
+    # Credentials travel as environment variables, not as `--user`/`--pass`.
+    # A flag lands in argv, and /proc/<pid>/cmdline is world-readable on the
+    # host; /proc/<pid>/environ is owner-only. `surreal start` reads these.
+    command: start --log info surrealkv:/data/axiam.db
+    environment:
+      SURREAL_USER: root
+      SURREAL_PASS: root
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - surrealdb-data:/data
     healthcheck:
@@ -39,8 +45,8 @@ services:
       # A6: 5671 (AMQPS) only. There is no plaintext 5672 mapping because there
       # is no plaintext listener to map — see docker/rabbitmq-tls.conf, mounted
       # below, which sets `listeners.tcp = none`.
-      - "5671:5671"
-      - "15672:15672"
+      - "127.0.0.1:5671:5671"
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: axiam
       RABBITMQ_DEFAULT_PASS: axiam
@@ -95,7 +101,7 @@ services:
       VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_DEV_ROOT_TOKEN_ID:-axiam-dev-root}"
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
     ports:
-      - "8200:8200"
+      - "127.0.0.1:8200:8200"
     healthcheck:
       # 200 = unsealed and active. A dev-mode Vault should reach this within a
       # second or two; anything else means it did not start cleanly.
@@ -108,7 +114,9 @@ services:
 
   axiam-server:
     profiles: ["full-stack"]
-    image: ghcr.io/axiamhq/axiam/server:latest
+    # A released version, not a floating tag, from the namespace release.yml
+    # publishes to (ghcr.io/${github.repository}). Override with AXIAM_IMAGE_TAG.
+    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:-1.3.1}
     container_name: axiam-server
     depends_on:
       surrealdb:

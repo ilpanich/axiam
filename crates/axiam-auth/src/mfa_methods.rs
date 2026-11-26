@@ -115,12 +115,13 @@ impl<
         let user = self.user_repo.get_by_id(tenant_id, user_id).await?;
         let mut types = Vec::new();
 
-        // `mfa_enabled` is half of this condition, not decoration.
-        // [`AuthService::enroll_mfa`] writes the secret and leaves the flag
-        // off; [`AuthService::confirm_mfa`] is what turns it on. So a secret
-        // present while the flag is off is an enrollment the user never
-        // completed, and offering `totp` for it would list a factor the user
-        // never proved they hold. Same condition [`Self::list_methods`] uses.
+        // `mfa_enabled` is half of this condition, not decoration. Since
+        // SA-43 [`AuthService::enroll_mfa`] stages its secret in a separate
+        // pending column and [`AuthService::confirm_mfa`] moves it here, but a
+        // secret written by an older release sits here under a false flag —
+        // an enrollment the user never completed, and offering `totp` for it
+        // would list a factor the user never proved they hold. Same condition
+        // [`Self::list_methods`] uses.
         if user.mfa_enabled && user.mfa_secret.is_some() {
             types.push("totp".into());
         }
@@ -311,11 +312,11 @@ impl<
     /// # Order
     ///
     /// Credentials first, then the user row, then the sessions, then the
-    /// OAuth2 refresh tokens. Each step narrows what an attacker holding the
-    /// old state can do, so a failure part-way leaves the account *more*
-    /// locked down rather than less: credentials gone but sessions alive is a
-    /// user who must re-enrol; sessions gone but credentials alive would be
-    /// the hole this closes.
+    /// OAuth2 refresh tokens, then a pending TOTP enrolment. Each step narrows
+    /// what an attacker holding the old state can do, so a failure part-way
+    /// leaves the account *more* locked down rather than less: credentials gone
+    /// but sessions alive is a user who must re-enrol; sessions gone but
+    /// credentials alive would be the hole this closes.
     ///
     /// # The refresh tokens (D-N40, #841)
     ///
@@ -355,6 +356,17 @@ impl<
             .refresh_token_repo
             .revoke_all_for_user(tenant_id, user_id)
             .await?;
+
+        // SA-43: and a TOTP enrolment in progress, which `confirm_mfa` would
+        // otherwise still accept after the reset. Last (QR1-7): it is a
+        // separate write, and a failure of it must not return before the
+        // sessions and refresh tokens above are revoked. Confirming that
+        // enrolment needs a session or a setup token, both of which the reset
+        // has just ended or will refuse, and a retry clears it.
+        self.user_repo
+            .clear_pending_mfa_secret(tenant_id, user_id)
+            .await?;
+
         tracing::debug!(
             %tenant_id, %user_id, %oauth2_revoked,
             "reset_mfa: factors evicted, sessions and OAuth2 refresh tokens revoked"

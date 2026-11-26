@@ -84,6 +84,7 @@ impl AuditLogRepository for RecordingRepo {
             ip_address: input.ip_address.clone(),
             metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         };
         self.entries.lock().unwrap().push(input);
         Ok(entry)
@@ -100,6 +101,7 @@ impl AuditLogRepository for RecordingRepo {
 
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _filter: AuditLogFilter,
         _pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -153,6 +155,7 @@ async fn service_log_delegates_to_repository() {
         outcome: AuditOutcome::Success,
         ip_address: Some("10.0.0.1".into()),
         metadata: None,
+        organization_id: None,
     };
 
     let stored = service.log(entry).await.unwrap();
@@ -178,6 +181,7 @@ async fn service_log_propagates_repository_error() {
         outcome: AuditOutcome::Failure,
         ip_address: None,
         metadata: None,
+        organization_id: None,
     };
 
     assert!(service.log(entry).await.is_err());
@@ -213,6 +217,93 @@ async fn middleware_logs_unauthenticated_success() {
     assert_eq!(e.outcome, AuditOutcome::Success);
     assert_eq!(e.metadata.as_ref().unwrap()["authenticated"], false);
     assert_eq!(e.metadata.as_ref().unwrap()["http_status"], 200);
+}
+
+/// SA-44: a bearer value carried in a `{token}` path segment (the single-use
+/// account-export handle) must not be copied into the audit row's action.
+#[actix_web::test]
+async fn a_token_path_segment_is_redacted_from_the_recorded_action() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    let app = test::init_service(
+        App::new().wrap(mw).service(
+            web::scope("/api/v1")
+                .route(
+                    "/account/export/{token}",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )
+                .route(
+                    "/users/{user_id}",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                ),
+        ),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/api/v1/account/export/super-secret-handle")
+        .to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::get()
+        .uri("/api/v1/users/42")
+        .to_request();
+    test::call_service(&app, req).await;
+
+    wait_for_entries(&repo, 2).await;
+    let entries = repo.snapshot();
+    let actions: Vec<&str> = entries.iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.iter().all(|a| !a.contains("super-secret-handle")),
+        "token leaked into audit action: {actions:?}"
+    );
+    assert!(
+        actions.contains(&"GET /api/v1/account/export/[redacted]"),
+        "{actions:?}"
+    );
+    assert!(actions.contains(&"GET /api/v1/users/42"), "{actions:?}");
+}
+
+/// SR1-3: redaction fails closed. A request shaped wrongly for its route (a
+/// trailing `/`, a doubled `//`) matches no route pattern and is answered 404
+/// without consuming the single-use handle in it, so the handle must still not
+/// reach the audit row.
+#[actix_web::test]
+async fn a_token_path_segment_is_redacted_even_when_no_route_matches() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+
+    let app = test::init_service(App::new().wrap(mw).service(web::scope("/api/v1").route(
+        "/account/export/{token}",
+        web::get().to(|| async { HttpResponse::Ok().finish() }),
+    )))
+    .await;
+
+    for uri in [
+        "/api/v1/account/export/super-secret-handle/",
+        "/api/v1//account/export/super-secret-handle",
+        "/api/v1/account/export/super-secret-handle/extra",
+    ] {
+        let req = test::TestRequest::get().uri(uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 404, "{uri} must not match the route");
+    }
+
+    wait_for_entries(&repo, 3).await;
+    let entries = repo.snapshot();
+    let actions: Vec<&str> = entries.iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.iter().all(|a| !a.contains("super-secret-handle")),
+        "token leaked into audit action of an unmatched request: {actions:?}"
+    );
+    assert!(
+        actions.contains(&"GET /api/v1/account/export/[redacted]/"),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&"GET /api/v1//account/export/[redacted]"),
+        "{actions:?}"
+    );
 }
 
 #[actix_web::test]
@@ -1114,6 +1205,7 @@ impl AuditLogRepository for PanicRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _filter: AuditLogFilter,
         _pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -1272,6 +1364,200 @@ async fn a_request_with_no_attribution_is_still_recorded_with_a_nil_tenant() {
 
     wait_for_entries(&repo, 1).await;
     assert_eq!(repo.snapshot()[0].tenant_id, Uuid::nil());
+}
+
+/// SA-02 (N1): an organization a handler resolved for a request that stays in
+/// the system partition is recorded on the row; the same extension beside an
+/// attribution — the row then belongs to a tenant — records none.
+#[actix_web::test]
+async fn a_system_row_records_the_organization_resolved_for_it() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let org_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+
+    let app = test::init_service(
+        App::new()
+            .wrap(mw)
+            .route(
+                "/scim/v2/Users",
+                web::get().to(move |req: actix_web::HttpRequest| async move {
+                    req.extensions_mut()
+                        .insert(axiam_audit::AuditOrganization { org_id });
+                    HttpResponse::Ok().finish()
+                }),
+            )
+            .route(
+                "/api/v1/auth/login",
+                web::post().to(move |req: actix_web::HttpRequest| async move {
+                    req.extensions_mut()
+                        .insert(axiam_audit::AuditOrganization { org_id });
+                    req.extensions_mut()
+                        .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
+                    HttpResponse::Unauthorized().finish()
+                }),
+            ),
+    )
+    .await;
+
+    let req = test::TestRequest::get().uri("/scim/v2/Users").to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 1).await;
+    let req = test::TestRequest::post()
+        .uri("/api/v1/auth/login")
+        .to_request();
+    let _ = test::call_service(&app, req).await;
+    wait_for_entries(&repo, 2).await;
+
+    let entries = repo.snapshot();
+    assert_eq!(entries[0].tenant_id, Uuid::nil());
+    assert_eq!(entries[0].organization_id, Some(org_id));
+    assert_eq!(entries[1].tenant_id, tenant_id);
+    assert_eq!(
+        entries[1].organization_id, None,
+        "a row attributed to a tenant records no organization of its own"
+    );
+}
+
+/// SR4-3: an organization still being looked up when the response leaves is
+/// waited for by the worker, not by the response, and recorded on the
+/// system-partition row once it arrives; a lookup that ends unanswered records
+/// none; beside an attribution it is ignored.
+#[actix_web::test]
+async fn a_pending_organization_is_recorded_once_it_arrives() {
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    let org_id = Uuid::new_v4();
+    let tenant_id = Uuid::new_v4();
+    let answers: Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<Option<Uuid>>>>> =
+        Arc::default();
+
+    let pending_route = {
+        let answers = Arc::clone(&answers);
+        move |req: actix_web::HttpRequest| {
+            let answers = Arc::clone(&answers);
+            async move {
+                let (tx, pending) = axiam_audit::PendingAuditOrganization::channel();
+                req.extensions_mut().insert(pending);
+                answers.lock().unwrap().push(tx);
+                HttpResponse::Unauthorized().finish()
+            }
+        }
+    };
+    let app = test::init_service(
+        App::new()
+            .wrap(mw)
+            .route("/pending", web::get().to(pending_route.clone()))
+            .route(
+                "/attributed",
+                web::get().to(move |req: actix_web::HttpRequest| {
+                    let route = pending_route.clone();
+                    async move {
+                        req.extensions_mut()
+                            .insert(axiam_audit::AuditAttribution { tenant_id, org_id });
+                        route(req).await
+                    }
+                }),
+            ),
+    )
+    .await;
+
+    // The response is served while the organization has not arrived.
+    let res = test::call_service(&app, test::TestRequest::get().uri("/pending").to_request()).await;
+    assert_eq!(res.status(), 401);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        repo.snapshot().is_empty(),
+        "the row was written before its pending organization arrived"
+    );
+    answers
+        .lock()
+        .unwrap()
+        .remove(0)
+        .send(Some(org_id))
+        .unwrap();
+    wait_for_entries(&repo, 1).await;
+
+    // A lookup dropped unanswered records no organization.
+    let _ = test::call_service(&app, test::TestRequest::get().uri("/pending").to_request()).await;
+    drop(answers.lock().unwrap().remove(0));
+    wait_for_entries(&repo, 2).await;
+
+    // Beside an attribution the row is the tenant's; the pending answer is not
+    // waited for and records nothing.
+    let _ = test::call_service(
+        &app,
+        test::TestRequest::get().uri("/attributed").to_request(),
+    )
+    .await;
+    wait_for_entries(&repo, 3).await;
+    let _ = answers.lock().unwrap().remove(0).send(Some(org_id));
+
+    let entries = repo.snapshot();
+    assert_eq!(entries[0].tenant_id, Uuid::nil());
+    assert_eq!(entries[0].organization_id, Some(org_id));
+    assert_eq!(entries[1].tenant_id, Uuid::nil());
+    assert_eq!(entries[1].organization_id, None);
+    assert_eq!(entries[2].tenant_id, tenant_id);
+    assert_eq!(entries[2].organization_id, None);
+}
+
+/// QR5-2: the wait for a pending organization is bounded from when the row was
+/// queued, not from when the worker reaches it. Rows whose lookups all stall
+/// together are written within about one [`PENDING_ORGANIZATION_WAIT`] of
+/// being queued, not one wait after another — N stalled lookups must not hold
+/// the worker (and every row queued behind them) for N times the bound.
+///
+/// [`PENDING_ORGANIZATION_WAIT`]: axiam_audit::PENDING_ORGANIZATION_WAIT
+#[actix_web::test]
+async fn stalled_pending_organizations_cost_one_wait_not_one_each() {
+    // Virtual time: the waits elapse instantly, and are measured exactly.
+    tokio::time::pause();
+    const ROWS: usize = 5;
+    let wait = axiam_audit::PENDING_ORGANIZATION_WAIT;
+    let repo = RecordingRepo::new();
+    let mw = AuditMiddleware::spawn(repo.clone());
+    // Held, never answered: every lookup stalls.
+    let answers: Arc<std::sync::Mutex<Vec<tokio::sync::oneshot::Sender<Option<Uuid>>>>> =
+        Arc::default();
+    let route = {
+        let answers = Arc::clone(&answers);
+        move |req: actix_web::HttpRequest| {
+            let answers = Arc::clone(&answers);
+            async move {
+                let (tx, pending) = axiam_audit::PendingAuditOrganization::channel();
+                req.extensions_mut().insert(pending);
+                answers.lock().unwrap().push(tx);
+                HttpResponse::Unauthorized().finish()
+            }
+        }
+    };
+    let app = test::init_service(App::new().wrap(mw).route("/pending", web::get().to(route))).await;
+
+    let queued = tokio::time::Instant::now();
+    for _ in 0..ROWS {
+        let res =
+            test::call_service(&app, test::TestRequest::get().uri("/pending").to_request()).await;
+        assert_eq!(res.status(), 401);
+    }
+    // Poll in virtual time, giving up well past N waits so a regression fails
+    // on the assertion below rather than hanging.
+    let give_up = queued + wait * (ROWS as u32 + 2);
+    while repo.len() < ROWS && tokio::time::Instant::now() < give_up {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let elapsed = queued.elapsed();
+    assert_eq!(repo.len(), ROWS, "every stalled row is written in the end");
+    assert!(
+        elapsed <= wait + Duration::from_secs(1),
+        "{ROWS} rows with stalled lookups took {elapsed:?} to be written; \
+         the bound is about one wait ({wait:?}) from when they were queued"
+    );
+    assert!(
+        repo.snapshot().iter().all(|e| e.organization_id.is_none()),
+        "an unanswered lookup records no organization"
+    );
+    assert_eq!(answers.lock().unwrap().len(), ROWS);
 }
 
 #[actix_web::test]

@@ -108,6 +108,34 @@ pub enum AxiamError {
     )]
     MfaEnforced,
 
+    /// The principal's tenant is suspended (`TenantStatus::Suspended`), so it
+    /// is refused sign-in, token issuance, refresh and API requests (SA-13,
+    /// N16, D-3).
+    ///
+    /// Its own variant — `tenant_suspended` on the wire, `403` — rather than an
+    /// [`Self::AuthenticationFailed`] for the reason [`Self::OpaqueRequired`]
+    /// is its own: nothing about the caller's credential is wrong, and a
+    /// client told "invalid credentials" would send its user to reset a
+    /// password that works. Only an organization principal can lift it. The
+    /// decision is
+    /// [`crate::models::tenant::tenant_accepts_principals`], asked at every
+    /// authentication door.
+    #[error("this tenant is suspended; an organization administrator must reactivate it")]
+    TenantSuspended,
+
+    /// A request to suspend the organization's own tenant
+    /// ([`crate::models::tenant::TenantKind::Organization`]) — refused, with
+    /// nothing written and nothing revoked (SA-13, owner decision OD-13a).
+    ///
+    /// The organization tenant holds every organization principal, the ones
+    /// who un-suspend a tenant: suspending it would lock out the only
+    /// principals able to lift the suspension. `409`,
+    /// `organization_tenant_not_suspendable` on the wire. Decided by
+    /// `TenantRepository::update`, so no caller of the status write can
+    /// bypass it.
+    #[error("the organization's own tenant cannot be suspended")]
+    OrganizationTenantNotSuspendable,
+
     /// A write that lost an optimistic-concurrency race in the datastore and
     /// stayed lost after every retry `retry_on_write_conflict` was willing to
     /// spend on it (T-262).

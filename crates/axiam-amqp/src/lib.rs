@@ -6,6 +6,7 @@ pub mod cache_invalidation;
 pub mod config;
 pub mod connection;
 pub mod error;
+pub mod internal_envelope;
 pub mod mail_consumer;
 pub mod mail_inprocess;
 pub mod mail_publisher;
@@ -19,10 +20,11 @@ pub use cache_invalidation::{
     CacheInvalidationPublisher, HEARTBEAT_MISS_THRESHOLD, InvalidationLiveness,
     PublisherChannelFactory, run_cache_invalidation_consumer,
 };
-pub use config::{AmqpConfig, AmqpTlsConfig};
+pub use config::{AmqpConfig, AmqpTlsConfig, InternalQueuesConfig};
 pub use connection::AmqpManager;
 pub use connection::{exchanges, queues};
 pub use error::AmqpError;
+pub use internal_envelope::{InternalQueueGate, InternalSigner};
 pub use mail_consumer::start_mail_consumer;
 pub use mail_inprocess::{
     InProcessMailPublisher, InProcessMailQueue, in_process_mail_channel,

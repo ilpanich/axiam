@@ -15,6 +15,9 @@
 
 #![allow(dead_code)]
 
+#[path = "../org_scope_support/mod.rs"]
+mod org_scope_support;
+
 pub use std::net::SocketAddr;
 pub use std::sync::{Arc, Mutex, OnceLock};
 
@@ -285,6 +288,32 @@ impl World {
             .ssf
             .bind_outbox(self.outbox.clone() as Arc<dyn SsfOutbox>);
         state
+    }
+
+    /// A token for a super-admin of the organization's reserved scope tenant,
+    /// created on the call (once per test).
+    ///
+    /// The organization baseline is organization-level (SA-02, N8): a caller
+    /// of an ordinary tenant is refused it whatever its role. The scope tenant
+    /// is not counted by the D-55 gate, which excludes the organization's own.
+    pub async fn org_admin_token(&self) -> String {
+        let scope = org_scope_support::organization_scope(&self.db, self.org_id).await;
+        org_scope_support::seed_tenant(&self.db, scope).await;
+        let admin = active_user(&self.db, scope, "org-admin").await;
+        let super_admin = SurrealRoleRepository::new(self.db.clone())
+            .list(scope, all_pages())
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|r| r.name == "super-admin")
+            .expect("seeded role")
+            .id;
+        SurrealRoleRepository::new(self.db.clone())
+            .assign_to_user(scope, admin, super_admin, AssignmentScope::global())
+            .await
+            .unwrap();
+        org_scope_support::user_token(&self.auth, admin, scope, self.org_id)
     }
 
     pub fn admin_token(&self) -> String {

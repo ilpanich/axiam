@@ -19,6 +19,9 @@ spec:
         app: axiam
         component: rabbitmq
     spec:
+      # Least privilege: this pod never calls the Kubernetes API, so it gets no
+      # service-account token mounted (SA-45).
+      automountServiceAccountToken: false
       # Pod-level restricted security context (KSV-0118). Mirrors the container
       # context below; fsGroup makes the /var/lib/rabbitmq PVC writable under the
       # non-root rabbitmq UID (999).

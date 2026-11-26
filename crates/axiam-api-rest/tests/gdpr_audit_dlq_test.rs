@@ -124,6 +124,7 @@ fn gdpr_audit_dlq_on_db_failure() {
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: Some(serde_json::json!({ "pseudonym": "DELETED_USER_test0123456789" })),
+        organization_id: None,
     };
 
     let log_buf = Arc::new(Mutex::new(Vec::new()));
@@ -219,6 +220,7 @@ fn failed_pseudonymization(tenant_id: Uuid) -> CreateAuditLogEntry {
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: Some(json!({ "pseudonym": "DELETED_USER_cancel0123456789" })),
+        organization_id: None,
     }
 }
 
@@ -599,7 +601,9 @@ fn replay_filter_from_docs() -> String {
 /// by the dead-letter writer and applies the statements to a migrated datastore:
 /// the rows that come back must be the rows that were dead-lettered, including
 /// the ones with a `null` `resource_id`/`ip_address`, which SurrealDB takes as
-/// `NONE` and not as `NULL`.
+/// `NONE` and not as `NULL`, and a system-partition row's `organization_id`
+/// (QR4-2): without it the replayed row is returned by
+/// `GET /api/v1/audit-logs/system` to nobody.
 #[actix_web::test]
 async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
     let jq_present = std::process::Command::new("jq")
@@ -629,6 +633,7 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
             "subject_id": f.user_id.to_string(),
             "note": "quote \" backslash \\ unicode \u{e9}"
         })),
+        organization_id: None,
     };
     let without_resource = CreateAuditLogEntry {
         tenant_id: f.tenant_id,
@@ -639,6 +644,22 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         outcome: AuditOutcome::Denied,
         ip_address: Some("203.0.113.9".into()),
         metadata: None,
+        organization_id: None,
+    };
+
+    // A system-partition row recording its organization (SA-02, N1): the
+    // kind `tenants.deleted` and `tenants.purged` write, and the request rows
+    // the resolver attributes to an organization.
+    let system_row = CreateAuditLogEntry {
+        tenant_id: Uuid::nil(),
+        actor_id: f.user_id,
+        actor_type: ActorType::User,
+        action: "tenants.deleted".into(),
+        resource_id: Some(f.tenant_id),
+        outcome: AuditOutcome::Success,
+        ip_address: None,
+        metadata: None,
+        organization_id: Some(f.org_id),
     };
 
     // The file as the writer leaves it: `encode_line` per record, each with its
@@ -647,10 +668,12 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
     let happened = [
         chrono::Utc::now() - chrono::Duration::hours(3),
         chrono::Utc::now() - chrono::Duration::minutes(7),
+        chrono::Utc::now() - chrono::Duration::minutes(2),
     ];
     let reasons = [
         axiam_audit::dead_letter::DeadLetterReason::DatastoreError,
         axiam_audit::dead_letter::DeadLetterReason::ChannelFull,
+        axiam_audit::dead_letter::DeadLetterReason::DatastoreError,
     ];
     let bare_form = CreateAuditLogEntry {
         action: "request.audit.bare".into(),
@@ -658,7 +681,10 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
     };
     let file = dead_letter_file("recipe");
     let mut contents = String::new();
-    for (i, entry) in [&with_resource, &without_resource].into_iter().enumerate() {
+    for (i, entry) in [&with_resource, &without_resource, &system_row]
+        .into_iter()
+        .enumerate()
+    {
         let record =
             axiam_audit::dead_letter::DeadLetterRecord::new(entry.clone(), happened[i], reasons[i]);
         contents.push_str(&axiam_audit::dead_letter::encode_line(&record).unwrap());
@@ -681,7 +707,7 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         String::from_utf8_lossy(&out.stderr)
     );
     let statements = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(statements.lines().count(), 3, "one statement per line");
+    assert_eq!(statements.lines().count(), 4, "one statement per line");
 
     f.db.query(statements)
         .await
@@ -726,4 +752,21 @@ async fn the_replay_recipe_in_the_docs_restores_dead_lettered_rows() {
         // a bare line has neither to carry.
         assert_eq!(got.metadata, want_meta(want, i), "{}", want.action);
     }
+
+    // QR4-2: the system-partition row comes back with its organization, and
+    // the organization's system audit view returns it.
+    let system_rows = repo
+        .list_system(f.org_id, AuditLogFilter::default(), Pagination::default())
+        .await
+        .unwrap()
+        .items;
+    let got = system_rows
+        .iter()
+        .find(|r| r.action == system_row.action)
+        .expect("the replayed system row is returned to its organization (QR4-2)");
+    assert_eq!(got.tenant_id, Uuid::nil());
+    assert_eq!(got.organization_id, Some(f.org_id));
+    assert_eq!(got.actor_id, system_row.actor_id);
+    assert_eq!(got.resource_id, system_row.resource_id);
+    assert_eq!(got.metadata, want_meta(&system_row, Some(2)));
 }

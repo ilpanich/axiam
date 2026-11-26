@@ -96,6 +96,7 @@ fn make_admin(tenant_id: Uuid) -> AuthenticatedUser {
         session_id,
         claims: ValidatedClaims(AccessTokenClaims {
             axiam_requested_claims: None,
+            roles: None,
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
             org_id: Uuid::nil().to_string(),

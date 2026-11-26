@@ -18,6 +18,9 @@ spec:
         app: axiam
         component: server
     spec:
+      # Least privilege: this pod never calls the Kubernetes API, so it gets no
+      # service-account token mounted (SA-45).
+      automountServiceAccountToken: false
       # An orderly stop waits up to 20 s for requests in flight, 5 s for gRPC, 1 s
       # for the minimal profile's lease release, 2 s for the in-process outbound
       # queues, 5 s for the audit queue and 5 s for the cleanup task: 38 s

@@ -29,7 +29,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Fixed application-level salt for HKDF tenant-key derivation. HKDF salts
 /// are not secret; domain separation comes from the `info` parameter below.
-const APP_SALT: &[u8] = b"axiam-amqp-hkdf-salt-v1";
+pub(crate) const APP_SALT: &[u8] = b"axiam-amqp-hkdf-salt-v1";
 
 /// Fixed domain-separation tag mixed into HKDF's `info` parameter so a
 /// derived AMQP signing subkey can never collide with a subkey derived for
@@ -85,6 +85,38 @@ fn default_issued_at() -> DateTime<Utc> {
 /// default.
 pub fn is_fresh(issued_at: DateTime<Utc>, now: DateTime<Utc>, skew: chrono::Duration) -> bool {
     now.signed_duration_since(issued_at).abs() <= skew
+}
+
+/// The trailing member every signed message the server writes ends with.
+const SIGNATURE_MEMBER: &[u8] = b",\"hmac_signature\":\"";
+
+/// Split a signed JSON message **as received** into the bytes its HMAC covers
+/// and the signature: `raw` with its trailing `,"hmac_signature":"<hex>"`
+/// member removed, and the hex (QR1-9, SR1-6).
+///
+/// Verifying over these bytes, rather than over a re-serialization of the
+/// parsed message, is what makes the check independent of how a JSON library
+/// prints what it parsed: serde_json's default float parsing is best-effort,
+/// and encoders in other languages escape strings differently. `None` when
+/// `raw` does not end in exactly that member with a hex value (a message the
+/// server did not write, or one re-encoded on the way): the caller refuses it.
+pub fn split_trailing_signature(raw: &[u8]) -> Option<(Vec<u8>, &str)> {
+    let start = raw
+        .windows(SIGNATURE_MEMBER.len())
+        .rposition(|w| w == SIGNATURE_MEMBER)?;
+    let rest = &raw[start + SIGNATURE_MEMBER.len()..];
+    let end = rest.iter().position(|&b| b == b'"')?;
+    if &rest[end..] != b"\"}" {
+        return None;
+    }
+    let signature = std::str::from_utf8(&rest[..end]).ok()?;
+    if signature.is_empty() || !signature.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut canonical = Vec::with_capacity(start + 1);
+    canonical.extend_from_slice(&raw[..start]);
+    canonical.push(b'}');
+    Some((canonical, signature))
 }
 
 /// Derive a per-tenant AMQP signing subkey from the shared master key
@@ -198,12 +230,26 @@ pub struct AuthzRequest {
     pub hmac_signature: Option<String>,
 }
 
-/// Authorization decision published to `axiam.authz.response`.
-#[derive(Debug, Serialize)]
+/// Authorization decision published in answer to an [`AuthzRequest`]: to the
+/// request's AMQP `reply_to` queue when it names one, otherwise to the shared
+/// `axiam.authz.response` queue.
+///
+/// SA-15 (N2): the response is bound to the request and signed. It carries the
+/// request's `tenant_id` and `nonce`, and an `hmac_signature` computed with the
+/// same per-tenant subkey (the request's `tenant_id` and `key_version`, see
+/// [`derive_tenant_key`]) over the **canonical form**: this struct serialized
+/// as JSON with `hmac_signature` absent, fields in declaration order —
+/// `correlation_id, allowed, reason?, reason_code?, tenant_id, nonce` — the
+/// optional members omitted when absent. A requester verifies the signature
+/// with its own tenant's subkey at the `key_version` it sent, and accepts the
+/// response only when `tenant_id`, `correlation_id` and `nonce` match a request
+/// it still has outstanding. The new members are additive: `allowed`, `reason`
+/// and `reason_code` keep their meaning.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthzResponse {
     pub correlation_id: Uuid,
     pub allowed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// B1: machine-readable decision reason — `allowed`, `no_grant`, or
     /// `denied_by_rule` (SDK contract §11).
@@ -214,6 +260,49 @@ pub struct AuthzResponse {
     /// `allowed` behaves exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
+    /// SA-15 (N2): the tenant of the request this answers. ALWAYS emitted, so
+    /// it is inside the signed body; it also names the subkey that signed it.
+    pub tenant_id: Uuid,
+    /// SA-15 (N2): the request's `nonce`, echoed. ALWAYS emitted, so it is
+    /// inside the signed body: it binds the decision to one signed request.
+    pub nonce: Uuid,
+    /// SA-15 (N2): HMAC-SHA256 (hex) of the canonical form — this struct with
+    /// this field absent — under the per-tenant subkey derived from the
+    /// request's `tenant_id` and `key_version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac_signature: Option<String>,
+}
+
+impl AuthzResponse {
+    /// The canonical bytes the signature covers: the JSON serialization with
+    /// `hmac_signature` absent.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let unsigned = AuthzResponse {
+            hmac_signature: None,
+            ..self.clone()
+        };
+        serde_json::to_vec(&unsigned).expect("an AuthzResponse always serializes")
+    }
+
+    /// Sign this response with the per-tenant subkey derived from
+    /// `master_key`, `self.tenant_id` and `key_version` (the request's), and
+    /// set `hmac_signature`.
+    pub fn sign(&mut self, master_key: &[u8], key_version: u8) {
+        let subkey = derive_tenant_key(master_key, self.tenant_id, key_version);
+        self.hmac_signature = Some(sign_payload(&subkey, &self.canonical_bytes()));
+    }
+
+    /// Verify `hmac_signature` against the canonical form under the subkey of
+    /// `self.tenant_id` at `key_version`. `false` when unsigned.
+    pub fn verify(&self, master_key: &[u8], key_version: u8) -> bool {
+        verify_tenant_signature(
+            master_key,
+            self.tenant_id,
+            key_version,
+            &self.canonical_bytes(),
+            self.hmac_signature.as_deref(),
+        )
+    }
 }
 
 /// Audit event received from external services via `axiam.audit.events`.

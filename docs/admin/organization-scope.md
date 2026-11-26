@@ -114,8 +114,9 @@ meaning.
 | Surface | For a restricted principal |
 | --- | --- |
 | Any tenant-scoped action | Allowed only in the named tenants; the authorization engine drops the assignment everywhere else |
-| Organization-level actions (create/update/delete a tenant or organization, mint or revoke the organization CA, set an mTLS trust anchor, organization email config, MDS refresh) | **Refused.** These name no tenant, so there is nothing for the engine to compare a scope against — the guard is explicit |
-| A tenant's signing CA (`…/tenants/{tenant}/signing-cas`) | Allowed when the reach covers *that* tenant. Organization-level, but what it produces belongs to one tenant |
+| Organization-level actions (create/update/delete a tenant or organization, mint, import, revoke or migrate the custody of the organization CA, set an mTLS trust anchor, read or update the organization security settings (`GET`/`PUT /organizations/{org}/settings`), read, set, delete or test the organization email config (`/organizations/{org}/email-config`), read the system audit log (`GET /audit-logs/system`), MDS refresh) | **Refused**, whatever the account's roles hold. These name no tenant, so there is nothing for the engine to compare a scope against — the guard (`require_organization_principal`) is explicit. The admin console does not offer them to such an account: the System audit tab and the organization's Settings and Email tabs are not drawn |
+| A tenant's signing CA (`…/tenants/{tenant}/signing-cas`) | Allowed when the reach covers *that* tenant. Organization-level, but what it produces belongs to one tenant. The list (`GET`) is also open to an ordinary tenant's principal for its **own** tenant only (it needs its signing CAs' ids to issue under them); any other tenant's list is `403` (SA-02, S-5) |
+| A tenant's record (`GET /organizations/{org}/tenants/{tenant}`) and its audit export (`POST …/tenants/{tenant}/audit-export`) | Allowed when the reach covers *that* tenant (`require_organization_principal_for_tenant`); `403` for any other. Unlike the signing-CA list, an ordinary tenant's own principal is refused both, for its own tenant too (SA-02, N9): the record and the export belong to the organization. The admin console offers the tenant's "View" button and detail page on the same terms |
 | `GET /organizations/{org}/tenants` | Returns only the tenants in reach |
 | `X-Axiam-Tenant` naming another tenant | `403` at the header, rather than a 403 on every request that follows |
 | `GET /auth/me` | `permissions` is computed for the tenant being acted on, and the `*` wildcard is **not** emitted |
@@ -289,6 +290,72 @@ The `X-Axiam-Tenant` header is only as good as the resolver behind it. The
 server registers one at startup (`axiam-server`'s composition root, alongside
 the session validator); without it the extractor refuses every switch, so an
 organization administrator would be unable to act on any tenant at all.
+
+## Suspending a tenant
+
+```http
+PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}
+{ "status": "Suspended" }
+```
+
+A suspended tenant keeps all of its data, and admits none of its own
+principals: sign-in (every method), the token endpoint for every grant, refresh,
+device mTLS, SCIM provisioning tokens, REST (the UMA Protection API and the SSF
+stream-management API included), gRPC and AMQP authorization requests all
+answer `tenant_suspended` (REST `403`, OAuth2 `400`). A password sign-in says so
+only once the password verified: a wrong password answers the usual `401`, so
+the code tells an anonymous caller nothing. AMQP **audit ingestion** is not
+refused: a suspended tenant's signed audit events are still recorded, so its
+trail loses nothing. The suspension revokes the tenant's sessions and refresh
+tokens in the same transaction as the status write — nothing is revoked when
+that write fails (a slug conflict, say) — so setting it back to `Active`
+restores sign-in through a **new** session only.
+
+Two further rules apply to it:
+
+* **The organization tenant cannot be suspended.** It holds every organization
+  principal — the only principals that can lift a suspension — so a request
+  that sets `status = Suspended` on it answers
+  `409 organization_tenant_not_suspendable`, writes nothing and revokes
+  nothing. The refusal is made by the tenant repository's status write, not by
+  the handler, so no other path reaches around it.
+* **Organization principals read it and change its status, nothing else.**
+  While a tenant is suspended, an organization principal may read it, change
+  its status, and delete it; every other state-changing request on it answers
+  `403 tenant_suspended`. The rule holds however the request names the tenant:
+
+  * **Through `X-Axiam-Tenant`.** Decided once, where the extractor resolves
+    the tenant the request acts on. Admitted: `GET`/`HEAD`; the tenant-update
+    request above and the tenant `DELETE`, for that same tenant; and the
+    `POST`s that only read —
+    `/authz/check`, `/authz/check/batch`,
+    `/organizations/{org_id}/tenants/{tenant_id}/audit-export`,
+    `/tenants/{tenant_id}/saml/parse-sp-metadata`, `/pgp-keys/{id}/encrypt`
+    and `/oauth2/userinfo`. Everything else — creating a user or a role in it,
+    changing its settings, its SAML or SCIM configuration, testing its mail
+    relay, queuing an account export — is refused. A `POST` route added later
+    counts as a write until it is listed as a read.
+  * **By path, under `/api/v1/organizations/{org_id}/tenants/{tenant_id}`.**
+    Decided once, in the per-tenant organization guard
+    (`require_organization_principal_for_tenant`) from what the route declares
+    it does; a datastore error while reading the tenant refuses the write
+    rather than letting it through; the tenant update checks its own body:
+
+    | Route | On a suspended tenant |
+    |---|---|
+    | `GET …/tenants/{tenant_id}` | allowed (read) |
+    | `PUT …/tenants/{tenant_id}`, body `{"status": …}` only | allowed (the un-suspend) |
+    | `PUT …/tenants/{tenant_id}`, any other field in the body | `403 tenant_suspended` |
+    | `DELETE …/tenants/{tenant_id}` | allowed (a lifecycle act) |
+    | `POST …/tenants/{tenant_id}/audit-export` | allowed (read) |
+    | `GET …/tenants/{tenant_id}/signing-cas` | allowed (read) |
+    | `POST …/tenants/{tenant_id}/signing-cas` | `403 tenant_suspended` |
+    | `POST …/tenants/{tenant_id}/signing-cas/sign-csr` | `403 tenant_suspended` |
+
+  The tenant-update request is accepted on a suspended tenant only when its
+  body changes **nothing but `status`** — with or without the header — so a
+  rename or a metadata change has to wait for the tenant to be active again.
+  The un-suspend is therefore always `{"status": "Active"}` on its own.
 
 ## What an organization principal's own account does
 

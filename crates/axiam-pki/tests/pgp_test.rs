@@ -43,6 +43,7 @@ fn make_audit_entries(tenant_id: uuid::Uuid) -> Vec<AuditLogEntry> {
         ip_address: None,
         metadata: serde_json::json!({}),
         timestamp: Utc::now(),
+        organization_id: None,
     }]
 }
 

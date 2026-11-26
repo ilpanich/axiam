@@ -38,12 +38,12 @@ pub const HEADER_CSRF: &str = "X-CSRF-Token";
 // Exempt path suffixes — no CSRF token needed on these endpoints
 // ---------------------------------------------------------------------------
 
-/// Path suffixes that are exempt from CSRF validation.
+/// Full request paths that are exempt from CSRF validation (exact match).
 ///
 /// These are either unauthenticated endpoints (login, MFA flows) that do not
 /// yet have a CSRF cookie, or token-based OAuth2 flows that use their own
 /// security model.
-const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
+const CSRF_EXEMPT_PATHS: &[&str] = &[
     "/api/v1/auth/login",
     // The OPAQUE endpoints are exempt on exactly the same grounds as /login:
     // the caller is unauthenticated and has no `axiam_csrf` cookie to echo.
@@ -93,7 +93,8 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
     "/api/v1/auth/reset",
     "/api/v1/auth/reset/confirm",
     // Bootstrap is a one-time endpoint called before any session exists.
-    // It is protected by the AXIAM_BOOTSTRAP_ADMIN_EMAIL env gate instead (D-10).
+    // It is protected by the one-time setup token from the first-boot log instead
+    // (SA-01, D-03a); AXIAM_BOOTSTRAP_ADMIN_EMAIL is only an additional restriction.
     "/api/v1/admin/bootstrap",
     // 28-05/CQ-B40: the four first-time-SSO public endpoints (D-22,
     // handlers/federation.rs) are unauthenticated by design — same model as
@@ -129,10 +130,11 @@ const CSRF_EXEMPT_SUFFIXES: &[&str] = &[
 const CSRF_EXEMPT_PREFIXES: &[&str] = &["/oauth2/"];
 
 fn is_csrf_exempt(path: &str) -> bool {
-    for suffix in CSRF_EXEMPT_SUFFIXES {
-        if path.ends_with(suffix) {
-            return true;
-        }
+    // Exact equality on the full path (every entry is `/api/v1/...`, and the
+    // middleware only wraps scopes that see that full path). `ends_with` would
+    // exempt any future nested route whose tail happens to equal an entry.
+    if CSRF_EXEMPT_PATHS.contains(&path) {
+        return true;
     }
     for prefix in CSRF_EXEMPT_PREFIXES {
         if path.starts_with(prefix) {
@@ -709,6 +711,20 @@ mod tests {
     }
 
     #[test]
+    fn a_path_merely_ending_in_an_exempt_entry_is_not_exempt() {
+        for path in [
+            "/api/v1/users/api/v1/auth/login",
+            "/api/v1/resources/x/api/v1/auth/reset/confirm",
+            "/t/abc/api/v1/auth/login",
+            "/api/v1/auth/login/",
+            "/api/v1/auth/login/extra",
+        ] {
+            assert!(!is_csrf_exempt(path), "{path} must not be CSRF-exempt");
+        }
+        assert!(is_csrf_exempt("/api/v1/auth/login"));
+    }
+
+    #[test]
     fn webauthn_registration_is_not_csrf_exempt() {
         for path in [
             "/api/v1/auth/webauthn/register/start",
@@ -727,7 +743,7 @@ mod tests {
     fn every_csrf_exempt_auth_path_is_also_publicly_routable() {
         // A path exempted here but absent from PUBLIC_PATHS is 401'd by
         // AuthzMiddleware instead — the same drift in the other direction.
-        for path in CSRF_EXEMPT_SUFFIXES {
+        for path in CSRF_EXEMPT_PATHS {
             if !path.starts_with("/api/v1/auth/") {
                 continue;
             }

@@ -277,6 +277,28 @@ pub async fn request_reset<C: Connection + Clone>(
     Ok(HttpResponse::Ok().json(serde_json::json!({ "sent": true })))
 }
 
+/// Ask the audit middleware to record, beside the request row, that
+/// `user_id`'s password was written and revoking their sessions then failed
+/// (QR13-1, QR13-2). The request answers an error, so its own row is a
+/// `Failure`; this row is a `Success` of the credential change, in the same
+/// tenant, and is what a `password_changed` notification rule matches.
+pub(crate) fn record_credential_written_revocation_failed(http_req: &HttpRequest, user_id: Uuid) {
+    http_req
+        .extensions_mut()
+        .insert(axiam_audit::AuditSupplementalRow {
+            action:
+                axiam_core::models::notification_rule::PASSWORD_CHANGED_REVOCATION_FAILED_ACTION
+                    .into(),
+            actor_id: user_id,
+            actor_type: axiam_core::models::audit::ActorType::User,
+            outcome: axiam_core::models::audit::AuditOutcome::Success,
+            metadata: serde_json::json!({
+                "credential_written": true,
+                "revocation": "failed",
+            }),
+        });
+}
+
 /// `POST /api/v1/auth/reset/confirm`
 ///
 /// Confirms a password reset using a one-time token and a new
@@ -341,40 +363,46 @@ pub async fn confirm_reset<C: Connection + Clone>(
     // holder of the reset token is the user).
     with_cause(Some(InitiatingEntity::User), async {
         // QUAL-07: PasswordResetService is now a hoisted AppState singleton.
-        let user_id = state
+        let confirmed = state
             .mail
             .password_reset_service
-            .confirm_reset(
+            .confirm_reset_reporting_revocation(
                 req.tenant_id,
                 &req.token,
                 &req.new_password,
                 &settings.password,
                 state.auth_config.pepper.as_ref().map(|p| p.expose_secret()),
                 Some(&state.http_client),
+                // SA-06 / N7 (SR4-2): written by the same transaction as the hash.
+                enrolled,
             )
             .await?;
 
-        crate::handlers::opaque_enrollment::store_credential(
-            &state,
-            req.tenant_id,
-            user_id,
-            enrolled,
-        )
-        .await?;
-
+        // QR12-2: the password is already stored, so the credential-change
+        // event goes out even when revoking the sessions failed; the error is
+        // answered after it.
         state
             .ssf
             .emitter
             .credential_changed(
                 req.tenant_id,
-                user_id,
+                confirmed.user_id,
                 CredentialType::Password,
                 ChangeType::Update,
                 InitiatingEntity::User,
                 CredentialDetail::default(),
             )
             .await;
-        Ok::<(), AxiamApiError>(())
+        match confirmed.revocation {
+            Some(error) => {
+                // QR13-1: the request row of this 500 is a `Failure`, which
+                // records no password change and fires no notification. Say
+                // that the credential did change.
+                record_credential_written_revocation_failed(&http_req, confirmed.user_id);
+                Err(AxiamApiError::from(error))
+            }
+            None => Ok::<(), AxiamApiError>(()),
+        }
     })
     .await?;
 

@@ -24,6 +24,10 @@ kind: ServiceAccount
 metadata:
   name: vault
   namespace: axiam
+# SA-45: Raft storage with no `auto_join` (provider=k8s), no Kubernetes auth
+# method and no service registration, so nothing needs the token. Re-enable it
+# if any of those is added.
+automountServiceAccountToken: false
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -172,6 +176,9 @@ spec:
         component: vault
     spec:
       serviceAccountName: vault
+      # Least privilege: this pod never calls the Kubernetes API, so it gets no
+      # service-account token mounted (SA-45).
+      automountServiceAccountToken: false
       # Pod-level restricted security context (KSV-0118), mirroring the
       # container context below. `runAsUser: 100` / `fsGroup: 1000` are the
       # `vault` user and group in hashicorp/vault; fsGroup is what makes the

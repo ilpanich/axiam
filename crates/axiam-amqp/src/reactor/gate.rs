@@ -714,6 +714,7 @@ where
                     "failure_kind": kind,
                     "detail": failure.to_string(),
                 })),
+                organization_id: None,
             })
             .await;
     }
@@ -767,6 +768,7 @@ where
                             "chain": reactor_ids,
                             "denied_by": result.denied_by,
                         })),
+                        organization_id: None,
                     })
                     .await;
             }
@@ -789,6 +791,7 @@ where
                             "fields": patch.keys().collect::<Vec<_>>(),
                             "chain": reactor_ids,
                         })),
+                        organization_id: None,
                     })
                     .await;
             }

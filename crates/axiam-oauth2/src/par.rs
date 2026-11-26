@@ -323,9 +323,28 @@ where
             ));
         }
 
+        let request_uri_hash = hash_request_uri(request_uri);
+
+        // SA-41 — the presenting client is checked BEFORE the handle is spent.
+        // `consume` is destructive, so checking afterwards let a party holding
+        // another client's handle burn it (DoS). A read that shows the wrong
+        // client refuses without touching the row; `consume` below stays the
+        // authoritative, atomic single-use decision.
+        if let Some(candidate) = self
+            .par_repo
+            .find_unconsumed(tenant_id, &request_uri_hash)
+            .await
+            .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
+            && candidate.client_id != client_id
+        {
+            return Err(OAuth2Error::InvalidRequest(
+                "request_uri was not issued to this client".into(),
+            ));
+        }
+
         let stored = self
             .par_repo
-            .consume(tenant_id, &hash_request_uri(request_uri))
+            .consume(tenant_id, &request_uri_hash)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
             .ok_or_else(|| {
@@ -668,6 +687,10 @@ mod tests {
             pub row: Option<PushedAuthRequest>,
             pub consumes: AtomicUsize,
             pub reads: AtomicUsize,
+            /// SA-41 — when set, `consume` spends the row (returns it and
+            /// removes it) instead of failing.
+            pub spendable: bool,
+            pub spent: std::sync::atomic::AtomicBool,
         }
 
         impl OneRow {
@@ -705,6 +728,10 @@ mod tests {
             }
             async fn consume(&self, _: Uuid, _: &str) -> AxiamResult<Option<PushedAuthRequest>> {
                 self.consumes.fetch_add(1, Ordering::SeqCst);
+                if self.spendable {
+                    self.spent.store(true, Ordering::SeqCst);
+                    return Ok(self.row.clone());
+                }
                 Err(AxiamError::Internal(
                     "peek must never consume the handle it is asked about".into(),
                 ))
@@ -715,6 +742,9 @@ mod tests {
                 _: &str,
             ) -> AxiamResult<Option<PushedAuthRequest>> {
                 self.reads.fetch_add(1, Ordering::SeqCst);
+                if self.spent.load(Ordering::SeqCst) {
+                    return Ok(None);
+                }
                 Ok(self.row.clone())
             }
             async fn cleanup_expired(&self, _: Uuid) -> AxiamResult<u64> {
@@ -732,6 +762,35 @@ mod tests {
 
     fn service(repo: OneRow) -> ParService<NoClients, OneRow> {
         ParService::new(NoClients, repo)
+    }
+
+    /// SA-41 — a party presenting another client's handle must not burn it:
+    /// the refusal happens before `consume`, and the owner can still redeem.
+    #[tokio::test]
+    async fn consume_by_another_client_does_not_spend_the_handle() {
+        let tenant = Uuid::now_v7();
+        let mut repo = OneRow::live(tenant, "client-a");
+        repo.spendable = true;
+        let svc = service(repo);
+        let uri = generate_request_uri();
+
+        let err = svc
+            .consume(tenant, "client-b", &uri)
+            .await
+            .expect_err("another client's handle must be refused");
+        assert!(
+            err.to_string().contains("not issued to this client"),
+            "{err}"
+        );
+        assert_eq!(
+            svc.par_repo.consumes.load(Ordering::SeqCst),
+            0,
+            "the handle must not be spent by a client it was not issued to"
+        );
+        assert!(
+            svc.consume(tenant, "client-a", &uri).await.is_ok(),
+            "the owning client can still redeem its handle"
+        );
     }
 
     /// A live handle is spendable, and **stays** spendable.

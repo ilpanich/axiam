@@ -24,8 +24,10 @@ data:
   # builds Apple's and the SAML IdPs' redirect URIs from.
   AXIAM__AUTH__OAUTH2_ISSUER_URL: "https://axiam-iam.duckdns.org"
   # PLACEHOLDER — set it to your own address before the first boot. Bootstrap is
-  # fail-closed: it refuses unless this matches the request's email, or the
-  # request carries the one-time setup token from the first-boot log.
+  # fail-closed: it ALWAYS requires the one-time setup token from the first-boot
+  # log (scripts/03-axiam-bootstrap.sh reads it). This address is only an
+  # additional restriction — the request's email must also match it — and never
+  # replaces the token. See docs/admin/README.md#first-run-admin-bootstrap.
   # `infra/rpi5-k3s/tofu` sets this from the `admin_email` variable, so editing
   # `20-axiam.auto.tfvars` is the supported way to change it.
   AXIAM_BOOTSTRAP_ADMIN_EMAIL: "admin@example.com"

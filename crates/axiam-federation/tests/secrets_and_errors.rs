@@ -286,6 +286,7 @@ impl AuditLogRepository for MockAuditRepo {
             ip_address: input.ip_address,
             metadata: input.metadata.unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         })
     }
     async fn list(
@@ -298,6 +299,7 @@ impl AuditLogRepository for MockAuditRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _f: AuditLogFilter,
         _p: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {

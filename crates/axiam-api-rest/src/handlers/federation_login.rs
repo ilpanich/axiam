@@ -9,7 +9,7 @@
 //! audiences. `federation.rs` is the tenant-admin CRUD surface, gated on
 //! `federation:*` permissions. Everything here is reachable with no credential
 //! at all, and every one of these routes therefore appears in **both**
-//! `PUBLIC_PATHS` and `CSRF_EXEMPT_SUFFIXES` and carries a rate limit.
+//! `PUBLIC_PATHS` and `CSRF_EXEMPT_PATHS` and carries a rate limit.
 //!
 //! See `claude_dev/federation-sso-login-design.md` §5.
 
@@ -1325,10 +1325,10 @@ pub async fn saml_acs_form_public<C: Connection + Clone>(
             &f.saml_response,
             Some(relay_state),
             Some(login_state.request_id.as_str()),
-            // Same SEC-005 residual as the JSON ACS: no ACS URL is stored, so
-            // the bearer SubjectConfirmationData's @Recipient *value* is not
-            // compared. Its presence, @NotOnOrAfter and @InResponseTo still are.
-            None,
+            // SA-11/N21: the ACS URL the sign-in was started with is stored on
+            // the login-state row, so the Response @Destination and the signed
+            // SubjectConfirmationData @Recipient are both compared to it.
+            login_state.idp_redirect_uri.as_deref(),
             false,
         )
         .await

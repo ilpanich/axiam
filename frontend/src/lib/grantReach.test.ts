@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  organizationPrincipalReaches,
   reachLabel,
   reachTitle,
   roleReach,
@@ -149,5 +150,43 @@ describe("useIsTenantRestricted", () => {
       isInitializing: false,
     });
     expect(renderHook(() => useIsTenantRestricted()).result.current).toBe(false);
+  });
+});
+
+describe("organizationPrincipalReaches", () => {
+  // Mirrors `require_organization_principal_for_tenant` (QR9-2).
+  const base: AuthUser = {
+    id: "u1",
+    username: "u",
+    email: "u@x.io",
+    permissions: ["*"],
+    tenant_id: "org-tenant",
+    principal_tenant_id: "org-tenant",
+    organization_level: true,
+  };
+
+  it("admits an unrestricted organization principal for any tenant", () => {
+    expect(organizationPrincipalReaches(base, "t1")).toBe(true);
+    expect(organizationPrincipalReaches(base, "t9")).toBe(true);
+  });
+
+  it("admits a restricted organization principal only for the tenants it reaches", () => {
+    const restricted = { ...base, reachable_tenant_ids: ["t1"] };
+    expect(organizationPrincipalReaches(restricted, "t1")).toBe(true);
+    expect(organizationPrincipalReaches(restricted, "t9")).toBe(false);
+    expect(
+      organizationPrincipalReaches({ ...base, reachable_tenant_ids: [] }, "t1"),
+    ).toBe(false);
+  });
+
+  it("refuses a tenant principal, its own tenant included", () => {
+    const tenantAdmin = {
+      ...base,
+      tenant_id: "t1",
+      principal_tenant_id: "t1",
+      organization_level: false,
+    };
+    expect(organizationPrincipalReaches(tenantAdmin, "t1")).toBe(false);
+    expect(organizationPrincipalReaches(null, "t1")).toBe(false);
   });
 });

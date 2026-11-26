@@ -21,7 +21,7 @@ use std::pin::Pin;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
     AUD_M2M, AUD_USER, AccessTokenClaims, ActClaim, ExtExchangeClaim, MAX_ACT_CHAIN_DEPTH,
-    SubjectKind, decode_access_token, issue_exchanged_token, unverified_issuer_of,
+    SubjectKind, decode_access_token, exchanged_token_spec, unverified_issuer_of,
 };
 use axiam_core::models::oauth2_client::OAuth2Client;
 use axiam_core::repository::TenantRepository;
@@ -461,6 +461,9 @@ pub struct TokenExchangeService<TR> {
     /// skip the check, and skipping it is how `scope_map` output becomes an
     /// authority in its own right.
     scope_authority: Option<std::sync::Arc<dyn SubjectScopeAuthority>>,
+    /// SA-18 (N15) — where the subject's global role names are read when the
+    /// narrowed scopes keep `roles`. See [`crate::roles_claim`].
+    role_source: crate::roles_claim::SharedRoleSource,
 }
 
 impl<TR> TokenExchangeService<TR>
@@ -474,7 +477,46 @@ where
             max_lifetime_secs,
             external_resolver: None,
             scope_authority: None,
+            role_source: crate::roles_claim::unwired(),
         }
+    }
+
+    /// Install the role source for the `roles` claim (SA-18). Until one is
+    /// installed an exchange whose narrowed scopes keep `roles` is refused
+    /// with `server_error`; any other exchange never reads it.
+    #[must_use]
+    pub fn with_role_source(mut self, source: crate::roles_claim::SharedRoleSource) -> Self {
+        self.role_source = source;
+        self
+    }
+
+    /// The `roles` claim for an exchanged token (SA-18): absent unless the
+    /// narrowed scopes keep `roles`, and then recomputed for the subject —
+    /// never copied from the subject token, which may be up to one lifetime
+    /// stale.
+    async fn exchanged_roles(
+        &self,
+        tenant_id: Uuid,
+        subject: &str,
+        sub_kind: SubjectKind,
+        granted: &[String],
+    ) -> Result<Option<Vec<String>>, OAuth2Error> {
+        use crate::roles_claim::RolesSubject;
+        let who = match sub_kind {
+            SubjectKind::OAuth2Client => RolesSubject::Client,
+            SubjectKind::User | SubjectKind::ServiceAccount => match Uuid::parse_str(subject) {
+                Ok(id) => RolesSubject::Principal(id),
+                // A user or service-account subject is a UUID; one that is not
+                // cannot be looked up, and an empty claim would be a guess.
+                Err(_) if crate::roles_claim::grants_roles(granted) => {
+                    return Err(OAuth2Error::InvalidGrant(
+                        "the subject token's subject is not a principal id".into(),
+                    ));
+                }
+                Err(_) => return Ok(None),
+            },
+        };
+        crate::roles_claim::roles_claim(self.role_source.as_ref(), tenant_id, who, granted).await
     }
 
     /// Enable the X4 external path (both collaborators, together).
@@ -792,6 +834,11 @@ where
             .get_by_id(tenant_id)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        // SA-13 (N16, D-3): the tenant is in hand; a suspended one issues
+        // nothing (the client's authentication refused it already).
+        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+            return Err(OAuth2Error::TenantSuspended);
+        }
 
         let act = actor_sub.as_ref().map(|actor| ActClaim {
             sub: actor.clone(),
@@ -816,13 +863,16 @@ where
         // the principal is did not change. A consumer that needs to know the
         // token arrived by exchange has `act` and the audit record, which the
         // impersonation path already relies on as its only evidence.
-        let access_token = issue_exchanged_token(
+        // SA-18 (N15) — `roles` survives only if the narrowing kept the scope.
+        let roles = self
+            .exchanged_roles(tenant_id, &subject.sub, subject.sub_kind, &granted)
+            .await?;
+        let access_token = exchanged_token_spec(
             &subject.sub,
             subject.sub_kind,
             tenant_id,
             tenant.organization_id,
             &granted,
-            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             &audience,
             expires_at,
@@ -834,6 +884,8 @@ where
             // read as "issued to" by `actor_token_client`.
             &client.client_id,
         )
+        .roles(roles)
+        .issue(&self.minting_config(issuer))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         Ok(ExchangeOutcome {
@@ -1042,8 +1094,22 @@ where
             .get_by_id(tenant_id)
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+        // SA-13 (N16, D-3): the tenant is in hand; a suspended one issues
+        // nothing (the client's authentication refused it already).
+        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+            return Err(OAuth2Error::TenantSuspended);
+        }
 
-        let access_token = issue_exchanged_token(
+        // SA-18 (N15) — the resolved local user's roles, when `roles` was
+        // granted.
+        let roles = crate::roles_claim::roles_claim(
+            self.role_source.as_ref(),
+            tenant_id,
+            crate::roles_claim::RolesSubject::Principal(external.user_id),
+            &granted,
+        )
+        .await?;
+        let access_token = exchanged_token_spec(
             &external.user_id.to_string(),
             // The subject is an AXIAM user — resolved through the federation
             // link, which is what a federated login resolves through too.
@@ -1051,7 +1117,6 @@ where
             tenant_id,
             tenant.organization_id,
             &granted,
-            &self.minting_config(issuer),
             Uuid::new_v4().to_string(),
             &audience,
             now + lifetime,
@@ -1067,6 +1132,8 @@ where
             // read as "issued to" by `actor_token_client`.
             &client.client_id,
         )
+        .roles(roles)
+        .issue(&self.minting_config(issuer))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
 
         Ok(ExchangeOutcome {

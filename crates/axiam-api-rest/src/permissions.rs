@@ -31,6 +31,15 @@ pub const PERMISSION_REGISTRY: &[(&str, &str)] = &[
         "users:admin",
         "Perform administrative user actions (unlock, reset MFA)",
     ),
+    // SA-12 (N4, D-2): the gRPC `UserService/ValidateCredentials` gate. Held
+    // only by a service account an operator chose — `axiam_db::seeder` gives
+    // it to no default role — and refused to every user token regardless.
+    (
+        "users:validate_credentials",
+        "Check any user's password over gRPC UserService/ValidateCredentials \
+         (service accounts only). WARNING: a password oracle over every \
+         account in the tenant; seeded to no role.",
+    ),
     // Groups
     ("groups:list", "List groups"),
     ("groups:get", "Retrieve a single group"),

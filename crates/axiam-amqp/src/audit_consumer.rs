@@ -257,6 +257,7 @@ where
         ip_address: msg.ip_address,
         // #741: stamped after the producer's metadata, so it cannot override.
         metadata: Some(stamp_ingested(msg.metadata)),
+        organization_id: None,
     };
 
     if let Err(e) = audit_repo.append(entry).await {

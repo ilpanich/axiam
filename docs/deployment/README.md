@@ -22,6 +22,12 @@ on a workstation.
 just prod-up
 ```
 
+First-admin bootstrap needs the one-time setup token the server logs once at
+first boot: `docker compose -f docker/docker-compose.prod.yml logs axiam-server`
+(or `scripts/first-boot-token.sh <container>`). It is always required, even
+if `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set (that only restricts the email), and the
+first-boot log is secret until bootstrap completes.
+
 For a single node that does not need a message broker there is a smaller
 stack, [`docker/docker-compose.minimal.yml`](../../docker/docker-compose.minimal.yml)
 (`just minimal-up`): SurrealDB and `axiam-server` only, with
@@ -100,6 +106,13 @@ The Kubernetes manifests live under [`k8s/`](../../k8s/) and are assembled by
 ```bash
 kubectl apply -k k8s/
 ```
+
+First-admin bootstrap needs the one-time setup token the server logs once at
+first boot: `kubectl -n axiam logs deploy/axiam-server | scripts/first-boot-token.sh -`
+(add `--previous` after a pod restart; mint a new one before bootstrap with
+`axiam-server setup-token --remint`). It is always required, even if
+`AXIAM_BOOTSTRAP_ADMIN_EMAIL` is set (that only restricts the email), and the
+first-boot log is secret until bootstrap completes.
 
 Key manifests:
 
@@ -466,6 +479,108 @@ for the tenants that inherit it) that would make `required` true for a tenant wi
 an enabled directory. A disabled configuration may coexist; enabling it is then
 the refused write.
 
+**A credential change ends the artefacts of the old credential (SA-06).** Every write of a
+user's password hash, and every write or deletion of the user's OPAQUE record, stamps
+`user.credential_changed_at` in the same transaction (schema v117: one optional column, no
+backfill). An MFA challenge token, an MFA setup token or an in-flight OPAQUE login
+(`login/start` already answered, `login/finish` not yet sent) issued before that instant is
+refused with the response an invalid or expired one gets, so a reset also stops a login the
+holder of the old password had in flight. A user whose credential has not changed since the
+upgrade has no stamp and is refused nothing. The two MFA tokens (and the WebAuthn
+second-factor state token, which carries the challenge's issue time and is checked again when the
+ceremony finishes) carry a sub-second issue time, `iat_ns`, and are compared with the stamp at full
+precision, as the OPAQUE exchange is: a token minted after the change, even in the same second, is
+accepted. A token minted without the claim (during a rolling upgrade) is compared by its
+whole-second `iat`, and one minted in the same second as a later change is refused.
+
+**The credential version (schema v118).** Next to the stamp, every user carries a counter,
+`credential_version`, bumped in the same transaction as every password-hash write and every
+OPAQUE record write or delete (a delete that removes no row bumps nothing). It is embedded in the
+MFA challenge and setup tokens (`cv`), the WebAuthn second-factor state token and the in-flight
+OPAQUE login (`SealedLogin`), and each is refused when its version differs from the user's
+current one. This compares no clock, so it holds whatever the replicas' skew; the stamp check
+below is the fallback only for artefacts that carry no version, which the previous release
+minted during a rolling upgrade.
+
+*The session write.* A sign-in that verified a credential (password with or without a second
+factor, OPAQUE finish, a WebAuthn or MFA second factor, MFA setup completion) carries the version
+it read together with that credential into the session write. The write compares it with the
+user's current version inside its own transaction and, when a reset or change committed in
+between, refuses as a wrong password is refused (invalid credentials), creating no session and
+no refresh token. A federated sign-in has no AXIAM credential behind it and carries no version.
+SurrealDB transactions are snapshot-isolated, so that in-transaction comparison alone does not
+abort against a concurrent credential write. The sign-in therefore also re-reads the user's
+credential version after its session row has committed and before it builds any token: if the
+version moved, it deletes that session row (which is also the refresh token) and answers invalid
+credentials. A password reset, a password change and a SCIM password write each write the
+credential first and revoke the user's sessions and refresh tokens afterwards, so a session that
+committed before the revocation is removed by it, and one that commits after it is caught by the
+re-read. If deleting the refused row fails, the sign-in still answers invalid credentials and no
+token is returned; the row is left to expire. The refused row is removed through the logout path
+(`session_repo.invalidate`), so its id appears on the revocation feed and, with an SSF sink
+configured, on the `session-revoked` stream, for a session that no client ever held.
+*Refresh rotation.* A refresh is a session mint and has the same protection. Sessions written by
+a sign-in that carried a credential version store it (`session.credential_version`, schema v119,
+optional, no backfill). The rotation consumes the presented session, then writes its successor
+under the version the consumed row carries: the write is refused when the user's version has
+moved, and the successor takes the same stored version. After the successor commits, the rotation
+re-reads the user's version exactly as a sign-in does; if it moved, the successor is deleted
+through the logout path and the rotation is refused with the answer an unknown or already-used
+refresh token gets. A reset, a password change or a SCIM password write that revokes sessions
+between the rotation's consume and its create therefore cannot leave a session behind. The session
+a password change deliberately keeps (including a change that carries a new OPAQUE record, which is
+written in the credential's own transaction) is stamped with the user's new version inside
+`invalidate_user_sessions_except`, in the same transaction that deletes the user's other sessions,
+so it can still rotate; this stamp is not part of the credential write itself. A session row written
+before schema v119 has no stored version: it rotates only if the user's `credential_changed_at`
+is strictly earlier than the row's `created_at` (a change at or after the row's creation, a tie
+included, refuses, as everywhere; so an upgrade logs nobody out, and a legacy row that predates a
+reset is refused), and its successor stores the user's current version. A
+credential write that does not revoke sessions would make the user's existing sessions unable to
+rotate (they must sign in again); today no route writes an OPAQUE record or removes one for an
+existing user other than a password change or reset, so none does. An OAuth2
+`refresh_token` grant has no stored version; after writing the successor it re-reads the user and
+refuses, revoking the successor, when the user's `credential_changed_at` is at or after the
+presented refresh token's `created_at`. The same rule covers every other OAuth2 route that turns a
+short-lived grant into a refresh token: an authorization code, a device-flow approval and a CIBA
+approval issued before a credential change are refused with `invalid_grant` when redeemed after it
+(compared with the code's `created_at`, the device grant's `created_at` and the CIBA request's
+`decided_at`, so a device approval is also refused when the change falls between the device's
+request and the user's approval; the grant is already redeemed, so the device must start a new
+device authorization, with a new device code and user code, and the user approves that one). A
+credential change at the very instant of the grant's time refuses too (a tie fails closed, here and
+for session rotation: one rule, `User::credential_changed_since`). After the refresh token is
+written the user is re-read once more; a change that landed in between revokes the token just
+minted and answers `invalid_grant`, and a failed read revokes it and answers a server error.
+
+**One clock.** `credential_changed_at` is written with the datastore's clock (`time::now()` inside
+the write), as the `created_at` of sessions, refresh tokens, codes and approvals is, so every
+comparison of the stamp with a stored row uses one clock whatever the replicas' skew. The one
+comparison that still sets the stamp against an application-replica time is the one for artefacts
+that are minted by a replica and carry their own issue time (MFA challenge and setup tokens,
+the WebAuthn state token, an in-flight OPAQUE login); those are covered by the credential version
+above, and the stamp is their fallback only.
+*Clock assumption (artefacts without a version).* The stamp is the datastore's clock, as above; it is
+not written from an application replica's clock. The residual skew is between that datastore stamp and
+the `iat` / `issued_at` that the minting replica put on an MFA, WebAuthn or OPAQUE artefact that carries
+no credential version. Run the replicas (and, for a remote cluster, the datastore) NTP-synchronised, as
+JWT `exp` handling already requires. A skew of delta shifts the refusal window by delta: if the minting
+replica runs delta ahead of the datastore, an artefact without a version minted up to delta before the
+change is still accepted (every artefact of this release carries one and is refused regardless); if it
+runs delta behind, one minted up to delta after the change is refused and the person signs in again.
+Normal NTP keeps delta in the milliseconds.
+
+If revoking the sessions fails after a password reset or a self-service password change has
+written the new password, it still emits the SSF `credential-change` event (the password has
+changed, so receivers must be told) and then answers the error (500); both revocations are
+attempted either way, for a reset and a change alike. The request's own audit row records that 500 as a `Failure`, so the
+server also records, beside it and in the tenant's own audit log, a row with action
+`auth.password_changed_revocation_failed`, outcome `Success` and metadata
+`{"credential_written": true, "revocation": "failed"}`; the `password_changed` notification rule
+matches that row, as it matches a successful reset's request row and a successful change's
+request row (`POST /api/v1/auth/password/change`). A successful reset or change writes no such
+row.
+
 **Accounts whose entry has no usable e-mail address cannot be provisioned.** A
 local account must have an e-mail address, and AXIAM does not invent one: a
 placeholder would be released as the user's e-mail `NameID` and as the OIDC
@@ -682,6 +797,344 @@ from `RABBITMQ_DEFAULT_USER` / `RABBITMQ_DEFAULT_PASS` (see
 [`k8s/rabbitmq/secret.yml`](../../k8s/rabbitmq/secret.yml)) into
 `AXIAM__AMQP__URL` at the deployment layer (see how
 `docker-compose.prod.yml` does this for the Compose path).
+
+## Upgrading to the release with the 2026-11 security-audit fixes
+
+This release closes the findings of the 2026-11-14 security audit
+([`claude_dev/security-audit-2026-11-14.md`](../../claude_dev/security-audit-2026-11-14.md);
+fix plan [`claude_dev/security-audit-2026-11-14-fix-plan.md`](../../claude_dev/security-audit-2026-11-14-fix-plan.md)).
+Several of the fixes change behaviour a live deployment may rely on. Read the
+table first, then the sections it links to; the ones marked **act** need an
+operator step before or during the rollout, the others only need to be known.
+
+| Task | What changes | Operator action |
+|---|---|---|
+| SA-01 | Bootstrap always needs the setup token | **act** if you script bootstrap |
+| SA-02 | Four permissions withheld from Standard tenants | **act** if a tenant admin relied on them |
+| SA-04 | A token minted for an OAuth2 client is refused on a user's own-account routes | **act** for relying parties that call them; see [SA-04 and SA-06](#sa-04-and-sa-06--own-account-routes-and-scim-passwords) |
+| SA-03 | Access tokens are typed; `aud` is required | **act**: sessions renew once; see the section below |
+| SA-18 | New `roles` scope and claim; SDK `require_role` needs it | **act** for applications using `require_role` |
+| SA-12 | gRPC `UserService` is authorized | **act** for gRPC `ValidateCredentials` callers |
+| SA-13 | Tenant suspension is enforced | **act** if any tenant is already `Suspended`: list them before the upgrade and re-suspend them after; clients must handle `tenant_suspended` |
+| SA-11 | SAML SP requires an `AudienceRestriction` | **act** if an IdP omits it |
+| SA-14 | Internal AMQP queues are signed | **act**: drain the queues |
+| SA-15 | Authz responses are signed and routed by `reply_to` | none; additive |
+| SA-10 | Guarded fetches ignore environment proxies | **act** if egress is proxy-only |
+| SA-16 | SurrealDB credentials move out of argv; dev image tag | **act** if you customised the SurrealDB command |
+| SA-09 | Erasure cancel restores the prior account status | none |
+| SA-06 | A SCIM password write is refused under OPAQUE `required` | know it; see [SA-04 and SA-06](#sa-04-and-sa-06--own-account-routes-and-scim-passwords) |
+| Wave 4 | Hardening: SA-40 to SA-45 | know them; see the last subsection |
+
+**Rolling the release out.** Schema migrations v116 (SA-02), v117 to v119
+(SA-06), v120 (SA-09) and v121 (SA-43) are additive and run at startup, as described under
+[Schema migrations at startup](#schema-migrations-at-startup). Roll the AMQP
+producers and consumers together (SA-14), keep
+`AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` for the length of a mixed-version
+rollout only (SA-03), and re-sync the SDKs afterwards: the SDK contract is
+1.68 and every SDK ships it as 1.4.0.
+
+### SA-01 — bootstrap needs the setup token on every path
+
+`POST /api/v1/admin/bootstrap` used to treat a matching
+`AXIAM_BOOTSTRAP_ADMIN_EMAIL` as a substitute for the one-time setup token. It
+is now only an **additional** restriction: a request needs a valid, unconsumed
+`setup_token` in every configuration, and a mismatched address is a `403` on
+top of that. No environment variable replaces the token.
+
+- A script or pipeline that bootstrapped by email alone must read the token
+  from the first-boot log (`scripts/first-boot-token.sh` does it for Compose
+  and Kubernetes) and send it as `setup_token`.
+- A second bootstrap call is now answered `403`, not `409`: the first call
+  consumed the token. `409` is left to two requests racing with one token.
+- Treat first-boot logs as secret until bootstrap has run.
+
+See [First-run admin bootstrap](../admin/README.md#first-run-admin-bootstrap)
+and [Recovering the bootstrap setup token](#recovering-the-bootstrap-setup-token).
+
+### SA-02 — organization-level permissions are withheld from Standard tenants
+
+`audit_logs:list_system`, `organizations:get_settings`,
+`organizations:update_settings` and `tenants:export_audit` are now
+organization-level actions. Their handlers
+(`GET /api/v1/audit-logs/system`, the organization settings and email-config
+reads and writes, and any tenant's `GET` and audit export under
+`/organizations/{org_id}/tenants/{tenant_id}`, a tenant administrator's own
+tenant included) accept only an organization principal, and the seeder withholds the four permissions from the
+`super_admin` and `admin` roles of every Standard tenant.
+
+- **Existing tenants are corrected at the next boot.** The server reconciles
+  default-role grants at every start, so the four actions are revoked from the
+  super-admin and admin roles of tenants that already hold them. No migration
+  is needed.
+- A **custom role** an operator granted one of these actions keeps the row, but
+  the handler still refuses a tenant principal. Use an organization principal
+  (see [Organization scope](../admin/organization-scope.md)) for these calls.
+- A tenant administrator who used to edit the organization's security baseline
+  or read the system audit partition now gets `403`. The admin console hides
+  those tabs for such users.
+
+See [Organization scope](../admin/organization-scope.md).
+
+### SA-03 and SA-18 — typed access tokens, the `roles` claim
+
+SA-03 is the section [Access-token type and upgrading](#access-token-type-typ-atjwt-and-upgrading)
+below; its two operator-visible effects are:
+
+- `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` defaults to `true`, so tokens minted
+  by the previous release (`typ: JWT`) are refused and every session renews
+  within one access-token lifetime (15 minutes by default). Set it to `false`
+  on the new replicas for the length of a rolling upgrade only.
+- `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` defaults to `false`: an access token
+  without `aud` is refused on user routes and on gRPC. A deployment that
+  depended on `aud`-less user tokens must mint tokens with an audience, or set
+  the variable to `true` explicitly and plan to remove it.
+
+SA-18 adds a `roles` scope and claim. A client receives the claim only if
+`roles` is in its registered scopes **and** the request asks for it; nothing is
+granted to existing clients. A client that already had an application scope
+literally named `roles` now gets the claim when it asks for that scope. Service
+accounts may send `scope=roles` on the client-credentials grant.
+
+**SDKs.** `require_role` in the SDKs no longer reads OAuth scopes. It reads the
+`roles` claim only and answers `403` when the claim is absent, so an application
+that uses `require_role` must request the `roles` scope on its sign-in. For a
+scope check, use the new `require_scope`. The claim is a snapshot, stale for at
+most one access-token lifetime; `require_access` stays authoritative
+([The `roles` scope and access-token claim](../api/roles-claim.md)).
+
+### SA-12 — gRPC `UserService` permissions
+
+- `GetUser` of another user now requires `users:get`; a caller can always read
+  itself.
+- `ValidateCredentials` is restricted to service accounts (`aud = axiam:m2m`)
+  holding the new permission `users:validate_credentials`. **No role holds it
+  after the upgrade**, so an SDK or service that calls it receives
+  `PERMISSION_DENIED` until an operator grants the permission to the service
+  account's role. It is seeded to no default role and reconciliation never adds
+  it.
+- Every answered `ValidateCredentials` call writes an
+  `auth.credentials_validated` audit row.
+
+See [gRPC](../api/grpc.md).
+
+### SA-13 — tenant suspension is enforced
+
+Setting a tenant to `Suspended` now ends its sessions and refresh tokens in the
+same transaction, and refuses sign-in, token issuance, refresh, REST, gRPC,
+and AMQP authorization for its principals with `tenant_suspended` (REST `403`,
+OAuth2 `400`, gRPC `PERMISSION_DENIED`); a SCIM provisioning token of a
+suspended tenant gets the plain `401` an unknown token gets, with no code. Its
+data is kept.
+
+**Before the upgrade, for any tenant that is already `Suspended`.** Until now
+the status was stored but not enforced, so a tenant may already hold it. The
+release performs no migration for that state: the revocation runs only inside
+the status write. Do this:
+
+1. List the tenants whose status is `Suspended`
+   (`GET /api/v1/organizations/{org_id}/tenants`).
+2. If the **organization's own tenant** is among them, set it back to `Active`
+   first. Its principals are the only ones that can lift a suspension, and the
+   new checks refuse them with `tenant_suspended` while it is suspended; only a
+   direct datastore write recovers that.
+3. After the upgrade, send `{"status":"Suspended"}` again for every tenant that
+   should stay suspended
+   (`PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}`). Any write with
+   that status runs the revocation. Until you do, such a tenant is refused at
+   every door, but still holds its pre-upgrade sessions and refresh tokens, and
+   lifting the suspension would bring them back.
+
+- Setting the tenant back to `Active` does **not** restore the sessions revoked
+  by a suspension written after the upgrade; users sign in again.
+- Suspension revokes sessions and OAuth2 refresh tokens only. SCIM provisioning
+  tokens, OAuth2 client and service-account secrets, certificates and passwords
+  are untouched, and scheduled directory sync keeps running. After a compromise,
+  revoke or rotate those **before** lifting the suspension.
+- The organization's own tenant cannot be suspended (`409
+  organization_tenant_not_suspendable`).
+- Organization principals can still read the tenant and change its status.
+- Clients and monitors that treated `Suspended` as cosmetic must handle the new
+  error code. Audit ingestion over AMQP is still accepted for a suspended
+  tenant.
+
+See [Tenant suspension](../admin/tenant-suspension.md).
+
+### SA-04 and SA-06 — own-account routes and SCIM passwords
+
+**SA-04.** An access token AXIAM minted for an OAuth2 client (one carrying a
+`client_id` claim, as a relying party holds for its user) is now refused `403`
+(`authorization_denied`) on the user's own-account acts: the `/oauth2/authorize`
+consent step, account deletion and export, the credential-management routes
+(passwords, MFA, passkeys), self-updates, the own-account SCIM `PUT`, `PATCH`
+and `DELETE`, and `DELETE /api/v1/users/{id}` for oneself. A console sign-in
+(the first-party sign-ins) is unaffected. A relying party that called such a
+route with its user's access token worked before the upgrade and gets `403`
+now: send the user to the AXIAM console for the act instead. See
+[`sdks/CONTRACT.md`](../../sdks/CONTRACT.md) (contract 1.67) and
+[SCIM provisioning](../api/scim-provisioning.md).
+
+**SA-06.** A SCIM `PUT` or `PATCH` that carries a `password` is answered `400`
+with `scimType: "mutability"` in a tenant whose effective OPAQUE mode is
+`required`; the user sets a password through the self-service change or reset
+flow. The credential-version behaviour is described under "A credential change
+ends the artefacts of the old credential (SA-06)" earlier in this guide.
+
+### SA-11 — the SAML SP requires an audience
+
+An assertion is accepted only if its `<Conditions>` carry an
+`AudienceRestriction` that names the SP entity ID, and its `Recipient` and
+`Destination` match the ACS URL the sign-in started with, on the form-POST ACS
+as well as the JSON one. There is no per-IdP opt-out. **An IdP that omits the
+audience restriction is now refused**: before the upgrade, ask the IdP
+administrator to add the AXIAM SP entity ID as an audience, and test one
+sign-in per IdP.
+
+### SA-14 and SA-15 — internal AMQP queues
+
+The mail, webhook, SSF-push, SCIM-push and CIBA-ping queues now carry a signed
+envelope. **Drain those queues and the `.retry` queues of the four outbound kinds before the upgrade**,
+or set `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false` for one
+deployment on a vhost nobody else can publish to; old replicas cannot read the
+envelope, so roll producers and consumers together. Messages already in a
+`.dlq` replay only with the flag off. Mail to a user that cannot be read, and
+deliveries to a disabled or unsubscribed webhook, are no longer sent. Full
+procedure: [Upgrading: drain the queues](#upgrading-drain-the-queues-or-relax-the-check-for-one-deployment);
+operator summary: [Internal queue signing](../admin/internal-queue-signing.md).
+
+SA-15 is additive on the wire: an authorization response now carries
+`tenant_id`, the request's `nonce` and an `hmac_signature`, and goes to the
+request's `reply_to` queue when one is set. Consumers that ignore unknown
+fields are unaffected. A requester that sets `reply_to` now receives its answer
+on that queue instead of the shared `axiam.authz.response`, except a queue
+named `axiam.…`, which is reserved: such a request is answered on the shared
+queue.
+
+### SA-10 — no egress proxy for guarded fetches
+
+Webhooks, back-channel logout, SSF push, CIBA ping, CIMD, JWKS and discovery
+fetches, token exchange, social and SAML metadata fetches, outbound SCIM, HTTP
+mail providers and FIDO MDS now ignore `HTTP_PROXY`, `HTTPS_PROXY` and
+`ALL_PROXY`. If the network allows egress only through a proxy, these fetches
+fail until a network-layer rule (a firewall rule or a transparent egress
+gateway) allows them. See
+[Outbound SSRF guard](#outbound-ssrf-guard--same-network-idps-axiam__pki__ssrf_allowed_hosts).
+
+### SA-16 — SurrealDB credentials and the dev image
+
+- The Compose files and the Kubernetes StatefulSet now pass the SurrealDB root
+  credentials as `SURREAL_USER` and `SURREAL_PASS` instead of `--user` and
+  `--pass` on the command line, so they no longer appear in the process list.
+  An operator with a **customised SurrealDB command or StatefulSet** must make
+  the same move. That SurrealDB 4 honours these variables was not run-verified
+  against a running database (the fix was checked with `docker compose config`
+  and a YAML parse only): smoke-test it before you roll out.
+- The development Compose stack pulls
+  `ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:-1.3.1}`, the namespace the
+  release pipeline publishes to, not `…/axiamhq/…:latest`. Override the tag with
+  `AXIAM_IMAGE_TAG`; the default is bumped with each release.
+
+### SA-09 — erasure cancel restores the prior status
+
+Cancelling an account-erasure request now restores the account to the status it
+had before the request (`Locked`, `Inactive` and `PendingVerification` are no
+longer turned into `Active`). A request created before schema v120 has no
+recorded status and restores `Active`, as every cancel did.
+
+### Wave 4 hardening — SA-40 to SA-45
+
+- **SA-40, REST edge.** A path segment that percent-decodes (repeatedly) to `.`
+  or `..` is no longer treated as public; the CSRF exemption is an exact match;
+  a percent-encoded duplicate tenant selector (`tenant%5Fid`) is refused `400
+  invalid_request` before authentication.
+- **SA-41, OAuth2.** A `code_verifier` presented for a code with no stored
+  challenge is `invalid_grant`; another client presenting a PAR `request_uri`
+  no longer spends it; introspection (REST and gRPC) reports `active: false`
+  when the session a user token names is gone: the `sid` claim, else `jti`,
+  which is where a first-party sign-in token carries its session id. A
+  service-account, client-credentials, exchanged, RPT or device token names no
+  session and is unaffected.
+- **SA-42, SSRF guard.** Cloud-metadata and other never-allowed addresses are
+  refused even when a deployment allows private addresses; `::1` stays reachable
+  there. `::ffff:0:0/96` is classified as special-purpose.
+- **SA-43, MFA.** A TOTP secret is now pending until confirmed (schema v121),
+  so re-enrolment cannot invalidate a confirmed authenticator. An MFA setup
+  token minted by the previous release cannot complete an enrolment (it has no
+  `jti`, so TOTP enrol and confirm refuse it; the user signs in again, and it
+  expires in five minutes anyway), and setup tokens are single-use. A wrong second-factor code
+  now counts toward the per-account lockout; **for accounts with MFA, the
+  password step no longer resets `failed_login_attempts`** — only a completed
+  second factor does. A WebAuthn second factor refuses a deactivated or locked
+  account.
+- **SA-44, audit and health.** Audit rows redact the token of
+  `/api/v1/account/export/{token}`; `GET /health/jobs` reports `last_error` as a
+  category (for example `internal_error`, `directory_unavailable`), not the
+  error text; the detail stays in the warn log. Anything that parsed the old
+  text must read the category. The OpenAPI spec digest changed, so SDK
+  repositories re-sync `sdks/openapi.json`.
+- **SA-45, Kubernetes and Compose.** The `k8s/` pods no longer automount a
+  ServiceAccount token (`automountServiceAccountToken: false`); a workload that
+  needs the Kubernetes API must opt in. `allow-ingress-to-server` admits only
+  the ingress controller's pods, selected by the ingress-nginx chart labels:
+  **check the labels match your controller** (with a hostNetwork controller the
+  CNI may see node IPs and neither selector matches, as before). The dev and e2e
+  Compose files publish SurrealDB, RabbitMQ and dev Vault on `127.0.0.1` only.
+  `TRUSTED_PROXIES` is documented next to `TRUSTED_HOPS` in the ConfigMap.
+
+## Access-token type (`typ: at+jwt`) and upgrading
+
+Every access token AXIAM mints carries the JOSE header `typ: at+jwt`
+(RFC 9068 §2.1) and a `kid`. The other JWTs signed with the same key each name
+their own kind, and every verifier requires its own:
+
+| Token | `typ` | `kid` |
+|---|---|---|
+| Access token (every grant, RPT, token exchange) | `at+jwt` | yes |
+| OIDC ID token | `JWT` | yes |
+| WebAuthn ceremony state | `axiam-webauthn-state+jwt` | no |
+| MFA challenge (after the password factor) | `axiam-mfa-challenge+jwt` | no |
+| MFA setup (MFA enforced, none enrolled) | `axiam-mfa-setup+jwt` | no |
+| Back-channel logout token | `logout+jwt` | no |
+| SSF Security Event Token | `secevent+jwt` | yes |
+
+The ceremony tokens (WebAuthn state, MFA challenge and setup) are only ever
+read back by AXIAM itself, which verifies them with its own key rather than
+by JWKS lookup, so they name no JWKS key: a relying party that selects keys
+strictly by `kid` finds none for them.
+
+An access-token verifier (REST, gRPC interceptor and `ValidateToken`,
+introspection, RFC 8693 `subject_token`, UMA `claim_token`) also refuses any
+token whose claims carry `purpose`, whatever its `typ`. An `id_token_hint`
+(end-session, `/oauth2/authorize`, CIBA) is accepted only with `typ: JWT` or
+no `typ`, and only if its claims carry none of `jti`, `purpose`, `scope` or
+`client_id`, which no ID token has ever carried; an access token or any other
+kind above is refused as a hint, including an access token minted by a
+release before this one (`typ: JWT`), however old.
+
+| Variable | Purpose |
+|---|---|
+| `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` | Default **`true`**: an access token without `typ: at+jwt` is refused. `false`, `0`, `no` or `off` (any case) relax it; an unrecognised value stops the server at startup with a configuration error. |
+| `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER` | Default **`false`**: an access token without `aud` is refused on user routes and on gRPC. Enabled only by `true`, `1` or `yes` (any case). `false`, `0`, `no`, `off` and also `on` leave it disabled. Like every `AXIAM__*` boolean, any other value — empty, padded with whitespace, a typo — stops the server at startup with a configuration error. |
+
+**What the default costs on upgrade.** Releases before this change minted
+access tokens with the generic `typ: JWT`. With
+`AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=true` those tokens are refused as soon
+as a replica runs the new release, so every signed-in user has to sign in
+again, or refresh, within one access-token lifetime
+(`AXIAM__AUTH__ACCESS_TOKEN_LIFETIME_SECS`, 15 minutes by default). Refresh
+tokens are opaque and unaffected: a client that refreshes on a 401 gets a typed
+token and carries on. An MFA or WebAuthn ceremony in flight at the moment of
+the upgrade (at most `mfa_challenge_lifetime_secs`, 5 minutes) has to be
+started again.
+
+**Relaxing it for one rolling upgrade.** While old and new replicas serve
+together, set `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` on the new
+replicas. An untyped token is then accepted only if its claims carry no
+`purpose`; acceptances are logged at `warn` at most once a minute per process,
+each line giving how many were accepted since the last one, and the server
+logs a `warn` at startup. The MFA and WebAuthn verifiers likewise accept the previous
+release's untyped tokens of their own kind. Set it back to `true` (or unset
+it) once every replica runs the new release and one access-token lifetime has
+passed. A token of any other `typ` is refused in both modes.
 
 ## Recovering the bootstrap setup token
 
@@ -1598,6 +2051,131 @@ TLS supplies the confidentiality. It does not supply HMAC's property, because
 TLS terminates at the broker and the broker then re-sends — only an end-to-end
 signature survives that hop. **Run both.**
 
+### The server-internal queues are signed too (SA-14)
+
+`axiam.mail.outbound` and the outbound kinds' queues (`axiam.webhook`,
+`axiam.ssf_push`, `axiam.scim_push`, `axiam.ciba_ping`, and each one's `.retry`
+queue) have no SDK producer: AXIAM writes them and AXIAM reads them. What it
+does with a message there is its most trusted output — tenant-branded mail
+through the tenant's provider, webhook POSTs signed with the webhook's secret,
+Security Event Tokens signed with the deployment key — so a message on them is
+now accepted only inside a signed envelope:
+
+```json
+{"purpose":"mail","key_version":2,"nonce":"…","issued_at":"…","body":{…},"hmac_signature":"…"}
+```
+
+`body` is the message exactly as these queues carried it before. The HMAC key
+is derived from `AXIAM__AMQP__SIGNING_KEY` under an HKDF label of its own
+(`axiam-amqp-internal-v1`, plus the queue family), **not** from a tenant's
+subkey: the subkey a tenant's producers hold for `axiam.authz.request` and
+`axiam.audit.events` cannot sign a message here. The nonce goes to the same
+durable replay store. The HMAC is checked over the bytes as received (with the
+trailing `hmac_signature` member removed), never over a re-serialization, so a
+payload carrying a number JSON cannot round-trip still verifies.
+
+**How old a message may be.** These are durable work queues: a message waits in
+them for reasons that have nothing to do with tampering — every consumer down
+for a deploy or a crash, a burst backing up the queue, a short-TTL retry copy
+held behind a long one in a `.retry` queue (the broker releases an expired
+message only from the head). So their freshness bound is not the 5-minute
+`AXIAM__AMQP__REPLAY_SKEW_SECS` of the SDK-facing queues but
+`AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS`, **86400 (24 h) by default**: a
+message is admitted while `issued_at` is no more than that in the past, and
+refused as stale after it. An `issued_at` in the *future* is still refused
+beyond `AXIAM__AMQP__REPLAY_SKEW_SECS` (clock skew, not dwell time). Each
+nonce is kept in the replay store for the maximum age, so a copy published
+again at any time inside it is a replay. A value below
+`AXIAM__AMQP__REPLAY_SKEW_SECS` is raised to it.
+
+The default covers, with room to spare:
+
+- **the outbound kinds' retries** — the longest single retry TTL is the
+  backoff ceiling (`AXIAM__<KIND>__BACKOFF_CEILING_MS`, 1 h by default), and
+  head-of-line blocking in a `.retry` queue can hold a copy for up to another
+  ceiling; a retry copy carries the time its TTL expires as `issued_at`, so its
+  own backoff never counts against it;
+- **the mail consumer's in-process backoff** — it sleeps before republishing a
+  failed send (10 s, then 20 s: three attempts, 30 s in all per message), one
+  message at a time, and the retry copy is re-sealed with a fresh `issued_at`.
+  What ages a queued mail is the sleeps of the failing messages ahead of it, at
+  most 20 s each; 24 h is about 4,300 of them back to back, far beyond any
+  realistic relay outage;
+- **a consumer outage** of most of a day.
+
+Raise it if your mail or outbound consumers can be down longer than that, or
+you raise `MAX_ATTEMPTS` or the backoff ceiling a long way; the cost is one
+replay-store row per message for that long. An unsigned, tampered, stale or
+replayed message is dead-lettered and recorded in the system audit log as
+`amqp.internal_message_rejected`, with the queue and the reason.
+
+**A redelivery is not a replay.** RabbitMQ delivers at least once: a consumer
+that crashes before it settles a message, or that requeues the original
+because its retry copy could not be published, gets the same bytes back. A
+message whose nonce is already recorded is therefore admitted when — and only
+when — the broker marks the delivery *redelivered*, a flag a publisher cannot
+set; its signature, purpose, key version and age are checked as for any other.
+A copy *published* again is never marked so, and is refused as a replay. The
+delivery is at-least-once as before (a consumer killed after it sent a mail
+but before the ack sends it again); a principal that can both publish to and
+consume from these queues can replay through a requeue, which is one more
+reason the broker must not grant SDK principals either on them.
+
+Note what the broker can and cannot deny here. RabbitMQ authorizes
+`basic.publish` as *write on the exchange*, not on the destination queue
+(write on a queue governs only `queue.bind`), and every AXIAM queue is reached
+through the default exchange. A per-queue "deny publish" rule is accepted by
+the broker but has no effect on publishing: a principal that may publish to
+the default exchange at all — an AMQP SDK producer sending authorization
+requests, for one — can publish to `axiam.mail.outbound` and every other queue
+whose name it knows. Consuming *can* be denied per queue. Only a separate vhost,
+or no publish right on the default exchange, keeps a principal from publishing
+to these queues.
+
+Two delivery rules changed with it. Mail of every type except a notification
+rule's is sent only to the address of the user record the message names; when
+that user cannot be read, nothing is sent (the message's own `to_address` was
+used before). And a queued webhook delivery is dropped, not retried, when the
+webhook has since been disabled or no longer subscribes to the event.
+
+#### Upgrading: drain the queues, or relax the check for one deployment
+
+A replica of an earlier version writes unsigned messages and cannot read the
+envelope. Do one of these when you upgrade; **draining is the default** and the
+only one that loses nothing and opens nothing:
+
+1. **Drain (recommended).** Stop the old replicas' producers (or wait for a quiet period),
+   let `axiam.mail.outbound`, `axiam.webhook`, `axiam.ssf_push`,
+   `axiam.scim_push`, `axiam.ciba_ping` **and their `.retry` queues** empty,
+   then deploy. Nothing is rejected.
+2. **Relax for one deployment** — only where no other principal can publish
+   to the default exchange. **While the flag is `false`, the N3 hole is open
+   again for its duration:** any principal that can publish to the default
+   exchange of AXIAM's vhost can inject an unsigned mail, webhook, SSF, SCIM or
+   CIBA message and the consumers will act on it, exactly as before SA-14. A
+   per-queue ACL does not prevent this (see the note above). Use it only where
+   no non-AXIAM principal can publish on AXIAM's vhost at all — no AMQP SDK
+   producers there, or SDK producers confined to a separate vhost — otherwise
+   drain; and keep the window as short as the rollout. Deploy with
+   `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false`: the new replicas
+   still sign everything they publish and still reject any envelope that fails
+   to verify, but also accept a message in the old, unsigned shape (each one is
+   logged as a warning). Once no old replica is left and the retry queues have
+   turned over — the longest retry TTL, an hour by default — remove the
+   variable (the default is `true`) and redeploy.
+
+   The flag cannot help an *old* replica: it does not know the envelope, so
+   a signed message it happens to consume is dead-lettered. Keep the overlap
+   short, or stop the old replicas' consumers first.
+
+Messages already in a `.dlq` when you upgrade are in the old shape; replaying
+one into its primary queue needs option 2. A message dead-lettered after the
+upgrade keeps its nonce and its original `issued_at`: a message the consumer
+admitted before dead-lettering it (a delivery that exhausted its attempts) is
+refused as a replay when it is published back, and any message is refused as
+stale once `AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS` has passed — the DLQ
+keeps it for inspection, and the event is re-sent from its source.
+
 ### Compose
 
 `just prod-up` handles it. It calls `just prod-broker-certs`, which generates a
@@ -1784,6 +2362,8 @@ configure and it is not covered here.
 | `AXIAM__AMQP__TLS__CLIENT_CERT_PATH` | *(unset)* | PEM client certificate, for mutual TLS. Requires the key. |
 | `AXIAM__AMQP__TLS__CLIENT_KEY_PATH` | *(unset)* | PEM client key. Requires the certificate. |
 | `AXIAM__AMQP__CONNECT_TIMEOUT_MS` | `30000` | Budget for one connection attempt. lapin has none of its own, so without this a broker whose port is published but whose TLS listener never answers leaves the connect pending forever — no error, no retry, no log line. Raise it for a broker behind a slow link; do not disable it. |
+| `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE` | `true` | Whether the mail and outbound consumers refuse a message without the signed envelope ([SA-14](#the-server-internal-queues-are-signed-too-sa-14)). Set `false` for **one** rolling deployment only. A failing envelope is refused either way. |
+| `AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS` | `86400` | How long a signed message may wait in the mail and outbound queues before it is refused as stale, and how long its nonce is kept ([SA-14](#the-server-internal-queues-are-signed-too-sa-14)). Covers the longest retry schedule and a day-long consumer outage; raised to `AXIAM__AMQP__REPLAY_SKEW_SECS` if set lower. A future-dated `issued_at` is still bounded by the replay skew. |
 
 ## Minimal profile (no broker)
 
@@ -2311,7 +2891,7 @@ source docker/.secrets/minimal-credentials.env   # the datastore credentials
 # a distroless image has no shell, so read the volume rather than the container:
 docker run --rm -v axiam-minimal_gdpr-audit-dlq:/d busybox cat /d/gdpr-audit-dlq.jsonl > gdpr-audit-dlq.jsonl
 
-jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
+jq -r '(if has("entry") then .entry else . end) as $e | (.occurred_at // null) as $at | (.reason // null) as $why | ($e.metadata // {}) as $m | ((if ($m|type) == "object" then $m else {original_metadata: $m} end) + (if $at then {occurred_at: $at} else {} end) + (if $why then {dead_lettered_reason: $why} else {} end)) as $meta | "CREATE type::record(\"audit_log\", <string>rand::uuid::v7()) SET tenant_id = \($e.tenant_id|@json), actor_id = \($e.actor_id|@json), actor_type = \($e.actor_type|@json), action = \($e.action|@json), resource_id = \($e.resource_id // null | if . == null then "NONE" else @json end), outcome = \($e.outcome|@json), ip_address = \($e.ip_address // null | if . == null then "NONE" else @json end), organization_id = \($e.organization_id // null | if . == null then "NONE" else @json end), metadata = \($meta|tojson);"' \
     gdpr-audit-dlq.jsonl \
   | docker exec -i axiam-minimal-surrealdb /surreal sql --endpoint ws://127.0.0.1:8000 \
       --user "$AXIAM__DB__USERNAME" --pass "$AXIAM__DB__PASSWORD" --ns axiam --db axiam --hide-welcome
@@ -2343,7 +2923,12 @@ recoverable: the recipe carries the line's `occurred_at` and `reason` into the
 row's `metadata` as `occurred_at` and `dead_lettered_reason`, so the trail can
 be read in the order things happened (a line from before 1.0.1 has neither, and
 its replayed row carries neither; the `axiam.audit.dlq` log event then dates a
-GDPR record, so keep the log with the file). Like every audit row, it can
+GDPR record, so keep the log with the file). A system-partition line (nil
+`tenant_id`) may carry `organization_id` — a `tenants.deleted` or
+`tenants.purged` record, or a request row whose organization was resolved — and
+the recipe writes it back, so `GET /api/v1/audit-logs/system` returns the
+replayed row to that organization; a line without one replays with none and is
+returned to nobody, exactly as it would have been written. Like every audit row, it can
 neither be updated nor deleted afterwards, so **replay each line once**. Note how many lines you
 replayed (`wc -l gdpr-audit-dlq.jsonl`) and start the next replay after them
 (`tail -n +N`). Do not rename or delete the file while the server runs: the
@@ -2543,6 +3128,15 @@ no suffix matching, no CIDRs. Unset (the default) means no exceptions at all.
 The exception applies to the first hop only; redirect targets are always
 validated strictly, and cloud metadata endpoints stay unreachable even for an
 allowlisted host. Every use is logged.
+
+**Guarded fetches do not use an egress proxy.** These fetches ignore
+`HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` (and their lowercase forms) even
+when the server process has them set. The guard validates one resolved address
+and connects to exactly that address; through a proxy the destination would be
+named by hostname and re-resolved by the proxy, so the validated address would
+no longer decide where the connection goes. If the network only permits egress
+via a proxy, allow these fetches at the network layer instead (for example a
+firewall rule or a transparent egress gateway).
 
 The full reasoning, and the five properties that keep this from being a bypass,
 are in [`../security-profiles.md`](../security-profiles.md#outbound-ssrf-guard--the-operator-override-sec-107).

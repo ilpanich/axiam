@@ -17,6 +17,15 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress-nginx  # TODO: operator must adjust to match ingress controller namespace
+          # SA-45: same `from` entry as the namespaceSelector, so the two AND:
+          # only the controller pods of that namespace, not every pod in it
+          # (admission-webhook jobs, default-backend, anything else installed
+          # there). These are the ingress-nginx Helm chart's labels; adjust
+          # them if you run a different controller.
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+              app.kubernetes.io/component: controller
       ports:
         - protocol: TCP
           port: 8090

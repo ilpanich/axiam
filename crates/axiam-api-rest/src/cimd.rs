@@ -267,6 +267,7 @@ async fn audit_quota_refusal<C: Connection + Clone>(
                 "managed_by": ManagedBy::Cimd.as_str(),
                 "error": "client_quota_exhausted",
             })),
+            organization_id: None,
         })
         .await
     {
@@ -306,6 +307,7 @@ async fn audit_materialisation<C: Connection + Clone>(
                 "managed_by": ManagedBy::Cimd.as_str(),
                 "client_id": client_id,
             })),
+            organization_id: None,
         })
         .await
     {

@@ -291,6 +291,16 @@ link, and a 30-day grace period before the purge pipeline above runs; the
 grace period can be aborted via `POST /api/v1/account/delete/cancel`
 (`cancel_account_delete`, proven by `deletion_cancel`).
 
+**Requesting erasure is the person's own act.** `POST /api/v1/account/delete`
+requires a console sign-in: a token AXIAM minted for an OAuth2 client (code,
+refresh, CIBA or device grant) is refused `403`, even though it names the user.
+The route is bearer-only and so exempt from the CSRF check, and without the
+refusal a relying party holding one of its user's tokens could disable the
+account and schedule its purge (security audit 2026-11-14, SA-04 follow-up
+S-3b). An administrator erasing somebody else still needs `users:erase`, and
+signs in to the console to do it. The cancel link is unaffected: it is
+authenticated by its own single-use token.
+
 **Both erasure statements write explicit column lists (W7).** `anonymize_user`
 and the administrator's tombstone each name every column they clear, so a column
 this list does not name **survives erasure**. That is not a theoretical hazard:
@@ -617,6 +627,13 @@ parameter to act for somebody else with, unlike the export and erasure
 endpoints, because consent is "an indication of the data subject's wishes" and
 an administrator cannot indicate it on their behalf.
 
+The grant and the withdrawal are also the person's **own act**: each requires a
+console sign-in, and a token AXIAM minted for an OAuth2 client (code, refresh,
+CIBA or device grant) is refused `403`. `/oauth2/authorize` reads these records
+to skip the consent screen, so a relying party able to record one with its
+user's token could have a code issued for another client in the user's name
+(T-447, security audit 2026-11-14 SA-04 follow-up).
+
 **Executable proof:**
 [`crates/axiam-api-rest/tests/oauth2_sensitive_scopes_test.rs`](../../crates/axiam-api-rest/tests/oauth2_sensitive_scopes_test.rs)
 (25 tests) and
@@ -654,6 +671,15 @@ scope per D-05 and RESEARCH.md Pitfall 1).
    (hash lookup, `Ready` status, 24-hour TTL), decrypts the blob, and
    **atomically** consumes the token (`consume_ready_and_delete`,
    TOCTTOU-safe single-use) before returning the plaintext JSON.
+
+Steps 1 and 3 both require a **console sign-in**. A token AXIAM minted for an
+OAuth2 client (code, refresh, CIBA or device grant) is refused `403` on each,
+and on the download before the token is looked up, so it neither queues an
+export nor consumes the person's link. Both routes are bearer-only and so exempt
+from the CSRF check; without the refusal a relying party holding one of its
+user's tokens could request the user's complete Art. 15 inventory and download
+it (security audit 2026-11-14, SA-04 follow-up S-3b). An administrator acting
+for somebody else still needs `gdpr:export`.
 
 **Why this satisfies CMPL-02's intent:** the async design was a deliberate
 SECHRD-06 choice — it lets export generation run outside the request/response

@@ -360,6 +360,7 @@ pub async fn get<C: Connection + Clone>(
     request_body = UpdateUserRequest,
     responses(
         (status = 200, description = "User updated", body = UserResponse),
+        (status = 403, description = "Missing `users:update` on another user, or `authorization_denied`: a console sign-in is required and the caller is updating their own account with a token minted for an OAuth2 client"),
         (status = 404, description = "User not found"),
     ),
     security(("bearer" = []))
@@ -377,6 +378,13 @@ pub async fn update<C: Connection + Clone>(
         RequirePermission::new("users:update", Uuid::nil())
             .check(&user, authz.get_ref().as_ref())
             .await?;
+    } else {
+        // SR5-1 "Guard all self-updates": the e-mail is the address a password
+        // reset mails to and the username is a sign-in identifier, so changing
+        // either is the person's own act. A token minted for an OAuth2 client
+        // is refused before anything is read or written, for any field. An
+        // administrator updating another user (the arm above) is not affected.
+        user.require_console_sign_in()?;
     }
     // Same rule as `get` above, and it matters more here: writing a
     // self-update into the *selected* tenant would not find the row to update
@@ -516,6 +524,9 @@ pub const AUDIT_USER_CERTIFICATES_REVOKED: &str = "user.certificates_revoked";
     responses(
         (status = 204, description = "User deleted; their sessions and `User` certificates \
                                       revoked"),
+        (status = 403, description = "A token minted for an OAuth2 client deleting the \
+                                      caller's own account (SR6-1: a first-party sign-in is \
+                                      required), or the caller lacks `users:delete`"),
         (status = 404, description = "User not found"),
     ),
     security(("bearer" = []))
@@ -531,6 +542,13 @@ pub async fn delete<C: Connection + Clone>(
         .check(&user, authz.get_ref().as_ref())
         .await?;
     let target_id = path.into_inner();
+    // SR6-1 "Own-account guard": deleting one's own account is the person's own
+    // act (`POST /account/delete` takes a console sign-in), so a token minted
+    // for an OAuth2 client is refused `403` before anything is read or written.
+    // An administrator deleting ANOTHER user is unaffected.
+    if is_own_resource(&user, target_id) {
+        user.require_console_sign_in()?;
+    }
 
     // Kill every live session BEFORE the row is tombstoned.
     //
@@ -654,6 +672,7 @@ pub async fn delete<C: Connection + Clone>(
                     "certificates_revoked": certificates_revoked,
                     "cause": "user_deleted",
                 })),
+                organization_id: None,
             })
             .await
         {

@@ -1194,3 +1194,129 @@ async fn encrypt_secret_fails_without_encryption_key_configured() {
         "encrypt_secret must fail when no encryption key is configured"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SA-14 (N3): `deliver_once` is the sink of a queued webhook message, so it
+// must itself refuse a webhook that is disabled or not subscribed to the
+// message's event. `emit` filters on both, but a message already on the queue
+// (or one forged onto it) reached the receiver regardless.
+// ---------------------------------------------------------------------------
+
+/// A loopback receiver counting the POSTs it is sent.
+async fn counting_receiver() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    });
+    (port, hits)
+}
+
+/// One delivery attempt of `event_type` to a webhook subscribed to
+/// `user.created`, `enabled` as given. Returns the outcome and the POST count.
+async fn attempt_on_webhook(
+    enabled: bool,
+    event_type: &str,
+) -> (axiam_core::outbound::DeliveryOutcome, usize) {
+    use axiam_core::outbound::{OutboundDeliverer, OutboundKind, OutboundMessage};
+    use std::sync::atomic::Ordering;
+
+    let (port, hits) = counting_receiver().await;
+    let (db, _org_id, tenant_id) = setup_db().await;
+    let webhook_repo = SurrealWebhookRepository::new(db.clone());
+    let service = WebhookDeliveryService::new(webhook_repo.clone(), Some(TEST_WEBHOOK_ENC_KEY))
+        .admitting_private_networks_for_tests();
+    let webhook = webhook_repo
+        .create(axiam_core::models::webhook::CreateWebhook {
+            tenant_id,
+            url: format!("http://127.0.0.1:{port}/hook"),
+            events: vec!["user.created".into()],
+            secret: service.encrypt_secret("test-secret").expect("encrypt"),
+            retry_policy: None,
+        })
+        .await
+        .expect("create test webhook");
+    if !enabled {
+        webhook_repo
+            .update(
+                tenant_id,
+                webhook.id,
+                axiam_core::models::webhook::UpdateWebhook {
+                    url: None,
+                    events: None,
+                    enabled: Some(false),
+                    retry_policy: None,
+                    secret: None,
+                },
+            )
+            .await
+            .expect("disable webhook");
+    }
+
+    let msg = OutboundMessage {
+        kind: OutboundKind::Webhook,
+        tenant_id,
+        target_id: webhook.id,
+        delivery_id: Uuid::new_v4(),
+        event_type: event_type.into(),
+        payload: serde_json::json!({"forged": true}),
+        attempt: 0,
+    };
+    let outcome = service.deliver_attempt(&msg).await.expect("an outcome");
+    (outcome, hits.load(Ordering::SeqCst))
+}
+
+/// Control: an enabled webhook subscribed to the event is delivered to.
+#[actix_rt::test]
+async fn sa14_an_enabled_subscribed_webhook_is_delivered() {
+    let (outcome, hits) = attempt_on_webhook(true, "user.created").await;
+    assert_eq!(
+        outcome,
+        axiam_core::outbound::DeliveryOutcome::Delivered {
+            response_status: Some(200)
+        }
+    );
+    assert_eq!(hits, 1);
+}
+
+/// SA-14 (N3): a disabled webhook receives nothing, and the delivery is
+/// dead-lettered rather than retried against a webhook that will stay off.
+#[actix_rt::test]
+async fn sa14_a_disabled_webhook_is_not_delivered_to() {
+    let (outcome, hits) = attempt_on_webhook(false, "user.created").await;
+    assert_eq!(hits, 0, "a disabled webhook must not be POSTed to");
+    assert!(
+        matches!(
+            outcome,
+            axiam_core::outbound::DeliveryOutcome::DeadLetter { .. }
+        ),
+        "{outcome:?}"
+    );
+}
+
+/// SA-14 (N3): an event the webhook is not subscribed to is not delivered.
+#[actix_rt::test]
+async fn sa14_an_unsubscribed_event_is_not_delivered() {
+    let (outcome, hits) = attempt_on_webhook(true, "user.deleted").await;
+    assert_eq!(hits, 0, "an unsubscribed event must not be POSTed");
+    assert!(
+        matches!(
+            outcome,
+            axiam_core::outbound::DeliveryOutcome::DeadLetter { .. }
+        ),
+        "{outcome:?}"
+    );
+}

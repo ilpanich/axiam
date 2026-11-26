@@ -88,6 +88,7 @@ pub(crate) fn audit_entry(
         outcome,
         ip_address: None,
         metadata: Some(metadata),
+        organization_id: None,
     }
 }
 
@@ -152,6 +153,7 @@ pub(crate) fn not_offered_entry(
             "reason": reason,
             "refused_count": refused_count,
         })),
+        organization_id: None,
     }
 }
 

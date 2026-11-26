@@ -270,7 +270,18 @@ async fn webhook_consumer_retries_then_dlqs_and_audits_end_to_end() {
         .create_publisher_channel()
         .await
         .expect("publisher channel");
-    let publisher = WebhookPublisher::new(pub_channel);
+    // SA-14: the publisher seals with the server-only key; the consumer's gate
+    // verifies under the same master key and the durable nonce store.
+    let master = b"webhook-consumer-test-master-key".to_vec();
+    let publisher =
+        WebhookPublisher::new(pub_channel, axiam_amqp::InternalSigner::new(master.clone()));
+    let gate = axiam_amqp::InternalQueueGate::new(
+        master,
+        true,
+        chrono::Duration::seconds(300),
+        chrono::Duration::hours(24),
+        axiam_db::repository::SurrealAmqpNonceRepository::new(db.clone()),
+    );
 
     let delivery_id = Uuid::new_v4();
     let msg = WebhookMessage {
@@ -294,6 +305,7 @@ async fn webhook_consumer_retries_then_dlqs_and_audits_end_to_end() {
             consumer_publisher,
             consumer_audit_repo,
             retry_cfg,
+            gate,
         )
         .await;
     });

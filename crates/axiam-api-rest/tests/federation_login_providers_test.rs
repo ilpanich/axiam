@@ -3091,3 +3091,190 @@ async fn g_a_another_tenant_cannot_read_or_replace_the_native_login_block() {
         json!(["com.example.app"])
     );
 }
+
+// ---------------------------------------------------------------------------
+// SA-13 (N16, D-3): the social-login and handoff doors refuse a suspended tenant
+// ---------------------------------------------------------------------------
+
+/// Suspend `tenant_id`.
+async fn suspend(db: &Surreal<TestDb>, tenant_id: Uuid) {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+    SurrealTenantRepository::new(db.clone())
+        .update(
+            tenant_id,
+            UpdateTenant {
+                status: Some(TenantStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// Social login ("Sign in with GitHub", `/auth/federation/oauth2/callback`):
+/// a callback that arrives while the tenant is suspended is refused
+/// `403 tenant_suspended` and sets no session cookie, however genuine the
+/// provider's answer.
+#[actix_rt::test]
+async fn a_social_login_to_a_suspended_tenant_is_refused() {
+    let f = setup("oauth2-suspended").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+
+    let idp = MockServer::start().await;
+    let base = idp.uri();
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "gho_test_access_token",
+            "token_type": "bearer",
+            "scope": "read:user,user:email",
+        })))
+        .mount(&idp)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 583231,
+            "login": "octocat",
+            "name": "The Octocat",
+            "email": "octocat@users.noreply.github.com",
+        })))
+        .mount(&idp)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user/emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"email": "octocat@users.noreply.github.com", "verified": true, "primary": true},
+        ])))
+        .mount(&idp)
+        .await;
+    let (status, created) = create_config!(
+        app,
+        auth,
+        f.db,
+        f.org_id,
+        f.tenant_id,
+        "t-admin",
+        json!({
+            "provider": "GitHub",
+            "provider_kind": "github",
+            "protocol": "OAuth2",
+            "client_id": "gh-client",
+            "client_secret": "gh-secret",
+            "authorization_endpoint": format!("{base}/login/oauth/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "userinfo_endpoint": format!("{base}/user"),
+        })
+    );
+    assert_eq!(status, 201, "{created}");
+
+    let start_resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oauth2/start")
+            .set_json(json!({
+                "org_slug": f.org_slug,
+                "tenant_slug": f.tenant_slug,
+                "federation_config_id": created["id"],
+                "redirect_uri": "https://spa.example.test/auth/sso/callback",
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(start_resp.status().as_u16(), 200);
+    let binding = binding_of(&start_resp);
+    let start: Value = test::read_body_json(start_resp).await;
+
+    // The operator suspends the tenant while the user is at the provider.
+    suspend(&f.db, f.tenant_id).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oauth2/callback")
+            .cookie(binding)
+            .set_json(json!({ "state": start["state"], "code": "provider-code" }))
+            .to_request(),
+    )
+    .await;
+    let status = resp.status().as_u16();
+    let cookies: Vec<String> = resp
+        .response()
+        .headers()
+        .get_all(actix_web::http::header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        !cookies.iter().any(|c| c.starts_with("axiam_access=")),
+        "no session cookie for a suspended tenant: {body}"
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "tenant_suspended", "{body}");
+}
+
+/// The SAML (and Sign in with Apple) completion — the ACS hands the browser a
+/// one-time handoff code, redeemed at `/auth/federation/handoff` for the
+/// session — refuses a code redeemed while the tenant is suspended.
+#[actix_rt::test]
+async fn a_handoff_redemption_for_a_suspended_tenant_is_refused() {
+    use axiam_core::repository::{SSO_HANDOFF_TTL_SECS, SsoHandoffCode, SsoHandoffCodeRepository};
+    use axiam_db::repository::SurrealSsoHandoffCodeRepository;
+    use sha2::{Digest, Sha256};
+
+    let f = setup("handoff-suspended").await;
+    let auth = test_auth_config();
+    let app = test_app!(f.db, auth);
+    let user_id = admin_in(&f.db, f.tenant_id, "federated-user").await;
+    let code = "a-256-bit-code-stands-in-for-the-real-thing";
+    let (binding_value, binding_hash) = fixed_binding();
+    SurrealSsoHandoffCodeRepository::new(f.db.clone())
+        .insert(&SsoHandoffCode {
+            code_hash: hex::encode(Sha256::digest(code.as_bytes())),
+            tenant_id: f.tenant_id,
+            user_id,
+            redirect_uri: "https://spa.example.test/dashboard".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(SSO_HANDOFF_TTL_SECS),
+            authenticated_at: None,
+            browser_binding_hash: Some(binding_hash),
+        })
+        .await
+        .unwrap();
+
+    suspend(&f.db, f.tenant_id).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/handoff")
+            .cookie(actix_web::cookie::Cookie::new(
+                "axiam_fed_bind",
+                binding_value,
+            ))
+            .cookie(actix_web::cookie::Cookie::new(
+                "__Host-axiam_fed_bind",
+                binding_value,
+            ))
+            .set_json(json!({ "code": code }))
+            .to_request(),
+    )
+    .await;
+    let status = resp.status().as_u16();
+    let cookies: Vec<String> = resp
+        .response()
+        .headers()
+        .get_all(actix_web::http::header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(
+        !cookies.iter().any(|c| c.starts_with("axiam_access=")),
+        "no session cookie for a suspended tenant: {body}"
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "tenant_suspended", "{body}");
+}

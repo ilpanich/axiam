@@ -19,6 +19,9 @@ spec:
         app: axiam
         component: surrealdb
     spec:
+      # Least privilege: this pod never calls the Kubernetes API, so it gets no
+      # service-account token mounted (SA-45).
+      automountServiceAccountToken: false
       # Pod-level restricted security context (KSV-0118). Mirrors the container
       # context below; fsGroup makes the /data PVC writable under the non-root UID.
       securityContext:
@@ -37,10 +40,6 @@ spec:
           command: ["surreal"]
           args:
             - "start"
-            - "--user"
-            - "$(SURREALDB_USER)"
-            - "--pass"
-            - "$(SURREALDB_PASS)"
             - "--log"
             - "info"
             # `surrealkv:`, not `file:`. SurrealDB 3 REMOVED the `file://`
@@ -57,12 +56,14 @@ spec:
             # here. This matches `docker/docker-compose.prod.yml`.
             - "surrealkv:/data/surreal.db"
           env:
-            - name: SURREALDB_USER
+            # Credentials arrive as SURREAL_USER / SURREAL_PASS, which `surreal start`
+            # reads, so the password never appears in argv (/proc/<pid>/cmdline).
+            - name: SURREAL_USER
               valueFrom:
                 secretKeyRef:
                   name: surrealdb-credentials
                   key: username
-            - name: SURREALDB_PASS
+            - name: SURREAL_PASS
               valueFrom:
                 secretKeyRef:
                   name: surrealdb-credentials

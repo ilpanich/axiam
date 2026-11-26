@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::authz::{AuthzData, RequirePermission, is_own_resource, user_scope_tenant};
 use crate::error::AxiamApiError;
-use crate::extractors::auth::AuthenticatedUser;
+use crate::extractors::auth::{AuthenticatedUser, ConsoleSignIn};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -126,6 +126,7 @@ async fn append_gdpr_audit<S: AuditWriteSink>(
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata,
+            organization_id: None,
         },
     )
     .await;
@@ -283,6 +284,11 @@ async fn dead_letter_audit(
 /// it, and emails a single-use 24 h download link (D-12).
 ///
 /// Self-service (own account) or admin with `gdpr:export` permission.
+///
+/// **The person's own act (SA-04 review S-3b).** Takes a [`ConsoleSignIn`]:
+/// a token AXIAM minted for an OAuth2 client is refused `403`. The route is
+/// bearer-only and so CSRF-exempt, and a relying party holding one of its
+/// user's tokens must not be able to have the user's personal data exported.
 #[utoipa::path(
     post,
     path = "/api/v1/account/export",
@@ -290,13 +296,14 @@ async fn dead_letter_audit(
     request_body = inline(serde_json::Value),
     responses(
         (status = 200, description = "Export job enqueued"),
-        (status = 403, description = "Forbidden"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Forbidden: the token is not a console sign-in's (AXIAM minted it for an OAuth2 client), or the caller lacks the permission to act for another user"),
     ),
     security(("bearer" = []))
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn request_account_export<C: Connection + Clone>(
-    auth_user: AuthenticatedUser,
+    ConsoleSignIn(auth_user): ConsoleSignIn,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<ExportRequest>,
@@ -363,6 +370,10 @@ pub async fn request_account_export<C: Connection + Clone>(
 /// blob, marks it as downloaded, and deletes the record.
 ///
 /// Requires authentication (self or admin with `gdpr:export`).
+///
+/// A [`ConsoleSignIn`], like the request (S-3b): a token AXIAM minted for an
+/// OAuth2 client is refused `403` before the token is looked up, so a relying
+/// party cannot spend the person's download link.
 #[utoipa::path(
     get,
     path = "/api/v1/account/export/{token}",
@@ -370,13 +381,15 @@ pub async fn request_account_export<C: Connection + Clone>(
     params(("token" = String, Path, description = "Single-use download token")),
     responses(
         (status = 200, description = "Export JSON"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Forbidden: the token is not a console sign-in's (AXIAM minted it for an OAuth2 client), the caller may not download another user's export, or the export was already used or has expired"),
         (status = 404, description = "Token not found or expired"),
     ),
     security(("bearer" = []))
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn download_account_export<C: Connection + Clone>(
-    auth_user: AuthenticatedUser,
+    ConsoleSignIn(auth_user): ConsoleSignIn,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     path: web::Path<DownloadPath>,
@@ -488,6 +501,11 @@ pub async fn download_account_export<C: Connection + Clone>(
 /// (D-07/D-08/D-09).
 ///
 /// Self-service (own account) or admin with `users:erase` permission.
+///
+/// A [`ConsoleSignIn`] (S-3b): a token AXIAM minted for an OAuth2 client is
+/// refused `403`. Erasure is the person's own act, and the route is
+/// bearer-only and so CSRF-exempt: a relying party holding one of its user's
+/// tokens must not be able to disable the account and schedule its purge.
 #[utoipa::path(
     post,
     path = "/api/v1/account/delete",
@@ -495,13 +513,14 @@ pub async fn download_account_export<C: Connection + Clone>(
     request_body = inline(serde_json::Value),
     responses(
         (status = 200, description = "Deletion scheduled"),
-        (status = 403, description = "Forbidden"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Forbidden: the token is not a console sign-in's (AXIAM minted it for an OAuth2 client), or the caller lacks the permission to act for another user"),
     ),
     security(("bearer" = []))
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn request_account_delete<C: Connection + Clone>(
-    auth_user: AuthenticatedUser,
+    ConsoleSignIn(auth_user): ConsoleSignIn,
     authz: AuthzData,
     state: web::Data<AppState<C>>,
     body: web::Json<DeleteRequest>,
@@ -818,6 +837,13 @@ pub async fn list_own_consents<C: Connection + Clone>(
 /// Idempotent: the `(tenant, user, type, version)` index makes a repeated
 /// grant the same grant, and a second call is answered `200` rather than a
 /// conflict. A consent screen the user double-submits has consented once.
+///
+/// **The person's own act (T-447, SA-04 review S-3).** Takes a
+/// [`ConsoleSignIn`]: a token AXIAM minted for an OAuth2 client is refused
+/// `403`. `/oauth2/authorize` reads exactly these records to skip the consent
+/// screen, and the CSRF middleware exempts bearer-only requests, so a relying
+/// party holding one of its user's tokens could otherwise record consent for
+/// another client in the user's name and have a code issued silently.
 #[utoipa::path(
     post,
     path = "/api/v1/account/consents/oidc-scopes",
@@ -828,12 +854,13 @@ pub async fn list_own_consents<C: Connection + Clone>(
         (status = 400, description = "Unknown client, unregistered scope, \
                                       non-sensitive scope, or the capability is off"),
         (status = 401, description = "Not authenticated"),
+        (status = 403, description = "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn grant_oidc_scope_consent<C: Connection + Clone>(
     http_req: actix_web::HttpRequest,
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     body: web::Json<GrantScopeConsent>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -994,6 +1021,10 @@ pub async fn grant_oidc_scope_consent<C: Connection + Clone>(
 /// went. A subject who withdraws twice is not told off, and an attacker who
 /// guesses `client_id`s learns nothing from the status code — though they
 /// would have to be the subject to ask at all.
+///
+/// A [`ConsoleSignIn`], like the grant: withdrawing is the person's own act
+/// too, and a relying party holding one of its user's tokens must not be able
+/// to strip a consent the user gave another client (T-447, S-3).
 #[utoipa::path(
     delete,
     path = "/api/v1/account/consents/oidc-scopes/{client_id}",
@@ -1002,12 +1033,13 @@ pub async fn grant_oidc_scope_consent<C: Connection + Clone>(
     responses(
         (status = 200, description = "Consent withdrawn (or there was none)"),
         (status = 401, description = "Not authenticated"),
+        (status = 403, description = "The token is not a console sign-in's: AXIAM minted it for an OAuth2 client"),
     ),
     security(("bearer" = []))
 )]
 pub async fn withdraw_oidc_scope_consent<C: Connection + Clone>(
     http_req: actix_web::HttpRequest,
-    user: AuthenticatedUser,
+    ConsoleSignIn(user): ConsoleSignIn,
     state: web::Data<AppState<C>>,
     path: web::Path<String>,
 ) -> Result<HttpResponse, AxiamApiError> {
@@ -1066,6 +1098,7 @@ async fn audit_consent<C: Connection + Clone>(
                 "client_id": client_id,
                 "scopes": scopes,
             })),
+            organization_id: None,
         })
         .await
     {

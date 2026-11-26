@@ -269,6 +269,12 @@ jobs:
       # build) and starts/stops it around each of the three registration
       # modes it drives, so no separate build step is needed here — the
       # smoke-test step below reuses the node_modules it installs.
+      #
+      # It signs in as BOTH bootstrap administrators: the organization-level
+      # super-admin (no tenant, as b6 does) for the org-baseline step alone,
+      # since `/organizations/{id}/settings` refuses a tenant admin (SA-02),
+      # and the tenant admin for everything else. Both fall back to the same
+      # defaults scripts/e2e-bootstrap.sh seeds with, so no env is needed here.
       - name: b7-mcp-server (walkthrough — MCP authorization handshake, all three registration modes)
         # AXIAM resolves the CIMD `client_id` by fetching it itself, from
         # inside the `axiam-e2e-server` container, while the publisher this

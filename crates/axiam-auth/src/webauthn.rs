@@ -147,7 +147,36 @@ struct WebauthnStateClaims {
     jti: String,
     iss: String,
     iat: i64,
+    /// The issue time, in nanoseconds since the Unix epoch, of what this
+    /// ceremony descends from: the MFA challenge that started a second-factor
+    /// authentication, or the moment the token was minted otherwise. The finish
+    /// refuses the ceremony if the user's credential changed after it
+    /// (SA-06, SR2-1). Absent on a token minted before it existed; `iat` is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    iat_ns: Option<i64>,
+    /// The credential version of the MFA challenge this ceremony descends from
+    /// (SA-06, SR3-1), carried through as `iat_ns` is: the finish refuses the
+    /// ceremony when the user's version differs. `None` for a ceremony not
+    /// started from a challenge, and for a token minted before the claim
+    /// existed; the timestamp check alone then applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cv: Option<i64>,
     exp: i64,
+}
+
+/// When an authentication ceremony's challenge was issued, as its state token
+/// carries it: whole seconds, and the sub-second claim if the token has one.
+/// Compared against the user's credential epoch by
+/// `AuthService::finish_webauthn_authentication`.
+#[derive(Debug, Clone, Copy)]
+pub struct StateIssue {
+    /// The token's `iat`, whole seconds.
+    pub iat: i64,
+    /// Nanoseconds since the Unix epoch, when the token carries it.
+    pub iat_ns: Option<i64>,
+    /// The credential version the ceremony's challenge was issued under, when
+    /// the token carries it.
+    pub credential_version: Option<i64>,
 }
 
 // -------------------------------------------------------------------
@@ -330,6 +359,33 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         user_id: Uuid,
         user_verification: WebauthnUserVerification,
     ) -> AxiamResult<(RequestChallengeResponse, String)> {
+        self.start_authentication_for_challenge(
+            tenant_id,
+            org_id,
+            user_id,
+            user_verification,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// As [`Self::start_authentication`], for the ceremony that follows an MFA
+    /// challenge: the state token carries `challenge_issued_at`, the issue time
+    /// of that challenge, so the finish can refuse the ceremony if the
+    /// credential changed after the challenge was issued (SA-06, SR2-1). With
+    /// `None` the token carries the moment it is minted. `credential_version`
+    /// is the challenge's credential version, carried through the same way
+    /// (SA-06, SR3-1).
+    pub async fn start_authentication_for_challenge(
+        &self,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        user_id: Uuid,
+        user_verification: WebauthnUserVerification,
+        challenge_issued_at: Option<chrono::DateTime<chrono::Utc>>,
+        credential_version: Option<i64>,
+    ) -> AxiamResult<(RequestChallengeResponse, String)> {
         let existing = self
             .credential_repo
             .list_by_user(tenant_id, user_id)
@@ -360,12 +416,14 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
         restamp_user_verification(&mut state_json, "ast", user_verification)?;
 
-        let state_token = self.encode_state_token_json(
+        let state_token = self.encode_state_token_json_at(
             user_id,
             tenant_id,
             org_id,
             "webauthn_authenticate",
             state_json,
+            challenge_issued_at,
+            credential_version,
         )?;
 
         Ok((rcr, state_token))
@@ -635,14 +693,38 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
         purpose: &str,
         state_json_value: JsonValue,
     ) -> Result<String, AuthError> {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        self.encode_state_token_json_at(
+            user_id,
+            tenant_id,
+            org_id,
+            purpose,
+            state_json_value,
+            None,
+            None,
+        )
+    }
 
+    /// [`Self::encode_state_token_json`] with the issue time the token's
+    /// `iat_ns` reports: `issued_at` when given (the MFA challenge the ceremony
+    /// descends from), the moment of minting otherwise. `iat` and `exp` are
+    /// always those of the minting, so the token's own lifetime is unchanged.
+    fn encode_state_token_json_at(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        org_id: Uuid,
+        purpose: &str,
+        state_json_value: JsonValue,
+        issued_at: Option<chrono::DateTime<chrono::Utc>>,
+        credential_version: Option<i64>,
+    ) -> Result<String, AuthError> {
         let encryption_key = self.require_encryption_key()?;
         let state_json = serde_json::to_string(&state_json_value)
             .map_err(|e| AuthError::Crypto(format!("serialize state: {e}")))?;
         let encrypted_state = totp::encrypt_secret(&encryption_key, state_json.as_bytes())?;
 
-        let now = chrono::Utc::now().timestamp();
+        let minted_at = chrono::Utc::now();
+        let now = minted_at.timestamp();
         let claims = WebauthnStateClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -652,14 +734,26 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
             jti: Uuid::new_v4().to_string(),
             iss: self.config.jwt_issuer.clone(),
             iat: now,
+            iat_ns: issued_at.unwrap_or(minted_at).timestamp_nanos_opt(),
+            cv: credential_version,
             exp: now + self.config.mfa_challenge_lifetime_secs as i64,
         };
 
-        let key = EncodingKey::from_ed_pem(self.config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        let header = Header::new(Algorithm::EdDSA);
-        jsonwebtoken::encode(&header, &claims, &key)
-            .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+        // SA-03 (N10): typed, so no access-token verifier can admit it.
+        crate::token::sign_purpose_token(&claims, crate::token::TYP_WEBAUTHN_STATE, &self.config)
+    }
+
+    /// SA-03 rule 6: a state reader accepts only a state token's `typ`.
+    fn require_state_typ(&self, header: &jsonwebtoken::Header) -> Result<(), AuthError> {
+        if crate::token::purpose_token_typ_accepted(
+            header.typ.as_deref(),
+            crate::token::TYP_WEBAUTHN_STATE,
+            &self.config,
+        ) {
+            Ok(())
+        } else {
+            Err(AuthError::WebauthnStateInvalid)
+        }
     }
 
     fn encode_state_token<T: Serialize>(
@@ -698,6 +792,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
 
         if data.claims.purpose != expected_purpose {
             return Err(AuthError::WebauthnStateInvalid);
@@ -761,12 +856,59 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
         if data.claims.purpose != expected_purpose || data.claims.jti.is_empty() {
             return Err(AuthError::WebauthnStateInvalid);
         }
         let expires_at = chrono::DateTime::from_timestamp(data.claims.exp, 0)
             .ok_or(AuthError::WebauthnStateInvalid)?;
         Ok((data.claims.jti, expires_at))
+    }
+
+    /// The `(user_id, tenant_id, issue time)` of a second-factor authentication
+    /// ceremony's state token, read **after** verifying its signature, issuer,
+    /// expiry, type and purpose — what
+    /// `AuthService::finish_webauthn_authentication` compares with the user's
+    /// credential epoch before the assertion is looked at. Every failure is
+    /// [`AuthError::WebauthnStateInvalid`], as for any bad state token.
+    pub fn authentication_state_issue(
+        &self,
+        token: &str,
+    ) -> Result<(Uuid, Uuid, StateIssue), AuthError> {
+        use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+
+        let key = DecodingKey::from_ed_pem(self.config.jwt_public_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad public key: {e}")))?;
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&self.config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+
+        let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
+        if data.claims.purpose != "webauthn_authenticate" {
+            return Err(AuthError::WebauthnStateInvalid);
+        }
+        let user_id: Uuid = data
+            .claims
+            .sub
+            .parse()
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        let tenant_id: Uuid = data
+            .claims
+            .tenant_id
+            .parse()
+            .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        Ok((
+            user_id,
+            tenant_id,
+            StateIssue {
+                iat: data.claims.iat,
+                iat_ns: data.claims.iat_ns,
+                credential_version: data.claims.cv,
+            },
+        ))
     }
 
     /// Read a state token's `purpose` claim **after** verifying its
@@ -789,6 +931,7 @@ impl<W: WebauthnCredentialRepository> WebauthnService<W> {
 
         let data = jsonwebtoken::decode::<WebauthnStateClaims>(token, &key, &validation)
             .map_err(|_| AuthError::WebauthnStateInvalid)?;
+        self.require_state_typ(&data.header)?;
         Ok(data.claims.purpose)
     }
 
@@ -1398,6 +1541,14 @@ mod tests {
             .expect("service builds from a valid config")
     }
 
+    /// The header a state token is minted under (SA-03), for tests that
+    /// hand-build one so it is refused for the reason they assert.
+    fn state_header() -> jsonwebtoken::Header {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.typ = Some(crate::token::TYP_WEBAUTHN_STATE.into());
+        header
+    }
+
     fn ids() -> (Uuid, Uuid, Uuid) {
         (
             Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
@@ -1747,7 +1898,7 @@ mod tests {
 
     #[test]
     fn an_expired_token_is_refused() {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        use jsonwebtoken::EncodingKey;
         let svc = service();
         let (u, t, o) = ids();
 
@@ -1763,10 +1914,12 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             iss: "axiam-test".into(),
             iat: past,
+            iat_ns: None,
+            cv: None,
             exp: past + 300,
         };
         let stale = jsonwebtoken::encode(
-            &Header::new(Algorithm::EdDSA),
+            &state_header(),
             &claims,
             &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
         )
@@ -1786,7 +1939,7 @@ mod tests {
 
     #[test]
     fn a_malformed_uuid_claim_is_refused_rather_than_defaulted() {
-        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        use jsonwebtoken::EncodingKey;
         let svc = service();
 
         for (sub, tenant, org) in [
@@ -1815,10 +1968,12 @@ mod tests {
                 jti: Uuid::new_v4().to_string(),
                 iss: "axiam-test".into(),
                 iat: chrono::Utc::now().timestamp(),
+                iat_ns: None,
+                cv: None,
                 exp: chrono::Utc::now().timestamp() + 300,
             };
             let token = jsonwebtoken::encode(
-                &Header::new(Algorithm::EdDSA),
+                &state_header(),
                 &claims,
                 &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
             )
@@ -2091,6 +2246,81 @@ mod tests {
         let (tenant_id, org_id, _user_id) = ids();
         assert!(
             tokio_test_block_on(svc.start_discoverable_authentication(tenant_id, org_id)).is_ok()
+        );
+    }
+
+    // -- SA-03 rule 6: the state verifier requires its own `typ` -------------
+
+    /// Mint a state token whose claims are exactly what
+    /// [`WebauthnService::encode_state_token_json`] writes, under a header
+    /// whose `typ` the test chooses (`None` removes the member).
+    fn state_token_with_typ(typ: Option<&str>, purpose: &str) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let (u, t, o) = ids();
+        let now = chrono::Utc::now().timestamp();
+        let claims = WebauthnStateClaims {
+            sub: u.to_string(),
+            tenant_id: t.to_string(),
+            org_id: o.to_string(),
+            purpose: purpose.into(),
+            state: totp::encrypt_secret(&KEY, b"{}").unwrap(),
+            jti: Uuid::new_v4().to_string(),
+            iss: "axiam-test".into(),
+            iat: now,
+            iat_ns: None,
+            cv: None,
+            exp: now + 300,
+        };
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = typ.map(str::to_owned);
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ed_pem(PRIV_PEM.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// A token carrying every state claim but typed as an access token, or
+    /// untyped as every token minted before SA-03 was, is refused by all three
+    /// state readers. Only the state `typ` is accepted.
+    #[test]
+    fn the_state_verifier_requires_the_state_typ() {
+        let svc = service();
+        for typ in [
+            Some("at+jwt"),
+            Some("application/at+jwt"),
+            Some("JWT"),
+            None,
+        ] {
+            let token = state_token_with_typ(typ, "webauthn_authenticate");
+            assert!(
+                matches!(
+                    svc.decode_state_token_json(&token, "webauthn_authenticate"),
+                    Err(AuthError::WebauthnStateInvalid)
+                ),
+                "decode_state_token_json accepted typ {typ:?}"
+            );
+            assert!(
+                svc.state_token_purpose(&token).is_err(),
+                "state_token_purpose accepted typ {typ:?}"
+            );
+            assert!(
+                svc.state_token_replay_key(&token, "webauthn_authenticate")
+                    .is_err(),
+                "state_token_replay_key accepted typ {typ:?}"
+            );
+        }
+
+        let typed = state_token_with_typ(Some("axiam-webauthn-state+jwt"), "webauthn_authenticate");
+        assert!(
+            svc.decode_state_token_json(&typed, "webauthn_authenticate")
+                .is_ok()
+        );
+        assert!(svc.state_token_purpose(&typed).is_ok());
+        assert!(
+            svc.state_token_replay_key(&typed, "webauthn_authenticate")
+                .is_ok()
         );
     }
 

@@ -75,6 +75,7 @@ impl AuditLogRepository for Store {
             ip_address: input.ip_address,
             metadata: input.metadata.unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: input.organization_id,
         })
     }
     async fn append_many(&self, inputs: Vec<CreateAuditLogEntry>) -> Vec<AxiamResult<()>> {
@@ -92,6 +93,7 @@ impl AuditLogRepository for Store {
     }
     async fn list_system(
         &self,
+        _: Uuid,
         _: AuditLogFilter,
         _: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {

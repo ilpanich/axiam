@@ -229,6 +229,13 @@ impl FromRequest for ScimPrincipal {
             resolver
                 .touch(principal.tenant_id, principal.token_id)
                 .await;
+            // SA-02 (N1): the request row has no token the audit middleware
+            // can verify and stays in the system partition; the resolved
+            // token names its tenant, whose organization it then records.
+            req.extensions_mut()
+                .insert(axiam_api_rest::audit_organization::VerifiedAuditTenant(
+                    principal.tenant_id,
+                ));
 
             Ok(ScimPrincipal::Token(principal))
         })

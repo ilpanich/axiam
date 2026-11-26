@@ -82,7 +82,7 @@ impl CredentialRow {
 /// Flatten KSF parameters into the six nullable columns the table carries.
 ///
 /// Returned in column order: `(memory_kib, iterations, parallelism, log_n, r, p)`.
-type KsfColumns = (
+pub(crate) type KsfColumns = (
     Option<u32>,
     Option<u32>,
     Option<u32>,
@@ -91,7 +91,7 @@ type KsfColumns = (
     Option<u32>,
 );
 
-fn ksf_columns(params: OpaqueKsfParams) -> KsfColumns {
+pub(crate) fn ksf_columns(params: OpaqueKsfParams) -> KsfColumns {
     match params {
         OpaqueKsfParams::Argon2id {
             memory_kib,
@@ -149,7 +149,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
             .db
             .current()
             .query(
-                "UPDATE opaque_credential SET \
+                "BEGIN TRANSACTION; \
+                 LET $updated = (UPDATE opaque_credential SET \
                  credential_identifier = $credential_identifier, \
                  suite = $suite, \
                  ksf = $ksf, \
@@ -162,7 +163,14 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  record = $record, \
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 RETURN meta::id(id) AS record_id, *",
+                 RETURN meta::id(id) AS record_id, *); \
+                 IF array::len($updated) > 0 { \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = time::now(), \
+                 credential_version = (credential_version ?? 0) + 1 \
+                 WHERE tenant_id = $tenant_id; \
+                 }; \
+                 RETURN $updated; \
+                 COMMIT TRANSACTION",
             )
             .bind(("tenant_id", input.tenant_id.to_string()))
             .bind(("user_id", input.user_id.to_string()))
@@ -182,7 +190,11 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let updated: Vec<CredentialRow> = result.take(0).map_err(DbError::from)?;
+        // BEGIN=0, LET=1, IF=2, RETURN=3. The user bump runs only when the
+        // UPDATE matched a row, so a first enrolment is bumped once, by the
+        // CREATE transaction below (QR8-2). A failed CREATE aborts that whole
+        // transaction, so the bump never lands without a credential row.
+        let updated: Vec<CredentialRow> = result.take(3).map_err(DbError::from)?;
         if let Some(row) = updated.into_iter().next() {
             return Ok(row.try_into_credential()?);
         }
@@ -193,7 +205,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
             .db
             .current()
             .query(
-                "CREATE type::record('opaque_credential', $id) SET \
+                "BEGIN TRANSACTION; \
+                 CREATE type::record('opaque_credential', $id) SET \
                  tenant_id = $tenant_id, \
                  user_id = $user_id, \
                  credential_identifier = $credential_identifier, \
@@ -206,7 +219,11 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
                  ksf_r = $ksf_r, \
                  ksf_p = $ksf_p, \
                  record = $record \
-                 RETURN meta::id(id) AS record_id, *",
+                 RETURN meta::id(id) AS record_id, *; \
+                 UPDATE type::record('user', $user_id) SET credential_changed_at = time::now(), \
+                 credential_version = (credential_version ?? 0) + 1 \
+                 WHERE tenant_id = $tenant_id; \
+                 COMMIT TRANSACTION",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -227,7 +244,8 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<CredentialRow> = result.take(0).map_err(DbError::from)?;
+        // BEGIN=0, CREATE=1, epoch=2.
+        let rows: Vec<CredentialRow> = result.take(1).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "opaque_credential", &id_str)?;
         Ok(row.try_into_credential()?)
     }
@@ -255,13 +273,26 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
     }
 
     async fn delete_for_user(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<bool> {
+        // The stamp and the version bump run only when a row was deleted, in
+        // the same transaction as the delete. The deleted rows are counted
+        // inside the query: `RETURN BEFORE` carries no `record_id`, so it
+        // cannot be read back as a `CredentialRow`.
         let result = self
             .db
             .current()
             .query(
-                "DELETE FROM opaque_credential \
-                 WHERE tenant_id = $tenant_id AND user_id = $user_id \
-                 RETURN BEFORE",
+                "BEGIN TRANSACTION; \
+                 LET $gone = (DELETE FROM opaque_credential \
+                     WHERE tenant_id = $tenant_id AND user_id = $user_id \
+                     RETURN BEFORE); \
+                 IF array::len($gone) > 0 { \
+                     UPDATE type::record('user', $user_id) \
+                     SET credential_changed_at = time::now(), \
+                     credential_version = (credential_version ?? 0) + 1 \
+                     WHERE tenant_id = $tenant_id; \
+                 }; \
+                 RETURN array::len($gone); \
+                 COMMIT TRANSACTION",
             )
             .bind(("tenant_id", tenant_id.to_string()))
             .bind(("user_id", user_id.to_string()))
@@ -271,8 +302,9 @@ impl<C: Connection> OpaqueCredentialRepository for SurrealOpaqueCredentialReposi
         let mut result = result
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
-        let rows: Vec<CredentialRow> = result.take(0).map_err(DbError::from)?;
-        Ok(!rows.is_empty())
+        // BEGIN=0, LET=1, IF=2, RETURN=3.
+        let deleted: Option<i64> = result.take(3).map_err(DbError::from)?;
+        Ok(deleted.unwrap_or(0) > 0)
     }
 
     async fn count_active_users_without_credential(&self, tenant_id: Uuid) -> AxiamResult<u64> {

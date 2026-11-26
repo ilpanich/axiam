@@ -348,7 +348,7 @@ The long form of what each does is
 the short form is that `AXIAM_WEBAUTHN_RP_ID` cannot be changed after passkeys
 are enrolled, `AXIAM_WEBAUTHN_RP_ORIGIN` must match the address bar byte for byte,
 `AXIAM__AUTH__OAUTH2_ISSUER_URL` is what Apple and every SAML IdP build their
-redirect URIs from, and `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is a fail-closed gate.
+redirect URIs from, and `AXIAM_BOOTSTRAP_ADMIN_EMAIL` only adds an email restriction to the bootstrap (the one-time setup token is always required).
 
 **Note the double underscore.** `AXIAM__DB__URL`, not `AXIAM_DB_URL`. Six names
 break the pattern because they are read with `std::env::var` rather than through
@@ -618,8 +618,11 @@ in — are unchanged and are in
 One Kubernetes-specific note. The setup token is minted once and logged once, and
 Kubernetes keeps only the current container's output. If the pod has restarted,
 the line is gone — `kubectl -n axiam logs deploy/axiam-server --previous` may
-still have it, and otherwise the `AXIAM_BOOTSTRAP_ADMIN_EMAIL` gate is your way
-in. The script tries both and says which it used.
+still have it, and otherwise mint a new one with
+`kubectl -n axiam exec deploy/axiam-server -- axiam-server setup-token --remint`
+(pass it as `AXIAM_SETUP_TOKEN`). `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is **not** a way
+in: the token is always required and the email only adds a restriction. The
+script tries the current and previous log and stops if it finds neither.
 
 ---
 

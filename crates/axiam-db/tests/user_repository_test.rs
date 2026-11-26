@@ -3,7 +3,7 @@
 use axiam_auth::password::verify_password;
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
-use axiam_core::models::user::{CreateUser, UserStatus};
+use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OrganizationRepository, Pagination, TenantRepository, UserRepository,
 };
@@ -618,4 +618,84 @@ async fn tenant_isolation() {
         not_found.is_err(),
         "user should not be visible in other tenant"
     );
+}
+
+/// SA-06 (N7, QR17-4): `credential_changed_at` is written with the datastore's
+/// clock, so it compares with the `created_at` of sessions, refresh tokens,
+/// codes and approvals (all `DEFAULT time::now()`) on one clock.
+///
+/// The password write sets `credential_changed_at` and `updated_at` in the one
+/// statement, and both are `time::now()` evaluated inside the same transaction,
+/// which the datastore answers with one instant. A value bound from the
+/// application's `Utc::now()` is a different instant, so the two differ.
+#[tokio::test]
+async fn qr17_4_the_credential_epoch_is_the_datastore_clock() {
+    let (db, tenant_id) = setup().await;
+    let repo = SurrealUserRepository::new(db);
+    let user = repo
+        .create(CreateUser {
+            tenant_id,
+            username: "dave".into(),
+            email: "dave@example.com".into(),
+            password: fixture_password(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    assert!(user.credential_changed_at.is_none());
+
+    let before = chrono::Utc::now();
+    let updated = repo
+        .update(
+            tenant_id,
+            user.id,
+            UpdateUser {
+                password_hash: Some("$argon2id$replacement".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let after = chrono::Utc::now();
+
+    let epoch = updated
+        .credential_changed_at
+        .expect("a password write stamps the epoch");
+    assert_eq!(
+        epoch, updated.updated_at,
+        "the epoch must be the datastore's time::now(), the instant `updated_at` carries"
+    );
+    // Same host in this test, so the datastore's clock lies in the write's window.
+    assert!(
+        before <= epoch && epoch <= after,
+        "{before} <= {epoch} <= {after}"
+    );
+}
+
+/// QR17-4, every writer: no write of `credential_changed_at` binds an
+/// application-clock value. The writers are the user repository's password
+/// write, directory linking and erasure, and the OPAQUE credential repository's
+/// upsert, create and delete; each stamps with `time::now()` inside its own
+/// transaction. A bound `$credential_epoch` would be an application clock
+/// compared with the datastore's `created_at` columns (a node running behind
+/// the datastore could then let a token minted just before a reset look newer
+/// than it).
+#[test]
+fn qr17_4_no_writer_of_the_credential_epoch_binds_an_application_clock() {
+    for (name, source) in [
+        ("user.rs", include_str!("../src/repository/user.rs")),
+        (
+            "opaque_credential.rs",
+            include_str!("../src/repository/opaque_credential.rs"),
+        ),
+    ] {
+        assert!(
+            !source.contains("credential_epoch"),
+            "{name} binds a credential epoch from the application clock"
+        );
+        assert!(
+            source.contains("credential_changed_at = time::now()"),
+            "{name} no longer stamps the epoch with the datastore clock"
+        );
+    }
 }

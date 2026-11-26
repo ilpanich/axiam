@@ -103,6 +103,7 @@ async fn populate(db: &Surreal<Db>, tenant_id: Uuid) -> Uuid {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -148,6 +149,7 @@ async fn export_receipt(
                 "record_count": 1,
                 "exported_through": exported_through,
             })),
+            organization_id: None,
         })
         .await
         .unwrap()
@@ -165,6 +167,7 @@ async fn record_deletion(db: &Surreal<Db>, tenant_id: Uuid, metadata: serde_json
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: Some(metadata),
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -182,6 +185,7 @@ async fn audit_entry(db: &Surreal<Db>, tenant_id: Uuid, action: &str) -> Uuid {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap()
@@ -828,6 +832,7 @@ async fn without_an_export_time_the_purge_keeps_the_whole_audit_trail() {
                 "record_count": 1,
                 "exported_through": exported_through,
             })),
+            organization_id: None,
         })
         .await
         .unwrap();

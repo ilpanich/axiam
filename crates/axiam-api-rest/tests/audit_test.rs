@@ -25,6 +25,9 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+mod org_scope_support;
+use org_scope_support::{org_operator, real_authz, seed_tenant, tenant_user};
+
 /// Test-only placeholder password — not a real credential.
 const TEST_PASSWORD: &str = "test-only-placeholder-not-a-real-password"; // gitleaks:allow
 
@@ -143,6 +146,7 @@ async fn seed_audit_entries(
         outcome: AuditOutcome::Success,
         ip_address: Some("127.0.0.1".into()),
         metadata: None,
+        organization_id: None,
     })
     .await
     .unwrap();
@@ -156,6 +160,7 @@ async fn seed_audit_entries(
         outcome: AuditOutcome::Denied,
         ip_address: Some("127.0.0.1".into()),
         metadata: None,
+        organization_id: None,
     })
     .await
     .unwrap();
@@ -169,6 +174,7 @@ async fn seed_audit_entries(
         outcome: AuditOutcome::Failure,
         ip_address: None,
         metadata: None,
+        organization_id: None,
     })
     .await
     .unwrap();
@@ -288,12 +294,14 @@ async fn list_audit_logs_requires_auth() {
     assert_eq!(resp.status().as_u16(), 401);
 }
 
+/// The caller lives in the organization's reserved scope: the system
+/// partition is organization-level (SA-02, N1), and a caller of an ordinary
+/// tenant is refused it whatever its permissions.
 #[actix_rt::test]
 async fn list_system_audit_logs_returns_only_nil_tenant() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
-    let user_id = create_admin_user(&db, tenant_id).await;
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let (_scope, user_id, token) = org_operator(&db, &auth, org_id, "admin").await;
 
     let audit_repo = SurrealAuditLogRepository::new(db.clone());
 
@@ -311,6 +319,8 @@ async fn list_system_audit_logs_returns_only_nil_tenant() {
             outcome: AuditOutcome::Failure,
             ip_address: Some("10.0.0.1".into()),
             metadata: None,
+            // SA-02 (N1): the system partition is read per organization.
+            organization_id: Some(org_id),
         })
         .await
         .unwrap();
@@ -344,4 +354,126 @@ async fn list_system_audit_logs_requires_auth() {
 
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 401);
+}
+
+// -------------------------------------------------------------------------
+// SA-02 (N1): the system partition is not a tenant administrator's to read
+// -------------------------------------------------------------------------
+
+macro_rules! real_authz_app {
+    ($db:expr, $auth:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($auth.clone()))
+                .app_data(web::Data::new(AppState::for_test(
+                    $db.clone(),
+                    $auth.clone(),
+                )))
+                .app_data(web::Data::new(real_authz(&$db)))
+                .configure(|cfg| {
+                    register_api_v1_routes::<TestDb>(cfg, &RateLimitConfig::default())
+                }),
+        )
+        .await
+    };
+}
+
+/// The row the request audit middleware writes for a request it cannot
+/// attribute to a tenant (`middleware.rs`, nil tenant, `METHOD /path` as the
+/// action) — here, tenant B's SCIM call from 192.0.2.10, recorded for
+/// organization `org_id` (SA-02, N1).
+async fn sibling_traffic_in_the_system_partition(db: &Surreal<TestDb>, org_id: Uuid) {
+    SurrealAuditLogRepository::new(db.clone())
+        .append(CreateAuditLogEntry {
+            tenant_id: Uuid::nil(),
+            actor_id: Uuid::nil(),
+            actor_type: ActorType::System,
+            action: "POST /scim/v2/Users".into(),
+            resource_id: None,
+            outcome: AuditOutcome::Success,
+            ip_address: Some("192.0.2.10".into()),
+            metadata: None,
+            organization_id: Some(org_id),
+        })
+        .await
+        .unwrap();
+}
+
+/// N1: tenant A's seeded admin cannot read the deployment-wide nil-tenant
+/// partition, which holds other tenants' request metadata.
+///
+/// The second caller holds `audit_logs:list_system` explicitly in tenant A — an
+/// operator-made role, or a grant an older seeder made — and only the scope
+/// guard refuses it.
+#[actix_rt::test]
+async fn standard_tenant_admin_cannot_read_the_system_audit_partition() {
+    let (db, org_id, tenant_a) = setup_db().await;
+    let tenant_b = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org_id,
+            kind: TenantKind::Standard,
+            name: "Tenant B".into(),
+            slug: "tenant-b".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    seed_tenant(&db, tenant_a).await;
+    seed_tenant(&db, tenant_b.id).await;
+    sibling_traffic_in_the_system_partition(&db, org_id).await;
+
+    let seeded_admin = tenant_user(&db, tenant_a, "a-admin", Some("admin"), None).await;
+    let explicit = tenant_user(
+        &db,
+        tenant_a,
+        "a-system-reader",
+        None,
+        Some("audit_logs:list_system"),
+    )
+    .await;
+
+    let auth = test_auth_config();
+    let app = real_authz_app!(db, auth);
+    for (who, user_id) in [("seeded admin", seeded_admin), ("explicit grant", explicit)] {
+        let token = mint_token(&auth, user_id, tenant_a, org_id);
+        let req = test::TestRequest::get()
+            .uri("/api/v1/audit-logs/system")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+        assert_eq!(
+            status, 403,
+            "tenant A's {who} must not read the system audit partition; body: {body}"
+        );
+        assert!(
+            !body.contains("192.0.2.10"),
+            "tenant B's traffic leaked to tenant A's {who}"
+        );
+    }
+}
+
+/// N1, the other side: an organization-level principal holding
+/// `audit_logs:list_system` still reads the partition.
+#[actix_rt::test]
+async fn organization_principal_reads_the_system_audit_partition() {
+    let (db, org_id, _tenant_id) = setup_db().await;
+    let scope = org_scope_support::organization_scope(&db, org_id).await;
+    seed_tenant(&db, scope).await;
+    sibling_traffic_in_the_system_partition(&db, org_id).await;
+    let operator = tenant_user(&db, scope, "org-admin", Some("super-admin"), None).await;
+
+    let auth = test_auth_config();
+    let app = real_authz_app!(db, auth);
+    let token = mint_token(&auth, operator, scope, org_id);
+    let req = test::TestRequest::get()
+        .uri("/api/v1/audit-logs/system")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["items"][0]["ip_address"], "192.0.2.10");
 }

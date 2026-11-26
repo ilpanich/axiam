@@ -74,6 +74,9 @@ struct AuditLogRow {
     ip_address: Option<String>,
     metadata: serde_json::Value,
     timestamp: DateTime<Utc>,
+    /// SA-02 (N1): absent on every row written before v116.
+    #[surreal(default)]
+    organization_id: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -88,6 +91,9 @@ struct AuditLogRowWithId {
     ip_address: Option<String>,
     metadata: serde_json::Value,
     timestamp: DateTime<Utc>,
+    /// SA-02 (N1): absent on every row written before v116.
+    #[surreal(default)]
+    organization_id: Option<String>,
 }
 
 /// [`AuditLogRepository::append_many`]'s statement: every row of the batch,
@@ -114,10 +120,12 @@ struct AuditInsertRow {
     outcome: String,
     ip_address: Option<String>,
     metadata: serde_json::Value,
+    organization_id: Option<String>,
 }
 
 impl AuditInsertRow {
     fn new(id: Uuid, input: CreateAuditLogEntry) -> Self {
+        let organization_id = system_partition_organization(&input);
         Self {
             id: RecordId::new("audit_log", id.to_string()),
             tenant_id: input.tenant_id.to_string(),
@@ -130,8 +138,20 @@ impl AuditInsertRow {
             metadata: input
                 .metadata
                 .unwrap_or(serde_json::Value::Object(Default::default())),
+            organization_id,
         }
     }
+}
+
+/// SA-02 (N1): the organization of a system-partition row only. A tenant's row
+/// belongs to its tenant's organization, and a second copy of that would be one
+/// that can disagree. Shared by the single-row `CREATE` and the batched
+/// `INSERT`, so both write the same column.
+fn system_partition_organization(input: &CreateAuditLogEntry) -> Option<String> {
+    input
+        .organization_id
+        .filter(|_| input.tenant_id.is_nil())
+        .map(|o| o.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +194,12 @@ fn outcome_str(o: &AuditOutcome) -> &'static str {
     }
 }
 
+fn parse_organization(raw: Option<&str>) -> Result<Option<Uuid>, DbError> {
+    raw.map(Uuid::parse_str)
+        .transpose()
+        .map_err(|e| DbError::Migration(format!("invalid organization UUID: {e}")))
+}
+
 // ---------------------------------------------------------------------------
 // Row → domain conversion
 // ---------------------------------------------------------------------------
@@ -202,6 +228,7 @@ impl AuditLogRow {
             ip_address: self.ip_address,
             metadata: self.metadata,
             timestamp: self.timestamp,
+            organization_id: parse_organization(self.organization_id.as_deref())?,
         })
     }
 }
@@ -232,6 +259,7 @@ impl AuditLogRowWithId {
             ip_address: self.ip_address,
             metadata: self.metadata,
             timestamp: self.timestamp,
+            organization_id: parse_organization(self.organization_id.as_deref())?,
         })
     }
 }
@@ -352,6 +380,7 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
             .unwrap_or(serde_json::Value::Object(Default::default()));
 
         let resource_id_str = input.resource_id.map(|r| r.to_string());
+        let organization_id_str = system_partition_organization(&input);
 
         let result = self
             .db
@@ -365,7 +394,8 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
                  resource_id = $resource_id, \
                  outcome = $outcome, \
                  ip_address = $ip_address, \
-                 metadata = $metadata",
+                 metadata = $metadata, \
+                 organization_id = $organization_id",
             )
             .bind(("id", id_str.clone()))
             .bind(("tenant_id", input.tenant_id.to_string()))
@@ -376,6 +406,7 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
             .bind(("outcome", outcome_str(&input.outcome).to_string()))
             .bind(("ip_address", input.ip_address))
             .bind(("metadata", metadata))
+            .bind(("organization_id", organization_id_str))
             .await
             .map_err(DbError::from)?;
 
@@ -387,6 +418,70 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
         let row = take_first_or_not_found(rows, "audit_log", &id_str)?;
 
         Ok(row.into_entry(id)?)
+    }
+
+    /// The rows of `tenant_id` matching `filter` and, with `organization_id`,
+    /// recording that organization (SA-02, N1: the system partition's read).
+    async fn list_where(
+        &self,
+        tenant_id: Uuid,
+        organization_id: Option<Uuid>,
+        filter: AuditLogFilter,
+        pagination: Pagination,
+    ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
+        let tenant_id_str = tenant_id.to_string();
+
+        // Build dynamic WHERE clause.
+        let (mut where_clause, mut binds) = build_filter_clause(&filter);
+        if let Some(org) = organization_id {
+            where_clause.push_str(" AND organization_id = $organization_id");
+            binds.push(FilterBind::Str("organization_id", org.to_string()));
+        }
+
+        // Count query.
+        let count_sql =
+            format!("SELECT count() AS total FROM audit_log WHERE {where_clause} GROUP ALL");
+        let db = self.db.current();
+        let mut count_query = db.query(&count_sql);
+        count_query = count_query.bind(("tenant_id", tenant_id_str.clone()));
+        count_query = apply_filter_binds(count_query, &binds);
+        let mut count_result = count_query.await.map_err(DbError::from)?;
+        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
+
+        // Data query.
+        //
+        // `id DESC` breaks ties. A batched append (`append_many`) is one
+        // statement, and SurrealDB 4.x evaluates `time::now()` once per
+        // statement, so every row of a batch carries the same `timestamp`.
+        // Without a tiebreak those rows would come back in no defined order and
+        // a page boundary falling among them could repeat or skip a row. Ids
+        // are UUIDv7 minted in append order by one worker, so `id` restores
+        // exactly the order the rows were written in. The index
+        // `idx_audit_tenant_time` (tenant_id, timestamp) still serves the scan:
+        // its entries are keyed by record id after the columns, so a backward
+        // scan already yields this order (pinned by `audit_repository_test`).
+        let data_sql = format!(
+            "SELECT meta::id(id) AS record_id, * FROM audit_log \
+             WHERE {where_clause} \
+             ORDER BY timestamp DESC, id DESC \
+             LIMIT $limit START $offset"
+        );
+        let db = self.db.current();
+        let mut data_query = db.query(&data_sql);
+        data_query = data_query.bind(("tenant_id", tenant_id_str));
+        data_query = apply_filter_binds(data_query, &binds);
+        data_query = data_query.bind(("limit", pagination.limit));
+        data_query = data_query.bind(("offset", pagination.offset));
+
+        let mut data_result = data_query.await.map_err(DbError::from)?;
+        let rows: Vec<AuditLogRowWithId> = data_result.take(0).map_err(DbError::from)?;
+
+        let items: Vec<AuditLogEntry> = rows
+            .into_iter()
+            .map(|r| r.try_into_entry())
+            .collect::<Result<_, _>>()?;
+
+        Ok(paginate(items, count_rows, &pagination))
     }
 }
 
@@ -477,64 +572,21 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
-        let tenant_id_str = tenant_id.to_string();
-
-        // Build dynamic WHERE clause.
-        let (where_clause, binds) = build_filter_clause(&filter);
-
-        // Count query.
-        let count_sql =
-            format!("SELECT count() AS total FROM audit_log WHERE {where_clause} GROUP ALL");
-        let db = self.db.current();
-        let mut count_query = db.query(&count_sql);
-        count_query = count_query.bind(("tenant_id", tenant_id_str.clone()));
-        count_query = apply_filter_binds(count_query, &binds);
-        let mut count_result = count_query.await.map_err(DbError::from)?;
-        let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
-
-        // Data query.
-        //
-        // `id DESC` breaks ties. A batched append (`append_many`) is one
-        // statement, and SurrealDB 4.x evaluates `time::now()` once per
-        // statement, so every row of a batch carries the same `timestamp`.
-        // Without a tiebreak those rows would come back in no defined order and
-        // a page boundary falling among them could repeat or skip a row. Ids
-        // are UUIDv7 minted in append order by one worker, so `id` restores
-        // exactly the order the rows were written in. The index
-        // `idx_audit_tenant_time` (tenant_id, timestamp) still serves the scan:
-        // its entries are keyed by record id after the columns, so a backward
-        // scan already yields this order (pinned by `audit_repository_test`).
-        let data_sql = format!(
-            "SELECT meta::id(id) AS record_id, * FROM audit_log \
-             WHERE {where_clause} \
-             ORDER BY timestamp DESC, id DESC \
-             LIMIT $limit START $offset"
-        );
-        let db = self.db.current();
-        let mut data_query = db.query(&data_sql);
-        data_query = data_query.bind(("tenant_id", tenant_id_str));
-        data_query = apply_filter_binds(data_query, &binds);
-        data_query = data_query.bind(("limit", pagination.limit));
-        data_query = data_query.bind(("offset", pagination.offset));
-
-        let mut data_result = data_query.await.map_err(DbError::from)?;
-        let rows: Vec<AuditLogRowWithId> = data_result.take(0).map_err(DbError::from)?;
-
-        let items: Vec<AuditLogEntry> = rows
-            .into_iter()
-            .map(|r| r.try_into_entry())
-            .collect::<Result<_, _>>()?;
-
-        Ok(paginate(items, count_rows, &pagination))
+        self.list_where(tenant_id, None, filter, pagination).await
     }
 
     async fn list_system(
         &self,
+        organization_id: Uuid,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
-        // System/unauthenticated entries are stored with nil tenant_id.
-        self.list(Uuid::nil(), filter, pagination).await
+        // System/unauthenticated entries are stored with nil tenant_id; of
+        // those, only the ones that record this organization (SA-02, N1). A
+        // row recording none — every row written before v116 — matches no
+        // organization.
+        self.list_where(Uuid::nil(), Some(organization_id), filter, pagination)
+            .await
     }
 
     async fn pseudonymize_actor(
@@ -802,6 +854,7 @@ mod tests {
                 outcome: AuditOutcome::Success,
                 ip_address: Some("192.168.1.1".into()),
                 metadata: Some(json!({ "email": "user@example.com", "username": "alice" })),
+                organization_id: None,
             })
             .await
             .unwrap();
@@ -882,6 +935,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         };
 
         repo.append(entry("old.event")).await.unwrap();
@@ -928,6 +982,7 @@ mod tests {
                 "user_agent": "Mozilla/5.0 (X11; Linux) Firefox/128.0",
                 "client_id": "oa_reporting",
             })),
+            organization_id: None,
         }
     }
 
@@ -1067,6 +1122,7 @@ mod tests {
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: None,
+                organization_id: None,
             })
             .await
             .unwrap();
@@ -1107,6 +1163,7 @@ mod tests {
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: None,
+                organization_id: None,
             })
             .await
             .unwrap();
@@ -1130,6 +1187,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();

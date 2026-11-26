@@ -86,13 +86,15 @@ impl actix_web::ResponseError for AxiamApiError {
             AxiamError::NotFound { .. } => StatusCode::NOT_FOUND,
             AxiamError::AlreadyExists { .. }
             | AxiamError::Conflict { .. }
+            | AxiamError::OrganizationTenantNotSuspendable
             | AxiamError::Network(_) => StatusCode::CONFLICT,
             AxiamError::AuthenticationFailed { .. } | AxiamError::ReplayDetected => {
                 StatusCode::UNAUTHORIZED
             }
             AxiamError::AuthorizationDenied { .. }
             | AxiamError::OpaqueRequired
-            | AxiamError::MfaEnforced => StatusCode::FORBIDDEN,
+            | AxiamError::MfaEnforced
+            | AxiamError::TenantSuspended => StatusCode::FORBIDDEN,
             AxiamError::Validation { .. } | AxiamError::TenantContext => StatusCode::BAD_REQUEST,
             AxiamError::PasswordPolicy { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AxiamError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -140,6 +142,15 @@ impl AxiamApiError {
             // against. A client switches on this to name the administrator
             // rather than to say "forbidden" (T-267).
             AxiamError::MfaEnforced => "mfa_enforced",
+            // SA-13 (N16, D-3): the caller's credential is genuine and its
+            // tenant is suspended. Distinct from `authentication_failed` (a
+            // client would send its user to reset a password that works) and
+            // from `authorization_denied` (no permission would help): only an
+            // organization administrator can lift it.
+            AxiamError::TenantSuspended => "tenant_suspended",
+            // SA-13 (OD-13a): the organization's own tenant holds the
+            // principals who lift a suspension, so it is never suspended.
+            AxiamError::OrganizationTenantNotSuspendable => "organization_tenant_not_suspendable",
             AxiamError::Validation { .. } => "validation_error",
             AxiamError::PasswordPolicy { .. } => "password_policy_violation",
             AxiamError::TenantContext => "tenant_context",
@@ -168,6 +179,8 @@ impl AxiamApiError {
             | AxiamError::AuthorizationDenied { .. }
             | AxiamError::OpaqueRequired
             | AxiamError::MfaEnforced
+            | AxiamError::TenantSuspended
+            | AxiamError::OrganizationTenantNotSuspendable
             | AxiamError::Validation { .. }
             | AxiamError::PasswordPolicy { .. }
             | AxiamError::TenantContext

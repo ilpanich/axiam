@@ -23,6 +23,24 @@ pub struct CountRow {
 }
 
 // ---------------------------------------------------------------------------
+// thrown — recognise a `THROW` of one of our own markers (QR16-3)
+// ---------------------------------------------------------------------------
+
+/// Whether `combined` carries `marker` exactly as the engine renders a `THROW`
+/// of it: `An error occurred: <marker>`, ended by the end of the text or `;`.
+///
+/// A bare `contains(marker)` would also match a stored value echoed in some
+/// other error (a UNIQUE violation reports the clashing values), turning a
+/// constraint failure into the marker's answer. Every repository that matches
+/// a `THROW` by its text uses this one function.
+pub(crate) fn thrown(combined: &str, marker: &str) -> bool {
+    let head = format!("An error occurred: {marker}");
+    combined
+        .match_indices(&head)
+        .any(|(at, _)| matches!(combined[at + head.len()..].chars().next(), None | Some(';')))
+}
+
+// ---------------------------------------------------------------------------
 // parse_uuid — typed parse, no longer misusing DbError::Migration (CQ-B11)
 // ---------------------------------------------------------------------------
 

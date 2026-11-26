@@ -125,7 +125,7 @@ The correct redemption target is the REST **session** refresh endpoint:
     not actually trusted; the handler re-derives the authoritative org from
     `tenant_id` (`handlers/auth.rs:449-451`, `org_id: tenant.organization_id`).
   - Requires the CSRF double-submit header `X-CSRF-Token` matching the
-    `axiam_csrf` cookie — this path is **not** in `CSRF_EXEMPT_SUFFIXES`
+    `axiam_csrf` cookie — this path is **not** in `CSRF_EXEMPT_PATHS`
     (`crates/axiam-api-rest/src/middleware/csrf.rs:42-68`; only `/login`,
     the MFA/reset/federation endpoints, and the `/oauth2/` prefix are
     exempt), so a request missing the header/cookie pair 403s

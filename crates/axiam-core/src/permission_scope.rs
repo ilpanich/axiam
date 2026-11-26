@@ -48,10 +48,16 @@
 //! guard alone. An action shared between the two levels cannot be withheld
 //! without taking the tenant-level capability with it.
 //!
-//! Read actions (`organizations:list`, `organizations:get`, `tenants:list`,
-//! `ca_certificates:list`, …) are absent for the same reason they are absent
-//! from the scope guard: the tenant switcher needs them and they leak nothing
-//! across the boundary.
+//! `email_config:read` is absent for the same reason: the organization
+//! handler (`get_org_email_config`) is scope-guarded, the tenant handler that
+//! shares the action is not.
+//!
+//! Plain read actions (`organizations:list`, `organizations:get`,
+//! `tenants:list`, `tenants:get`, `ca_certificates:list`, …) are absent: the
+//! seeded `viewer` role holds every `:list`/`:get` action and is not filtered
+//! against this list. Where one of them still needs the boundary —
+//! `tenants:get`, whose handler binds the path tenant to the caller's reach —
+//! the scope guard alone provides it.
 
 /// Every permission action that may only be exercised by an organization-level
 /// principal.
@@ -60,7 +66,10 @@
 /// (`TenantKind::Standard`) tenant. The organization's own scope keeps them.
 ///
 /// The `viewer` role is unaffected by construction: it is seeded only with
-/// actions ending in `:list` or `:get`, and every action here is a mutation.
+/// actions ending exactly in `:list` or `:get`, and no action here does. Most
+/// are mutations; the reads that are here (`audit_logs:list_system`,
+/// `organizations:get_settings`) carry a longer verb, so the viewer was never
+/// seeded with them either.
 pub const ORGANIZATION_LEVEL_ACTIONS: &[&str] = &[
     // The organization itself. `POST /api/v1/organizations` has no
     // organization in its path to bind against at all, which is why the scope
@@ -83,6 +92,20 @@ pub const ORGANIZATION_LEVEL_ACTIONS: &[&str] = &[
     "ca_certificates:generate",
     "ca_certificates:revoke",
     "ca_certificates:manage",
+    // SA-02 (N8). The organization security baseline, which every tenant of
+    // the organization inherits wherever its own overrides are not stricter.
+    // A tenant administrator rewriting it weakens MFA, password and lockout
+    // policy for its siblings; reading it is reading the organization's
+    // configuration, not its own tenant's.
+    "organizations:get_settings",
+    "organizations:update_settings",
+    // SA-02 (N9). Streams the complete audit trail of the tenant the path
+    // names; the handler binds that tenant to the caller's reach.
+    "tenants:export_audit",
+    // SA-02 (N1). The nil-tenant system partition is deployment-wide: it holds
+    // the unattributed request rows of every tenant, other organizations'
+    // included.
+    "audit_logs:list_system",
 ];
 
 /// Whether `action` may only be exercised by an organization-level principal.
@@ -130,5 +153,21 @@ mod tests {
         assert!(!is_organization_level_action("tenants:list"));
         assert!(!is_organization_level_action("tenants"));
         assert!(!is_organization_level_action("email_config:write"));
+        assert!(!is_organization_level_action("email_config:read"));
+    }
+
+    #[test]
+    fn the_sa_02_actions_are_organization_level() {
+        // N1, N8, N9: each was seeded to every ordinary tenant's admins.
+        for action in [
+            "audit_logs:list_system",
+            "organizations:get_settings",
+            "organizations:update_settings",
+            "tenants:export_audit",
+        ] {
+            assert!(is_organization_level_action(action), "{action}");
+        }
+        // `audit_logs:list` is a tenant's own trail and stays grantable.
+        assert!(!is_organization_level_action("audit_logs:list"));
     }
 }

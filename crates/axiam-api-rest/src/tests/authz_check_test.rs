@@ -60,6 +60,7 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
     let session_id = Uuid::new_v4();
     let claims = ValidatedClaims(AccessTokenClaims {
         axiam_requested_claims: None,
+        roles: None,
         sub: user_id.to_string(),
         tenant_id: tenant_id.to_string(),
         org_id: Uuid::nil().to_string(),
@@ -97,6 +98,7 @@ fn make_user(tenant_id: Uuid, user_id: Uuid) -> AuthenticatedPrincipal {
 fn make_machine(tenant_id: Uuid, service_account_id: Uuid) -> AuthenticatedPrincipal {
     let claims = ValidatedClaims(AccessTokenClaims {
         axiam_requested_claims: None,
+        roles: None,
         sub: service_account_id.to_string(),
         tenant_id: tenant_id.to_string(),
         org_id: Uuid::nil().to_string(),

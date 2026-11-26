@@ -18,6 +18,7 @@ import type {
   SecuritySettings,
 } from "@/services/organizations";
 import { DEFAULT_CIMD_POLICY } from "@/services/settings";
+import { useAuthStore, type AuthUser } from "@/stores/auth";
 
 const org: Organization = {
   id: "o1",
@@ -180,8 +181,83 @@ function renderDetail() {
   );
 }
 
+/**
+ * Sign in as the organization's own, unrestricted administrator.
+ *
+ * The Settings and Email tabs are drawn only for a principal that can act on
+ * the whole organization (`useCanActOnOrganization`), because the server's
+ * organization settings and email-config handlers call
+ * `require_organization_principal` (SA-02, review QR9-1). The tests below that
+ * open the Settings tab exercise that administrator. `permissions` is empty by
+ * default so the Email tab stays permission-gated exactly as before.
+ */
+function signIn(overrides: Partial<AuthUser> = {}) {
+  useAuthStore.setState({
+    user: {
+      id: "u1",
+      username: "org-admin",
+      email: "org-admin@acme.test",
+      permissions: [],
+      tenant_id: "org-tenant",
+      principal_tenant_id: "org-tenant",
+      org_id: "o1",
+      organization_level: true,
+      ...overrides,
+    },
+    isAuthenticated: true,
+    isInitializing: false,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  signIn();
+});
+
+describe("OrganizationDetailPage — organization-wide tabs (QR9-1)", () => {
+  const EMAIL_URL = "/api/v1/organizations/o1/email-config";
+
+  it("hides Settings and Email from an organization principal confined to particular tenants", async () => {
+    // It may hold `email_config:read`, but the server refuses it the
+    // organization's settings and email configuration on standing: its roles
+    // are restricted to particular tenants of the organization.
+    signIn({
+      permissions: ["email_config:read"],
+      reachable_tenant_ids: ["t1"],
+    });
+    routeGet({ [URLS.org]: org, [URLS.tenants]: tenants });
+    renderDetail();
+    await screen.findByText("Widgets Inc");
+    expect(screen.getByRole("tab", { name: "Tenants" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Email" })).not.toBeInTheDocument();
+    const fetched = apiMock.get.mock.calls.map((c) => c[0]);
+    expect(fetched).not.toContain(URLS.settings);
+    expect(fetched).not.toContain(EMAIL_URL);
+  });
+
+  it("hides Settings and Email from a tenant principal", async () => {
+    signIn({
+      permissions: ["*"],
+      tenant_id: "t1",
+      principal_tenant_id: "t1",
+      organization_level: false,
+    });
+    routeGet({ [URLS.org]: org, [URLS.tenants]: tenants });
+    renderDetail();
+    await screen.findByText("Widgets Inc");
+    expect(screen.queryByRole("tab", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Email" })).not.toBeInTheDocument();
+  });
+
+  it("offers Settings and Email to an unrestricted organization administrator", async () => {
+    signIn({ permissions: ["*"] });
+    routeGet({ [URLS.org]: org, [URLS.tenants]: tenants });
+    renderDetail();
+    await screen.findByText("Widgets Inc");
+    expect(screen.getByRole("tab", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Email" })).toBeInTheDocument();
+  });
 });
 
 describe("OrganizationDetailPage — header & tenants tab", () => {

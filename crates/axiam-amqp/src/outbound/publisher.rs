@@ -9,6 +9,7 @@ use axiam_core::outbound::{OutboundError, OutboundFuture, OutboundMessage, Outbo
 use super::topology::OutboundTopology;
 use super::wire;
 use crate::error::AmqpError;
+use crate::internal_envelope::InternalSigner;
 
 /// Publishes outbound messages to their kind's primary or retry queue.
 ///
@@ -16,9 +17,13 @@ use crate::error::AmqpError;
 /// queue), and additionally exposes [`Self::publish_retry`] for the consumer
 /// loop's TTL-delayed republish. Use `AmqpManager::create_publisher_channel` to
 /// obtain a channel with publisher confirms enabled before wrapping it here.
+///
+/// SA-14 (N3): every message is sealed in the server-only signed envelope;
+/// the consume loop refuses anything else.
 #[derive(Clone)]
 pub struct AmqpOutboundPublisher {
     channel: Channel,
+    signer: InternalSigner,
 }
 
 /// Properties of a primary-queue publish: JSON, persistent.
@@ -35,9 +40,9 @@ pub(crate) fn retry_properties(ttl_ms: u64) -> BasicProperties {
 }
 
 impl AmqpOutboundPublisher {
-    /// Wrap a confirm-enabled publisher channel.
-    pub fn new(channel: Channel) -> Self {
-        Self { channel }
+    /// Wrap a confirm-enabled publisher channel; `signer` seals every message.
+    pub fn new(channel: Channel, signer: InternalSigner) -> Self {
+        Self { channel, signer }
     }
 
     async fn publish_to(
@@ -45,8 +50,9 @@ impl AmqpOutboundPublisher {
         queue: &str,
         msg: &OutboundMessage,
         properties: BasicProperties,
+        issued_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), AmqpError> {
-        let payload = wire::encode(msg).map_err(|e| {
+        let payload = wire::seal(&self.signer, msg, issued_at).map_err(|e| {
             error!(kind = %msg.kind, error = %e, "Failed to serialize outbound message");
             AmqpError::Publish(e.to_string())
         })?;
@@ -81,19 +87,45 @@ impl AmqpOutboundPublisher {
     /// already dead-lettered back from the retry queue).
     pub async fn publish(&self, msg: &OutboundMessage) -> Result<(), AmqpError> {
         let topology = OutboundTopology::for_kind(msg.kind);
-        self.publish_to(&topology.primary, msg, primary_properties())
-            .await
+        self.publish_to(
+            &topology.primary,
+            msg,
+            primary_properties(),
+            chrono::Utc::now(),
+        )
+        .await
     }
 
     /// Publish to the kind's retry queue with a per-message TTL of `ttl_ms`.
     /// RabbitMQ dead-letters the message back to the primary queue once the TTL
     /// expires; no consumer is ever attached to the retry queue, so no slot is
     /// held for the delay.
+    ///
+    /// The copy's `issued_at` is the time its TTL expires, not the publish
+    /// time: it re-enters the primary queue then, and a backoff longer than the
+    /// freshness window must not make it stale on arrival (SA-14).
     pub async fn publish_retry(&self, msg: &OutboundMessage, ttl_ms: u64) -> Result<(), AmqpError> {
         let topology = OutboundTopology::for_kind(msg.kind);
-        self.publish_to(&topology.retry, msg, retry_properties(ttl_ms))
-            .await
+        self.publish_to(
+            &topology.retry,
+            msg,
+            retry_properties(ttl_ms),
+            retry_issued_at(chrono::Utc::now(), ttl_ms),
+        )
+        .await
     }
+}
+
+/// When a retry copy published at `now` with TTL `ttl_ms` becomes current.
+pub(crate) fn retry_issued_at(
+    now: chrono::DateTime<chrono::Utc>,
+    ttl_ms: u64,
+) -> chrono::DateTime<chrono::Utc> {
+    i64::try_from(ttl_ms)
+        .ok()
+        .and_then(chrono::Duration::try_milliseconds)
+        .and_then(|ttl| now.checked_add_signed(ttl))
+        .unwrap_or(now)
 }
 
 impl OutboundPublisher for AmqpOutboundPublisher {
@@ -122,6 +154,16 @@ mod tests {
             Some("application/json".to_string())
         );
         assert!(props.expiration().is_none());
+    }
+
+    /// SA-14: a retry copy is current when it comes back, not when it left.
+    #[test]
+    fn a_retry_copy_is_issued_at_its_ttl_expiry() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            retry_issued_at(now, 3_600_000),
+            now + chrono::Duration::hours(1)
+        );
     }
 
     #[test]

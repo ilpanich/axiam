@@ -1523,12 +1523,16 @@ export const OPERATE_PAGES: DocPage[] = [
         type: "api",
         endpoints: [
           { method: "GET", path: "/api/v1/audit-logs", summary: "Query the tenant's audit trail." },
-          { method: "GET", path: "/api/v1/audit-logs/system", summary: "System-level audit events." },
+          { method: "GET", path: "/api/v1/audit-logs/system", summary: "System-level audit events of the caller's organization." },
         ],
       },
       {
         type: "note",
         text: "Reading audit logs is itself permission-guarded (`audit_logs:*`) and itself audited. An investigator's access to the trail is part of the trail.",
+      },
+      {
+        type: "p",
+        text: `The system log is read per organization, by an organization-level principal only: it returns the entries whose recorded organization is the caller's, and an entry whose organization the server could not resolve — every entry written before that rule existed among them — is returned to nobody. Which entries record which organization is in the [admin guide](${GH_BLOB}/docs/admin/README.md#who-reads-the-system-audit-log).`,
       },
       { type: "h", id: "gdpr", text: "Audit and the right to erasure" },
       {
@@ -1634,7 +1638,7 @@ export const OPERATE_PAGES: DocPage[] = [
       {
         type: "code",
         caption: "a degraded response",
-        code: '{\n  "status": "degraded",\n  "jobs": [\n    {\n      "name": "gdpr_purge",\n      "last_success_at": "2026-08-21T02:00:04Z",\n      "last_failure_at": "2026-08-23T02:00:01Z",\n      "last_error": "database unreachable",\n      "consecutive_failures": 3,\n      "stalled": true\n    },\n    {\n      "name": "audit_retention",\n      "last_success_at": "2026-08-23T02:00:07Z",\n      "last_failure_at": null,\n      "last_error": null,\n      "consecutive_failures": 0,\n      "stalled": false\n    }\n  ]\n}',
+        code: '{\n  "status": "degraded",\n  "jobs": [\n    {\n      "name": "gdpr_purge",\n      "last_success_at": "2026-08-21T02:00:04Z",\n      "last_failure_at": "2026-08-23T02:00:01Z",\n      "last_error": "database_error",\n      "consecutive_failures": 3,\n      "stalled": true\n    },\n    {\n      "name": "audit_retention",\n      "last_success_at": "2026-08-23T02:00:07Z",\n      "last_failure_at": null,\n      "last_error": null,\n      "consecutive_failures": 0,\n      "stalled": false\n    }\n  ]\n}',
       },
       {
         type: "p",
@@ -1646,7 +1650,7 @@ export const OPERATE_PAGES: DocPage[] = [
         rows: [
           ["`stalled`", "The job has missed three consecutive expected runs. **This is the field to alert on.**"],
           ["`consecutive_failures`", "Failures since the last success; reset to zero on success."],
-          ["`last_error`", "The last error text, for whoever is now looking at this wondering what broke."],
+          ["`last_error`", "A fixed category for the last failure (`database_error`, `certificate_error`, `crypto_error`, `email_error`, `webhook_error`, `service_unavailable`, `internal_error`, or, for the directory sweep, one of its own tags such as `directory_unavailable`) and never the error text: this endpoint is unauthenticated. The details are in the server log, for whoever is now looking at this wondering what broke."],
           ["`last_success_at`", "When it last completed cleanly. `null` means never."],
         ],
       },
@@ -1895,9 +1899,9 @@ export const OPERATE_PAGES: DocPage[] = [
             "Bootstrap cannot be run again to rescue you from losing the first.",
           ],
           [
-            "Bootstrap variable unset after bootstrap",
+            "Bootstrap email restriction unset after bootstrap",
             "Unset `AXIAM_BOOTSTRAP_ADMIN_EMAIL`",
-            "It is inert afterwards, so this is hygiene rather than exposure — leaving it implies a live gate that is not there.",
+            "It is inert afterwards (the consumed setup token refuses every later call), so this is hygiene rather than exposure — leaving it implies a live restriction that is not there.",
           ],
           [
             "Password policy is set on the organization baseline",
@@ -2264,7 +2268,7 @@ export const OPERATE_PAGES: DocPage[] = [
       },
       {
         type: "p",
-        text: "See [scheduled-job liveness](#/docs/observability) for the response shape and what `stalled` means. If a job shows `consecutive_failures` climbing, `last_error` is the reason.",
+        text: "See [scheduled-job liveness](#/docs/observability) for the response shape and what `stalled` means. If a job shows `consecutive_failures` climbing, `last_error` names the category of failure and the server log carries the details.",
       },
       { type: "h", id: "config", text: "A setting has no effect" },
       {
@@ -2288,12 +2292,12 @@ export const OPERATE_PAGES: DocPage[] = [
         rows: [
           [
             "`403` from bootstrap",
-            "The gate is not satisfied — email mismatch, or a missing/consumed setup token.",
-            "The error names which. Check the variable is set on the *server* process and matches exactly.",
+            "The gate is not satisfied — a missing, unknown or consumed setup token, or an email that does not match `AXIAM_BOOTSTRAP_ADMIN_EMAIL`. On an already-bootstrapped deployment this is the answer every later call gets.",
+            `Every refusal carries the same reason, by design. Send the current first-boot token; if the variable is set on the *server* process, check the email matches it exactly. See [First-run admin bootstrap](${GH_BLOB}/docs/admin/README.md#first-run-admin-bootstrap).`,
           ],
           [
             "`409` from bootstrap",
-            "Bootstrap already completed. It is one-shot, enforced by a uniqueness invariant.",
+            "A concurrent bootstrap request won the race. It is one-shot, enforced by a uniqueness invariant.",
             "Log in as the existing admin; create further tenants through the API.",
           ],
           [

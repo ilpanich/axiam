@@ -5,9 +5,7 @@
 use axiam_auth::client_secret::{self, ClientSecretVerdict};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
-    IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_access_token_for_client,
-    issue_client_credentials_token_for_resource, issue_id_token,
-    issue_service_account_client_credentials_token_enriched,
+    AccessTokenSpec, IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_id_token,
 };
 use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
@@ -769,6 +767,11 @@ pub struct TokenService<OC, AC, TR, RT, UR, SA, SR, AR> {
     /// read only after a refresh-token replay has been refused. Defaults to
     /// the system default, `revoke_session`; see [`crate::refresh_reuse`].
     refresh_reuse_policy: crate::refresh_reuse::SharedRefreshReusePolicy,
+    /// SA-18 (N15) — where the subject's global role names are read for the
+    /// `roles` claim. Read only when a grant carries the `roles` scope; left
+    /// unwired, such a grant is refused with `server_error` rather than minted
+    /// with a claim nobody computed. See [`crate::roles_claim`].
+    role_source: crate::roles_claim::SharedRoleSource,
 }
 
 /// A well-formed current-scheme client-secret hash that no secret produces
@@ -884,7 +887,27 @@ where
             reactor_gate: axiam_core::models::reactor::noop_reactor_gate(),
             scope_policy: crate::scope_ceiling::unwired(),
             refresh_reuse_policy: crate::refresh_reuse::default_policy(),
+            role_source: crate::roles_claim::unwired(),
         }
+    }
+
+    /// Install the role source for the `roles` claim (SA-18). See the
+    /// `role_source` field.
+    #[must_use]
+    pub fn with_role_source(mut self, source: crate::roles_claim::SharedRoleSource) -> Self {
+        self.role_source = source;
+        self
+    }
+
+    /// The `roles` claim for a token granted `scopes` (SA-18): absent unless
+    /// `roles` is among them, and then read now for `subject`.
+    pub(crate) async fn roles_claim_for(
+        &self,
+        tenant_id: Uuid,
+        subject: crate::roles_claim::RolesSubject,
+        scopes: &[String],
+    ) -> Result<Option<Vec<String>>, OAuth2Error> {
+        crate::roles_claim::roles_claim(self.role_source.as_ref(), tenant_id, subject, scopes).await
     }
 
     /// The config every token minted for **this** request is signed under
@@ -933,11 +956,30 @@ where
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<(), OAuth2Error> {
-        // A status check of an already-authenticated grant: through the record
-        // cache, ≤ TTL old (`axiam_db::record_cache`).
+        self.ensure_account_may_act_since(tenant_id, user_id, None)
+            .await
+    }
+
+    /// [`Self::ensure_account_may_act`] for a grant issued at `issued_at`
+    /// (`Some`): it is also refused when the user's credential changed at or
+    /// after that instant (SA-06, SR17-1; a tie refuses: see
+    /// [`crate::credential_epoch`] and `User::credential_changed_since`). One
+    /// read answers both questions.
+    ///
+    /// A status check of an already-authenticated grant: through the record
+    /// cache, ≤ TTL old (`axiam_db::record_cache`). A credential change made
+    /// through this process drops the cached account at once; one made on
+    /// another replica is seen within the TTL.
+    async fn ensure_account_may_act_since(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        issued_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<(), OAuth2Error> {
         account_may_act_outcome(
             tenant_id,
             user_id,
+            issued_at,
             self.user_repo.get_by_id_cached(tenant_id, user_id).await,
         )
     }
@@ -949,10 +991,25 @@ where
         user_id: Uuid,
         read: AxiamResult<User>,
     ) -> Result<bool, OAuth2Error> {
-        match account_may_act_outcome(tenant_id, user_id, read) {
+        match account_may_act_outcome(tenant_id, user_id, None, read) {
             Ok(()) => Ok(true),
             Err(OAuth2Error::InvalidGrant(_)) => Ok(false),
             Err(e) => Err(e),
+        }
+    }
+
+    /// SA-41 — whether the session a token's `sid` names is still live: a
+    /// missing or expired row is not. A read that fails otherwise is a server
+    /// error, not a guess.
+    async fn introspected_session_is_live(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<bool, OAuth2Error> {
+        match self.session_repo.get_by_id(tenant_id, session_id).await {
+            Ok(session) => Ok(session.expires_at > chrono::Utc::now()),
+            Err(AxiamError::NotFound { .. }) => Ok(false),
+            Err(e) => Err(OAuth2Error::ServerError(e.to_string())),
         }
     }
 
@@ -1196,6 +1253,7 @@ where
                     // `null` otherwise.
                     "failed_writes": response.and_then(RefusedReplayResponse::failed_writes),
                 })),
+                organization_id: None,
             })
             .await
         {
@@ -1653,10 +1711,21 @@ where
     /// `deleted_at = NONE`) and reads as the same `invalid_client` a wrong
     /// credential does. Any other error is a datastore fault and stays a
     /// `server_error`, never masquerading as bad client credentials.
+    ///
+    /// SA-13 (N16, D-3): and `tenant_suspended` if the tenant no longer admits
+    /// its principals (`tenant_accepts_principals`). Every grant authenticates
+    /// its client through here — code, refresh, client credentials (clients
+    /// and service accounts), device, CIBA, UMA, token exchange and the native
+    /// provider ID token — after the credential, so no grant of a suspended
+    /// tenant mints a token.
     async fn live_tenant(&self, tenant_id: Uuid) -> Result<Tenant, OAuth2Error> {
         // Through the record cache: liveness ≤ TTL old, dropped at once by a
         // suspension or deletion through this process (`axiam_db::record_cache`).
-        live_tenant_outcome(self.tenant_repo.get_by_id_cached(tenant_id).await)
+        let tenant = live_tenant_outcome(self.tenant_repo.get_by_id_cached(tenant_id).await)?;
+        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+            return Err(OAuth2Error::TenantSuspended);
+        }
+        Ok(tenant)
     }
 
     /// The credential check proper, split out of
@@ -2054,13 +2123,27 @@ where
         let tenant = self.live_tenant(tenant_id).await?;
         let tenant_lookup_us = t_tenant_lookup.elapsed().as_micros() as u64;
 
-        if let Some(scope) = requested_scope.filter(|s| !s.trim().is_empty()) {
-            return Err(OAuth2Error::InvalidScope(format!(
-                "unregistered scopes: {} — a service account registers no scopes; \
-                 its authorization comes from the roles assigned to it",
-                scope.split_whitespace().collect::<Vec<_>>().join(", ")
-            )));
-        }
+        // SA-18 (N15) — a service account registers no scopes, so the one it
+        // may ask for is `roles`: a statement about its own assignments, which
+        // is all its authority already is. Every other scope is refused as it
+        // always was.
+        let scopes: Vec<String> = match requested_scope.filter(|s| !s.trim().is_empty()) {
+            None => Vec::new(),
+            Some(scope) => {
+                let invalid: Vec<&str> = scope
+                    .split_whitespace()
+                    .filter(|s| *s != crate::roles_claim::ROLES_SCOPE)
+                    .collect();
+                if !invalid.is_empty() {
+                    return Err(OAuth2Error::InvalidScope(format!(
+                        "unregistered scopes: {} — a service account registers no scopes; \
+                         its authorization comes from the roles assigned to it",
+                        invalid.join(", ")
+                    )));
+                }
+                vec![crate::roles_claim::ROLES_SCOPE.to_owned()]
+            }
+        };
 
         let t_token_mint = std::time::Instant::now();
         // X1 — the fourth issuance path, hooked like the other three.
@@ -2070,24 +2153,32 @@ where
                 &sa.id.to_string(),
                 "service_account",
                 &sa.client_id,
-                &[],
+                &scopes,
             )
             .await?;
-        let access_token = issue_service_account_client_credentials_token_enriched(
+        let roles = self
+            .roles_claim_for(
+                tenant_id,
+                crate::roles_claim::RolesSubject::Principal(sa.id),
+                &scopes,
+            )
+            .await?;
+        let access_token = AccessTokenSpec::service_account(
             sa.id,
             tenant_id,
             tenant.organization_id,
-            &[],
-            &self.minting_config(issuer),
-            ext,
-            // No binding on this grant: it authenticates by client secret, and
-            // a client whose registered posture wants certificate or DPoP
-            // binding is served by `certificate_binding_for` on the general
-            // client-credentials path. Stamping a `cnf` here from a
-            // certificate the client did not register against would bind a
-            // token nobody asked to have bound.
-            None,
+            uuid::Uuid::new_v4().to_string(),
         )
+        .scopes(&scopes)
+        .roles(roles)
+        .ext(ext)
+        // No binding on this grant: it authenticates by client secret, and
+        // a client whose registered posture wants certificate or DPoP
+        // binding is served by `certificate_binding_for` on the general
+        // client-credentials path. Stamping a `cnf` here from a
+        // certificate the client did not register against would bind a
+        // token nobody asked to have bound.
+        .issue(&self.minting_config(issuer))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
 
@@ -2103,7 +2194,7 @@ where
             token_type: "Bearer".to_string(),
             expires_in: self.auth_config.access_token_lifetime_secs,
             refresh_token: None,
-            scope: None,
+            scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
             id_token: None,
         })
     }
@@ -2502,6 +2593,18 @@ where
             ));
         }
 
+        // SA-41 (RFC 9700 §2.1.1) — a `code_verifier` for a code that carries
+        // no stored challenge is a PKCE downgrade attempt: the client believes
+        // the flow is PKCE-protected, the code is not. Refuse rather than
+        // silently ignoring it.
+        if auth_code.code_challenge.is_none() && req.code_verifier.is_some() {
+            return Err(OAuth2Error::InvalidGrant(
+                "code_verifier presented, but the authorization request carried no \
+                 code_challenge (RFC 9700 §2.1.1)"
+                    .into(),
+            ));
+        }
+
         // Verify PKCE before consuming the code
         if let Some(ref challenge) = auth_code.code_challenge {
             let verifier = req.code_verifier.as_deref().ok_or_else(|| {
@@ -2594,7 +2697,13 @@ where
         }
 
         // F4 P23W1-01 — after the code is spent, so a refused account burns it.
-        self.ensure_account_may_act(tenant_id, auth_code.user_id)
+        //
+        // SA-06 (SR17-1): and a code issued before the user's last credential
+        // change is refused here too. A reset revokes sessions and refresh
+        // tokens but cannot reach a code that has not been redeemed yet, and
+        // the refresh token minted from it would be created after that
+        // revocation and pass the refresh grant's own check.
+        self.ensure_account_may_act_since(tenant_id, auth_code.user_id, Some(auth_code.created_at))
             .await?;
 
         // `org_id` comes from the tenant `authenticate_client_credential` already
@@ -2657,6 +2766,15 @@ where
             .as_deref()
             .unwrap_or(axiam_auth::token::AUD_USER)
             .to_owned();
+        // SA-18 (N15) — the `roles` claim, only when the code carries the
+        // `roles` scope; read now, so it reflects the assignments at mint time.
+        let roles = self
+            .roles_claim_for(
+                tenant_id,
+                crate::roles_claim::RolesSubject::Principal(auth_code.user_id),
+                &auth_code.scopes,
+            )
+            .await?;
         let access_token = axiam_auth::token::AccessTokenSpec::user(
             auth_code.user_id,
             tenant_id,
@@ -2665,6 +2783,7 @@ where
         )
         .aud(&audience)
         .scopes(&auth_code.scopes)
+        .roles(roles)
         .cnf(cnf)
         .ext(ext)
         .client_id(Some(client_id))
@@ -2686,6 +2805,7 @@ where
         let refresh_token = if client.grant_types.iter().any(|s| s == "refresh_token") {
             let raw_refresh = generate_refresh_token();
             let refresh_hash = hash_refresh_token(&raw_refresh);
+            let minted_hash = refresh_hash.clone();
             let refresh_expires =
                 Utc::now() + chrono::Duration::seconds(self.refresh_token_lifetime_secs);
 
@@ -2727,6 +2847,19 @@ where
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            // SA-06 (SR17-1): a reset can land between the pre-check above and
+            // this write, with its `revoke_all_for_user` already run. Re-read
+            // the user; a later change revokes the token just written.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                auth_code.user_id,
+                auth_code.created_at,
+                &minted_hash,
+                crate::credential_epoch::REFUSED,
+            )
+            .await?;
             Some(raw_refresh)
         } else {
             None
@@ -3018,16 +3151,21 @@ where
         // deployment today — mints `axiam:m2m`, byte for byte (I2).
         let resource =
             crate::resource::resolve_requested(&client.allowed_resources, req.resource.as_deref())?;
-        let access_token = issue_client_credentials_token_for_resource(
-            client_id,
-            tenant_id,
-            tenant.organization_id,
-            &scopes,
-            &self.minting_config(ctx.issuer.as_deref()),
-            cnf,
-            ext,
-            resource.as_deref(),
-        )
+        // SA-18 (N15) — an OAuth2 client holds no roles: a granted `roles`
+        // scope yields `[]`, an absent one no claim.
+        let roles = self
+            .roles_claim_for(tenant_id, crate::roles_claim::RolesSubject::Client, &scopes)
+            .await?;
+        let spec = AccessTokenSpec::oauth2_client(client_id, tenant_id, tenant.organization_id)
+            .scopes(&scopes)
+            .cnf(cnf)
+            .ext(ext)
+            .roles(roles);
+        let access_token = match resource.as_deref() {
+            Some(aud) => spec.aud(aud),
+            None => spec,
+        }
+        .issue(&self.minting_config(ctx.issuer.as_deref()))
         .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
         let token_mint_us = t_token_mint.elapsed().as_micros() as u64;
 
@@ -3349,46 +3487,59 @@ where
             // access to consented claims at UserInfo fifteen minutes after the
             // consent was given, which the end user would experience as the
             // consent not having worked.
-            issue_access_token_for_client(
+            // SA-18 (N15) — recomputed at every rotation, never carried from
+            // the previous token: a role change shows in the next token.
+            let roles = self
+                .roles_claim_for(
+                    tenant_id,
+                    crate::roles_claim::RolesSubject::Principal(user_id),
+                    &scopes,
+                )
+                .await?;
+            AccessTokenSpec::user(
                 user_id,
                 tenant_id,
                 tenant.organization_id,
-                &scopes,
-                &self.minting_config(ctx.issuer.as_deref()),
                 uuid::Uuid::new_v4().to_string(),
-                // RFC 8707 — the SAME audience the grant was issued for.
-                // `None` for every grant that named no resource, which mints
-                // `axiam:user` exactly as this path always did (I2).
-                resource.as_deref().unwrap_or(axiam_auth::token::AUD_USER),
-                cnf,
-                ext,
-                Some(client_id),
-                // Rotation carries the session forward. A refreshed token that
-                // dropped `sid` would stop working at UserInfo the moment it
-                // replaced the one that did, which the end user would
-                // experience as the session silently ending mid-flow.
-                stored.session_id,
-                // And the claims request, for exactly the same reason (T-241).
-                // Empty for every grant that sent no `claims` parameter, and
-                // an empty list leaves this token byte-identical to what it
-                // was before §5.5.
-                &stored.requested_userinfo_claims,
             )
+            // RFC 8707 — the SAME audience the grant was issued for.
+            // `None` for every grant that named no resource, which mints
+            // `axiam:user` exactly as this path always did (I2).
+            .aud(resource.as_deref().unwrap_or(axiam_auth::token::AUD_USER))
+            .scopes(&scopes)
+            .roles(roles)
+            .cnf(cnf)
+            .ext(ext)
+            .client_id(Some(client_id))
+            // Rotation carries the session forward. A refreshed token that
+            // dropped `sid` would stop working at UserInfo the moment it
+            // replaced the one that did, which the end user would
+            // experience as the session silently ending mid-flow.
+            .session(stored.session_id)
+            // And the claims request, for exactly the same reason (T-241).
+            // Empty for every grant that sent no `claims` parameter, and
+            // an empty list leaves this token byte-identical to what it
+            // was before §5.5.
+            .requested_userinfo_claims(&stored.requested_userinfo_claims)
+            .issue(&self.minting_config(ctx.issuer.as_deref()))
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         } else {
             // Client-credentials-originated refresh (shouldn't normally
-            // happen, but handle gracefully)
-            issue_client_credentials_token_for_resource(
-                client_id,
-                tenant_id,
-                tenant.organization_id,
-                &scopes,
-                &self.minting_config(ctx.issuer.as_deref()),
-                cnf,
-                ext,
-                // RFC 8707 — carried across the rotation on this branch too.
-                resource.as_deref(),
-            )
+            // happen, but handle gracefully). SA-18: a client holds no roles.
+            let roles = self
+                .roles_claim_for(tenant_id, crate::roles_claim::RolesSubject::Client, &scopes)
+                .await?;
+            let spec = AccessTokenSpec::oauth2_client(client_id, tenant_id, tenant.organization_id)
+                .scopes(&scopes)
+                .roles(roles)
+                .cnf(cnf)
+                .ext(ext);
+            // RFC 8707 — carried across the rotation on this branch too.
+            match resource.as_deref() {
+                Some(aud) => spec.aud(aud),
+                None => spec,
+            }
+            .issue(&self.minting_config(ctx.issuer.as_deref()))
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?
         };
 
@@ -3445,6 +3596,42 @@ where
             })
             .await
             .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+
+        // SA-06 (N7, SR16-1) — a rotation is a mint, and a credential change
+        // revokes every refresh token of the user: `revoke_all_for_user` after
+        // a reset, a password change or a SCIM password write. That revocation
+        // can land between this request's read of the token and the `create`
+        // above, finding nothing of ours to remove, and the successor would
+        // then outlive the credential change.
+        //
+        // The check is a re-read AFTER the successor is written, against the
+        // predecessor's own `created_at`: a credential write commits BEFORE its
+        // revocation, so either the write is already visible here (and the
+        // successor is removed below), or it commits later and its revocation
+        // runs after the `create` and removes the successor itself. A
+        // predecessor written after the last credential change always passes,
+        // so a refresh token issued under the current credential is never
+        // affected; every token a credential change would have revoked
+        // predates it.
+        //
+        // No stored credential version is used: unlike a session, a refresh
+        // token has no column for one, and the comparison needs none, because
+        // `credential_changed_at` is stamped in the same transaction as every
+        // credential write.
+        if let Some(user_id) = stored.user_id {
+            // The shared helper (`crate::credential_epoch`), with this grant's
+            // own refusal text.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                user_id,
+                stored.created_at,
+                &new_refresh_hash,
+                "refresh token is invalid, expired, or revoked",
+            )
+            .await?;
+        }
 
         // Now retire the old refresh token — on one of two lanes, chosen by
         // the client's registration and by nothing else (T-254).
@@ -3725,6 +3912,33 @@ where
                 });
             }
 
+            // SA-41 — and only while the session the token names is still
+            // live: a token of a logged-out or expired session is inactive at
+            // once, not at `exp`.
+            //
+            // The session is named by `sid`, else by `jti`
+            // (`AccessTokenClaims::session_reference`, the rule the REST
+            // extractor applies): a first-party sign-in token (password, OPAQUE,
+            // TOTP, WebAuthn, directory) carries its session id in `jti` and no
+            // `sid`. Only a user token can name a session. A client-credentials
+            // or service-account token is not tied to one (its `jti` is minted
+            // fresh), and neither is a token of a grant that names none
+            // (exchanged, RPT, device), which `session_reference` answers
+            // `None` for. A user token whose reference is not a session id
+            // cannot be live.
+            if claims.sub_kind == axiam_auth::token::SubjectKind::User
+                && let Some(reference) = claims.session_reference()
+                && !match Uuid::parse_str(reference) {
+                    Ok(sid) => self.introspected_session_is_live(tenant_id, sid).await?,
+                    Err(_) => false,
+                }
+            {
+                return Ok(IntrospectionResponse {
+                    active: false,
+                    ..Default::default()
+                });
+            }
+
             // #520, P23W1-12 — introspection is the "immediate revocation"
             // answer (T-39), so it re-reads the account a user's token names
             // and reports a suspended one's token inactive, by the rule every
@@ -3965,23 +4179,29 @@ where
 }
 
 /// What a read of the account behind a grant means for that grant (#519,
-/// #520): the account may act, or `invalid_grant` — a removed account reads as
-/// one — or, for any other failure of the read, a `server_error`.
+/// #520; SA-06 with `issued_at`): the account may act, or `invalid_grant` — a
+/// removed account, or one whose credential changed at or after `issued_at`,
+/// reads as one — or, for any other failure of the read, a `server_error`.
 fn account_may_act_outcome(
     tenant_id: Uuid,
     user_id: Uuid,
+    issued_at: Option<chrono::DateTime<Utc>>,
     read: AxiamResult<User>,
 ) -> Result<(), OAuth2Error> {
-    let refused = || {
-        OAuth2Error::InvalidGrant(
-            "the account this grant was issued for can no longer sign in".into(),
-        )
-    };
+    let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
     let user = match read {
         Ok(user) => user,
         Err(AxiamError::NotFound { .. }) => return Err(refused()),
         Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
     };
+    if issued_at.is_some_and(|at| crate::credential_epoch::changed_since(&user, at)) {
+        tracing::info!(
+            %tenant_id,
+            %user_id,
+            "refusing an OAuth2 grant: the user's credential changed at or after it was issued"
+        );
+        return Err(refused());
+    }
     axiam_auth::service::account_may_act(&user).map_err(|reason| {
         tracing::info!(
             %tenant_id,

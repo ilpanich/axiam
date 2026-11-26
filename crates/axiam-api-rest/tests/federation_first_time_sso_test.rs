@@ -928,3 +928,154 @@ async fn oidc_authorize_authenticated_rejects_cross_tenant_config() {
         "a config from a different tenant must be invisible (404), not leaked"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SA-13 (N16, D-3): the OIDC federation door refuses a suspended tenant
+// ---------------------------------------------------------------------------
+
+/// An OIDC federated sign-in whose callback arrives while the tenant is
+/// suspended is refused `403 tenant_suspended`, with a valid ID token from the
+/// IdP, and sets no session cookie.
+#[actix_rt::test]
+async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_token = mint_token(
+        &auth,
+        create_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let idp = MockServer::start().await;
+    let issuer = idp.uri();
+    let keys = TestKeys::generate("mock-idp-kid");
+    let client_id = "mock-idp-client";
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(keys.jwks_json()))
+        .mount(&idp)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": format!("{issuer}/token"),
+            "jwks_uri": format!("{issuer}/jwks"),
+        })))
+        .mount(&idp)
+        .await;
+    let app = test_app!(db, auth, Arc::new(JwksCache::new_allow_private_networks()));
+
+    let create_resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/federation-configs")
+            .insert_header(("Authorization", format!("Bearer {admin_token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(json!({
+                "provider": "MockIdP",
+                "protocol": "OidcConnect",
+                "metadata_url": format!("{issuer}/.well-known/openid-configuration"),
+                "client_id": client_id,
+                "client_secret": "mock-idp-secret",
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(create_resp.status().as_u16(), 201);
+    let config: serde_json::Value = test::read_body_json(create_resp).await;
+
+    let start_resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oidc/start")
+            .set_json(json!({
+                "org_id": org_id,
+                "tenant_id": tenant_id,
+                "federation_config_id": config["id"],
+                "redirect_uri": "https://spa.example.com/callback",
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(start_resp.status().as_u16(), 200);
+    let binding = start_resp
+        .response()
+        .cookies()
+        .find(|c| c.name() == "axiam_fed_bind" || c.name() == "__Host-axiam_fed_bind")
+        .map(|c| c.into_owned())
+        .unwrap();
+    let start: serde_json::Value = test::read_body_json(start_resp).await;
+    let nonce = url::Url::parse(start["authorize_url"].as_str().unwrap())
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "nonce")
+        .map(|(_, v)| v.into_owned())
+        .unwrap();
+    let now = now_secs();
+    let id_token = sign_jwt(
+        &json!({
+            "sub": "suspended-tenant-subject",
+            "iss": issuer,
+            "aud": client_id,
+            "exp": now + 3600,
+            "iat": now,
+            "nonce": nonce,
+            "email": "suspended-sso-user@example.com",
+        }),
+        &keys.encoding_key(),
+        "mock-idp-kid",
+    );
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "mock-idp-access-token",
+            "id_token": id_token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        })))
+        .mount(&idp)
+        .await;
+
+    // The operator suspends the tenant while the user is at the IdP.
+    SurrealTenantRepository::new(db.clone())
+        .update(
+            tenant_id,
+            UpdateTenant {
+                status: Some(TenantStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oidc/callback")
+            .cookie(binding)
+            .set_json(json!({ "state": start["state"], "code": "mock-authorization-code" }))
+            .to_request(),
+    )
+    .await;
+    let status = resp.status().as_u16();
+    let sets_session = resp
+        .response()
+        .cookies()
+        .any(|c| c.name() == "axiam_access");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(
+        !sets_session,
+        "no session cookie for a suspended tenant: {body}"
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "tenant_suspended", "{body}");
+}

@@ -22,6 +22,207 @@ pub const AUD_USER: &str = "axiam:user";
 /// OAuth2 Client Credentials grant — `sub` is a `client_id` string).
 pub const AUD_M2M: &str = "axiam:m2m";
 
+// ---------------------------------------------------------------------------
+// JOSE `typ` — what kind of token a signature over the deployment key is (SA-03)
+// ---------------------------------------------------------------------------
+//
+// One Ed25519 key signs every JWT AXIAM issues: access tokens, ID tokens, the
+// WebAuthn ceremony state, the MFA challenge and setup tokens, back-channel
+// logout tokens and SSF SETs. Before SA-03 only the SET was explicitly typed,
+// and a WebAuthn state token carried every claim `AccessTokenClaims` requires,
+// so `decode_access_token` admitted it (N10). Each kind now names itself in
+// the header, and every verifier requires its own name.
+
+/// RFC 9068 §2.1 — the `typ` of every AXIAM access token.
+pub const TYP_ACCESS_TOKEN: &str = "at+jwt";
+/// The `typ` of an OIDC ID token: the generic RFC 7519 §5.1 value, which
+/// every OIDC relying party already accepts.
+pub const TYP_ID_TOKEN: &str = "JWT";
+/// The `typ` of a WebAuthn ceremony state token.
+pub const TYP_WEBAUTHN_STATE: &str = "axiam-webauthn-state+jwt";
+/// The `typ` of the MFA challenge token issued after the password factor.
+pub const TYP_MFA_CHALLENGE: &str = "axiam-mfa-challenge+jwt";
+/// The `typ` of the MFA setup token issued when MFA is enforced but absent.
+pub const TYP_MFA_SETUP: &str = "axiam-mfa-setup+jwt";
+/// OIDC Back-Channel Logout 1.0 §2.4 — the `typ` of a logout token.
+pub const TYP_LOGOUT_TOKEN: &str = "logout+jwt";
+
+/// Whether a header `typ` names `expected`: case-insensitive, with the
+/// optional `application/` media-type prefix of RFC 7515 §4.1.9 removed.
+pub fn typ_matches(typ: Option<&str>, expected: &str) -> bool {
+    let Some(typ) = typ.map(str::trim) else {
+        return false;
+    };
+    let bare = typ
+        .get(..12)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("application/"))
+        .map_or(typ, |_| &typ[12..]);
+    bare.eq_ignore_ascii_case(expected)
+}
+
+/// Whether a header `typ` is what every JWT AXIAM signed before SA-03
+/// carried: absent, or the generic `JWT` that `jsonwebtoken::Header::new`
+/// writes. Such a token names no kind, so only its claims can tell.
+fn is_untyped(typ: Option<&str>) -> bool {
+    typ.is_none() || typ_matches(typ, "JWT")
+}
+
+/// Claim-set members that every AXIAM access token (`jti`, required by
+/// [`AccessTokenClaims`]), purpose token (`purpose`) or logout token (`jti`)
+/// carries, and that no ID token AXIAM has minted ever carried: neither
+/// [`IdTokenClaims`] nor [`issue_id_token`] has a `jti`, `purpose`, `scope`
+/// or `client_id` (SR2-2).
+const NEVER_IN_AN_ID_TOKEN: [&str; 4] = ["jti", "purpose", "scope", "client_id"];
+
+/// Verify an `id_token_hint` with `validation` and return its claims, or
+/// `None` when it is not an ID token this key signed.
+///
+/// Two rules beyond the signature, applied by both hint decoders
+/// (end-session and `/oauth2/authorize`, CIBA):
+///
+/// 1. **Header.** The `typ` is an ID token's own `JWT`, or absent. An access
+///    token (`at+jwt`), a purpose token or a logout token is refused, however
+///    well its claims fit [`IdTokenClaims`] (Q-8 / S-10).
+/// 2. **Claims.** None of [`NEVER_IN_AN_ID_TOKEN`] is present. Rule 1 cannot
+///    tell an access token minted before SA-03 (`typ: JWT`) from an ID token,
+///    and the hint decoders skip `exp`, so without this rule every such token
+///    would stay a valid hint for good (SR2-2). It needs no relax flag: it
+///    refuses nothing an ID token has ever contained.
+pub fn decode_id_token_hint_claims(
+    token: &str,
+    key: &DecodingKey,
+    validation: &Validation,
+) -> Option<IdTokenClaims> {
+    let data =
+        jsonwebtoken::decode::<serde_json::Map<String, serde_json::Value>>(token, key, validation)
+            .ok()?;
+    if !is_untyped(data.header.typ.as_deref()) {
+        return None;
+    }
+    if NEVER_IN_AN_ID_TOKEN
+        .iter()
+        .any(|member| data.claims.contains_key(*member))
+    {
+        return None;
+    }
+    serde_json::from_value(serde_json::Value::Object(data.claims)).ok()
+}
+
+/// Whether a purpose-token verifier accepts a header `typ` (SA-03 rule 6).
+///
+/// Its own `typ` always. An untyped token only while
+/// [`AuthConfig::require_access_token_typ`] is `false`, the one rolling
+/// upgrade during which tokens minted by the previous release are still in
+/// flight; the verifier's own `purpose` check then decides, as it did before.
+pub fn purpose_token_typ_accepted(typ: Option<&str>, expected: &str, config: &AuthConfig) -> bool {
+    typ_matches(typ, expected) || (!config.require_access_token_typ && is_untyped(typ))
+}
+
+/// Rate limit for the relaxed-window `warn!` in [`check_access_token_type`]:
+/// with `require_access_token_typ` off every request may carry an untyped
+/// token, and one log line per request would flood the log for the whole
+/// rolling upgrade. At most one line per [`Self::INTERVAL_SECS`] per process,
+/// carrying how many tokens were accepted since the previous line.
+struct RelaxedTypWarning {
+    /// Unix second of the last line written; `i64::MIN` before the first.
+    last_logged: std::sync::atomic::AtomicI64,
+    /// Acceptances since the last line, the current one included.
+    accepted: std::sync::atomic::AtomicU64,
+}
+
+impl RelaxedTypWarning {
+    const INTERVAL_SECS: i64 = 60;
+
+    const fn new() -> Self {
+        Self {
+            last_logged: std::sync::atomic::AtomicI64::new(i64::MIN),
+            accepted: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Record one acceptance at `now` (Unix seconds). `Some(n)` when a line is
+    /// due, `n` being the acceptances it reports; `None` when it is not.
+    fn admit(&self, now: i64) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+        self.accepted.fetch_add(1, Ordering::Relaxed);
+        let last = self.last_logged.load(Ordering::Relaxed);
+        if last != i64::MIN && now.saturating_sub(last) < Self::INTERVAL_SECS {
+            return None;
+        }
+        // One caller wins the interval; a racing one sees the new value.
+        self.last_logged
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .ok()?;
+        Some(self.accepted.swap(0, Ordering::Relaxed))
+    }
+}
+
+static RELAXED_TYP_WARNING: RelaxedTypWarning = RelaxedTypWarning::new();
+
+/// The access-token type gate shared by both decoders (SA-03).
+///
+/// 1. `typ` is `at+jwt` (case-insensitive, `application/` allowed): pass.
+/// 2. `typ` is absent or the generic `JWT`: a token minted before SA-03.
+///    Refused while [`AuthConfig::require_access_token_typ`] is `true`, the
+///    default (D-7); admitted, with a warning, when an operator has relaxed it
+///    for one rolling upgrade.
+/// 3. Any other `typ`: another kind of token. Refused.
+///
+/// Then, whatever the `typ`: a token whose claims carry `purpose` is a
+/// purpose token and is refused. This is what protects a relaxed deployment,
+/// where a WebAuthn state or MFA token minted by the previous release is as
+/// untyped as an access token.
+fn check_access_token_type(
+    header: &Header,
+    token: &str,
+    config: &AuthConfig,
+) -> Result<(), AuthError> {
+    let typ = header.typ.as_deref();
+    if !typ_matches(typ, TYP_ACCESS_TOKEN) {
+        if !is_untyped(typ) {
+            return Err(AuthError::TokenInvalid("not an access token (typ)".into()));
+        }
+        if config.require_access_token_typ {
+            return Err(AuthError::TokenInvalid(
+                "access token has no typ at+jwt".into(),
+            ));
+        }
+        if let Some(accepted) = RELAXED_TYP_WARNING.admit(Utc::now().timestamp()) {
+            tracing::warn!(
+                accepted,
+                "accepted access tokens without typ at+jwt: require_access_token_typ is off \
+                 (rolling-upgrade window; logged at most once every {}s)",
+                RelaxedTypWarning::INTERVAL_SECS
+            );
+        }
+    }
+    if claims_carry_purpose(token) {
+        return Err(AuthError::TokenInvalid(
+            "a purpose token is not an access token".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the (already signature-verified) payload of `token` has a
+/// `purpose` member. `AccessTokenClaims` ignores unknown members, so this is
+/// read from the payload itself. An unreadable payload counts as carrying one:
+/// it cannot have verified, and failing closed costs nothing.
+fn claims_carry_purpose(token: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Probe {
+        #[serde(default)]
+        purpose: Option<serde::de::IgnoredAny>,
+    }
+    let Some(payload) = token.split('.').nth(1) else {
+        return true;
+    };
+    let Ok(bytes) = URL_SAFE_NO_PAD.decode(payload) else {
+        return true;
+    };
+    serde_json::from_slice::<Probe>(&bytes).map_or(true, |p| p.purpose.is_some())
+}
+
 /// Self-describing subject kind carried by an access token (FUNC-04).
 ///
 /// Informational only (D-10) — no validator or authz path branches on this
@@ -121,6 +322,18 @@ pub struct AccessTokenClaims {
     /// Code flows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// SA-18 (N15, D-1) — the names of the subject's **global** roles in this
+    /// token's tenant, assigned directly or through a group, sorted and
+    /// de-duplicated. Resource-scoped assignments are not included.
+    ///
+    /// Present **only** when the grant carried the `roles` scope; absent — not
+    /// `[]` — otherwise, so a consumer can tell "not requested" from "holds no
+    /// roles". A snapshot taken at mint time, stale for at most one token
+    /// lifetime: nothing on the server reads it to authorize anything, and
+    /// `require_access` remains the authoritative check. Never carried by an
+    /// ID token or released by UserInfo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
     /// Self-describing subject kind (FUNC-04, D-09/D-10/D-11).
     ///
     /// Always serialized when a token is issued. Missing on decode (a
@@ -276,6 +489,46 @@ pub struct AccessTokenClaims {
     /// removed by the one function that builds this map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext: Option<std::collections::BTreeMap<String, String>>,
+}
+
+impl AccessTokenClaims {
+    /// Whether this token was minted by a grant that names **no session**: a
+    /// client's token without `sid` (the device grant, a code grant with no
+    /// session), an RPT, or an exchanged token (`axiam_exchanged`, and before
+    /// #819 `act` or `ext_exchange`).
+    ///
+    /// Its `jti` is minted fresh for that one token and names no session row,
+    /// so a lookup by it would find nothing and refuse a live token.
+    pub fn is_grant_without_session(&self) -> bool {
+        self.sid.is_none()
+            && (self.client_id.is_some()
+                || self.permissions.is_some()
+                || self.act.is_some()
+                || self.ext_exchange.is_some()
+                || self.axiam_exchanged.is_some())
+    }
+
+    /// The raw session identifier this token names, if it names one.
+    ///
+    /// The single statement of the rule every reader of a token's session
+    /// applies (the REST extractor, REST and gRPC introspection): `sid` first,
+    /// else `jti`, unless the token comes from a grant that names no session
+    /// ([`Self::is_grant_without_session`]), which names none.
+    ///
+    /// The `jti` fallback is what covers a first-party sign-in token (password,
+    /// OPAQUE, TOTP, WebAuthn, directory): the login path stores its session's
+    /// id in `jti` and sets no `sid` (see the `sid` field). Reading `sid` alone
+    /// would leave exactly those tokens active after logout.
+    ///
+    /// Returned unparsed so that each caller decides what an unusable
+    /// identifier means for it.
+    pub fn session_reference(&self) -> Option<&str> {
+        match self.sid.as_deref() {
+            Some(sid) => Some(sid),
+            None if self.is_grant_without_session() => None,
+            None => Some(&self.jti),
+        }
+    }
 }
 
 /// The `ext.` namespace prefix a `token.pre_issue` patch key carries, and the
@@ -467,18 +720,11 @@ pub const MAX_ACT_CHAIN_DEPTH: usize = 3;
 /// None. `config.jwt_encoding_key` is the same pre-parsed key cache (CQ-B14)
 /// the inline copies read; the PEM fallback is unchanged and still only taken
 /// when the cache is absent.
-fn sign_claims<T: Serialize>(claims: &T, config: &AuthConfig) -> Result<String, AuthError> {
-    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-
-    let mut header = Header::new(Algorithm::EdDSA);
+fn sign_claims<T: Serialize>(
+    claims: &T,
+    typ: &str,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
     // X7 §1.3 — name the verifying key in the header.
     //
     // The JWKS at `/oauth2/jwks` has always published a `kid`; the tokens
@@ -492,9 +738,57 @@ fn sign_claims<T: Serialize>(claims: &T, config: &AuthConfig) -> Result<String, 
     // from is not an error here: `build_jwks` will refuse it at the JWKS
     // endpoint with a message about the PEM, and failing token issuance with
     // the same complaint would turn a metadata problem into an outage.
-    header.kid = ed25519_jwk_kid(&config.jwt_public_key_pem);
+    let kid = ed25519_jwk_kid(&config.jwt_public_key_pem);
+    sign_with_header(claims, typ, kid, config)
+}
+
+/// The one encoder behind [`sign_claims`] and [`sign_purpose_token`]: the
+/// deployment key, EdDSA, the given `typ` and (optionally) `kid`.
+fn sign_with_header<T: Serialize>(
+    claims: &T,
+    typ: &str,
+    kid: Option<String>,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    // CQ-B14: Use pre-parsed key cache when available; fall back to PEM parsing.
+    let owned;
+    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
+        cached.as_ref()
+    } else {
+        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
+            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
+        &owned
+    };
+
+    let mut header = Header::new(Algorithm::EdDSA);
+    // SA-03 — every token names its kind; see `TYP_ACCESS_TOKEN`.
+    header.typ = Some(typ.to_owned());
+    header.kid = kid;
     jsonwebtoken::encode(&header, claims, key)
         .map_err(|e| AuthError::Crypto(format!("JWT encode: {e}")))
+}
+
+/// Sign a purpose token (WebAuthn state, MFA challenge, MFA setup) with the
+/// deployment key, under its own `typ` (SA-03).
+///
+/// The same key as the access and ID tokens, but **no `kid`** (S-8): only
+/// AXIAM reads a purpose token back, and it verifies with its own configured
+/// key, never by JWKS lookup. A relying party that selects keys strictly by
+/// `kid` therefore finds no key for a purpose token, which is the one
+/// separation such verifiers relied on before purpose tokens were typed (N14).
+/// `typ` must not be [`TYP_ACCESS_TOKEN`]: the whole point of the header is
+/// that the two can never be mistaken for each other.
+pub fn sign_purpose_token<T: Serialize>(
+    claims: &T,
+    typ: &str,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    if typ_matches(Some(typ), TYP_ACCESS_TOKEN) || is_untyped(Some(typ)) {
+        return Err(AuthError::Crypto(format!(
+            "a purpose token cannot be typed {typ}"
+        )));
+    }
+    sign_with_header(claims, typ, None, config)
 }
 
 /// The `kid` of an Ed25519 public key: the first 16 hex characters (64 bits)
@@ -610,6 +904,7 @@ pub struct AccessTokenSpec {
     exchanged: bool,
     client_id: Option<String>,
     requested_userinfo_claims: Option<Vec<String>>,
+    roles: Option<Vec<String>>,
 }
 
 impl AccessTokenSpec {
@@ -639,6 +934,7 @@ impl AccessTokenSpec {
             exchanged: false,
             client_id: None,
             requested_userinfo_claims: None,
+            roles: None,
         }
     }
 
@@ -807,6 +1103,18 @@ impl AccessTokenSpec {
         self
     }
 
+    /// Carry the `roles` claim (SA-18, N15). `None` — every grant that was
+    /// not granted the `roles` scope — leaves the claim absent and the token
+    /// byte-identical to one minted before the claim existed.
+    ///
+    /// The caller decides the value (the global role names, read at mint
+    /// time); this builder neither reads roles nor checks the scope.
+    #[must_use]
+    pub fn roles(mut self, roles: Option<Vec<String>>) -> Self {
+        self.roles = roles;
+        self
+    }
+
     /// Bind this token to the session it was issued from (`sid`).
     ///
     /// Call it wherever a session exists. Omitting it does not fail — it
@@ -887,13 +1195,14 @@ impl AccessTokenSpec {
             ext: self.ext.clone(),
             client_id: self.client_id.clone(),
             axiam_requested_claims: self.requested_userinfo_claims.clone(),
+            roles: self.roles.clone(),
         })
     }
 
     /// Mint and sign the token.
     pub fn issue(&self, config: &AuthConfig) -> Result<String, AuthError> {
         let claims = self.claims_at(config, Utc::now().timestamp())?;
-        sign_claims(&claims, config)
+        sign_claims(&claims, TYP_ACCESS_TOKEN, config)
     }
 }
 
@@ -1129,6 +1438,41 @@ pub fn issue_exchanged_token(
     cnf: Option<CnfClaim>,
     client_id: &str,
 ) -> Result<String, AuthError> {
+    exchanged_token_spec(
+        subject,
+        sub_kind,
+        tenant_id,
+        org_id,
+        scopes,
+        jti,
+        aud,
+        expires_at,
+        act,
+        ext_exchange,
+        cnf,
+        client_id,
+    )
+    .issue(config)
+}
+
+/// The [`AccessTokenSpec`] [`issue_exchanged_token`] signs, for a caller that
+/// adds a claim before signing (the SA-18 `roles` claim, which the exchange
+/// recomputes for the subject when the narrowed scopes keep `roles`).
+#[allow(clippy::too_many_arguments)]
+pub fn exchanged_token_spec(
+    subject: &str,
+    sub_kind: SubjectKind,
+    tenant_id: Uuid,
+    org_id: Uuid,
+    scopes: &[String],
+    jti: String,
+    aud: &str,
+    expires_at: i64,
+    act: Option<ActClaim>,
+    ext_exchange: Option<ExtExchangeClaim>,
+    cnf: Option<CnfClaim>,
+    client_id: &str,
+) -> AccessTokenSpec {
     AccessTokenSpec::exchanged(subject, sub_kind, tenant_id, org_id, jti, aud)
         // RFC 9068 §2.2 (#819): the client that ran the exchange.
         .client_id(Some(client_id))
@@ -1139,7 +1483,6 @@ pub fn issue_exchanged_token(
         // SEC-096: the exchanging client's OWN constraint, never the subject
         // token's -- see the function's doc comment.
         .cnf(cnf)
-        .issue(config)
 }
 
 /// Issue a JWT access token for OAuth2 Client Credentials grant (M2M).
@@ -1631,7 +1974,7 @@ pub fn issue_id_token(
         amr: evidence.amr.clone(),
     };
 
-    sign_claims(&claims, config)
+    sign_claims(&claims, TYP_ID_TOKEN, config)
 }
 
 /// Decode and verify an EdDSA JWT access token.
@@ -1686,6 +2029,15 @@ fn enforce_issuer(
     Ok(claims)
 }
 
+/// Decode and verify an AXIAM access token: signature, issuer, expiry, `aud`
+/// (when present, `axiam:user` or `axiam:m2m`) and token type.
+///
+/// Token type (SA-03, N10): the header `typ` must be `at+jwt` (an untyped
+/// token is admitted only while [`AuthConfig::require_access_token_typ`] is
+/// off), and a token whose claims carry `purpose` is refused whatever its
+/// `typ` — see `check_access_token_type`. Without this a WebAuthn ceremony
+/// state token, signed with the same key and carrying every required claim,
+/// decoded as an access token.
 pub fn decode_access_token(
     token: &str,
     config: &AuthConfig,
@@ -1718,13 +2070,16 @@ pub fn decode_access_token(
     validation.set_audience(&[AUD_USER, AUD_M2M]);
     validation.leeway = 60;
 
-    jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)
-        .map(|data| data.claims)
-        .map_err(|e| match e.kind() {
+    let data =
+        jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation).map_err(|e| match e
+            .kind()
+        {
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
             _ => AuthError::TokenInvalid(e.to_string()),
-        })
-        .and_then(|claims| enforce_issuer(claims, config))
+        })?;
+    // SA-03 (N10) — only an access token is an access token.
+    check_access_token_type(&data.header, token, config)?;
+    enforce_issuer(data.claims, config)
 }
 
 /// Decode and verify an access token **without pinning its audience** (T21.3).
@@ -1784,13 +2139,16 @@ pub fn decode_access_token_any_audience(
     validation.validate_aud = false;
     validation.leeway = 60;
 
-    jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation)
-        .map(|data| data.claims)
-        .map_err(|e| match e.kind() {
+    let data =
+        jsonwebtoken::decode::<AccessTokenClaims>(token, key, &validation).map_err(|e| match e
+            .kind()
+        {
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AuthError::TokenExpired,
             _ => AuthError::TokenInvalid(e.to_string()),
-        })
-        .and_then(|claims| enforce_issuer(claims, config))
+        })?;
+    // SA-03 (N10) — only an access token is an access token.
+    check_access_token_type(&data.header, token, config)?;
+    enforce_issuer(data.claims, config)
 }
 
 /// Validated JWT claims — a newtype proving the token was verified.
@@ -2130,6 +2488,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
             session_validation_cache_ttl_secs: 0,
+            require_access_token_typ: true,
         }
     }
 
@@ -3127,6 +3486,7 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
     fn claims_with_cnf(cnf: Option<CnfClaim>) -> AccessTokenClaims {
         AccessTokenClaims {
             axiam_requested_claims: None,
+            roles: None,
             sub: Uuid::new_v4().to_string(),
             tenant_id: Uuid::new_v4().to_string(),
             org_id: Uuid::new_v4().to_string(),
@@ -3461,6 +3821,39 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         assert_same_claims(&a, &b);
         // Both mint a fresh jti — a machine token has no session row behind it.
         assert_ne!(a.jti, b.jti, "each call must mint its own jti");
+    }
+
+    /// QR1-1: the one statement of "which session does this token name".
+    #[test]
+    fn session_reference_is_sid_else_jti_unless_the_grant_names_no_session() {
+        let config = test_config();
+        let (tenant, org) = (Uuid::new_v4(), Uuid::new_v4());
+        let (sid, jti) = (Uuid::new_v4(), Uuid::new_v4());
+
+        // A first-party sign-in token: `jti` is the session, no `sid`.
+        let sign_in = AccessTokenSpec::user(Uuid::new_v4(), tenant, org, jti.to_string())
+            .issue(&config)
+            .unwrap();
+        let claims = decode_claims(&sign_in, &config);
+        assert_eq!(claims.session_reference(), Some(jti.to_string().as_str()));
+
+        // `sid` wins over `jti`.
+        let oauth2 = AccessTokenSpec::user(Uuid::new_v4(), tenant, org, jti.to_string())
+            .session(Some(sid))
+            .client_id(Some("c"))
+            .issue(&config)
+            .unwrap();
+        let claims = decode_claims(&oauth2, &config);
+        assert_eq!(claims.session_reference(), Some(sid.to_string().as_str()));
+
+        // A grant that names no session: its `jti` is not one.
+        let device = AccessTokenSpec::user(Uuid::new_v4(), tenant, org, jti.to_string())
+            .client_id(Some("c"))
+            .issue(&config)
+            .unwrap();
+        let claims = decode_claims(&device, &config);
+        assert!(claims.is_grant_without_session());
+        assert_eq!(claims.session_reference(), None);
     }
 
     #[test]
@@ -3927,5 +4320,220 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=
         // The audience-agnostic sibling introspection uses still reads it, and
         // still pins the issuer set.
         assert!(decode_access_token_any_audience(&foreign_audience, &on).is_ok());
+    }
+
+    // -- SA-03 (N10): typed access tokens ---------------------------------
+
+    /// Sign `claims` with the test key under a header whose `typ` the test
+    /// picks (`None` removes the member).
+    fn sign_with_typ(claims: &serde_json::Value, typ: Option<&str>) -> String {
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = typ.map(str::to_owned);
+        header.kid = ed25519_jwk_kid(&test_config().jwt_public_key_pem);
+        jsonwebtoken::encode(
+            &header,
+            claims,
+            &EncodingKey::from_ed_pem(test_config().jwt_private_key_pem.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Every claim `AccessTokenClaims` requires, plus `aud`.
+    fn access_shaped_claims() -> serde_json::Value {
+        let now = Utc::now().timestamp();
+        serde_json::json!({
+            "sub": Uuid::new_v4().to_string(),
+            "tenant_id": Uuid::new_v4().to_string(),
+            "org_id": Uuid::new_v4().to_string(),
+            "iss": "axiam-test",
+            "iat": now,
+            "exp": now + 900,
+            "jti": Uuid::new_v4().to_string(),
+            "aud": AUD_USER,
+        })
+    }
+
+    fn relaxed() -> AuthConfig {
+        AuthConfig {
+            require_access_token_typ: false,
+            ..test_config()
+        }
+    }
+
+    fn both_decoders_accept(token: &str, config: &AuthConfig) -> bool {
+        let strict = decode_access_token(token, config).is_ok();
+        let any = decode_access_token_any_audience(token, config).is_ok();
+        assert_eq!(strict, any, "the two decoders must agree on the type gate");
+        strict
+    }
+
+    /// Every kind of access token AXIAM mints carries `typ: at+jwt` and a
+    /// `kid`, and decodes. The ID token keeps the generic `JWT`.
+    #[test]
+    fn every_access_token_is_typed_at_jwt_and_names_its_key() {
+        let config = test_config();
+        let (t, o) = (Uuid::new_v4(), Uuid::new_v4());
+        let tokens = [
+            AccessTokenSpec::user(Uuid::new_v4(), t, o, "s")
+                .issue(&config)
+                .unwrap(),
+            AccessTokenSpec::oauth2_client("client", t, o)
+                .issue(&config)
+                .unwrap(),
+            AccessTokenSpec::service_account(Uuid::new_v4(), t, o, "s")
+                .issue(&config)
+                .unwrap(),
+            issue_client_credentials_token("client", t, o, &[], &config).unwrap(),
+        ];
+        for token in &tokens {
+            let header = jsonwebtoken::decode_header(token).unwrap();
+            assert_eq!(header.typ.as_deref(), Some(TYP_ACCESS_TOKEN));
+            assert!(header.kid.is_some());
+            assert!(both_decoders_accept(token, &config));
+        }
+
+        let id = issue_id_token(
+            Uuid::new_v4(),
+            "rp",
+            None,
+            None,
+            &[],
+            &config,
+            None,
+            &IdTokenEvidence::NONE,
+        )
+        .unwrap();
+        let header = jsonwebtoken::decode_header(&id).unwrap();
+        assert_eq!(header.typ.as_deref(), Some(TYP_ID_TOKEN));
+        assert!(header.kid.is_some());
+    }
+
+    /// `at+jwt` is compared case-insensitively, with or without the
+    /// `application/` prefix.
+    #[test]
+    fn the_access_token_typ_is_compared_as_a_media_type() {
+        let config = test_config();
+        for typ in [
+            "at+jwt",
+            "AT+JWT",
+            "application/at+jwt",
+            "Application/At+Jwt",
+        ] {
+            let token = sign_with_typ(&access_shaped_claims(), Some(typ));
+            assert!(both_decoders_accept(&token, &config), "typ {typ} refused");
+        }
+    }
+
+    /// Strict by default (D-7): a token with no `typ`, or the generic `JWT`
+    /// every earlier release wrote, is refused. Relaxed, it is accepted.
+    #[test]
+    fn an_untyped_access_token_is_refused_unless_the_operator_relaxes_it() {
+        assert!(AuthConfig::default().require_access_token_typ);
+        for typ in [None, Some("JWT")] {
+            let token = sign_with_typ(&access_shaped_claims(), typ);
+            assert!(!both_decoders_accept(&token, &test_config()), "{typ:?}");
+            assert!(both_decoders_accept(&token, &relaxed()), "{typ:?}");
+        }
+    }
+
+    /// Any other `typ` names another kind of token: refused in both modes.
+    #[test]
+    fn a_token_of_another_type_is_refused_in_both_modes() {
+        for typ in [
+            TYP_WEBAUTHN_STATE,
+            TYP_MFA_CHALLENGE,
+            TYP_MFA_SETUP,
+            TYP_LOGOUT_TOKEN,
+            "secevent+jwt",
+            "dpop+jwt",
+        ] {
+            let token = sign_with_typ(&access_shaped_claims(), Some(typ));
+            assert!(!both_decoders_accept(&token, &test_config()), "{typ}");
+            assert!(!both_decoders_accept(&token, &relaxed()), "{typ}");
+        }
+    }
+
+    /// Rule (b): a `purpose` claim is refused whatever the `typ` and mode.
+    /// This is what protects a relaxed deployment from the previous
+    /// release's untyped WebAuthn state and MFA tokens.
+    #[test]
+    fn a_purpose_claim_is_refused_whatever_the_typ() {
+        let mut claims = access_shaped_claims();
+        claims["purpose"] = "webauthn_authenticate_discoverable".into();
+        claims.as_object_mut().unwrap().remove("aud");
+        for typ in [Some("at+jwt"), Some("JWT"), None] {
+            let token = sign_with_typ(&claims, typ);
+            assert!(!both_decoders_accept(&token, &test_config()), "{typ:?}");
+            assert!(!both_decoders_accept(&token, &relaxed()), "{typ:?}");
+        }
+    }
+
+    #[test]
+    fn typ_matching_is_exact_after_normalisation() {
+        assert!(typ_matches(Some(" at+jwt "), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(Some("at+jwt2"), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(Some("application/"), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(Some("xapplication/at+jwt"), TYP_ACCESS_TOKEN));
+        assert!(!typ_matches(None, TYP_ACCESS_TOKEN));
+        // A multi-byte prefix must not panic on the slice.
+        assert!(!typ_matches(Some("ééééééé/at+jwt"), TYP_ACCESS_TOKEN));
+    }
+
+    /// A purpose token can never be signed as an access token or untyped.
+    #[test]
+    fn sign_purpose_token_refuses_an_access_or_untyped_typ() {
+        let claims = serde_json::json!({"sub": "x"});
+        for typ in [TYP_ACCESS_TOKEN, "application/at+jwt", "JWT"] {
+            assert!(sign_purpose_token(&claims, typ, &test_config()).is_err());
+        }
+        assert!(sign_purpose_token(&claims, TYP_MFA_SETUP, &test_config()).is_ok());
+    }
+
+    /// Q-9: the relaxed-window warning is written once per interval, and each
+    /// line counts every acceptance since the previous one.
+    #[test]
+    fn the_relaxed_typ_warning_is_rate_limited() {
+        let w = RelaxedTypWarning::new();
+        let t0 = 1_000_000;
+        assert_eq!(w.admit(t0), Some(1), "the first acceptance is logged");
+        for dt in [0, 1, 30, RelaxedTypWarning::INTERVAL_SECS - 1] {
+            assert_eq!(w.admit(t0 + dt), None, "suppressed at +{dt}s");
+        }
+        assert_eq!(
+            w.admit(t0 + RelaxedTypWarning::INTERVAL_SECS),
+            Some(5),
+            "the next line reports the four suppressed acceptances and itself"
+        );
+        assert_eq!(w.admit(t0 + RelaxedTypWarning::INTERVAL_SECS + 1), None);
+        // A clock that steps back does not unlock a burst of lines.
+        assert_eq!(w.admit(t0), None);
+    }
+
+    /// S-8: a purpose token names no JWKS key — a verifier that selects keys
+    /// strictly by `kid` finds none for it — and still verifies under the
+    /// deployment key, which is how every AXIAM purpose verifier selects it.
+    #[test]
+    fn a_purpose_token_names_no_key_and_still_verifies() {
+        let config = test_config();
+        let now = Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "sub": Uuid::new_v4().to_string(),
+            "purpose": "mfa_setup",
+            "iss": config.jwt_issuer,
+            "iat": now,
+            "exp": now + 300,
+        });
+        let key = DecodingKey::from_ed_pem(config.jwt_public_key_pem.as_bytes()).unwrap();
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_required_spec_claims(&["sub", "exp", "iat", "iss"]);
+        for typ in [TYP_WEBAUTHN_STATE, TYP_MFA_CHALLENGE, TYP_MFA_SETUP] {
+            let token = sign_purpose_token(&claims, typ, &config).unwrap();
+            let header = jsonwebtoken::decode_header(&token).unwrap();
+            assert_eq!(header.kid, None, "a {typ} token must carry no kid");
+            assert_eq!(header.typ.as_deref(), Some(typ));
+            jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation)
+                .unwrap_or_else(|e| panic!("a kid-less {typ} token must still verify: {e}"));
+        }
     }
 }

@@ -85,6 +85,20 @@ back-channel logout; on Linux it also needs that example's
 The default, `127.0.0.1`, is right whenever AXIAM shares your network namespace
 (`just run`, or any non-containerised local repro).
 
+**Who does what.** `walkthrough.sh` signs in as two administrators, both
+seeded by `scripts/e2e-bootstrap.sh`. Raising the **organization baseline**
+(`GET`/`PUT /api/v1/organizations/{id}/settings`, so that the tenant may turn
+on dynamic registration and CIMD at all) needs an **organization
+administrator**: the script signs in as the organization-level super-admin
+(`E2E_ADMIN_EMAIL`, default `admin@axiam.dev`, password `E2E_ADMIN_PASSWORD`)
+with no tenant, exactly as
+[`b6-organization-scope`](../b6-organization-scope/README.md) does. The org
+baseline cascades to every tenant, so a tenant administrator is refused `403`
+there by design. Every tenant-level step — creating the end user, the OAuth2
+client and the tenant's own settings — uses the tenant administrator
+(`E2E_TENANT_ADMIN_USERNAME`, default `tenant-admin`), the principal an
+application operator would actually have.
+
 Both scripts build and start the MCP server themselves (on `MCP_PORT`,
 default `8091` / `8092`) and tear it down on exit; neither needs `npm start`
 run separately.

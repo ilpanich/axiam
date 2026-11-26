@@ -319,10 +319,15 @@ jobs:
       #     unmaintained (no CVE, no successor release). humantime is transitive via SurrealDB;
       #     chrono is a direct dependency of every crate. cargo-audit only warns on these, but
       #     cargo-deny fails, so both lists carry them. Reasons and review date: deny.toml.
+      #   RUSTSEC-2026-0594 — cookie 0.16.2, private-cookie nonces can repeat across fork().
+      #     Pulled only by actix-web 4 (newest 4.20.0 still pins cookie 0.16), so no upgrade
+      #     path. The flaw is in the private (encrypted) jar behind cookie's `private` feature;
+      #     AXIAM does not enable actix-web `secure-cookies` and the graph enables only
+      #     `percent-encode`, so the code is not compiled in. Reason and review date: deny.toml.
       - name: cargo audit
         uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24  # v1
         with:
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387,RUSTSEC-2026-0542,RUSTSEC-2026-0543
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2025-0141,RUSTSEC-2023-0089,RUSTSEC-2026-0258,RUSTSEC-2026-0387,RUSTSEC-2026-0542,RUSTSEC-2026-0543,RUSTSEC-2026-0594
 
       # axiam-opaque-wasm is outside the workspace and carries its own
       # lockfile, which the step above never reads. That lockfile is what
@@ -1014,7 +1019,7 @@ jobs:
 
       - name: Start backend services (built from PR source)
         # --build forces the server image to be built from this PR's source code.
-        # Using a pre-built registry image (ghcr.io/axiamhq/axiam/server:latest)
+        # Using a pre-built registry image (ghcr.io/ilpanich/axiam/server:latest)
         # would produce false-green results on PR branches (W8 — stale image).
         run: |
           # load_config() asserts the JWT signing keypair is non-empty, else the

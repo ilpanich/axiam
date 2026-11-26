@@ -161,12 +161,114 @@ pub struct User {
     /// can set or clear it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory_external_id: Option<String>,
+    /// The credential epoch (SA-06, N7; S-1 and S-6): when a credential that
+    /// proves who is signing in last changed — the Argon2 hash or the OPAQUE
+    /// record, written or deleted. A short-lived artefact of the *old*
+    /// credential (an MFA challenge or setup token, an in-flight OPAQUE login)
+    /// issued before this instant is refused.
+    ///
+    /// `None` for a user whose credential has not changed since the column was
+    /// added (schema v117, no backfill): such a user behaves exactly as before.
+    /// Server-internal bookkeeping, never serialised or documented as API.
+    #[serde(default, skip_serializing)]
+    #[schema(ignore = true)]
+    pub credential_changed_at: Option<DateTime<Utc>>,
+    /// The credential version (SA-06, N7; review SR3-1): a per-user counter
+    /// bumped **in the same transaction** as every write that stamps
+    /// [`Self::credential_changed_at`]. It is read with the credential (the
+    /// same user row as the Argon2 hash) and embedded in the short-lived
+    /// artefacts a login issues; they are refused when it no longer equals the
+    /// user's current value. Unlike the timestamp it does not depend on
+    /// ordering two clocks, so an artefact built from a credential read that
+    /// raced a reset's transaction cannot slip past it.
+    ///
+    /// `0` for a user whose credential has not changed since schema v118 (the
+    /// column is absent and not backfilled). Server-internal bookkeeping, never
+    /// serialised or documented as API.
+    #[serde(default, skip_serializing)]
+    #[schema(ignore = true)]
+    pub credential_version: i64,
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl User {
+    /// Whether a short-lived artefact issued at `issued_at` (to the
+    /// nanosecond) predates the last credential change. The comparison is
+    /// inclusive: issued *at* the epoch is refused.
+    #[must_use]
+    pub fn credential_changed_since(&self, issued_at: DateTime<Utc>) -> bool {
+        self.credential_changed_at
+            .is_some_and(|epoch| issued_at <= epoch)
+    }
+
+    /// As [`Self::credential_changed_since`], for an artefact whose issue time
+    /// is whole seconds (a JWT `iat`). The epoch is truncated to its second, so
+    /// a token minted in the same second as a later change is refused; the
+    /// price is that one minted in that second *after* the change is too, and
+    /// the user signs in again. Only a fallback now, for a token that carries
+    /// no sub-second issue time: see [`Self::credential_changed_since_claims`].
+    #[must_use]
+    pub fn credential_changed_since_secs(&self, iat_secs: i64) -> bool {
+        self.credential_changed_at
+            .is_some_and(|epoch| iat_secs <= epoch.timestamp())
+    }
+
+    /// Whether a short-lived artefact whose claims carry `iat` (whole seconds)
+    /// and, if it was minted with it, `iat_ns` (the issue time in nanoseconds
+    /// since the Unix epoch) predates the last credential change.
+    ///
+    /// With `iat_ns` the comparison is [`Self::credential_changed_since`], at
+    /// full precision, so an artefact minted after the change in the same
+    /// second is accepted. A token minted without it (before the claim
+    /// existed: a rolling upgrade) falls back to the whole-second
+    /// [`Self::credential_changed_since_secs`].
+    #[must_use]
+    pub fn credential_changed_since_claims(&self, iat_secs: i64, iat_ns: Option<i64>) -> bool {
+        match iat_ns {
+            Some(ns) => self.credential_changed_since(DateTime::from_timestamp_nanos(ns)),
+            None => self.credential_changed_since_secs(iat_secs),
+        }
+    }
+
+    /// Whether a short-lived artefact is stale against the credential.
+    ///
+    /// An artefact that carries a credential `version` (the counter it was
+    /// built from) is judged by the version alone: it is superseded exactly
+    /// when the version differs from the user's current
+    /// [`Self::credential_version`] ([`Self::credential_version_stale`]). The
+    /// counter is bumped in the same transaction as every credential write, so
+    /// nothing is lost by ignoring the clocks, and an artefact of the current
+    /// version is never refused because its `iat` (an application clock) reads
+    /// at or before the epoch (the datastore's clock).
+    ///
+    /// An artefact with no version (minted by a release that predates the
+    /// counter) falls back to the timestamp check alone
+    /// ([`Self::credential_changed_since_claims`], ties refused), so an
+    /// in-flight artefact survives a rolling upgrade.
+    #[must_use]
+    pub fn credential_superseded(
+        &self,
+        iat_secs: i64,
+        iat_ns: Option<i64>,
+        version: Option<i64>,
+    ) -> bool {
+        match version {
+            Some(_) => self.credential_version_stale(version),
+            None => self.credential_changed_since_claims(iat_secs, iat_ns),
+        }
+    }
+
+    /// Whether an artefact built from credential version `version` is stale:
+    /// it carries one and it is not the user's current
+    /// [`Self::credential_version`]. `None` (a release that predates the
+    /// counter minted it) is never stale by this check.
+    #[must_use]
+    pub fn credential_version_stale(&self, version: Option<i64>) -> bool {
+        version.is_some_and(|v| v != self.credential_version)
+    }
+
     /// Whether the tenant's directory, not AXIAM, holds this account's
     /// password (see [`Self::directory_external_id`]).
     #[must_use]
@@ -254,6 +356,16 @@ pub struct UpdateUser {
     #[serde(skip)]
     #[schema(ignore = true)]
     pub password_hash: Option<String>,
+    /// SA-06 (N7, SR4-2): the OPAQUE record for the password in
+    /// `password_hash`. Written in the *same transaction* as the hash, the
+    /// credential epoch and the credential version, replacing any record the
+    /// user had; with no record here a hash write deletes the existing one.
+    /// Only meaningful alongside `password_hash` (the repository refuses it
+    /// otherwise), and its `tenant_id`/`user_id` must match the row updated.
+    /// Internal-only, like `password_hash`.
+    #[serde(skip)]
+    #[schema(ignore = true)]
+    pub opaque_record: Option<crate::models::opaque::CreateOpaqueCredential>,
     pub status: Option<UserStatus>,
     pub metadata: Option<serde_json::Value>,
     pub mfa_enabled: Option<bool>,
@@ -485,6 +597,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             directory_external_id: None,
+            credential_changed_at: None,
+            credential_version: 0,
         }
     }
 
@@ -547,6 +661,53 @@ mod tests {
             }
             .is_empty()
         );
+    }
+
+    fn user_with_epoch(changed_at: Option<DateTime<Utc>>, version: i64) -> User {
+        User {
+            credential_changed_at: changed_at,
+            credential_version: version,
+            ..a_user()
+        }
+    }
+
+    /// QR21-1: an artefact that carries a version is judged by the version
+    /// alone. A current version is accepted even when its `iat` is at or before
+    /// the epoch (clock skew between the application and the datastore).
+    #[test]
+    fn versioned_artefact_ignores_the_timestamp() {
+        let epoch = Utc::now();
+        let user = user_with_epoch(Some(epoch), 3);
+        let earlier = epoch.timestamp() - 60;
+        let earlier_ns = (epoch - chrono::Duration::seconds(60))
+            .timestamp_nanos_opt()
+            .unwrap();
+        // Earlier than the epoch, with and without sub-second precision.
+        assert!(!user.credential_superseded(earlier, Some(earlier_ns), Some(3)));
+        assert!(!user.credential_superseded(earlier, None, Some(3)));
+        // Exactly at the epoch.
+        let at_ns = epoch.timestamp_nanos_opt().unwrap();
+        assert!(!user.credential_superseded(epoch.timestamp(), Some(at_ns), Some(3)));
+        // A stale version is refused, however recent the artefact is.
+        let later = epoch.timestamp() + 60;
+        assert!(user.credential_superseded(later, None, Some(2)));
+        assert!(user.credential_superseded(later, None, Some(4)));
+    }
+
+    /// An artefact without a version keeps the timestamp rule, ties refused.
+    #[test]
+    fn versionless_artefact_uses_the_timestamp_rule() {
+        let epoch = Utc::now();
+        let user = user_with_epoch(Some(epoch), 3);
+        let epoch_ns = epoch.timestamp_nanos_opt().unwrap();
+        assert!(user.credential_superseded(epoch.timestamp() - 60, None, None));
+        // Tie at full precision is refused.
+        assert!(user.credential_superseded(epoch.timestamp(), Some(epoch_ns), None));
+        // Strictly after is accepted.
+        assert!(!user.credential_superseded(epoch.timestamp() + 60, Some(epoch_ns + 1), None));
+        // No stored epoch: nothing refused.
+        let never = user_with_epoch(None, 0);
+        assert!(!never.credential_superseded(0, None, None));
     }
 }
 

@@ -358,9 +358,13 @@ describe("TenantsPage", () => {
 
   it("offers no tenant lifecycle controls to a tenant administrator", async () => {
     // The tenant roster belongs to the organization. A tenant administrator can
-    // see the one tenant the server returns for it and open the detail page —
-    // what it cannot do is create, rename or delete, and those buttons are
-    // therefore not drawn.
+    // see the one tenant the server returns for it — what it cannot do is
+    // create, rename, delete or open the tenant record, and those buttons are
+    // therefore not drawn. `GET /organizations/{org}/tenants/{tenant}` calls
+    // `require_organization_principal_for_tenant`, which answers 403 to a
+    // principal that does not live in the organization scope — its own tenant
+    // included (SA-02, review QR8-1) — so a "View" button would lead to a page
+    // the server refuses.
     useAuthStore.setState({
       user: {
         id: "u2",
@@ -389,9 +393,58 @@ describe("TenantsPage", () => {
     expect(
       screen.queryByRole("button", { name: /^delete production$/i }),
     ).not.toBeInTheDocument();
-    // ...but the way into the tenant it administers is still there.
     expect(
-      screen.getByRole("button", { name: /view production/i }),
+      screen.queryByRole("button", { name: /^view production$/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers View only for the tenants a restricted organization principal reaches (QR9-2)", async () => {
+    // The server serves the tenant record to an organization principal whose
+    // reach covers that tenant, and refuses the rest. Lifecycle controls stay
+    // hidden: creating, renaming and deleting a tenant are acts on the
+    // organization, which `require_organization_principal` refuses it.
+    useAuthStore.setState({
+      user: {
+        id: "u3",
+        username: "restricted",
+        email: "restricted@acme.test",
+        permissions: ["tenants:list", "tenants:get"],
+        tenant_id: "t1",
+        principal_tenant_id: "org-tenant",
+        org_id: "o1",
+        organization_level: true,
+        reachable_tenant_ids: ["t1"],
+      },
+      isAuthenticated: true,
+      isInitializing: false,
+    });
+
+    mockDefaultGets();
+    renderWithProviders(<TenantsPage />);
+
+    expect(
+      await screen.findByRole("button", { name: /^view production$/i }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Staging")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^view staging$/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^edit production$/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^delete production$/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still offers View to the organization administrator", async () => {
+    mockDefaultGets();
+    renderWithProviders(<TenantsPage />);
+    expect(
+      await screen.findByRole("button", { name: /^view production$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^view staging$/i }),
     ).toBeInTheDocument();
   });
 });

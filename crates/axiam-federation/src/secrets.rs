@@ -170,6 +170,7 @@ where
                 "tenant_id": config.tenant_id.to_string(),
                 "key_version": current_key_version(),
             })),
+            organization_id: None,
         };
 
         if let Err(e) = audit_repo.append(audit_entry).await {

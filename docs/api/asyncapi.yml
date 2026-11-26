@@ -22,6 +22,14 @@ info:
     exact convention); webhook delivery uses a nack-no-requeue dead-letter
     chain with no silent message loss.
 
+    **Server-internal queues (SA-14).** `axiam.mail.outbound` and every
+    outbound kind's queues (`axiam.webhook`, `axiam.ssf_push`,
+    `axiam.scim_push`, `axiam.ciba_ping`, their `.retry` and `.dlq` queues)
+    carry each message documented below as the `body` of an
+    `InternalEnvelope` (see that schema), HMAC-signed with a server-only key
+    no SDK or tenant holds. These queues have no external producer; the
+    message schemas below describe the envelope's `body`.
+
     **Minimal profile.** A server running with `AXIAM__AMQP__ENABLED=false`
     reads none of these queues. A broker confirm for a message published to
     `axiam.authz.request` or `axiam.audit.events` never means AXIAM decided the
@@ -87,7 +95,15 @@ channels:
     description: >-
       Outbound authorization decision responses (queue: `axiam.authz.response`,
       durable). No DLQ — this is a response queue, not subject to poison-message
-      dead-lettering.
+      dead-lettering. SA-15 (N2): a request whose AMQP `reply_to` property
+      names a queue is answered on that queue instead (default exchange,
+      routing key = `reply_to`); this shared queue receives only the answers
+      to requests that name none, or that name one of the server's own
+      `axiam.` queues (not honoured, SR1-5). Every response is signed with the
+      requester's tenant subkey and bound to the request's `nonce`; the
+      signature authenticates it to holders of that subkey (the server or any
+      of the tenant's producers), so where several services share a tenant
+      each reads its answers from an exclusive `reply_to` queue (CONTRACT §8).
     bindings:
       amqp:
         is: queue
@@ -474,8 +490,9 @@ components:
       name: AuthzResponse
       title: Authorization decision response
       summary: >-
-        Authorization decision published to `axiam.authz.response`
-        (source: crates/axiam-amqp/src/messages.rs L148-153).
+        Authorization decision published to the request's AMQP `reply_to`
+        queue, or to `axiam.authz.response` when the request names none
+        (source: crates/axiam-amqp/src/messages.rs, `AuthzResponse`).
       contentType: application/json
       payload:
         $ref: '#/components/schemas/AuthzResponse'
@@ -559,6 +576,39 @@ components:
         $ref: '#/components/schemas/WebhookMessage'
 
   schemas:
+    InternalEnvelope:
+      type: object
+      description: >-
+        The signed envelope of the server-internal queues (SA-14, source:
+        crates/axiam-amqp/src/internal_envelope.rs). `hmac_signature` is
+        HMAC-SHA256 (hex) over this object serialized in field order without
+        `hmac_signature`, keyed by HKDF-SHA256 of the AMQP master key with
+        info `axiam-amqp-internal-v1 || key_version || purpose` — never a
+        per-tenant subkey. Consumers reject an unsigned, tampered, stale
+        (`issued_at` outside the replay skew) or replayed (`nonce` seen)
+        envelope, dead-letter it and audit `amqp.internal_message_rejected`.
+        Unknown fields are refused.
+      required: [purpose, key_version, nonce, issued_at, body, hmac_signature]
+      additionalProperties: false
+      properties:
+        purpose:
+          type: string
+          description: "`mail`, or `outbound.<kind>` (`outbound.webhook`, `outbound.ssf_push`, `outbound.scim_push`, `outbound.ciba_ping`)."
+        key_version:
+          type: integer
+          minimum: 2
+        nonce:
+          type: string
+          format: uuid
+        issued_at:
+          type: string
+          format: date-time
+          description: Publish time; for an outbound retry copy, the time its retry-queue TTL expires.
+        body:
+          type: object
+          description: The queue's message (`OutboundMailMessage`, `WebhookMessage`, or the shared outbound message of the other kinds).
+        hmac_signature:
+          type: string
     AuthzRequest:
       type: object
       description: >-
@@ -644,9 +694,24 @@ components:
 
     AuthzResponse:
       type: object
+      description: >-
+        SA-15 (N2): HMAC-SHA256-signed by the server with the same per-tenant
+        subkey as the request it answers (HKDF over the master key, the
+        request's `tenant_id` and `key_version`). The canonical form is the
+        JSON object with `hmac_signature` absent and the fields in this order:
+        correlation_id, allowed, reason?, reason_code?, tenant_id, nonce
+        (optional members omitted when absent). A requester verifies the
+        signature with its own tenant's subkey at the `key_version` it sent and
+        accepts the response only when `tenant_id`, `correlation_id` and
+        `nonce` match a request it still has outstanding. `tenant_id`, `nonce`
+        and `hmac_signature` are additive; `allowed`, `reason` and
+        `reason_code` keep their meaning.
       required:
         - correlation_id
         - allowed
+        - tenant_id
+        - nonce
+        - hmac_signature
       properties:
         correlation_id:
           type: string
@@ -656,6 +721,26 @@ components:
         reason:
           type: string
           nullable: true
+        reason_code:
+          type: string
+          nullable: true
+          description: >-
+            Machine-readable decision reason: `allowed`, `no_grant`,
+            `denied_by_rule` or `tenant_suspended`; absent on an internal
+            error.
+        tenant_id:
+          type: string
+          format: uuid
+          description: The tenant of the request this answers.
+        nonce:
+          type: string
+          format: uuid
+          description: The `nonce` of the request this answers, echoed.
+        hmac_signature:
+          type: string
+          description: >-
+            HMAC-SHA256 hex digest of the canonical form under the
+            requester's tenant subkey.
 
     AuditEventMessage:
       type: object

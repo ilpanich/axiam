@@ -437,6 +437,15 @@ acceptance is unaffected — the request is refused either way, and the `401` is
 if anything the better answer — but the mechanism it names is observable only
 behind a credential, and the test asserts both.
 
+**Update 2026-11-23 (SA-40).** The guard now percent-decodes query keys
+(`url::form_urlencoded::parse`), so `tenant%5Fid` is refused by the guard itself
+with the same `400 invalid_request` as the plain spelling, before authentication
+and with or without a credential; the `401` a stranger got above no longer
+applies. The extractor's `duplicate field` answer remains as a backstop. See
+`claude_dev/security-audit-2026-11-14-fix-plan.md` `### SA-40`. The test's
+no-credential expectation changed from `401` to `400 invalid_request`
+accordingly.
+
 ---
 
 ## 8. V1 — the loopback matcher does not widen the host

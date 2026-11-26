@@ -43,7 +43,7 @@
 //! the full SSRF guard against the redirect target").
 
 use std::collections::BTreeSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -176,7 +176,7 @@ fn host_is_allowlisted(host: &str) -> bool {
 // `is_disallowed_ip` is re-exported because callers outside this crate (the
 // webhook tests among them) have always reached it as `ssrf::is_disallowed_ip`.
 pub use axiam_core::ip_class::is_disallowed_ip;
-use axiam_core::ip_class::is_never_allowed;
+use axiam_core::ip_class::{canonical, is_never_allowed};
 
 /// Resolve `host:port` (A + AAAA), reject if ANY resolved address is
 /// disallowed, and return ONE validated address to pin into the connection.
@@ -207,8 +207,32 @@ pub async fn resolve_and_pick(
         return Err(SsrfError::ResolveFailed);
     }
 
+    pick_address(host, &addrs, allow_private)
+}
+
+/// Decide which of `addrs` (a resolver's non-empty answer for `host`) may be
+/// pinned. Split from [`resolve_and_pick`] so the decision is testable with an
+/// injected answer.
+fn pick_address(host: &str, addrs: &[IpAddr], allow_private: bool) -> Result<IpAddr, SsrfError> {
+    // SA-42: `allow_private` waives the private-address rule only, never the
+    // metadata-endpoint rule. `::1` is IPv6 loopback, which this seam must
+    // reach exactly as it reaches `127.0.0.1` (`localhost` resolves to both);
+    // every other address `is_never_allowed` flags stays refused. The
+    // exemption is this seam's alone; SEC-107's allowlist below still refuses
+    // `::1`.
     if allow_private {
+        let is_ipv6_loopback = |ip: &IpAddr| canonical(*ip) == IpAddr::V6(Ipv6Addr::LOCALHOST);
+        if addrs
+            .iter()
+            .any(|ip| is_never_allowed(*ip) && !is_ipv6_loopback(ip))
+        {
+            return Err(SsrfError::Blocked);
+        }
         return Ok(addrs[0]);
+    }
+
+    if addrs.iter().any(|ip| is_never_allowed(*ip)) {
+        return Err(SsrfError::Blocked);
     }
 
     if let Some(bad) = addrs.iter().find(|ip| is_disallowed_ip(**ip)) {
@@ -251,6 +275,10 @@ pub async fn resolve_and_pick(
 pub fn pinned_client(host: &str, ip: IpAddr, port: u16) -> Result<reqwest::Client, SsrfError> {
     reqwest::Client::builder()
         .resolve(host, SocketAddr::new(ip, port))
+        // N13 / D-4: never traverse an environment proxy. Through one, the
+        // destination is named by hostname and re-resolved by the proxy, so
+        // the validated IP below would no longer decide where the socket goes.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
@@ -431,6 +459,54 @@ pub async fn read_capped_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-42 — `allow_private` is a loopback test seam; it must never reach a
+    /// cloud metadata endpoint.
+    #[tokio::test]
+    async fn sa42_allow_private_never_reaches_metadata() {
+        for host in ["169.254.169.254", "::ffff:169.254.169.254", "fe80::1"] {
+            let result = resolve_and_pick(host, 443, true).await;
+            assert!(
+                matches!(result, Err(SsrfError::Blocked)),
+                "{host} with allow_private=true must be Blocked, got {result:?}"
+            );
+        }
+        // The seam still reaches loopback.
+        assert!(resolve_and_pick("127.0.0.1", 443, true).await.is_ok());
+    }
+
+    /// SA-42 regression: `localhost` resolves to `127.0.0.1` and `::1`, and the
+    /// seam must keep reaching it. An answer that also carries a metadata
+    /// address is never pinned, whatever its order.
+    #[test]
+    fn sa42_allow_private_still_reaches_a_loopback_answer() {
+        let v4: IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+        let meta: IpAddr = "169.254.169.254".parse().unwrap();
+        assert_eq!(pick_address("localhost", &[v4, v6], true).unwrap(), v4);
+        assert_eq!(pick_address("localhost", &[v6, v4], true).unwrap(), v6);
+        assert_eq!(pick_address("localhost", &[v6], true).unwrap(), v6);
+        for answer in [[v4, meta], [meta, v6], [v6, meta]] {
+            assert!(
+                matches!(
+                    pick_address("localhost", &answer, true),
+                    Err(SsrfError::Blocked)
+                ),
+                "{answer:?}"
+            );
+        }
+        // An IPv4-compatible spelling of metadata is still refused.
+        let compat: IpAddr = "::a9fe:a9fe".parse().unwrap();
+        assert!(matches!(
+            pick_address("h", &[v4, compat], true),
+            Err(SsrfError::Blocked)
+        ));
+        // Without the seam, loopback is still refused.
+        assert!(matches!(
+            pick_address("localhost", &[v4, v6], false),
+            Err(SsrfError::Blocked)
+        ));
+    }
 
     /// SEC-094 — end-to-end: the mapped form must be rejected by
     /// `resolve_and_pick`, i.e. before `pinned_client` can pin it. Uses a
@@ -861,6 +937,68 @@ mod tests {
             .await;
         let result = guarded_fetch_no_redirect(&origin.uri(), true, |c, u| c.get(u)).await;
         assert!(matches!(result, Err(SsrfError::ResponseTooLarge(_))));
+    }
+
+    /// N13 / SA-10 — the pinned client must never traverse an environment
+    /// proxy. With `HTTPS_PROXY` pointing at a loopback CONNECT fixture, a
+    /// guarded request must not reach it: through a proxy the destination
+    /// would be named by hostname and re-resolved by the proxy, so the pinned
+    /// (validated) IP would no longer decide where the socket goes.
+    #[tokio::test]
+    async fn n13_pinned_client_ignores_environment_proxy() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = proxy.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut line = String::new();
+                    let _ = BufReader::new(sock).read_line(&mut line).await;
+                    let _ = tx.send(line);
+                });
+            }
+        });
+
+        // SAFETY (QR1-10): reqwest reads the proxy variables when a client is
+        // *built* (`ClientBuilder::build` calls `Matcher::from_system()`), for
+        // every scheme, not when an `https://` request is sent. So the window
+        // below — set, build, restore — is short, but a client another test
+        // of this binary builds on another thread inside it would read the
+        // fixture proxy, and `set_var` racing a concurrent `getenv` is the
+        // undefined behaviour `unsafe` marks. No other test here mutates the
+        // environment and this crate has no environment lock to serialize on;
+        // the residual risk is a spuriously proxied client in a concurrent
+        // test, not a false pass here: the variable is read at build time and
+        // not cached, so this test still fails without `.no_proxy()`.
+        let previous = std::env::var_os("HTTPS_PROXY");
+        unsafe { std::env::set_var("HTTPS_PROXY", format!("http://{proxy_addr}")) };
+
+        // 192.0.2.0/24 is TEST-NET-1: a "validated public" pin that is not
+        // routable, so a direct connection simply times out.
+        let client = pinned_client("rebind.example.test", "192.0.2.1".parse().unwrap(), 443);
+
+        match previous {
+            Some(v) => unsafe { std::env::set_var("HTTPS_PROXY", v) },
+            None => unsafe { std::env::remove_var("HTTPS_PROXY") },
+        }
+
+        let client = client.unwrap();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.get("https://rebind.example.test/").send(),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let seen = rx.try_recv().ok();
+        assert!(
+            seen.is_none(),
+            "pinned_client connected to the environment proxy and sent {seen:?}; \
+             the validated-IP pin was bypassed"
+        );
     }
 
     #[tokio::test]

@@ -8,13 +8,16 @@ use axiam_api_grpc::proto::user_service_server::UserService;
 use axiam_api_grpc::proto::{
     GetUserRequest, IntrospectTokenRequest, ValidateCredentialsRequest, ValidateTokenRequest,
 };
+use axiam_api_grpc::services::user::{BoxFuture, CredentialAuditSink, UserServiceAuthorizer};
 use axiam_api_grpc::services::{TokenServiceImpl, UserServiceImpl};
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{AUD_USER, ValidatedClaims, issue_access_token};
 use axiam_core::error::{AxiamError, AxiamResult};
+use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::user::{CreateUser, UpdateUser, User, UserStatus};
 use axiam_core::repository::{PaginatedResult, Pagination, UserRepository};
 use chrono::Utc;
+use std::sync::Arc;
 use tonic::Request;
 use tonic::service::Interceptor;
 use uuid::Uuid;
@@ -606,6 +609,8 @@ fn active_user(tenant: Uuid, password_hash: String) -> User {
         phone_number_verified_at: None,
         address: None,
         directory_external_id: None,
+        credential_changed_at: None,
+        credential_version: 0,
         metadata: serde_json::Value::Null,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -664,7 +669,7 @@ impl UserRepository for MockUserRepo {
 
 #[tokio::test]
 async fn get_user_missing_claims_unauthenticated() {
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -679,7 +684,7 @@ async fn get_user_missing_claims_unauthenticated() {
 
 #[tokio::test]
 async fn get_user_tenant_mismatch_permission_denied() {
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -693,16 +698,76 @@ async fn get_user_tenant_mismatch_permission_denied() {
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
 
+/// SA-12 (N4): this test used to pin the defect — a token for a random
+/// subject holding no grant read alice's record. Reading another user's
+/// record now needs `users:get`, exactly as REST's `GET /users/{id}` does.
 #[tokio::test]
-async fn get_user_success() {
+async fn get_user_of_another_user_without_users_get_is_denied() {
     let tenant = Uuid::new_v4();
     let user = active_user(tenant, "hash".into());
+    let authz = Arc::new(ScriptedAuthorizer::denying());
     let svc = UserServiceImpl::with_static_lockout_policy(
         MockUserRepo {
             user: Some(user.clone()),
         },
         auth_config(),
         test_crypto_gate(),
+        authz.clone(),
+        Arc::new(RecordingAudit::default()),
+    );
+    let mut req = Request::new(GetUserRequest {
+        tenant_id: tenant.to_string(),
+        user_id: user.id.to_string(),
+    });
+    // `claims_for` mints a token for a fresh random subject, never alice.
+    req.extensions_mut().insert(claims_for(tenant));
+    let err = svc.get_user(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert_eq!(authz.asked(), ["users:get"]);
+}
+
+/// The self-read exemption (REST's `is_own_resource`): a subject reads its
+/// own record without the authorizer being asked at all.
+#[tokio::test]
+async fn get_user_success() {
+    let tenant = Uuid::new_v4();
+    let user = active_user(tenant, "hash".into());
+    let authz = Arc::new(ScriptedAuthorizer::denying());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(user.clone()),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        Arc::new(RecordingAudit::default()),
+    );
+    let mut req = Request::new(GetUserRequest {
+        tenant_id: tenant.to_string(),
+        user_id: user.id.to_string(),
+    });
+    req.extensions_mut()
+        .insert(user_claims_for(tenant, user.id));
+    let resp = svc.get_user(req).await.unwrap().into_inner();
+    assert_eq!(resp.username, "alice");
+    assert_eq!(resp.status, "active");
+    assert!(authz.asked().is_empty(), "a self-read needs no grant");
+}
+
+/// With `users:get`, another user's record is answered.
+#[tokio::test]
+async fn get_user_of_another_user_with_users_get_is_allowed() {
+    let tenant = Uuid::new_v4();
+    let user = active_user(tenant, "hash".into());
+    let authz = Arc::new(ScriptedAuthorizer::allowing());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(user.clone()),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        Arc::new(RecordingAudit::default()),
     );
     let mut req = Request::new(GetUserRequest {
         tenant_id: tenant.to_string(),
@@ -711,13 +776,13 @@ async fn get_user_success() {
     req.extensions_mut().insert(claims_for(tenant));
     let resp = svc.get_user(req).await.unwrap().into_inner();
     assert_eq!(resp.username, "alice");
-    assert_eq!(resp.status, "active");
+    assert_eq!(authz.asked(), ["users:get"]);
 }
 
 #[tokio::test]
 async fn get_user_not_found() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -734,7 +799,7 @@ async fn get_user_not_found() {
 #[tokio::test]
 async fn get_user_invalid_uuid_argument() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -753,7 +818,7 @@ async fn validate_credentials_success() {
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo {
             user: Some(user.clone()),
         },
@@ -765,7 +830,7 @@ async fn validate_credentials_success() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(resp.valid);
     assert_eq!(resp.user_id, user.id.to_string());
@@ -776,7 +841,7 @@ async fn validate_credentials_wrong_password_records_failure() {
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -786,7 +851,7 @@ async fn validate_credentials_wrong_password_records_failure() {
         username_or_email: "alice".into(),
         password: "wrong".into(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(!resp.valid);
 }
@@ -800,7 +865,7 @@ async fn validate_credentials_refuses_a_directory_account() {
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let mut user = active_user(tenant, hash);
     user.directory_external_id = Some("6f9619ff-8b86-d011-b42d-00c04fc964ff".into());
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -810,7 +875,7 @@ async fn validate_credentials_refuses_a_directory_account() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(
         !resp.valid,
@@ -822,7 +887,7 @@ async fn validate_credentials_refuses_a_directory_account() {
 #[tokio::test]
 async fn validate_credentials_unknown_user_is_invalid() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -832,14 +897,14 @@ async fn validate_credentials_unknown_user_is_invalid() {
         username_or_email: "ghost".into(),
         password: "x".into(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(!resp.valid);
 }
 
 #[tokio::test]
 async fn validate_credentials_tenant_mismatch_denied() {
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -849,7 +914,7 @@ async fn validate_credentials_tenant_mismatch_denied() {
         username_or_email: "alice".into(),
         password: "x".into(),
     });
-    req.extensions_mut().insert(claims_for(Uuid::new_v4()));
+    req.extensions_mut().insert(m2m_claims_for(Uuid::new_v4()));
     let err = svc.validate_credentials(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::PermissionDenied);
 }
@@ -860,7 +925,7 @@ async fn validate_credentials_inactive_user_is_invalid() {
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let mut user = active_user(tenant, hash);
     user.status = UserStatus::Inactive;
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -870,7 +935,7 @@ async fn validate_credentials_inactive_user_is_invalid() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(!resp.valid);
 }
@@ -953,7 +1018,7 @@ async fn get_user_renders_all_status_variants() {
     ] {
         let mut user = active_user(tenant, "hash".into());
         user.status = status;
-        let svc = UserServiceImpl::with_static_lockout_policy(
+        let svc = user_service(
             MockUserRepo {
                 user: Some(user.clone()),
             },
@@ -974,7 +1039,7 @@ async fn get_user_renders_all_status_variants() {
 #[tokio::test]
 async fn get_user_internal_error_maps_to_internal() {
     let tenant = Uuid::new_v4();
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         ScriptedUserRepo {
             fail_get_by_id: true,
             ..Default::default()
@@ -993,7 +1058,7 @@ async fn get_user_internal_error_maps_to_internal() {
 
 #[tokio::test]
 async fn validate_credentials_missing_claims_is_unauthenticated() {
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: None },
         auth_config(),
         test_crypto_gate(),
@@ -1017,7 +1082,7 @@ async fn validate_credentials_with_pepper_succeeds() {
     let hash =
         axiam_auth::password::hash_password(&test_password(), Some("test-pepper-value")).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo {
             user: Some(user.clone()),
         },
@@ -1029,7 +1094,7 @@ async fn validate_credentials_with_pepper_succeeds() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(resp.valid);
 }
@@ -1058,7 +1123,7 @@ async fn validate_credentials_saturated_hash_gate_is_unavailable_not_internal() 
     cfg.hash_acquire_timeout_secs = 0;
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: Some(user) },
         cfg,
         // Zero permits: the gate is saturated, nothing can be acquired.
@@ -1069,7 +1134,7 @@ async fn validate_credentials_saturated_hash_gate_is_unavailable_not_internal() 
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let err = svc.validate_credentials(req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1107,7 +1172,7 @@ async fn every_refusal_needs_the_hash_permit_a_wrong_password_needs() {
     for (case, user) in cases {
         let mut cfg = auth_config();
         cfg.hash_acquire_timeout_secs = 0;
-        let svc = UserServiceImpl::with_static_lockout_policy(
+        let svc = user_service(
             MockUserRepo { user },
             cfg,
             // Zero permits: the gate is saturated, nothing can be acquired.
@@ -1118,7 +1183,7 @@ async fn every_refusal_needs_the_hash_permit_a_wrong_password_needs() {
             username_or_email: "alice".into(),
             password: "definitely-not-the-password".into(),
         });
-        req.extensions_mut().insert(claims_for(tenant));
+        req.extensions_mut().insert(m2m_claims_for(tenant));
         let err = svc.validate_credentials(req).await.unwrap_err();
         assert_eq!(
             err.code(),
@@ -1137,7 +1202,7 @@ async fn validate_credentials_succeeds_when_hash_gate_has_capacity() {
     cfg.hash_acquire_timeout_secs = 0;
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: Some(user) },
         cfg,
         std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1147,7 +1212,7 @@ async fn validate_credentials_succeeds_when_hash_gate_has_capacity() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(resp.valid);
 }
@@ -1165,7 +1230,7 @@ async fn validate_credentials_releases_hash_permit_after_verify() {
     cfg.hash_acquire_timeout_secs = 0;
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo {
             user: Some(user.clone()),
         },
@@ -1177,7 +1242,7 @@ async fn validate_credentials_releases_hash_permit_after_verify() {
         username_or_email: "alice".into(),
         password: "definitely-not-the-password".into(),
     });
-    wrong.extensions_mut().insert(claims_for(tenant));
+    wrong.extensions_mut().insert(m2m_claims_for(tenant));
     assert!(
         !svc.validate_credentials(wrong)
             .await
@@ -1191,7 +1256,7 @@ async fn validate_credentials_releases_hash_permit_after_verify() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    right.extensions_mut().insert(claims_for(tenant));
+    right.extensions_mut().insert(m2m_claims_for(tenant));
     assert!(
         svc.validate_credentials(right)
             .await
@@ -1208,7 +1273,7 @@ async fn validate_credentials_releases_hash_permit_after_verify() {
 async fn validate_credentials_bad_hash_maps_to_internal() {
     let tenant = Uuid::new_v4();
     let user = active_user(tenant, "not-a-valid-phc-hash".into());
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -1218,7 +1283,7 @@ async fn validate_credentials_bad_hash_maps_to_internal() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let err = svc.validate_credentials(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Internal);
 }
@@ -1230,7 +1295,7 @@ async fn validate_credentials_failed_login_record_error_maps_to_internal() {
     let tenant = Uuid::new_v4();
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let user = active_user(tenant, hash);
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         ScriptedUserRepo {
             user: Some(user),
             fail_increment: true,
@@ -1244,7 +1309,7 @@ async fn validate_credentials_failed_login_record_error_maps_to_internal() {
         username_or_email: "alice".into(),
         password: "wrong-password".into(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let err = svc.validate_credentials(req).await.unwrap_err();
     assert_eq!(err.code(), tonic::Code::Internal);
 }
@@ -1255,7 +1320,7 @@ async fn validate_credentials_locked_user_is_invalid() {
     let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
     let mut user = active_user(tenant, hash);
     user.locked_until = Some(Utc::now() + chrono::Duration::hours(1));
-    let svc = UserServiceImpl::with_static_lockout_policy(
+    let svc = user_service(
         MockUserRepo { user: Some(user) },
         auth_config(),
         test_crypto_gate(),
@@ -1265,7 +1330,574 @@ async fn validate_credentials_locked_user_is_invalid() {
         username_or_email: "alice".into(),
         password: test_password(),
     });
-    req.extensions_mut().insert(claims_for(tenant));
+    req.extensions_mut().insert(m2m_claims_for(tenant));
     let resp = svc.validate_credentials(req).await.unwrap().into_inner();
     assert!(!resp.valid);
+}
+
+// ---------------------------------------------------------------------------
+// SA-12 (N4, D-2): UserService authorization doubles
+// ---------------------------------------------------------------------------
+
+/// An authorizer that answers one fixed way and records what it was asked.
+struct ScriptedAuthorizer {
+    allow: bool,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl ScriptedAuthorizer {
+    fn allowing() -> Self {
+        Self {
+            allow: true,
+            asked: Default::default(),
+        }
+    }
+    fn denying() -> Self {
+        Self {
+            allow: false,
+            asked: Default::default(),
+        }
+    }
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl UserServiceAuthorizer for ScriptedAuthorizer {
+    fn require<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        _subject_id: Uuid,
+        action: &'a str,
+    ) -> BoxFuture<'a, Result<(), tonic::Status>> {
+        self.asked.lock().unwrap().push(action.to_string());
+        let allow = self.allow;
+        Box::pin(async move {
+            if allow {
+                Ok(())
+            } else {
+                Err(tonic::Status::permission_denied("no grant"))
+            }
+        })
+    }
+}
+
+/// An audit sink that keeps what it is given.
+#[derive(Default)]
+struct RecordingAudit(std::sync::Mutex<Vec<CreateAuditLogEntry>>);
+
+impl RecordingAudit {
+    fn rows(&self) -> Vec<CreateAuditLogEntry> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl CredentialAuditSink for RecordingAudit {
+    fn record(&self, entry: CreateAuditLogEntry) -> BoxFuture<'_, ()> {
+        self.0.lock().unwrap().push(entry);
+        Box::pin(async {})
+    }
+}
+
+/// A `UserServiceImpl` whose authorizer allows everything — for the tests
+/// below that are about what happens *after* the permission check.
+fn user_service<U: UserRepository>(
+    repo: U,
+    cfg: AuthConfig,
+    gate: Arc<tokio::sync::Semaphore>,
+) -> UserServiceImpl<U> {
+    UserServiceImpl::with_static_lockout_policy(
+        repo,
+        cfg,
+        gate,
+        Arc::new(ScriptedAuthorizer::allowing()),
+        Arc::new(RecordingAudit::default()),
+    )
+}
+
+/// Claims of a user token whose subject is `user_id`.
+fn user_claims_for(tenant_id: Uuid, user_id: Uuid) -> ValidatedClaims {
+    let token = issue_access_token(
+        user_id,
+        tenant_id,
+        Uuid::new_v4(),
+        &[],
+        &auth_config(),
+        Uuid::new_v4().to_string(),
+        AUD_USER,
+    )
+    .unwrap();
+    axiam_auth::token::validate_access_token(&token, &auth_config()).unwrap()
+}
+
+/// Claims of a service-account token (`aud = axiam:m2m`,
+/// `sub_kind = service_account`) for a fresh service account.
+fn m2m_claims_for(tenant_id: Uuid) -> ValidatedClaims {
+    let token = axiam_auth::token::issue_service_account_token(
+        Uuid::new_v4(),
+        tenant_id,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+        None,
+        &auth_config(),
+    )
+    .unwrap();
+    axiam_auth::token::validate_access_token(&token, &auth_config()).unwrap()
+}
+
+/// A user token narrowed to the machine audience (what an RFC 8693 exchange
+/// can produce): `aud = axiam:m2m`, but `sub_kind = user`.
+fn m2m_audience_user_claims_for(tenant_id: Uuid) -> ValidatedClaims {
+    let token = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant_id,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+    )
+    .aud(axiam_auth::token::AUD_M2M)
+    .issue(&auth_config())
+    .unwrap();
+    axiam_auth::token::validate_access_token(&token, &auth_config()).unwrap()
+}
+
+fn validate_request(tenant: Uuid, password: String) -> ValidateCredentialsRequest {
+    ValidateCredentialsRequest {
+        tenant_id: tenant.to_string(),
+        username_or_email: "alice".into(),
+        password,
+    }
+}
+
+/// D-2: a user token never reaches the credential check, even when the
+/// authorizer would allow — the principal kind is decided first.
+#[tokio::test]
+async fn validate_credentials_refuses_a_user_token() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let authz = Arc::new(ScriptedAuthorizer::allowing());
+    let audit = Arc::new(RecordingAudit::default());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(active_user(tenant, hash)),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        audit.clone(),
+    );
+    for claims in [claims_for(tenant), m2m_audience_user_claims_for(tenant)] {
+        let mut req = Request::new(validate_request(tenant, test_password()));
+        req.extensions_mut().insert(claims);
+        let err = svc.validate_credentials(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+    assert!(authz.asked().is_empty());
+    // QR1-13: a refusal is an answer too, and is audited — `Denied`, naming
+    // the caller and no account. (This asserted no row before the fix.)
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 2, "one row per refused call");
+    for row in &rows {
+        assert_eq!(row.action, "auth.credentials_validated");
+        assert_eq!(row.tenant_id, tenant);
+        assert_eq!(row.outcome, AuditOutcome::Denied);
+        assert_eq!(row.actor_type, ActorType::User);
+        assert_eq!(row.resource_id, None);
+    }
+}
+
+/// D-2: a service account the authorizer denies is refused.
+#[tokio::test]
+async fn validate_credentials_refuses_a_service_account_without_the_permission() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let authz = Arc::new(ScriptedAuthorizer::denying());
+    let audit = Arc::new(RecordingAudit::default());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(active_user(tenant, hash)),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        audit.clone(),
+    );
+    let claims = m2m_claims_for(tenant);
+    let caller: Uuid = claims.0.sub.parse().unwrap();
+    let mut req = Request::new(validate_request(tenant, test_password()));
+    req.extensions_mut().insert(claims);
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert_eq!(authz.asked(), ["users:validate_credentials"]);
+    // QR1-13: the refusal is audited.
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action, "auth.credentials_validated");
+    assert_eq!(rows[0].outcome, AuditOutcome::Denied);
+    assert_eq!(rows[0].actor_id, caller);
+    assert_eq!(rows[0].actor_type, ActorType::ServiceAccount);
+    assert_eq!(rows[0].resource_id, None);
+}
+
+/// QR3-4: the body-`tenant_id` mismatch is a `PERMISSION_DENIED` refusal like
+/// the others, and is audited like them — `Denied`, in the caller's own tenant
+/// (the one its token names), naming the caller and no account.
+#[tokio::test]
+async fn validate_credentials_audits_a_tenant_mismatch() {
+    let tenant = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let authz = Arc::new(ScriptedAuthorizer::allowing());
+    let audit = Arc::new(RecordingAudit::default());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(active_user(tenant, hash)),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        audit.clone(),
+    );
+    let claims = m2m_claims_for(tenant);
+    let caller: Uuid = claims.0.sub.parse().unwrap();
+    let mut req = Request::new(validate_request(other, test_password()));
+    req.extensions_mut().insert(claims);
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(authz.asked().is_empty());
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 1, "the mismatch refusal writes one row");
+    assert_eq!(rows[0].action, "auth.credentials_validated");
+    assert_eq!(rows[0].tenant_id, tenant);
+    assert_eq!(rows[0].outcome, AuditOutcome::Denied);
+    assert_eq!(rows[0].actor_id, caller);
+    assert_eq!(rows[0].actor_type, ActorType::ServiceAccount);
+    assert_eq!(rows[0].resource_id, None);
+}
+
+/// QR3-4: a service account whose token carries the wrong audience is refused
+/// as "not a service-account principal", but the row records it as what its
+/// token says it is — `ServiceAccount`, from `sub_kind` — not `User`.
+#[tokio::test]
+async fn validate_credentials_records_a_wrong_audience_service_account_as_one() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let authz = Arc::new(ScriptedAuthorizer::allowing());
+    let audit = Arc::new(RecordingAudit::default());
+    let svc = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(active_user(tenant, hash)),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        authz.clone(),
+        audit.clone(),
+    );
+    let token = axiam_auth::token::AccessTokenSpec::service_account(
+        Uuid::new_v4(),
+        tenant,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+    )
+    .aud(AUD_USER)
+    .issue(&auth_config())
+    .unwrap();
+    let claims = axiam_auth::token::validate_access_token(&token, &auth_config()).unwrap();
+    let caller: Uuid = claims.0.sub.parse().unwrap();
+    let mut req = Request::new(validate_request(tenant, test_password()));
+    req.extensions_mut().insert(claims);
+    let err = svc.validate_credentials(req).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert!(authz.asked().is_empty());
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, AuditOutcome::Denied);
+    assert_eq!(rows[0].actor_id, caller);
+    assert_eq!(rows[0].actor_type, ActorType::ServiceAccount);
+}
+
+/// Every answer — valid, wrong password, unknown name — writes one
+/// `auth.credentials_validated` row naming the service account.
+#[tokio::test]
+async fn validate_credentials_audits_every_answer() {
+    let tenant = Uuid::new_v4();
+    let hash = axiam_auth::password::hash_password(&test_password(), None).unwrap();
+    let user = active_user(tenant, hash);
+    let claims = m2m_claims_for(tenant);
+    let caller: Uuid = claims.0.sub.parse().unwrap();
+    let audit = Arc::new(RecordingAudit::default());
+    let known = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo {
+            user: Some(user.clone()),
+        },
+        auth_config(),
+        test_crypto_gate(),
+        Arc::new(ScriptedAuthorizer::allowing()),
+        audit.clone(),
+    );
+    let unknown = UserServiceImpl::with_static_lockout_policy(
+        MockUserRepo { user: None },
+        auth_config(),
+        test_crypto_gate(),
+        Arc::new(ScriptedAuthorizer::allowing()),
+        audit.clone(),
+    );
+    for (svc, password, valid) in [
+        (&known, test_password(), true),
+        (&known, "wrong".to_string(), false),
+        (&unknown, test_password(), false),
+    ] {
+        let mut req = Request::new(validate_request(tenant, password));
+        req.extensions_mut().insert(claims.clone());
+        assert_eq!(
+            svc.validate_credentials(req)
+                .await
+                .unwrap()
+                .into_inner()
+                .valid,
+            valid
+        );
+    }
+    let rows = audit.rows();
+    assert_eq!(rows.len(), 3);
+    for row in &rows {
+        assert_eq!(row.action, "auth.credentials_validated");
+        assert_eq!(row.tenant_id, tenant);
+        assert_eq!(row.actor_id, caller);
+        assert_eq!(row.actor_type, ActorType::ServiceAccount);
+    }
+    assert_eq!(rows[0].outcome, AuditOutcome::Success);
+    assert_eq!(rows[0].resource_id, Some(user.id));
+    assert_eq!(rows[1].outcome, AuditOutcome::Failure);
+    assert_eq!(rows[1].resource_id, Some(user.id));
+    assert_eq!(rows[2].outcome, AuditOutcome::Failure);
+    assert_eq!(rows[2].resource_id, None);
+}
+
+// ---------------------------------------------------------------------------
+// SA-03 (N10): a WebAuthn ceremony state token is not an access token on gRPC
+// ---------------------------------------------------------------------------
+
+/// A credential store the discoverable ceremony start never reads.
+#[derive(Clone)]
+struct NoWebauthnStore;
+
+#[rustfmt::skip]
+impl axiam_core::repository::WebauthnCredentialRepository for NoWebauthnStore {
+    async fn create(&self, _i: axiam_core::models::webauthn_credential::CreateWebauthnCredential) -> AxiamResult<axiam_core::models::webauthn_credential::WebauthnCredential> { unreachable!() }
+    async fn get_by_id(&self, _t: Uuid, _i: Uuid) -> AxiamResult<axiam_core::models::webauthn_credential::WebauthnCredential> { unreachable!() }
+    async fn list_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<Vec<axiam_core::models::webauthn_credential::WebauthnCredential>> { unreachable!() }
+    async fn update_last_used(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!() }
+    async fn delete(&self, _t: Uuid, _i: Uuid) -> AxiamResult<()> { unreachable!() }
+    async fn count_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!() }
+    async fn delete_by_user(&self, _t: Uuid, _u: Uuid) -> AxiamResult<u64> { unreachable!() }
+}
+
+/// The configuration under which N10 reproduced: the access-token key signs
+/// the state token, `jwt_issuer` is the root issuer (no `OAUTH2_ISSUER_URL`),
+/// and the pre-SA-03 default of admitting an absent `aud` is set explicitly,
+/// so what refuses the token below is its type and not that flag.
+fn n10_config() -> AuthConfig {
+    AuthConfig {
+        mfa_encryption_key: Some([9u8; 32]),
+        allow_missing_aud_as_user: true,
+        ..auth_config()
+    }
+}
+
+/// What the public `POST /api/v1/auth/webauthn/authenticate/discoverable/start`
+/// hands an anonymous caller who names a tenant.
+async fn discoverable_state_token(tenant_id: Uuid) -> String {
+    let webauthn = axiam_auth::webauthn::WebauthnService::new(NoWebauthnStore, n10_config())
+        .expect("service builds");
+    webauthn
+        .start_discoverable_authentication(tenant_id, Uuid::new_v4())
+        .await
+        .expect("the ceremony starts")
+        .1
+}
+
+#[tokio::test]
+async fn n10_the_interceptor_refuses_a_webauthn_state_token() {
+    let token = discoverable_state_token(Uuid::new_v4()).await;
+    let mut interceptor = AuthInterceptor::new(n10_config());
+    let mut req = Request::new(());
+    req.metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let err = interceptor
+        .call(req)
+        .map(|r| {
+            r.extensions()
+                .get::<ValidatedClaims>()
+                .map(|c| c.0.sub.clone())
+        })
+        .expect_err("a ceremony state token must not authenticate a gRPC caller");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
+
+    // Positive control: an ordinary access token still passes.
+    let mut req = Request::new(());
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", token_for(Uuid::new_v4()))
+            .parse()
+            .unwrap(),
+    );
+    assert!(interceptor.call(req).is_ok());
+}
+
+#[tokio::test]
+async fn n10_validate_token_reports_a_webauthn_state_token_invalid() {
+    let tenant = Uuid::new_v4();
+    let token = discoverable_state_token(tenant).await;
+    let svc = TokenServiceImpl::new(
+        n10_config(),
+        MockUserRepo {
+            user: Some(active_user(Uuid::new_v4(), String::new())),
+        },
+    );
+    let mut req = Request::new(ValidateTokenRequest {
+        access_token: token,
+    });
+    req.extensions_mut().insert(claims_for(tenant));
+    let resp = svc.validate_token(req).await.unwrap().into_inner();
+    assert!(
+        !resp.valid,
+        "ValidateToken called a ceremony state token valid (subject {:?})",
+        resp.subject_id
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SA-41 — introspection of a token whose `sid` session is no longer live
+// ---------------------------------------------------------------------------
+
+struct FixedSessions(bool);
+
+impl axiam_api_grpc::middleware::strict_revocation::SessionRevocationCheck for FixedSessions {
+    fn is_session_active(
+        &self,
+        _tenant_id: Uuid,
+        _session_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        let live = self.0;
+        Box::pin(async move { live })
+    }
+}
+
+#[tokio::test]
+async fn sa41_introspection_reports_a_token_of_a_dead_session_inactive() {
+    let tenant = Uuid::new_v4();
+    let token = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+    )
+    .session(Some(Uuid::new_v4()))
+    .issue(&auth_config())
+    .unwrap();
+
+    for (live, what) in [(true, "live"), (false, "ended")] {
+        let svc = token_service().with_session_check(Arc::new(FixedSessions(live)));
+        let mut req = Request::new(IntrospectTokenRequest {
+            access_token: token.clone(),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let resp = svc.introspect_token(req).await.unwrap().into_inner();
+        assert_eq!(resp.active, live, "session {what}");
+        if !live {
+            assert!(resp.sub.is_empty() && resp.jti.is_empty() && resp.scope.is_empty());
+        }
+    }
+}
+
+/// Live for exactly one session id, so a test proves WHICH id the service
+/// asked about rather than that it asked.
+struct OnlySession(Uuid);
+
+impl axiam_api_grpc::middleware::strict_revocation::SessionRevocationCheck for OnlySession {
+    fn is_session_active(
+        &self,
+        _tenant_id: Uuid,
+        session_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        let live = session_id == self.0;
+        Box::pin(async move { live })
+    }
+}
+
+/// QR1-1: gRPC introspection reads the session by the REST extractor's rule
+/// (`sid`, else `jti`, unless the token comes from a session-less grant).
+///
+/// A first-party sign-in token stores its session id in `jti` and has no
+/// `sid`: it is inactive once that session is gone and active while it is
+/// live. Client-credentials, service-account and device-grant tokens name no
+/// session and stay active whatever the session store holds.
+#[tokio::test]
+async fn qr1_1_introspection_reads_a_sign_in_tokens_session_from_jti() {
+    let tenant = Uuid::new_v4();
+    let org = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let cfg = auth_config();
+
+    let sign_in = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant,
+        org,
+        session_id.to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    let client_credentials = axiam_auth::token::AccessTokenSpec::oauth2_client("c-1", tenant, org)
+        .issue(&cfg)
+        .unwrap();
+    let service_account = axiam_auth::token::AccessTokenSpec::service_account(
+        Uuid::new_v4(),
+        tenant,
+        org,
+        Uuid::new_v4().to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    let device_grant = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant,
+        org,
+        Uuid::new_v4().to_string(),
+    )
+    .client_id(Some("c-1"))
+    .issue(&cfg)
+    .unwrap();
+
+    // (the one live session id, token, expected `active`, what)
+    let cases: Vec<(Uuid, &String, bool, &str)> = vec![
+        (session_id, &sign_in, true, "sign-in token, live session"),
+        (
+            Uuid::new_v4(),
+            &sign_in,
+            false,
+            "sign-in token, session deleted",
+        ),
+        (
+            Uuid::new_v4(),
+            &client_credentials,
+            true,
+            "client credentials",
+        ),
+        (Uuid::new_v4(), &service_account, true, "service account"),
+        (
+            Uuid::new_v4(),
+            &device_grant,
+            true,
+            "grant that names no session",
+        ),
+    ];
+    for (live_session, token, active, what) in cases {
+        let svc = token_service().with_session_check(Arc::new(OnlySession(live_session)));
+        let mut req = Request::new(IntrospectTokenRequest {
+            access_token: token.clone(),
+        });
+        req.extensions_mut().insert(claims_for(tenant));
+        let resp = svc.introspect_token(req).await.unwrap().into_inner();
+        assert_eq!(resp.active, active, "{what}");
+    }
 }

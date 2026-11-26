@@ -642,16 +642,23 @@ async fn org_settings_update_denies_tenant_settings_permission() {
 }
 
 /// The dedicated `organizations:update_settings` grant authorizes the org
-/// baseline write (confirms the handler now enforces the org-level permission).
+/// baseline write — for an **organization-level** principal.
+///
+/// Rewritten for SA-02 (N8). This test used to give the grant to a user of an
+/// ordinary (`TenantKind::Standard`) tenant and assert 200, which pinned the
+/// defect: the organization baseline cascades into every sibling tenant, and a
+/// tenant administrator is not who may rewrite it. The caller now lives in the
+/// organization's reserved scope, which is where the action belongs.
 #[actix_rt::test]
 async fn org_settings_update_allows_org_settings_permission() {
-    let (db, org_id, tenant_id) = setup_db().await;
+    let (db, org_id, _tenant_id) = setup_db().await;
+    let scope_id = seeded_org_scope_tenant(&db, org_id).await;
     let auth = test_auth_config();
     let authz = make_authz(&db);
     let user_id =
-        user_with_single_permission(&db, tenant_id, "orgadmin", "organizations:update_settings")
+        user_with_single_permission(&db, scope_id, "orgadmin", "organizations:update_settings")
             .await;
-    let token = mint_token(&auth, user_id, tenant_id, org_id);
+    let token = mint_token(&auth, user_id, scope_id, org_id);
     let app = test_app!(db, auth, authz);
 
     let req = test::TestRequest::put()
@@ -667,6 +674,171 @@ async fn org_settings_update_allows_org_settings_permission() {
     assert_eq!(
         resp.status().as_u16(),
         200,
-        "organizations:update_settings must authorize the org-baseline write"
+        "organizations:update_settings must authorize the org-baseline write \
+         for an organization-level principal"
     );
+}
+
+// -------------------------------------------------------------------------
+// SA-02 (N8): the organization baseline belongs to the organization scope
+// -------------------------------------------------------------------------
+
+/// The organization's reserved scope tenant, with the permission registry and
+/// the default roles seeded the way the bootstrap path seeds them.
+async fn seeded_org_scope_tenant(db: &Surreal<TestDb>, org_id: Uuid) -> Uuid {
+    let scope = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant::organization_scope(org_id))
+        .await
+        .unwrap();
+    seed_permissions(db, scope.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(db, scope.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    scope.id
+}
+
+/// A second ordinary tenant of `org_id`, seeded exactly like the first — the
+/// same two calls `handlers::tenants::create` makes for every new tenant.
+async fn seeded_sibling_tenant(db: &Surreal<TestDb>, org_id: Uuid) -> Uuid {
+    let tenant = SurrealTenantRepository::new(db.clone())
+        .create(CreateTenant {
+            organization_id: org_id,
+            kind: TenantKind::Standard,
+            name: "Sibling Tenant".into(),
+            slug: "sibling-tenant".into(),
+            metadata: None,
+        })
+        .await
+        .unwrap();
+    seed_permissions(db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    seed_default_roles(db, tenant.id, PERMISSION_REGISTRY)
+        .await
+        .unwrap();
+    tenant.id
+}
+
+/// N8: tenant A's seeded `admin` cannot rewrite the organization baseline that
+/// sibling tenant B inherits, and B's effective settings are untouched.
+///
+/// Two callers, because the handler guard and the seeder are two layers: the
+/// seeded admin (whose role no longer carries the grant), and a tenant-A role
+/// that carries `organizations:update_settings` explicitly — an operator-made
+/// role, or a grant an older seeder made — which only the scope guard refuses.
+#[actix_rt::test]
+async fn standard_tenant_admin_cannot_rewrite_the_org_baseline() {
+    use axiam_core::models::settings::SetOrgSettings;
+    use axiam_core::repository::SettingsRepository;
+    use axiam_db::SurrealSettingsRepository;
+
+    let (db, org_id, tenant_a) = setup_db().await;
+    let tenant_b = seeded_sibling_tenant(&db, org_id).await;
+    let settings_repo = SurrealSettingsRepository::new(db.clone());
+    let baseline: SetOrgSettings = serde_json::from_value(valid_org_settings_body()).unwrap();
+    settings_repo
+        .set_org_settings(org_id, baseline)
+        .await
+        .unwrap();
+    assert!(
+        settings_repo
+            .get_effective_settings(org_id, tenant_b)
+            .await
+            .unwrap()
+            .mfa
+            .mfa_enforced,
+        "fixture: B inherits mfa_enforced = true"
+    );
+
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let seeded_admin = create_user_with_role(
+        &db,
+        tenant_a,
+        "a-admin",
+        "a-admin@example.com",
+        Some("admin"),
+    )
+    .await;
+    let explicit = user_with_single_permission(
+        &db,
+        tenant_a,
+        "a-settings-writer",
+        "organizations:update_settings",
+    )
+    .await;
+    let app = test_app!(db, auth, authz);
+
+    let mut weaker = valid_org_settings_body();
+    weaker["mfa_enforced"] = serde_json::json!(false);
+
+    for (who, user_id) in [("seeded admin", seeded_admin), ("explicit grant", explicit)] {
+        let token = mint_token(&auth, user_id, tenant_a, org_id);
+        let req = test::TestRequest::put()
+            .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+            .peer_addr("127.0.0.1:12345".parse().unwrap())
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(weaker.clone())
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            403,
+            "tenant A's {who} must not rewrite the organization baseline"
+        );
+    }
+
+    assert!(
+        settings_repo
+            .get_effective_settings(org_id, tenant_b)
+            .await
+            .unwrap()
+            .mfa
+            .mfa_enforced,
+        "sibling tenant B's effective mfa_enforced was weakened by tenant A"
+    );
+}
+
+/// N8, read side: the organization baseline is not a tenant administrator's to
+/// read either (`get_org_settings` had the same missing guard).
+#[actix_rt::test]
+async fn standard_tenant_admin_cannot_read_the_org_baseline() {
+    let (db, org_id, tenant_a) = setup_db().await;
+    let _tenant_b = seeded_sibling_tenant(&db, org_id).await;
+    let auth = test_auth_config();
+    let authz = make_authz(&db);
+    let seeded_admin = create_user_with_role(
+        &db,
+        tenant_a,
+        "a-admin",
+        "a-admin@example.com",
+        Some("admin"),
+    )
+    .await;
+    let explicit = user_with_single_permission(
+        &db,
+        tenant_a,
+        "a-settings-reader",
+        "organizations:get_settings",
+    )
+    .await;
+    let app = test_app!(db, auth, authz);
+
+    for (who, user_id) in [("seeded admin", seeded_admin), ("explicit grant", explicit)] {
+        let token = mint_token(&auth, user_id, tenant_a, org_id);
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/organizations/{org_id}/settings"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            403,
+            "tenant A's {who} must not read the organization baseline"
+        );
+    }
 }

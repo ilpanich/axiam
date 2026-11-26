@@ -62,6 +62,7 @@ fn entry(
         outcome,
         ip_address: Some("203.0.113.5".into()),
         metadata: Some(serde_json::json!({"email": "actor@example.com"})),
+        organization_id: None,
     }
 }
 
@@ -276,29 +277,69 @@ async fn list_filters_by_actor_action_outcome_resource_and_time_range() {
     assert_eq!(excluded.total, 0);
 }
 
+/// SA-02 (N1): the system partition (nil `tenant_id`) is read per
+/// organization. `list_system(org)` returns the system rows recording `org`,
+/// a system row recording none is returned for no organization, and a tenant
+/// row never records one (its organization is its tenant's).
 #[tokio::test]
-async fn list_system_uses_nil_tenant_id() {
-    let (db, _tenant_id) = setup().await;
+async fn list_system_returns_only_the_organizations_own_system_rows() {
+    let (db, tenant_id) = setup().await;
     let repo = SurrealAuditLogRepository::new(db);
-    let actor_id = Uuid::new_v4();
+    let (org_x, org_y) = (Uuid::new_v4(), Uuid::new_v4());
+    let row = |tenant: Uuid, action: &str, org: Option<Uuid>| CreateAuditLogEntry {
+        organization_id: org,
+        ..entry(tenant, Uuid::new_v4(), action, AuditOutcome::Failure, None)
+    };
 
-    // System/unauthenticated entries are stored with nil tenant_id.
-    repo.append(entry(
-        Uuid::nil(),
-        actor_id,
-        "auth.failed_login",
-        AuditOutcome::Failure,
-        None,
-    ))
-    .await
-    .unwrap();
-
-    let system_entries = repo
-        .list_system(AuditLogFilter::default(), Pagination::default())
+    repo.append(row(Uuid::nil(), "x.system", Some(org_x)))
         .await
         .unwrap();
-    assert_eq!(system_entries.total, 1);
-    assert_eq!(system_entries.items[0].action, "auth.failed_login");
+    repo.append(row(Uuid::nil(), "y.system", Some(org_y)))
+        .await
+        .unwrap();
+    repo.append(row(Uuid::nil(), "auth.failed_login", None))
+        .await
+        .unwrap();
+    let tenant_row = repo
+        .append(row(tenant_id, "x.tenant", Some(org_x)))
+        .await
+        .unwrap();
+    assert_eq!(
+        tenant_row.organization_id, None,
+        "a tenant row records no organization of its own"
+    );
+
+    for (org, action) in [(org_x, "x.system"), (org_y, "y.system")] {
+        let page = repo
+            .list_system(org, AuditLogFilter::default(), Pagination::default())
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1, "{action}: {:?}", page.items);
+        assert_eq!(page.items[0].action, action);
+        assert_eq!(page.items[0].organization_id, Some(org));
+        assert_eq!(page.items[0].tenant_id, Uuid::nil());
+    }
+    let none = repo
+        .list_system(
+            Uuid::new_v4(),
+            AuditLogFilter::default(),
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(none.total, 0, "{:?}", none.items);
+
+    // The whole partition is still there, unchanged: nothing is filtered out
+    // of the datastore, only out of the per-organization read.
+    let partition = repo
+        .list(
+            Uuid::nil(),
+            AuditLogFilter::default(),
+            Pagination::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(partition.total, 3);
 }
 
 #[tokio::test]
@@ -316,6 +357,7 @@ async fn append_supports_service_account_and_system_actor_types() {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -331,6 +373,7 @@ async fn append_supports_service_account_and_system_actor_types() {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         })
         .await
         .unwrap();
@@ -643,6 +686,7 @@ async fn pseudonymize_actor_leaves_the_erasures_own_record() {
             "pseudonym": pseudonym,
             "certificates_revoked": 0,
         })),
+        organization_id: None,
     };
     let login = repo
         .append(entry(

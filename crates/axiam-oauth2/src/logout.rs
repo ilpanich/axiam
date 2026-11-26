@@ -102,7 +102,11 @@ pub fn issue_logout_token(
             .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
         &owned
     };
-    jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, key)
+    // SA-03 — explicitly typed, as Back-Channel Logout 1.0 §2.4 recommends,
+    // so no verifier of another AXIAM token kind can mistake it for its own.
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.typ = Some(axiam_auth::token::TYP_LOGOUT_TOKEN.to_owned());
+    jsonwebtoken::encode(&header, &claims, key)
         .map_err(|e| AuthError::Crypto(format!("logout token encode: {e}")))
 }
 
@@ -129,6 +133,12 @@ pub struct IdTokenHint {
 ///   authenticated statement of which session and client this is about rather
 ///   than a suggestion. Without it, anyone could name any session.
 ///
+/// The header `typ` must be an ID token's (`JWT`, or absent), and the claims
+/// must carry no member an ID token never has (`jti`, `purpose`, `scope`,
+/// `client_id`): an access token — including one minted before SA-03 with
+/// `typ: JWT` — a purpose token or a logout token is not a hint. See
+/// [`axiam_auth::token::decode_id_token_hint_claims`].
+///
 /// `aud` is read out rather than validated against — there is no expected
 /// value to compare to, since the client's identity is what we are learning.
 ///
@@ -142,9 +152,10 @@ pub fn decode_id_token_hint(token: &str, public_key_pem: &str) -> Option<IdToken
     validation.validate_exp = false;
     validation.validate_aud = false;
 
-    let claims = jsonwebtoken::decode::<axiam_auth::token::IdTokenClaims>(token, &key, &validation)
-        .ok()?
-        .claims;
+    // Q-8 / S-10, SR2-2: only an ID token is a hint. An access token's claims
+    // fit `IdTokenClaims` (and carry `sid`), so the header and the claim set
+    // must refuse it.
+    let claims = axiam_auth::token::decode_id_token_hint_claims(token, &key, &validation)?;
     Some(IdTokenHint {
         session_id: claims.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok()),
         client_id: claims.aud,
@@ -246,6 +257,24 @@ mod tests {
         assert_eq!(c.events.len(), 1);
         let member = c.events.get(BACKCHANNEL_LOGOUT_EVENT).expect("events key");
         assert_eq!(member, &Value::Object(Map::new()));
+    }
+
+    /// SA-03: the logout token is explicitly typed (BCL 1.0 §2.4) and no
+    /// access-token verifier admits it.
+    #[test]
+    fn logout_token_is_typed_and_is_not_an_access_token() {
+        let cfg = test_config();
+        let t = issue_logout_token(
+            "https://id.test.example",
+            "rp-1",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &cfg,
+        )
+        .unwrap();
+        let header = jsonwebtoken::decode_header(&t).unwrap();
+        assert_eq!(header.typ.as_deref(), Some("logout+jwt"));
+        assert!(axiam_auth::token::decode_access_token(&t, &cfg).is_err());
     }
 
     #[test]
@@ -381,6 +410,168 @@ mod tests {
         let outcome =
             resolve_post_logout_redirect(Some("https://elsewhere.example"), &allow, Some("xyz"));
         assert_eq!(outcome, LogoutOutcome::Rendered);
+    }
+
+    /// Q-8 / S-10: an `at+jwt` access token is not an ID token. Its claims
+    /// fit `IdTokenClaims` (`sub`, `aud`, `iss`, `iat`, `exp`, and `sid`), so
+    /// only the header can refuse it; before SA-03 review it named the
+    /// session and the client to the end-session endpoint and to
+    /// `/oauth2/authorize`'s hint.
+    #[test]
+    fn an_access_token_is_not_an_id_token_hint() {
+        let cfg = test_config();
+        let sid = Uuid::new_v4();
+        let access = axiam_auth::token::AccessTokenSpec::user(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            sid.to_string(),
+        )
+        .aud("rp-1")
+        .session(Some(sid))
+        .issue(&cfg)
+        .unwrap();
+        assert_eq!(
+            jsonwebtoken::decode_header(&access).unwrap().typ.as_deref(),
+            Some(axiam_auth::token::TYP_ACCESS_TOKEN)
+        );
+        let hint = decode_id_token_hint(&access, &cfg.jwt_public_key_pem);
+        assert_eq!(
+            hint, None,
+            "an at+jwt access token was accepted as an id_token_hint"
+        );
+
+        // Every other AXIAM kind is refused too; an untyped token (every ID
+        // token before SA-03 was `JWT`) and a real ID token are not.
+        let now = chrono::Utc::now().timestamp();
+        let claims = serde_json::json!({
+            "iss": cfg.root_issuer(), "sub": Uuid::new_v4().to_string(),
+            "aud": "rp-1", "iat": now, "exp": now + 300,
+        });
+        let key = EncodingKey::from_ed_pem(cfg.jwt_private_key_pem.as_bytes()).unwrap();
+        for (typ, accepted) in [
+            (Some(axiam_auth::token::TYP_WEBAUTHN_STATE), false),
+            (Some(axiam_auth::token::TYP_MFA_CHALLENGE), false),
+            (Some(axiam_auth::token::TYP_MFA_SETUP), false),
+            (Some(axiam_auth::token::TYP_LOGOUT_TOKEN), false),
+            (Some("JWT"), true),
+            (None, true),
+        ] {
+            let mut header = Header::new(Algorithm::EdDSA);
+            header.typ = typ.map(str::to_owned);
+            let token = jsonwebtoken::encode(&header, &claims, &key).unwrap();
+            assert_eq!(
+                decode_id_token_hint(&token, &cfg.jwt_public_key_pem).is_some(),
+                accepted,
+                "typ {typ:?}"
+            );
+        }
+        let id = axiam_auth::token::issue_id_token(
+            Uuid::new_v4(),
+            "rp-1",
+            None,
+            None,
+            &[],
+            &cfg,
+            Some(sid),
+            &axiam_auth::token::IdTokenEvidence::NONE,
+        )
+        .unwrap();
+        assert!(decode_id_token_hint(&id, &cfg.jwt_public_key_pem).is_some());
+    }
+
+    /// Re-sign `token`'s payload, unchanged, under `typ`: what an access token
+    /// minted before SA-03 (`Header::new(EdDSA)`, so `typ: "JWT"`) looks like.
+    fn resign_with_typ(token: &str, typ: Option<&str>, cfg: &AuthConfig) -> String {
+        use base64::Engine;
+        let payload = token.split('.').nth(1).unwrap();
+        let claims: Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .unwrap(),
+        )
+        .unwrap();
+        let key = EncodingKey::from_ed_pem(cfg.jwt_private_key_pem.as_bytes()).unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = typ.map(str::to_owned);
+        jsonwebtoken::encode(&header, &claims, &key).unwrap()
+    }
+
+    /// SR2-2: an access token minted before SA-03 carries `typ: "JWT"` (or
+    /// none) and claims that fit `IdTokenClaims`, `sid` included. The header
+    /// cannot refuse it, and the decoder skips `exp`, so without a claims rule
+    /// every such token would name a session to the end-session endpoint and
+    /// a subject to `/oauth2/authorize` forever. `jti` (and `purpose`,
+    /// `scope`, `client_id`) is what no ID token has ever carried.
+    #[test]
+    fn a_legacy_untyped_access_token_is_not_an_id_token_hint() {
+        let cfg = test_config();
+        let sid = Uuid::new_v4();
+        let access = axiam_auth::token::AccessTokenSpec::user(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            sid.to_string(),
+        )
+        .aud("rp-1")
+        .session(Some(sid))
+        .issue(&cfg)
+        .unwrap();
+        for typ in [Some("JWT"), None] {
+            let legacy = resign_with_typ(&access, typ, &cfg);
+            assert_eq!(
+                decode_id_token_hint(&legacy, &cfg.jwt_public_key_pem),
+                None,
+                "a legacy (typ {typ:?}) access token was accepted as an id_token_hint"
+            );
+        }
+
+        // Each access-token-only member alone refuses an otherwise ID-shaped,
+        // untyped token.
+        let now = chrono::Utc::now().timestamp();
+        let key = EncodingKey::from_ed_pem(cfg.jwt_private_key_pem.as_bytes()).unwrap();
+        for (member, value) in [
+            ("jti", serde_json::json!(Uuid::new_v4().to_string())),
+            ("purpose", serde_json::json!("webauthn_authentication")),
+            ("scope", serde_json::json!("openid")),
+            ("client_id", serde_json::json!("rp-1")),
+        ] {
+            let mut claims = serde_json::json!({
+                "iss": cfg.root_issuer(), "sub": Uuid::new_v4().to_string(),
+                "aud": "rp-1", "iat": now, "exp": now + 300, "sid": sid.to_string(),
+            });
+            claims[member] = value;
+            let token =
+                jsonwebtoken::encode(&Header::new(Algorithm::EdDSA), &claims, &key).unwrap();
+            assert_eq!(
+                decode_id_token_hint(&token, &cfg.jwt_public_key_pem),
+                None,
+                "an untyped token carrying `{member}` was accepted as an id_token_hint"
+            );
+        }
+
+        // A real ID token as minted today, every optional claim populated,
+        // still is a hint.
+        let sub = Uuid::new_v4();
+        let id = axiam_auth::token::issue_id_token(
+            sub,
+            "rp-1",
+            Some("n-0S6_WzA2Mj"),
+            Some("alice"),
+            &["openid".to_owned(), "profile".to_owned()],
+            &cfg,
+            Some(sid),
+            &axiam_auth::token::IdTokenEvidence {
+                auth_time: Some(now - 60),
+                acr: Some("urn:axiam:acr:mfa".into()),
+                amr: vec!["pwd".into(), "otp".into()],
+            },
+        )
+        .unwrap();
+        let hint = decode_id_token_hint(&id, &cfg.jwt_public_key_pem).expect("a real ID token");
+        assert_eq!(hint.session_id, Some(sid));
+        assert_eq!(hint.client_id, "rp-1");
+        assert_eq!(hint.subject_id, Some(sub));
     }
 
     #[test]

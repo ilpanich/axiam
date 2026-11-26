@@ -797,6 +797,324 @@ async fn setup_register_start_refuses_an_account_that_already_has_a_factor() {
     );
 }
 
+/// SA-43 (h08-authn-recovery): the TOTP setup endpoints use the same
+/// first-factor-only guard as the WebAuthn twins — `available_method_types`,
+/// which sees the WebAuthn credential rows as well as the TOTP secret. An
+/// account holding a passkey (here one whose `mfa_enabled` flag was never
+/// turned on, the state a failed profile-page enable leaves) must not be able
+/// to add a TOTP factor with a setup token.
+#[actix_web::test]
+async fn sa43_totp_setup_enroll_refuses_an_account_that_holds_a_passkey() {
+    use axiam_core::models::webauthn_credential::{
+        CreateWebauthnCredential, WebauthnCredentialType,
+    };
+    use axiam_core::repository::WebauthnCredentialRepository;
+
+    let (db, org_id, tenant_id, user_id) = setup().await;
+    enforce_mfa(&db, org_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let token = setup_token_for(&app, org_id, tenant_id, "wa-user-a").await;
+    axiam_db::repository::SurrealWebauthnCredentialRepository::new(db.clone())
+        .create(CreateWebauthnCredential {
+            tenant_id,
+            user_id,
+            credential_id: Uuid::new_v4().to_string(),
+            name: "passkey".into(),
+            credential_type: WebauthnCredentialType::Passkey,
+            passkey_json: "sealed-passkey-placeholder".into(),
+            aaguid: None,
+            attestation_format: None,
+            attested: false,
+            authenticator_name: None,
+        })
+        .await
+        .unwrap();
+
+    for uri in [
+        "/api/v1/auth/mfa/setup/enroll",
+        "/api/v1/auth/mfa/setup/confirm",
+    ] {
+        let req = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri(uri)
+            .set_json(json!({ "setup_token": token, "totp_code": "000000" }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status().as_u16(),
+            400,
+            "{uri}: an account with a factor is refused, as \
+             `webauthn/setup/register/start` refuses it"
+        );
+        let body: Value = test::read_body_json(resp).await;
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already"),
+            "{uri}: {body}"
+        );
+    }
+}
+
+/// A `none`-attestation registration response over `challenge`, for a fresh
+/// P-256 credential: the CBOR is written by hand (it is three keys and a COSE
+/// key), which is all `webauthn-rs` needs to register a passkey under a tenant
+/// whose attestation mode is `none`.
+fn sa43_none_registration(challenge: &str) -> Value {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use sha2::{Digest, Sha256};
+
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+    let point = key.public_key_raw();
+    assert_eq!(point.len(), 65, "an uncompressed P-256 point");
+    let cred_id = Uuid::new_v4().as_bytes().to_vec();
+
+    let mut cose = vec![0xA5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20];
+    cose.extend_from_slice(&point[1..33]);
+    cose.extend_from_slice(&[0x22, 0x58, 0x20]);
+    cose.extend_from_slice(&point[33..65]);
+
+    let mut auth_data = Sha256::digest(b"localhost").to_vec();
+    auth_data.push(0x45); // UP | UV | AT
+    auth_data.extend_from_slice(&0u32.to_be_bytes());
+    auth_data.extend_from_slice(&[0u8; 16]); // AAGUID
+    auth_data.extend_from_slice(&u16::try_from(cred_id.len()).unwrap().to_be_bytes());
+    auth_data.extend_from_slice(&cred_id);
+    auth_data.extend_from_slice(&cose);
+
+    let mut att = vec![0xA3, 0x63];
+    att.extend_from_slice(b"fmt");
+    att.push(0x64);
+    att.extend_from_slice(b"none");
+    att.push(0x67);
+    att.extend_from_slice(b"attStmt");
+    att.push(0xA0);
+    att.push(0x68);
+    att.extend_from_slice(b"authData");
+    att.push(0x58);
+    att.push(u8::try_from(auth_data.len()).unwrap());
+    att.extend_from_slice(&auth_data);
+
+    let client_data = serde_json::to_vec(&json!({
+        "type": "webauthn.create",
+        "challenge": challenge,
+        "origin": "http://localhost:8090",
+        "crossOrigin": false,
+    }))
+    .unwrap();
+    json!({
+        "id": URL_SAFE_NO_PAD.encode(&cred_id),
+        "rawId": URL_SAFE_NO_PAD.encode(&cred_id),
+        "type": "public-key",
+        "response": {
+            "attestationObject": URL_SAFE_NO_PAD.encode(&att),
+            "clientDataJSON": URL_SAFE_NO_PAD.encode(&client_data),
+        },
+        "extensions": {}
+    })
+}
+
+/// SA-43 (owner decision 2026-11-24): two forced-enrolment finishes sent
+/// together with one setup token — say the user's and that of whoever captured
+/// the token — register ONE credential. The token is spent before the
+/// registration is stored, so the second finish is refused before it writes
+/// anything; the factor-presence guard alone could be passed by both.
+#[actix_web::test]
+async fn sa43_concurrent_setup_finishes_register_one_credential() {
+    use axiam_core::repository::WebauthnCredentialRepository;
+
+    // `surrealkv`, the engine production runs: `kv-mem` can admit two winners
+    // of a UNIQUE index race (see `axiam-db/tests/common`).
+    let dir = tempfile::TempDir::new().unwrap();
+    let db: Surreal<TestDb> = Surreal::new::<surrealdb::engine::local::SurrealKv>(
+        dir.path().join("race.db").to_string_lossy().into_owned(),
+    )
+    .await
+    .unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let (org_id, tenant_id, user_id) = setup_tenant(&db, "a").await;
+    enforce_mfa(&db, org_id).await;
+    let auth = test_auth_config();
+    let app = test_app!(db, auth);
+
+    let token = setup_token_for(&app, org_id, tenant_id, "wa-user-a").await;
+    let mut finishes = Vec::new();
+    for _ in 0..2 {
+        let resp = test::call_service(&app, setup_start(&token).to_request()).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body: Value = test::read_body_json(resp).await;
+        let challenge = body["challenge"]["publicKey"]["challenge"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let state_token = body["state_token"].as_str().unwrap().to_owned();
+        finishes.push(
+            test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri("/api/v1/auth/webauthn/setup/register/finish")
+                .set_json(json!({
+                    "setup_token": token,
+                    "state_token": state_token,
+                    "credential_name": "key",
+                    "response": sa43_none_registration(&challenge),
+                }))
+                .to_request(),
+        );
+    }
+    let second = finishes.pop().unwrap();
+    let first = finishes.pop().unwrap();
+    let (a, b) = futures::future::join(
+        test::call_service(&app, first),
+        test::call_service(&app, second),
+    )
+    .await;
+    let (a, b) = (a.status().as_u16(), b.status().as_u16());
+
+    let credentials = axiam_db::repository::SurrealWebauthnCredentialRepository::new(db.clone())
+        .list_by_user(tenant_id, user_id)
+        .await
+        .unwrap();
+    assert!(
+        a == 200 || b == 200,
+        "one finish completes the sign-in ({a}, {b})"
+    );
+    assert_eq!(
+        credentials.len(),
+        1,
+        "one setup token registers one credential ({a}, {b})"
+    );
+}
+
+/// SR1-2 / QR1-2: a TOTP setup confirm and a WebAuthn setup finish sent
+/// together with ONE setup token — say the user's passkey enrolment and the
+/// TOTP enrolment of whoever captured the token — leave exactly one factor.
+/// Both pass the factor-presence guard; the token's single spend decides, and
+/// the TOTP side spends before it promotes its secret. Before the fix the TOTP
+/// confirm promoted first and only then lost the spend, so the account ended
+/// with a passkey AND the other party's TOTP secret.
+#[actix_web::test]
+async fn sr12_concurrent_totp_confirm_and_webauthn_finish_leave_one_factor() {
+    use axiam_core::repository::WebauthnCredentialRepository;
+
+    // `surrealkv`, as in `sa43_concurrent_setup_finishes_register_one_credential`.
+    let dir = tempfile::TempDir::new().unwrap();
+    let db: Surreal<TestDb> = Surreal::new::<surrealdb::engine::local::SurrealKv>(
+        dir.path().join("race.db").to_string_lossy().into_owned(),
+    )
+    .await
+    .unwrap();
+    db.use_ns("test").use_db("test").await.unwrap();
+    axiam_db::run_migrations(&db).await.unwrap();
+    let auth = test_auth_config();
+
+    // A few rounds, alternating which request is polled first, so both
+    // orders of the race are exercised.
+    for (round, suffix) in ["r0", "r1", "r2", "r3"].into_iter().enumerate() {
+        let (org_id, tenant_id, user_id) = setup_tenant(&db, suffix).await;
+        enforce_mfa(&db, org_id).await;
+        let app = test_app!(db, auth);
+        let token = setup_token_for(&app, org_id, tenant_id, &format!("wa-user-{suffix}")).await;
+
+        // The TOTP side: enrol, and compute a valid code.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+                .uri("/api/v1/auth/mfa/setup/enroll")
+                .set_json(json!({ "setup_token": token }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200, "round {round}: TOTP enrol");
+        let body: Value = test::read_body_json(resp).await;
+        let secret = totp_rs::Secret::try_from_base32(body["secret_base32"].as_str().unwrap())
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let code = totp_rs::Builder::new()
+            .with_algorithm(totp_rs::Algorithm::SHA1)
+            .with_digits(6)
+            .with_skew(1)
+            .with_step_duration(30)
+            .with_secret(secret)
+            .with_issuer(Some("AXIAM-Test"))
+            .with_account_name(format!("wa-user-{suffix}@example.com"))
+            .build()
+            .unwrap()
+            .generate_current()
+            .to_string();
+        let confirm = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/mfa/setup/confirm")
+            .set_json(json!({ "setup_token": token, "totp_code": code }))
+            .to_request();
+
+        // The WebAuthn side: start, and build a valid registration.
+        let resp = test::call_service(&app, setup_start(&token).to_request()).await;
+        assert_eq!(resp.status().as_u16(), 200, "round {round}: WebAuthn start");
+        let body: Value = test::read_body_json(resp).await;
+        let challenge = body["challenge"]["publicKey"]["challenge"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let state_token = body["state_token"].as_str().unwrap().to_owned();
+        let finish = test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/webauthn/setup/register/finish")
+            .set_json(json!({
+                "setup_token": token,
+                "state_token": state_token,
+                "credential_name": "key",
+                "response": sa43_none_registration(&challenge),
+            }))
+            .to_request();
+
+        let (totp_status, webauthn_status) = if round % 2 == 0 {
+            let (w, t) = futures::future::join(
+                test::call_service(&app, finish),
+                test::call_service(&app, confirm),
+            )
+            .await;
+            (t.status().as_u16(), w.status().as_u16())
+        } else {
+            let (t, w) = futures::future::join(
+                test::call_service(&app, confirm),
+                test::call_service(&app, finish),
+            )
+            .await;
+            (t.status().as_u16(), w.status().as_u16())
+        };
+
+        let passkeys = axiam_db::repository::SurrealWebauthnCredentialRepository::new(db.clone())
+            .list_by_user(tenant_id, user_id)
+            .await
+            .unwrap()
+            .len();
+        let user = SurrealUserRepository::new(db.clone())
+            .get_by_id(tenant_id, user_id)
+            .await
+            .unwrap();
+        let totp_factors = usize::from(user.mfa_secret.is_some());
+        assert!(
+            totp_status == 200 || webauthn_status == 200,
+            "round {round}: one of the two completes the sign-in \
+             (totp {totp_status}, webauthn {webauthn_status})"
+        );
+        assert_eq!(
+            passkeys + totp_factors,
+            1,
+            "round {round}: one setup token registers one factor \
+             (passkeys {passkeys}, totp {totp_factors}; \
+             totp {totp_status}, webauthn {webauthn_status})"
+        );
+    }
+}
+
 #[actix_web::test]
 async fn setup_register_finish_refuses_the_same_tokens_start_refuses() {
     // Both halves take the token, so both must check it. A `finish` that

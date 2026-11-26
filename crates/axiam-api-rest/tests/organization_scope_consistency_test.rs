@@ -55,6 +55,12 @@ struct Handler {
     action: Option<String>,
     /// Whether the body calls `require_organization_principal`.
     scope_guarded: bool,
+    /// Whether the body calls the whole-organization form,
+    /// `require_organization_principal(…)`.
+    org_guard: bool,
+    /// Whether the body calls the per-tenant form,
+    /// `require_organization_principal_for_tenant(…)`.
+    tenant_guard: bool,
 }
 
 fn handlers_dir() -> PathBuf {
@@ -90,6 +96,8 @@ fn parse_handlers(file: &str, source: &str) -> Vec<Handler> {
                 name,
                 action: None,
                 scope_guarded: false,
+                org_guard: false,
+                tenant_guard: false,
             });
             continue;
         }
@@ -100,6 +108,9 @@ fn parse_handlers(file: &str, source: &str) -> Vec<Handler> {
             out.push(current.take().expect("just checked"));
             continue;
         }
+        // Only code counts (review Q-16): a comment that mentions the guard,
+        // or a call commented out, must not read as the guard being there.
+        let line = code_of(line);
         if h.action.is_none()
             && let Some(rest) = line.split_once("RequirePermission::new(")
             && let Some(action) = rest.1.split('"').nth(1)
@@ -109,11 +120,67 @@ fn parse_handlers(file: &str, source: &str) -> Vec<Handler> {
         if line.contains("require_organization_principal") {
             h.scope_guarded = true;
         }
+        if line.contains("require_organization_principal(") {
+            h.org_guard = true;
+        }
+        if line.contains("require_organization_principal_for_tenant(") {
+            h.tenant_guard = true;
+        }
     }
     if let Some(h) = current {
         out.push(h);
     }
     out
+}
+
+/// `line` without its `//` comment (`///` and `//!` included).
+///
+/// A `//` inside a string literal (`"https://…"`) is not a comment, so the
+/// scan tracks string literals; escapes inside them are honoured. Block
+/// comments are not handled: the handler modules use none.
+fn code_of(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let (mut i, mut in_str) = (0, false);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if in_str => i += 1,
+            b'"' => in_str = !in_str,
+            b'/' if !in_str && bytes.get(i + 1) == Some(&b'/') => return &line[..i],
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+/// The scan reads code only (review Q-16): a body whose only mention of the
+/// guard is a comment is not guarded, and a `//` inside a string does not hide
+/// the call after it.
+#[test]
+fn the_handler_scan_ignores_comments() {
+    let source = "\
+pub async fn commented(user: AuthenticatedUser) -> Result<HttpResponse, AxiamApiError> {
+    RequirePermission::new(\"a:b\", Uuid::nil())
+    // require_organization_principal(&user, state.get_ref()).await?;
+    /// require_organization_principal_for_tenant(&user, state.get_ref(), t).await?;
+    let x = 1; // require_organization_principal(&user, state.get_ref())
+}
+pub async fn guarded(user: AuthenticatedUser) -> Result<HttpResponse, AxiamApiError> {
+    let _u = \"https://example.com\"; require_organization_principal(&user, s).await?;
+}
+";
+    let handlers = parse_handlers("probe.rs", source);
+    let commented = handlers.iter().find(|h| h.name == "commented").unwrap();
+    assert_eq!(commented.action.as_deref(), Some("a:b"));
+    assert!(
+        !commented.scope_guarded && !commented.org_guard && !commented.tenant_guard,
+        "a guard named only in comments was read as present: {commented:?}"
+    );
+    let guarded = handlers.iter().find(|h| h.name == "guarded").unwrap();
+    assert!(
+        guarded.scope_guarded && guarded.org_guard,
+        "a call after a `//` inside a string was hidden: {guarded:?}"
+    );
 }
 
 fn all_handlers() -> Vec<Handler> {
@@ -193,6 +260,15 @@ fn every_scope_guarded_action_is_declared_organization_level() {
         if !unguarded.is_empty() {
             continue;
         }
+        // A plain `:list`/`:get` action can never be in the list: the seeded
+        // `viewer` role is granted every such action and is not filtered
+        // against it (`axiam_core::permission_scope`'s
+        // `the_list_holds_no_read_action`). `tenants:get` is the case — its
+        // only handler binds the path tenant to the caller's reach (SA-02,
+        // N9), and that guard is what refuses a tenant administrator.
+        if action.ends_with(":list") || action.ends_with(":get") {
+            continue;
+        }
         if !ORGANIZATION_LEVEL_ACTIONS.contains(&action.as_str()) {
             missing.push(format!(
                 "`{action}` — every handler requiring it is scope-guarded \
@@ -262,5 +338,320 @@ fn every_declared_organization_level_action_exists_in_the_registry() {
         unknown.is_empty(),
         "ORGANIZATION_LEVEL_ACTIONS names actions absent from \
          PERMISSION_REGISTRY (typo?): {unknown:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SA-02: every `/organizations/{org_id}/**` route, and the guard it must reach
+// ---------------------------------------------------------------------------
+//
+// The tests above reason from the *actions*, so they cannot see a handler that
+// lacks the guard altogether: an unguarded organization-level handler is simply
+// "an action required by an unguarded handler", which is also what an ordinary
+// tenant handler looks like. That is how `set_org_settings`, `get_org_settings`
+// and `export_audit` shipped without it (N8, N9).
+//
+// So the routes are listed here explicitly, each with the guard its handler
+// must call. The list is checked against `server.rs` in both directions: a
+// route registered there and missing here fails, so a new organization route
+// cannot arrive without someone deciding how it is guarded.
+
+/// How a route under `/organizations/{org_id}` is kept inside the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    /// `require_organization_principal`: an act on the organization as a whole.
+    Organization,
+    /// `require_organization_principal_for_tenant`: an organization-level act on
+    /// the one tenant the path names, which the caller's reach must cover.
+    OrganizationForTenant,
+    /// A read that carries neither guard, with the reason it may not. Only a
+    /// `GET` may be exempt.
+    Exempt(&'static str),
+}
+
+/// Every route under `/organizations/{org_id}` as `(method, path, handler,
+/// guard)`, `handler` being `module::function` under `src/handlers`.
+const ORGANIZATION_ROUTES: &[(&str, &str, &str, Guard)] = &[
+    (
+        "GET",
+        "/organizations/{org_id}",
+        "organizations::get",
+        Guard::Exempt(
+            "the caller's own organization record (path bound to user.org_id); \
+             the tenant switcher reads it",
+        ),
+    ),
+    (
+        "PUT",
+        "/organizations/{org_id}",
+        "organizations::update",
+        Guard::Organization,
+    ),
+    (
+        "DELETE",
+        "/organizations/{org_id}",
+        "organizations::delete",
+        Guard::Organization,
+    ),
+    (
+        "GET",
+        "/organizations/{org_id}/settings",
+        "settings::get_org_settings",
+        Guard::Organization,
+    ),
+    (
+        "PUT",
+        "/organizations/{org_id}/settings",
+        "settings::set_org_settings",
+        Guard::Organization,
+    ),
+    (
+        "GET",
+        "/organizations/{org_id}/email-config",
+        "email_config::get_org_email_config",
+        Guard::Organization,
+    ),
+    (
+        "PUT",
+        "/organizations/{org_id}/email-config",
+        "email_config::set_org_email_config",
+        Guard::Organization,
+    ),
+    (
+        "DELETE",
+        "/organizations/{org_id}/email-config",
+        "email_config::delete_org_email_config",
+        Guard::Organization,
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/email-config/test",
+        "email_config::test_org_email_config",
+        Guard::Organization,
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/tenants",
+        "tenants::create",
+        Guard::Organization,
+    ),
+    (
+        "GET",
+        "/organizations/{org_id}/tenants",
+        "tenants::list",
+        Guard::Exempt(
+            "the roster is filtered to the caller's own reach \
+             (`reachable_tenants`): an ordinary tenant principal sees its own tenant",
+        ),
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/tenants/{tenant_id}/audit-export",
+        "tenants::export_audit",
+        Guard::OrganizationForTenant,
+    ),
+    (
+        "GET",
+        "/organizations/{org_id}/tenants/{tenant_id}",
+        "tenants::get",
+        Guard::OrganizationForTenant,
+    ),
+    (
+        "PUT",
+        "/organizations/{org_id}/tenants/{tenant_id}",
+        "tenants::update",
+        Guard::Organization,
+    ),
+    (
+        "DELETE",
+        "/organizations/{org_id}/tenants/{tenant_id}",
+        "tenants::delete",
+        Guard::Organization,
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/ca-certificates",
+        "ca_certificates::generate",
+        Guard::Organization,
+    ),
+    (
+        "GET",
+        "/organizations/{org_id}/ca-certificates",
+        "ca_certificates::list",
+        Guard::Exempt(
+            "organization CA certificates are the public trust material every \
+             tenant of the organization chains to; no private key is returned",
+        ),
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/ca-certificates/import",
+        "ca_certificates::import",
+        Guard::Organization,
+    ),
+    (
+        "GET",
+        "/organizations/{org_id}/ca-certificates/{id}",
+        "ca_certificates::get",
+        Guard::Exempt("as for the list: one public organization CA certificate"),
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/ca-certificates/{id}/revoke",
+        "ca_certificates::revoke",
+        Guard::Organization,
+    ),
+    (
+        "PUT",
+        "/organizations/{org_id}/ca-certificates/{id}/mtls-trust-anchor",
+        "ca_certificates::set_mtls_trust_anchor",
+        Guard::Organization,
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/ca-certificates/{id}/migrate-custody",
+        "ca_certificates::migrate_custody",
+        Guard::Organization,
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+        "ca_certificates::generate_intermediate",
+        Guard::OrganizationForTenant,
+    ),
+    (
+        "GET",
+        "/organizations/{org_id}/tenants/{tenant_id}/signing-cas",
+        // Review S-5: a principal's own tenant is listed without the guard (a
+        // Standard tenant needs its signing CAs to issue under); any other
+        // tenant needs an organization principal that reaches it.
+        "ca_certificates::list_intermediates",
+        Guard::OrganizationForTenant,
+    ),
+    (
+        "POST",
+        "/organizations/{org_id}/tenants/{tenant_id}/signing-cas/sign-csr",
+        "ca_certificates::sign_intermediate_csr",
+        Guard::OrganizationForTenant,
+    ),
+];
+
+/// The `(method, path, handler)` of every route `server.rs` registers under
+/// `/organizations/{org_id}`.
+///
+/// Read with whitespace removed, one `web::resource(` at a time: the first
+/// string literal is the path, and every `web::<method>().to(handlers::…::<C>`
+/// after it, up to the next resource, is a route on it. Paths contain no
+/// whitespace, so removing it changes no literal this reads.
+fn registered_organization_routes() -> BTreeSet<(String, String, String)> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server.rs");
+    let source: String = std::fs::read_to_string(&path)
+        .expect("server.rs should be readable")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+
+    let mut out = BTreeSet::new();
+    for chunk in source.split("web::resource(").skip(1) {
+        let Some(route_path) = chunk.split('"').nth(1) else {
+            continue;
+        };
+        if route_path != "/organizations/{org_id}"
+            && !route_path.starts_with("/organizations/{org_id}/")
+        {
+            continue;
+        }
+        for method in ["get", "post", "put", "patch", "delete"] {
+            let needle = format!("web::{method}().to(handlers::");
+            for rest in chunk.split(needle.as_str()).skip(1) {
+                let handler = rest.split("::<").next().unwrap_or_default();
+                out.insert((
+                    method.to_uppercase(),
+                    route_path.to_string(),
+                    handler.to_string(),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The scan must find the routes; an empty set would make the next test a
+/// comparison of two lists that both say nothing.
+#[test]
+fn organization_route_scan_finds_the_routes() {
+    let routes = registered_organization_routes();
+    assert!(
+        routes.len() >= ORGANIZATION_ROUTES.len(),
+        "only {} organization routes were read out of server.rs — the scan is \
+         broken, not the router: {routes:?}",
+        routes.len()
+    );
+}
+
+/// The list is the router: a route registered under `/organizations/{org_id}`
+/// and absent here fails, and so does a listed route the router no longer has.
+#[test]
+fn every_organization_route_is_on_the_guard_list() {
+    let registered = registered_organization_routes();
+    let listed: BTreeSet<(String, String, String)> = ORGANIZATION_ROUTES
+        .iter()
+        .map(|(m, p, h, _)| (m.to_string(), p.to_string(), h.to_string()))
+        .collect();
+
+    let unlisted: Vec<_> = registered.difference(&listed).collect();
+    let stale: Vec<_> = listed.difference(&registered).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "ORGANIZATION_ROUTES disagrees with server.rs.\n  \
+         registered but not listed (decide its guard and add it): {unlisted:?}\n  \
+         listed but not registered (remove it): {stale:?}"
+    );
+}
+
+/// The rule itself: a listed route reaches a handler that calls the guard the
+/// list names, and only a read is exempt.
+#[test]
+fn every_listed_organization_route_reaches_its_guard() {
+    let handlers = all_handlers();
+    let mut wrong = Vec::new();
+
+    for (method, path, handler, guard) in ORGANIZATION_ROUTES {
+        let (module, function) = handler
+            .split_once("::")
+            .expect("handler is `module::function`");
+        let file = format!("{module}.rs");
+        let Some(h) = handlers
+            .iter()
+            .find(|h| h.file == file && h.name == function)
+        else {
+            wrong.push(format!(
+                "{method} {path}: handler `{handler}` not found in src/handlers"
+            ));
+            continue;
+        };
+        match guard {
+            Guard::Organization if !h.org_guard => wrong.push(format!(
+                "{method} {path} reaches `{handler}`, which does not call \
+                 require_organization_principal"
+            )),
+            Guard::OrganizationForTenant if !h.tenant_guard => wrong.push(format!(
+                "{method} {path} reaches `{handler}`, which does not call \
+                 require_organization_principal_for_tenant"
+            )),
+            Guard::Exempt(reason) if *method != "GET" => wrong.push(format!(
+                "{method} {path} is exempt ({reason}), but only a GET may be"
+            )),
+            Guard::Exempt(reason) if reason.trim().is_empty() => {
+                wrong.push(format!("{method} {path} is exempt without a reason"))
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "organization routes without their guard:\n  - {}",
+        wrong.join("\n  - ")
     );
 }

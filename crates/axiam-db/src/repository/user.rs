@@ -5,7 +5,7 @@
 //! secret) can be provided at construction time via `with_pepper`.
 
 use axiam_auth::password;
-use axiam_core::error::AxiamResult;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::email_verification::EmailVerificationRedemption;
 use axiam_core::models::user::{
@@ -22,7 +22,9 @@ use uuid::Uuid;
 
 use crate::error::DbError;
 use crate::handle::DbHandle;
-use crate::helpers::{CountRow, classify_write_error, parse_uuid, search_bind, search_filter};
+use crate::helpers::{
+    CountRow, TxFail, classify_write_error, parse_uuid, search_bind, search_filter, thrown,
+};
 use crate::record_cache::RecordCaches;
 
 /// What both erasure paths remove besides the user row: the SAML single-logout
@@ -71,6 +73,12 @@ pub(crate) struct UserRow {
     /// G-3 marker (schema v71). `Option` because a row written before v71 has
     /// no such column.
     directory_external_id: Option<String>,
+    /// SA-06 credential epoch (schema v117). `Option` because a row written
+    /// before v117 — or never touched since — has no such column.
+    credential_changed_at: Option<DateTime<Utc>>,
+    /// SA-06 credential version (schema v118), read in the same row as the
+    /// hash. `Option` because a row never touched since has no such column.
+    credential_version: Option<i64>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -145,6 +153,12 @@ struct UserRowWithId {
     /// G-3 marker (schema v71). `Option` because a row written before v71 has
     /// no such column.
     directory_external_id: Option<String>,
+    /// SA-06 credential epoch (schema v117). `Option` because a row written
+    /// before v117 — or never touched since — has no such column.
+    credential_changed_at: Option<DateTime<Utc>>,
+    /// SA-06 credential version (schema v118), read in the same row as the
+    /// hash. `Option` because a row never touched since has no such column.
+    credential_version: Option<i64>,
     metadata: serde_json::Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -196,6 +210,28 @@ struct CollisionRow {
     record_id: String,
     by_username: bool,
 }
+
+/// What `update`'s credential transaction `THROW`s when the account is a
+/// directory account (QR6-1): its password belongs to the tenant's directory,
+/// so no local hash or OPAQUE record may be written for it. Read back as
+/// [`axiam_auth::error::AuthError::DirectoryAccountPassword`], the answer every
+/// caller that refuses first already gives.
+const DIRECTORY_ACCOUNT_CREDENTIAL: &str = "axiam:directory_account_credential";
+
+/// What `update`'s credential transaction `THROW`s when no user `id` exists in
+/// the tenant (QR6-4), so the OPAQUE DELETE/CREATE after it never run. Read
+/// back as `NotFound`, the answer a write to a missing user already gave.
+const CREDENTIAL_TARGET_MISSING: &str = "axiam:credential_target_missing";
+
+/// SR3-1 (N11): the statement every writer of a user's `status` runs in the
+/// same transaction as its write. It records the new status (`$status`) as the
+/// `prior_status` of the account's pending erasure request, if it has one, so
+/// the request's cancel restores the latest administrative decision — an
+/// administrator's or SCIM's deactivation, the directory sync's — rather than
+/// the status the account had when the request was filed. Matches nothing when
+/// no request is pending.
+const PENDING_ERASURE_RECORDS_STATUS: &str = "UPDATE account_deletion SET prior_status = $status \
+     WHERE tenant_id = $tenant_id AND user_id = $id AND status = 'pending'; ";
 
 /// The text of a transaction's failed statements, for `classify_write_error`.
 ///
@@ -347,6 +383,8 @@ impl UserRow {
             phone_number_verified_at: self.phone_number_verified_at,
             address: decode_address(self.address),
             directory_external_id: self.directory_external_id,
+            credential_changed_at: self.credential_changed_at,
+            credential_version: self.credential_version.unwrap_or(0),
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -393,6 +431,8 @@ impl UserRowWithId {
             phone_number_verified_at: self.phone_number_verified_at,
             address: decode_address(self.address),
             directory_external_id: self.directory_external_id,
+            credential_changed_at: self.credential_changed_at,
+            credential_version: self.credential_version.unwrap_or(0),
             metadata: self.metadata,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -741,6 +781,20 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             || input.email.is_some()
             || input.status.is_some()
             || input.metadata.is_some();
+        if let Some(record) = &input.opaque_record {
+            if input.password_hash.is_none() {
+                return Err(AxiamError::Validation {
+                    message: "an OPAQUE record can only be written together with the \
+                              password hash it answers to"
+                        .into(),
+                });
+            }
+            if record.tenant_id != tenant_id || record.user_id != id {
+                return Err(AxiamError::Validation {
+                    message: "the OPAQUE record belongs to a different user".into(),
+                });
+            }
+        }
         let updated = crate::helpers::retry_on_write_conflict(|| async {
             let input = input.clone();
             let id_str = id.to_string();
@@ -809,6 +863,14 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             if input.address.is_some() {
                 sets.push("address = $address");
             }
+            // SA-06 (N7; S-1, S-6): a write of the hash moves the credential
+            // epoch (stamped with the datastore clock, QR17-4) in the same
+            // statement, so no moment exists at which the new hash is stored
+            // and an artefact of the old one is still honoured.
+            if input.password_hash.is_some() {
+                sets.push("credential_changed_at = time::now()");
+                sets.push("credential_version = (credential_version ?? 0) + 1");
+            }
             sets.push("updated_at = time::now()");
 
             // Item A of the 1.1.0 atomicity audit: a write that changes the
@@ -825,23 +887,106 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
              WHERE tenant_id = $tenant_id",
                 sets.join(", ")
             );
-            let (query, update_slot) = if input.email.is_some() {
-                (
-                    format!(
-                        "BEGIN TRANSACTION; \
-                         LET $previous_email = (SELECT VALUE email FROM type::record('user', $id) \
-                             WHERE tenant_id = $tenant_id)[0]; \
-                         {update}; \
-                         IF $previous_email != NONE AND $previous_email != $email {{ \
+            // N7 / SA-06: a write of `password_hash` retires the user's OPAQUE
+            // record in the same transaction. The record is a verifier for the
+            // *previous* password; leaving it behind under `opaque_mode=optional`
+            // lets that password keep authenticating on the OPAQUE endpoint after
+            // a reset or change that supplied no new record. Living here, it
+            // covers every writer of the hash — reset, self-service change,
+            // SCIM — rather than each handler remembering to.
+            //
+            // SR4-2: a writer that DOES supply a new record (`opaque_record`)
+            // has it replace the old one in this same transaction, so the hash,
+            // the record, the epoch and the version come from one write. Storing
+            // it afterwards let a concurrent writer's hash commit in between and
+            // sit next to this writer's record.
+            let rotates_hash = input.password_hash.is_some();
+            let writes_record = input.opaque_record.is_some();
+            let email_changes = input.email.is_some();
+            // SR3-1 (N11): a status write on an account whose erasure request
+            // is pending is the latest decision about that account, and the
+            // request's `prior_status` is what a cancel restores. It is
+            // recorded there in this same transaction, so a deactivation by an
+            // administrator or SCIM `active=false` — which leaves an account
+            // the request already parked as `Inactive` unchanged — survives the
+            // cancel instead of being replaced by the older status.
+            let writes_status = input.status.is_some();
+            let (query, update_slot) = if email_changes || rotates_hash || writes_status {
+                let mut q = String::from("BEGIN TRANSACTION; ");
+                // BEGIN occupies slot 0; each `LET` below shifts the UPDATE.
+                let mut slot = 1;
+                if email_changes {
+                    q.push_str(
+                        "LET $previous_email = (SELECT VALUE email FROM type::record('user', $id) \
+                             WHERE tenant_id = $tenant_id)[0]; ",
+                    );
+                    slot += 1;
+                }
+                if rotates_hash {
+                    // QR6-1 (owner decision "Enforce in the repository"): a
+                    // directory account's password belongs to the tenant's
+                    // directory, so no writer may give it a local hash or an
+                    // OPAQUE record — refused here, whatever a caller forgets.
+                    //
+                    // QR6-4: and the follow-on DELETE/CREATE of the OPAQUE row
+                    // runs only for a user that exists in this tenant. Read in
+                    // the transaction, so the UPDATE below matches the row read
+                    // here (a concurrent removal conflicts and is retried), and
+                    // a `THROW` aborts every statement after it: nothing is
+                    // written on either refusal.
+                    q.push_str(
+                        "LET $credential_target = (SELECT directory_external_id \
+                             FROM type::record('user', $id) WHERE tenant_id = $tenant_id); ",
+                    );
+                    q.push_str(&format!(
+                        "IF array::len($credential_target) == 0 {{ THROW '{CREDENTIAL_TARGET_MISSING}'; }}; "
+                    ));
+                    q.push_str(&format!(
+                        "IF $credential_target[0].directory_external_id != NONE \
+                             {{ THROW '{DIRECTORY_ACCOUNT_CREDENTIAL}'; }}; "
+                    ));
+                    slot += 3;
+                }
+                q.push_str(&update);
+                q.push_str("; ");
+                if email_changes {
+                    q.push_str(
+                        "IF $previous_email != NONE AND $previous_email != $email { \
                              DELETE email_verification_token WHERE tenant_id = $tenant_id \
                                  AND user_id = $id AND consumed_at IS NONE; \
                              DELETE password_reset_token WHERE tenant_id = $tenant_id \
                                  AND user_id = $id AND consumed_at IS NONE; \
-                         }}; \
-                         COMMIT TRANSACTION"
-                    ),
-                    2,
-                )
+                         }; ",
+                    );
+                }
+                if rotates_hash {
+                    q.push_str(
+                        "DELETE FROM opaque_credential \
+                         WHERE tenant_id = $tenant_id AND user_id = $id; ",
+                    );
+                }
+                if writes_status {
+                    q.push_str(PENDING_ERASURE_RECORDS_STATUS);
+                }
+                if writes_record {
+                    q.push_str(
+                        "CREATE type::record('opaque_credential', $opaque_row_id) SET \
+                         tenant_id = $tenant_id, \
+                         user_id = $id, \
+                         credential_identifier = $opaque_credential_identifier, \
+                         suite = $opaque_suite, \
+                         ksf = $opaque_ksf, \
+                         ksf_memory_kib = $opaque_ksf_memory_kib, \
+                         ksf_iterations = $opaque_ksf_iterations, \
+                         ksf_parallelism = $opaque_ksf_parallelism, \
+                         ksf_log_n = $opaque_ksf_log_n, \
+                         ksf_r = $opaque_ksf_r, \
+                         ksf_p = $opaque_ksf_p, \
+                         record = $opaque_record; ",
+                    );
+                }
+                q.push_str("COMMIT TRANSACTION");
+                (q, slot)
             } else {
                 (update, 0)
             };
@@ -860,6 +1005,22 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             }
             if let Some(password_hash) = input.password_hash {
                 builder = builder.bind(("password_hash", password_hash));
+            }
+            if let Some(record) = input.opaque_record {
+                let (memory_kib, iterations, parallelism, log_n, r, p) =
+                    crate::repository::opaque_credential::ksf_columns(record.ksf_params);
+                builder = builder
+                    .bind(("opaque_row_id", new_id().to_string()))
+                    .bind(("opaque_credential_identifier", record.credential_identifier))
+                    .bind(("opaque_suite", record.suite.to_string()))
+                    .bind(("opaque_ksf", record.ksf_params.ksf().to_string()))
+                    .bind(("opaque_ksf_memory_kib", memory_kib))
+                    .bind(("opaque_ksf_iterations", iterations))
+                    .bind(("opaque_ksf_parallelism", parallelism))
+                    .bind(("opaque_ksf_log_n", log_n))
+                    .bind(("opaque_ksf_r", r))
+                    .bind(("opaque_ksf_p", p))
+                    .bind(("opaque_record", record.record));
             }
             if let Some(ref status) = input.status {
                 builder = builder.bind(("status", status_to_string(status).to_string()));
@@ -911,11 +1072,34 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             // UNIQUE violation on the address fires on the UPDATE's slot while
             // the others report "not executed due to a failed transaction",
             // which alone would read as a retryable conflict.
-            if let Some(text) = tx_error_text(result.take_errors()) {
+            let errors = result.take_errors();
+            if !errors.is_empty() {
+                // A `THROW` of this transaction is an answer, told apart before
+                // anything is wrapped: the statements after it report "not
+                // executed due to a failed transaction", a conflict marker, so
+                // left as a database error it would be retried.
+                let combined = errors
+                    .values()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if thrown(&combined, DIRECTORY_ACCOUNT_CREDENTIAL) {
+                    return Err(TxFail::Refused(
+                        axiam_auth::error::AuthError::DirectoryAccountPassword.into(),
+                    ));
+                }
+                if thrown(&combined, CREDENTIAL_TARGET_MISSING) {
+                    return Err(TxFail::Db(DbError::NotFound {
+                        entity: "user".into(),
+                        id: id_str,
+                    }));
+                }
+            }
+            if let Some(text) = tx_error_text(errors) {
                 // Kept a `DbError` inside the retried closure: its text carries
                 // the engine's conflict marker, which `retry_on_write_conflict`
                 // reads; `AxiamError::WriteContention` would not.
-                return Err(classify_write_error(text, "user"));
+                return Err(TxFail::Db(classify_write_error(text, "user")));
             }
 
             let rows: Vec<UserRow> = result.take(update_slot).map_err(DbError::from)?;
@@ -924,7 +1108,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                 id: id_str,
             })?;
 
-            row.into_user(id)
+            Ok::<_, TxFail>(row.into_user(id)?)
         })
         .await?;
         if touches_provisioned_field {
@@ -1064,6 +1248,8 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                  UPDATE type::record('user', $id) SET \
                      directory_external_id = $external_id, \
                      password_hash = $password_hash, \
+                     credential_changed_at = time::now(), \
+                     credential_version = (credential_version ?? 0) + 1, \
                      updated_at = time::now() \
                  WHERE tenant_id = $tenant_id; \
                  DELETE FROM opaque_credential \
@@ -1177,7 +1363,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
                         phone_number, phone_number_verified_at, address, \
-                        directory_external_id, \
+                        directory_external_id, credential_changed_at, credential_version, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id AND directory_external_id = $external_id \
@@ -1216,7 +1402,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
                         phone_number, phone_number_verified_at, address, \
-                        directory_external_id, \
+                        directory_external_id, credential_changed_at, credential_version, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id \
@@ -1247,26 +1433,35 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         // already `Inactive`, was tombstoned (marker cleared) or anonymised
         // meanwhile matches nothing, so the job can never overwrite a state an
         // administrator or an erasure chose, and never writes any status but
-        // `Inactive`.
+        // `Inactive`. SR3-1: a write that lands on an account with a pending
+        // erasure request records itself as the request's `prior_status`, in
+        // the same transaction, so the request's cancel does not undo it.
         let id_str = user_id.to_string();
         let rows: Vec<UserRow> = crate::helpers::retry_on_write_conflict(|| async {
             let mut result = self
                 .db
                 .current()
-                .query(
-                    "UPDATE type::record('user', $id) SET \
-                         status = 'Inactive', updated_at = time::now() \
+                .query(format!(
+                    "BEGIN TRANSACTION; \
+                     LET $changed = (UPDATE type::record('user', $id) SET \
+                         status = $status, updated_at = time::now() \
                      WHERE tenant_id = $tenant_id \
                        AND directory_external_id != NONE \
-                       AND status IN ['Active', 'PendingVerification', 'Locked']",
-                )
+                       AND status IN ['Active', 'PendingVerification', 'Locked'] \
+                     RETURN AFTER); \
+                     IF array::len($changed) > 0 {{ {PENDING_ERASURE_RECORDS_STATUS} }}; \
+                     $changed; \
+                     COMMIT TRANSACTION"
+                ))
                 .bind(("id", id_str.clone()))
                 .bind(("tenant_id", tenant_id.to_string()))
+                .bind(("status", "Inactive".to_string()))
                 .await
                 .map_err(DbError::from)?
                 .check()
                 .map_err(|e| classify_write_error(e.to_string(), "user"))?;
-            let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
+            // Slots: BEGIN=0, LET=1, IF=2, $changed=3, COMMIT=4.
+            let rows: Vec<UserRow> = result.take(3).map_err(DbError::from)?;
             Ok::<_, DbError>(rows)
         })
         .await?;
@@ -1329,6 +1524,175 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
             .map_err(|e| classify_write_error(e.to_string(), "user"))?;
 
         let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn stage_pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        encrypted_secret: String,
+    ) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
+        // SA-43: the pending column only — `mfa_secret` and `mfa_enabled` are
+        // untouched until `promote_pending_mfa_secret`.
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE type::record('user', $id) SET \
+                  mfa_pending_secret = $secret, updated_at = time::now() \
+                  WHERE tenant_id = $tenant_id)",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("secret", encrypted_secret))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+        if rows.is_empty() {
+            return Err(DbError::NotFound {
+                entity: "user".into(),
+                id: user_id.to_string(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> AxiamResult<Option<String>> {
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE mfa_pending_secret FROM type::record('user', $id) \
+                 WHERE tenant_id = $tenant_id",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<Option<String>> = result.take(0).map_err(DbError::from)?;
+        rows.into_iter().next().ok_or_else(|| {
+            DbError::NotFound {
+                entity: "user".into(),
+                id: user_id.to_string(),
+            }
+            .into()
+        })
+    }
+
+    async fn promote_pending_mfa_secret(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        expected: &str,
+    ) -> AxiamResult<bool> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
+        // SA-43: compare-and-swap on the pending secret the caller verified the
+        // code against, so a re-enrolment racing the confirmation cannot have
+        // its (unverified) secret promoted. The value written is the bound one,
+        // equal to the pending column by the WHERE.
+        let result = self
+            .db
+            .current()
+            .query(
+                "SELECT meta::id(id) AS record_id FROM \
+                 (UPDATE type::record('user', $id) SET \
+                  mfa_secret = $expected, mfa_pending_secret = NONE, \
+                  mfa_enabled = true, updated_at = time::now() \
+                  WHERE tenant_id = $tenant_id AND mfa_pending_secret = $expected)",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind(("expected", expected.to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let mut result = result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        let rows: Vec<TotpStepCasRow> = result.take(0).map_err(DbError::from)?;
+        let promoted = !rows.is_empty();
+        if promoted {
+            self.notify_user_changed(tenant_id, user_id).await;
+        }
+        Ok(promoted)
+    }
+
+    async fn clear_pending_mfa_secret(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
+        let result = self
+            .db
+            .current()
+            .query(
+                "UPDATE type::record('user', $id) SET \
+                 mfa_pending_secret = NONE, updated_at = time::now() \
+                 WHERE tenant_id = $tenant_id AND mfa_pending_secret != NONE",
+            )
+            .bind(("id", user_id.to_string()))
+            .bind(("tenant_id", tenant_id.to_string()))
+            .await
+            .map_err(DbError::from)?;
+        result
+            .check()
+            .map_err(|e| classify_write_error(e.to_string(), "user"))?;
+        Ok(())
+    }
+
+    async fn consume_mfa_setup_token(
+        &self,
+        tenant_id: Uuid,
+        jti: &str,
+        expires_at: DateTime<Utc>,
+    ) -> AxiamResult<()> {
+        // SA-43: the replay store every other single-use purpose token uses
+        // (`oauth2_proof_replay`), under the kind that records ceremony state
+        // tokens and a scope of its own, `mfa_setup`. Reusing the kind keeps
+        // v121 additive: widening the kind's ASSERT is an OVERWRITE (#729).
+        // The UNIQUE `(tenant_id, kind, scope, jti)` index decides, and the
+        // proof sweep removes the row once `expires_at` passes.
+        use axiam_core::repository::ProofReplayRepository;
+        crate::repository::oauth2_proof_replay::SurrealProofReplayRepository::new(self.db.clone())
+            .insert_proof_jti(
+                tenant_id,
+                axiam_core::repository::ProofKind::WebauthnAssertion,
+                "mfa_setup",
+                jti,
+                expires_at,
+            )
+            .await
+    }
+
+    async fn mfa_setup_token_spent(&self, tenant_id: Uuid, jti: &str) -> AxiamResult<bool> {
+        // SR1-2: the row `consume_mfa_setup_token` writes, looked up by the
+        // same `(tenant_id, kind, scope, jti)` its UNIQUE index covers.
+        let mut result = self
+            .db
+            .current()
+            .query(
+                "SELECT VALUE meta::id(id) FROM oauth2_proof_replay \
+                 WHERE tenant_id = $tenant_id AND kind = $kind \
+                 AND scope = 'mfa_setup' AND jti = $jti LIMIT 1",
+            )
+            .bind(("tenant_id", tenant_id.to_string()))
+            .bind((
+                "kind",
+                axiam_core::repository::ProofKind::WebauthnAssertion
+                    .as_str()
+                    .to_owned(),
+            ))
+            .bind(("jti", jti.to_owned()))
+            .await
+            .map_err(DbError::from)?;
+        let rows: Vec<String> = result.take(0).map_err(DbError::from)?;
         Ok(!rows.is_empty())
     }
 
@@ -1521,7 +1885,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
                         locked_until, email_verified_at, \
                         deletion_pending, scheduled_purge_at, \
                         phone_number, phone_number_verified_at, address, \
-                        directory_external_id, \
+                        directory_external_id, credential_changed_at, credential_version, \
                         metadata, created_at, updated_at \
                  FROM user \
                  WHERE tenant_id = $tenant_id AND status != 'Deleted'{search} \
@@ -1728,6 +2092,8 @@ impl<C: Connection> SurrealUserRepository<C> {
              scheduled_purge_at = NONE, \
              status = 'Anonymized', \
              erasure_audit_pending = $record_stamp, \
+             credential_changed_at = time::now(), \
+             credential_version = (credential_version ?? 0) + 1, \
              updated_at = time::now() \
              WHERE tenant_id = $tenant_id AND ($only_pending = false OR deletion_pending = true) \
              RETURN VALUE meta::id(id)); \
@@ -1890,6 +2256,7 @@ impl<C: Connection> SurrealUserRepository<C> {
         user_id: Uuid,
         scheduled_purge_at: DateTime<Utc>,
     ) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         self.db
             .current()
             .query(
@@ -1918,6 +2285,7 @@ impl<C: Connection> SurrealUserRepository<C> {
     /// window.  Resets `deletion_pending`, `scheduled_purge_at`, and sets
     /// status back to `Active`.
     pub async fn clear_deletion_pending(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         self.db
             .current()
             .query(

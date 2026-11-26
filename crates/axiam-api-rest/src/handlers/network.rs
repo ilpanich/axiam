@@ -658,6 +658,7 @@ async fn audit_success<C: Connection + Clone>(
             outcome: AuditOutcome::Success,
             ip_address: client_ip(http_req),
             metadata: Some(json!({ "before": before, "after": after })),
+            organization_id: None,
         },
     )
     .await;
@@ -751,6 +752,7 @@ async fn refused<C: Connection + Clone>(
                 "before": refusal.before,
                 "after": refusal.after,
             })),
+            organization_id: None,
         },
     )
     .await;
@@ -1862,6 +1864,7 @@ pub async fn replace_policy<C: Connection + Clone>(
                 "before": before,
                 "after": after,
             })),
+            organization_id: None,
         },
     )
     .await;

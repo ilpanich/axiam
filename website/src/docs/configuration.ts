@@ -78,6 +78,16 @@ export const CONFIGURATION_PAGES: DocPage[] = [
             "/etc/axiam/amqp/client.key",
           ],
           [
+            "AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE",
+            "Whether the server-internal queues — transactional mail, webhooks, SSF push, outbound SCIM and CIBA ping, and their retry queues — refuse a message without the signed envelope AXIAM now puts on them (default `true`). Set `false` for **one** rolling-upgrade deployment only, or to replay a pre-upgrade dead-lettered message — and only where no other principal can publish on AXIAM's broker vhost at all (RabbitMQ authorizes a publish against the exchange, not the queue, so a per-queue ACL cannot stop one; otherwise drain), because while it is `false` anyone who can publish to the default exchange can inject unsigned messages, exactly as before the envelope existed: unsigned, old-shape messages are then accepted (each logged as a warning), while everything is still signed on publish and an envelope that fails to verify is refused either way. Remove it once no old replica is left and the retry queues have turned over. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#the-server-internal-queues-are-signed-too-sa-14).",
+            "false",
+          ],
+          [
+            "AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS",
+            "How long a signed message may wait in the server-internal queues (mail, webhooks, SSF push, outbound SCIM, CIBA ping, and their retry queues) before it is refused as stale, and how long its nonce is kept against replay (default `86400`, 24 hours). These are durable work queues, so a consumer outage or a backlog must not cost queued mail: the default covers the longest retry schedule (a one-hour backoff ceiling, plus head-of-line waiting in a retry queue), the mail consumer's in-process backoff and a day-long consumer outage. A future-dated message is still refused beyond the 5-minute replay skew; a value below that skew is raised to it. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#the-server-internal-queues-are-signed-too-sa-14).",
+            "86400",
+          ],
+          [
             "AXIAM__SERVER__HOST",
             "REST bind address (default 127.0.0.1). Set 0.0.0.0 in a container.",
             "0.0.0.0",
@@ -330,8 +340,13 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER",
-            "Compatibility switch — treat a token with no audience claim as a user token. Default `true` (this row used to read as if it were off); set `false` to refuse such a token with a `401`.",
+            "Compatibility switch — treat a token with no audience claim as a user token. Default `false`: such a token is refused with a `401`. Enabled only by `true`, `1` or `yes` (any case); `false`, `0`, `no`, `off` and also `on` leave it off. Like every `AXIAM__*` boolean, any other value — empty, padded with whitespace, a typo — stops the server at startup with a configuration error.",
             "false",
+          ],
+          [
+            "AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP",
+            "Refuse an access token whose JOSE header is not `typ: at+jwt`. Default `true`. With the default, every access token minted by a release before the one that introduced it (`typ: JWT`) is refused, so every signed-in user signs in again, or refreshes, within one access-token lifetime (15 minutes by default). Set `false` (or `0`, `no`, `off`) for one rolling upgrade only, while old and new replicas serve together, then set it back. Any other value stops the server at startup. See the [deployment guide](https://github.com/ilpanich/axiam/blob/main/docs/deployment/README.md#access-token-type-typ-atjwt-and-upgrading).",
+            "true",
           ],
         ],
       },

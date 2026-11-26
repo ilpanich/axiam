@@ -191,8 +191,14 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
     /// `deletion_pending` is never left `true` without a matching
     /// cancellable row.
     ///
-    /// Result slots: BEGIN=0, UPDATE user=1, LET $existing=2, IF/THROW=3,
-    /// CREATE account_deletion=4, COMMIT=5. Every field of the returned
+    /// SA-09 (N11): the account's status *before* this request is read inside
+    /// the transaction, ahead of the `UPDATE` that parks it as `Inactive`, and
+    /// stored on the `account_deletion` row (`prior_status`, schema v120) so
+    /// `cancel_tx` restores it instead of re-activating a suspended, locked or
+    /// unverified account.
+    ///
+    /// Result slots: BEGIN=0, LET $prior=1, UPDATE user=2, LET $existing=3,
+    /// IF/THROW=4, CREATE account_deletion=5, COMMIT=6. Every field of the returned
     /// `AccountDeletion` is already known client-side (the id is generated
     /// here, everything else is an input or a literal), so we don't
     /// `.take()` any statement result — `.check()` alone proves the whole
@@ -208,6 +214,8 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
         let created_at = Utc::now();
 
         let query = "BEGIN TRANSACTION; \
+            LET $prior = (SELECT VALUE status FROM type::record('user', $user_id) \
+                WHERE tenant_id = $tenant_id); \
             UPDATE type::record('user', $user_id) SET \
                 deletion_pending = true, \
                 scheduled_purge_at = $purge_at, \
@@ -226,6 +234,7 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
                 cancel_token_hash = $hash, \
                 scheduled_purge_at = $purge_at, \
                 status = 'pending', \
+                prior_status = $prior[0], \
                 created_at = $created_at; \
             COMMIT TRANSACTION";
 
@@ -357,10 +366,28 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
     ) -> Result<(CancelOutcome, Option<Uuid>), TxFail> {
         // Slots: BEGIN=0, LET $row=1, four IF/THROW=2..=5, UPDATE deletion=6,
         // LET $user=7, IF/THROW=8, $user=9, COMMIT=10.
+        //
+        // SA-09 (N11): the account returns to the status it had before the
+        // request (`prior_status`, schema v120). A request written before v120
+        // has none and restores `Active`, as every cancel did before.
+        //
+        // SR1-3: only while the account still carries the status the request
+        // parked it in (`Inactive`). An administrator or SCIM may change it
+        // while the request is pending — lock an account found compromised —
+        // and a cancel, which the mailbox holder can trigger, must not undo
+        // that decision with the older value.
+        //
+        // SR3-1: `Inactive` alone cannot tell the request's parking from an
+        // administrator's or SCIM's deactivation, which leaves the parked
+        // account `Inactive` too. So every writer of a user's status records
+        // it as the pending request's `prior_status` in the same transaction
+        // (`PENDING_ERASURE_RECORDS_STATUS` in the user repository): by the
+        // time this runs, `prior_status` is the latest decision, and restoring
+        // it restores that decision.
         let query = format!(
             "BEGIN TRANSACTION; \
-             LET $row = (SELECT status, purge_claimed_at, scheduled_purge_at, user_id \
-                 FROM type::record('account_deletion', $id) WHERE tenant_id = $tenant_id); \
+             LET $row = (SELECT status, purge_claimed_at, scheduled_purge_at, user_id, \
+                 prior_status FROM type::record('account_deletion', $id) WHERE tenant_id = $tenant_id); \
              IF array::len($row) = 0 {{ THROW '{DELETION_GONE}'; }}; \
              IF $row[0].status = 'cancelled' {{ THROW '{DELETION_CANCELLED}'; }}; \
              IF $row[0].status != 'pending' OR $row[0].purge_claimed_at != NONE \
@@ -368,7 +395,9 @@ impl<C: Connection> SurrealAccountDeletionRepository<C> {
              IF $row[0].scheduled_purge_at <= time::now() {{ THROW '{DELETION_EXPIRED}'; }}; \
              UPDATE type::record('account_deletion', $id) SET status = 'cancelled'; \
              LET $user = (UPDATE type::record('user', $row[0].user_id) SET \
-                 deletion_pending = false, scheduled_purge_at = NONE, status = 'Active', \
+                 deletion_pending = false, scheduled_purge_at = NONE, \
+                 status = IF status = 'Inactive' THEN ($row[0].prior_status ?? 'Active') \
+                     ELSE status END, \
                  updated_at = time::now() \
                  WHERE tenant_id = $tenant_id AND deletion_pending = true \
                  RETURN VALUE meta::id(id)); \
@@ -1247,5 +1276,285 @@ mod tests {
             .unwrap()
             .expect("original pending row must still exist");
         assert_eq!(pending.cancel_token_hash, "atomic-hash");
+    }
+    /// SA-09 (N11) — seeds a user in `prior`, files an erasure request, cancels
+    /// it, and returns the status the account reads afterwards.
+    async fn status_after_erasure_cancel(
+        prior: axiam_core::models::user::UserStatus,
+    ) -> axiam_core::models::user::UserStatus {
+        status_after_erasure_cancel_with(prior, false, None).await
+    }
+
+    /// As [`status_after_erasure_cancel`]; `legacy` blanks the row's
+    /// `prior_status`, as a request written before schema v120 reads.
+    /// `meanwhile`, when set, is a status an administrator (or SCIM) writes
+    /// while the request is pending, before the cancel.
+    async fn status_after_erasure_cancel_with(
+        prior: axiam_core::models::user::UserStatus,
+        legacy: bool,
+        meanwhile: Option<axiam_core::models::user::UserStatus>,
+    ) -> axiam_core::models::user::UserStatus {
+        use crate::repository::{
+            SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+        };
+        use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+
+        let db = setup_db().await;
+        let org = SurrealOrganizationRepository::new(db.clone())
+            .create(axiam_core::models::organization::CreateOrganization {
+                name: "Org".into(),
+                slug: "org".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let tenant = SurrealTenantRepository::new(db.clone())
+            .create(axiam_core::models::tenant::CreateTenant {
+                organization_id: org.id,
+                kind: TenantKind::Standard,
+                name: "Tenant".into(),
+                slug: "tenant".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let user_repo = SurrealUserRepository::new(db.clone());
+        let user = user_repo
+            .create(axiam_core::models::user::CreateUser {
+                tenant_id: tenant.id,
+                username: "prior".into(),
+                email: "prior@example.com".into(),
+                password: test_password(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        user_repo
+            .update(
+                tenant.id,
+                user.id,
+                axiam_core::models::user::UpdateUser {
+                    status: Some(prior.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            user_repo
+                .get_by_id(tenant.id, user.id)
+                .await
+                .unwrap()
+                .status,
+            prior,
+            "the seeded prior status must be in place before the request"
+        );
+
+        let repo = SurrealAccountDeletionRepository::new(db.clone());
+        let deletion = repo
+            .create_with_pending_flag(
+                tenant.id,
+                user.id,
+                Utc::now() + Duration::days(30),
+                "prior-hash".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            user_repo
+                .get_by_id(tenant.id, user.id)
+                .await
+                .unwrap()
+                .status,
+            axiam_core::models::user::UserStatus::Inactive,
+            "a pending request parks the account as Inactive"
+        );
+        if legacy {
+            db.query("UPDATE type::record('account_deletion', $id) SET prior_status = NONE")
+                .bind(("id", deletion.id.to_string()))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+        if let Some(status) = meanwhile {
+            user_repo
+                .update(
+                    tenant.id,
+                    user.id,
+                    axiam_core::models::user::UpdateUser {
+                        status: Some(status),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let outcome = repo.cancel_pending(tenant.id, deletion.id).await.unwrap();
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+        let after = user_repo.get_by_id(tenant.id, user.id).await.unwrap();
+        assert!(!after.deletion_pending);
+        after.status
+    }
+
+    /// SA-09 (N11) — cancelling an erasure request restores a `Locked` account
+    /// to `Locked`, not `Active`.
+    #[tokio::test]
+    async fn cancel_restores_prior_status_locked() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel(UserStatus::Locked).await,
+            UserStatus::Locked
+        );
+    }
+
+    /// SA-09 (N11) — cancelling restores an `Inactive` (suspended) account to
+    /// `Inactive`, not `Active`.
+    #[tokio::test]
+    async fn cancel_restores_prior_status_inactive() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel(UserStatus::Inactive).await,
+            UserStatus::Inactive
+        );
+    }
+
+    /// SA-09 (N11) — cancelling restores a `PendingVerification` account to
+    /// `PendingVerification`, so it cannot skip email verification.
+    #[tokio::test]
+    async fn cancel_restores_prior_status_pending_verification() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel(UserStatus::PendingVerification).await,
+            UserStatus::PendingVerification
+        );
+    }
+
+    /// SA-09 (N11) — a request written before schema v120 has no
+    /// `prior_status`; cancelling it restores `Active`, as it always did.
+    #[tokio::test]
+    async fn cancel_of_a_legacy_row_without_prior_status_restores_active() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel_with(UserStatus::Locked, true, None).await,
+            UserStatus::Active
+        );
+    }
+
+    /// SR1-3 (N11) — an administrator locks the account while its erasure
+    /// request is pending (it was found compromised); the cancel — which a
+    /// mailbox holder can trigger — must not undo that: the account stays
+    /// `Locked`. The status the request parked it in (`Inactive`) is the only
+    /// one a cancel replaces.
+    #[tokio::test]
+    async fn cancel_keeps_a_status_an_administrator_set_while_pending() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel_with(UserStatus::Active, false, Some(UserStatus::Locked))
+                .await,
+            UserStatus::Locked
+        );
+    }
+
+    /// SR3-1 (N11) — an administrator (the admin UI's deactivate) or SCIM
+    /// (`active=false`) deactivates the account while its erasure request is
+    /// pending. The parked account was `Inactive` already, so the write leaves
+    /// the status unchanged; the cancel must still keep the account `Inactive`
+    /// rather than restore the `Active` it had when the request was filed.
+    #[tokio::test]
+    async fn cancel_keeps_a_deactivation_made_while_pending() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel_with(UserStatus::Active, false, Some(UserStatus::Inactive))
+                .await,
+            UserStatus::Inactive
+        );
+    }
+
+    /// SR3-1 (N11) — the directory sync's deactivation, made while the erasure
+    /// request is pending, also survives the cancel. An administrator
+    /// re-activated the parked directory account (so the sync can see it as
+    /// live), the sync then deactivates it: the cancel keeps it `Inactive`.
+    #[tokio::test]
+    async fn cancel_keeps_a_directory_sync_deactivation_made_while_pending() {
+        use crate::repository::{
+            SurrealOrganizationRepository, SurrealTenantRepository, SurrealUserRepository,
+        };
+        use axiam_core::models::user::{CreateDirectoryAccount, UpdateUser, UserStatus};
+        use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
+
+        let db = setup_db().await;
+        let org = SurrealOrganizationRepository::new(db.clone())
+            .create(axiam_core::models::organization::CreateOrganization {
+                name: "Org".into(),
+                slug: "org".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let tenant = SurrealTenantRepository::new(db.clone())
+            .create(axiam_core::models::tenant::CreateTenant {
+                organization_id: org.id,
+                kind: TenantKind::Standard,
+                name: "Tenant".into(),
+                slug: "tenant".into(),
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        let user_repo = SurrealUserRepository::new(db.clone());
+        let user = user_repo
+            .create_directory_account(CreateDirectoryAccount {
+                tenant_id: tenant.id,
+                username: "dir".into(),
+                email: "dir@example.com".into(),
+                external_id: "entry-1".into(),
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let repo = SurrealAccountDeletionRepository::new(db.clone());
+        let deletion = repo
+            .create_with_pending_flag(
+                tenant.id,
+                user.id,
+                Utc::now() + Duration::days(30),
+                "dir-hash".into(),
+            )
+            .await
+            .unwrap();
+        user_repo
+            .update(
+                tenant.id,
+                user.id,
+                UpdateUser {
+                    status: Some(UserStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let deactivated = user_repo
+            .deactivate_directory_account(tenant.id, user.id)
+            .await
+            .unwrap()
+            .expect("the sync deactivates a live directory account");
+        assert_eq!(deactivated.status, UserStatus::Inactive);
+
+        let outcome = repo.cancel_pending(tenant.id, deletion.id).await.unwrap();
+        assert_eq!(outcome, CancelOutcome::Cancelled);
+        let after = user_repo.get_by_id(tenant.id, user.id).await.unwrap();
+        assert!(!after.deletion_pending);
+        assert_eq!(after.status, UserStatus::Inactive);
+    }
+
+    /// SA-09 (N11) — an `Active` account still comes back `Active`.
+    #[tokio::test]
+    async fn cancel_restores_prior_status_active() {
+        use axiam_core::models::user::UserStatus;
+        assert_eq!(
+            status_after_erasure_cancel(UserStatus::Active).await,
+            UserStatus::Active
+        );
     }
 }

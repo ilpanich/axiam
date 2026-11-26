@@ -1372,6 +1372,7 @@ mod tests {
                 ip_address: input.ip_address,
                 metadata: input.metadata.unwrap_or(serde_json::Value::Null),
                 timestamp: chrono::Utc::now(),
+                organization_id: None,
             })
         }
         async fn list(
@@ -1386,6 +1387,7 @@ mod tests {
         }
         async fn list_system(
             &self,
+            _organization_id: uuid::Uuid,
             _: axiam_core::repository::AuditLogFilter,
             _: axiam_core::repository::Pagination,
         ) -> axiam_core::error::AxiamResult<
@@ -1483,6 +1485,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         };
         // The worker takes the first and sticks in its append; the second fills
         // the channel.

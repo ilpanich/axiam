@@ -30,17 +30,19 @@ use axiam_core::models::resource::CreateResource;
 use axiam_core::models::role::AssignmentScope;
 use axiam_core::models::role::CreateRole;
 use axiam_core::models::scope::CreateScope;
+use axiam_core::models::session::CreateSession;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::uma::UMA_TICKET_GRANT_TYPE;
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
     OAuth2ClientRepository, OrganizationRepository, PermissionRepository, ResourceRepository,
-    RoleRepository, ScopeRepository, TenantRepository, UserRepository,
+    RoleRepository, ScopeRepository, SessionRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealGroupRepository, SurrealOAuth2ClientRepository, SurrealOrganizationRepository,
     SurrealPermissionRepository, SurrealResourceRepository, SurrealRoleRepository,
-    SurrealScopeRepository, SurrealTenantRepository, SurrealUserRepository,
+    SurrealScopeRepository, SurrealSessionRepository, SurrealTenantRepository,
+    SurrealUserRepository,
 };
 use axiam_db::{SharedRateLimitConfig, SharedRateLimitCounter};
 use serde_json::{Value, json};
@@ -84,6 +86,10 @@ struct Fixture {
     /// The requesting party — granted `view` on `resource_id`, denied
     /// `redact` by an explicit deny rule.
     user_id: Uuid,
+    /// The requesting party's live sign-in session. Introspection reports a
+    /// user token inactive once the session its `sid`/`jti` names is gone, so
+    /// `user_token` must carry this id, as a real sign-in token does.
+    session_id: Uuid,
     /// A resource set the resource server (`rs_client_id`) registered.
     resource_id: Uuid,
     /// A resource made as `/api/v1/resources` makes one (no
@@ -159,6 +165,22 @@ async fn setup() -> Fixture {
                 ..Default::default()
             },
         )
+        .await
+        .unwrap();
+
+    let session = SurrealSessionRepository::new(db.clone())
+        .create(CreateSession {
+            tenant_id: tenant.id,
+            user_id: user.id,
+            token_hash: Uuid::new_v4().to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            authenticated_at: chrono::Utc::now(),
+            amr: vec![],
+            browser_token_hash: None,
+            lineage_id: None,
+        })
         .await
         .unwrap();
 
@@ -334,6 +356,7 @@ async fn setup() -> Fixture {
         tenant_id: tenant.id,
         org_id: org.id,
         user_id: user.id,
+        session_id: session.id,
         resource_id: resource.id,
         plain_resource_id: plain.id,
         rs_client_id: rs.client_id,
@@ -403,7 +426,7 @@ fn user_token(f: &Fixture) -> String {
         f.org_id,
         &[],
         &f.auth,
-        Uuid::new_v4().to_string(),
+        f.session_id.to_string(),
         AUD_USER,
     )
     .unwrap()

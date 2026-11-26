@@ -681,6 +681,48 @@ impl<C: Connection> SurrealTenantRepository<C> {
         Ok(rows.first().is_some_and(|r| r.total > 0))
     }
 
+    /// The organization the newest `tenants.deleted` record of tenant `id`
+    /// records (SA-02, N1), for the purge's `tenants.purged` record: `None`
+    /// for an orphan, a deletion recorded before the field existed, or a
+    /// datastore failure (logged; the purge record is written either way).
+    pub async fn deleted_tenant_organization(&self, id: Uuid) -> Option<Uuid> {
+        let read = async {
+            let mut result = self
+                .db
+                .current()
+                .query(
+                    "SELECT VALUE organization_id FROM audit_log \
+                     WHERE tenant_id = $nil AND action = $action AND resource_id = $id \
+                       AND organization_id != NONE \
+                     ORDER BY timestamp DESC LIMIT 1",
+                )
+                .bind(("nil", Uuid::nil().to_string()))
+                .bind((
+                    "action",
+                    super::tenant_purge::TENANT_DELETED_ACTION.to_string(),
+                ))
+                .bind(("id", id.to_string()))
+                .await
+                .map_err(DbError::from)?
+                .check()
+                .map_err(DbError::from)?;
+            let rows: Vec<String> = result.take(0).map_err(DbError::from)?;
+            Ok::<_, DbError>(rows.into_iter().next())
+        };
+        match read.await {
+            Ok(org) => org.and_then(|o| Uuid::parse_str(&o).ok()),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    tenant_id = %id,
+                    "could not read a deleted tenant's organization; its purge record \
+                     names none"
+                );
+                None
+            }
+        }
+    }
+
     /// Tenant ids that own rows but have no tenant row at all — the residue of
     /// deletions made before the tombstone existed (#523), which removed the
     /// tenant row and nothing else.
@@ -1085,10 +1127,47 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
 
         // #523: a tombstoned tenant is not there to update — `NotFound`, as
         // every read answers.
-        let query = format!(
+        let update = format!(
             "UPDATE type::record('tenant', $id) SET {} WHERE deleted_at = NONE",
             sets.join(", ")
         );
+        // SA-13 (N16, D-3): suspending a tenant revokes, in the same
+        // transaction as the status write, every session and OAuth2 refresh
+        // token it holds — the tombstone's first step (`delete` below). Its
+        // access tokens then fail the per-request session check, its last
+        // session cannot refresh, and un-suspending restores sign-in only
+        // through a new session. The data stays. The handler revoked them once
+        // already, through the repositories that publish to the revocation
+        // feed and drop the validity cache; this pass catches a sign-in that
+        // raced it, atomically with the status.
+        let suspends = input.status == Some(TenantStatus::Suspended);
+        // SA-13 (OD-13a): the organization's own tenant holds every
+        // organization principal — the principals who lift a suspension — so it
+        // is never suspended. Decided here, where the status write is, so no
+        // caller can reach around it; refused before anything is written or
+        // revoked. A read rather than a guard inside the transaction is enough:
+        // `kind` is fixed at creation (`UpdateTenant` cannot change it), so
+        // nothing can race it. A tombstoned tenant answers `NotFound` here, as
+        // the write itself would.
+        if suspends && self.get_by_id(id).await?.is_organization_scope() {
+            return Err(axiam_core::error::AxiamError::OrganizationTenantNotSuspendable);
+        }
+        let (query, slot) = if suspends {
+            (
+                // BEGIN=0, DELETE=1, UPDATE refresh tokens=2, UPDATE tenant=3.
+                format!(
+                    "BEGIN TRANSACTION; \
+                     DELETE session WHERE tenant_id = $id; \
+                     UPDATE oauth2_refresh_token SET revoked = true \
+                         WHERE tenant_id = $id AND revoked = false; \
+                     {update}; \
+                     COMMIT TRANSACTION"
+                ),
+                3,
+            )
+        } else {
+            (update, 0)
+        };
 
         let db = self.db.current();
         let mut builder = db.query(&query).bind(("id", id_str.clone()));
@@ -1111,7 +1190,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
             .check()
             .map_err(|e| DbError::Migration(e.to_string()))?;
 
-        let rows: Vec<TenantRow> = result.take(0).map_err(DbError::from)?;
+        let rows: Vec<TenantRow> = result.take(slot).map_err(DbError::from)?;
         let row = take_first_or_not_found(rows, "tenant", &id_str)?;
 
         Ok(row.into_tenant(id)?)
@@ -1153,6 +1232,11 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         //   tenant's own), and its SCIM targets with their links and delivery
         //   state.
         //
+        // * SA-13 (N16): its SCIM provisioning tokens are revoked, so a
+        //   provisioner's long-lived handle stops at the tombstone rather than
+        //   at the purge (`SurrealScimTokenResolver::resolve` refuses a
+        //   tombstoned or suspended tenant's tokens too).
+        //
         // * R1W1-01: its certificates and signing CAs are revoked. The handler
         //   revoked them once already, through the services that forward a
         //   `vault_pki` leaf to Vault and release a CA's key; this pass catches
@@ -1188,6 +1272,8 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
                  DELETE scim_target_link WHERE tenant_id = $id; \
                  DELETE scim_target_state WHERE tenant_id = $id; \
                  DELETE scim_target WHERE tenant_id = $id; \
+                 UPDATE scim_token SET revoked_at = time::now() \
+                     WHERE tenant_id = $id AND revoked_at = NONE; \
                  UPDATE certificate SET status = 'Revoked', \
                      revoked_at = revoked_at ?? time::now() \
                      WHERE tenant_id = $id AND status != 'Revoked' \

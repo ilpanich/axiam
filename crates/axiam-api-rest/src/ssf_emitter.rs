@@ -578,6 +578,7 @@ impl<C: Connection + Clone> axiam_core::models::ssf::SharedIssuerObserver for Sh
                         metadata: Some(serde_json::json!({
                             "reason": SHARED_ISSUER_INACTIVE_REASON,
                         })),
+                        organization_id: None,
                     })
                     .await
                 {

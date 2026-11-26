@@ -452,14 +452,20 @@ async fn main() -> std::io::Result<()> {
         .expect("client-secret pepper must resolve (OBS-1) — see AXIAM__AUTH__PEPPER");
     tracing::info!("Client-secret hasher installed (OBS-1)");
 
-    // Load allow_missing_aud_as_user override (bool, default true).
-    // The serde default already sets it to true; this allows an operator to
-    // explicitly disable the back-compat window via env var.
+    // Load allow_missing_aud_as_user override (bool, default false since
+    // SA-03). The serde default already sets it to false; this keeps the
+    // explicit env-var spelling an operator may already use.
     if let Ok(val) = std::env::var("AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER") {
-        match val.to_lowercase().as_str() {
-            "false" | "0" | "no" => config.auth.allow_missing_aud_as_user = false,
-            _ => config.auth.allow_missing_aud_as_user = true,
-        }
+        config.auth.allow_missing_aud_as_user =
+            axiam_server::boot::allow_missing_aud_override(&val);
+    }
+    // SA-03 (N10, D-7): say so at startup when the access-token `typ` check is
+    // relaxed, so a rolling-upgrade setting is not left on by accident.
+    if !config.auth.require_access_token_typ {
+        tracing::warn!(
+            "AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false: access tokens without typ at+jwt \
+             are accepted (rolling-upgrade window only; set it back to true afterwards)"
+        );
     }
 
     // Connect to SurrealDB. `DbPool` holds N independent, individually-renewable
@@ -530,11 +536,15 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("Database connected and migrations applied");
 
+    // Q-11 / S-12: build the timing-equalisation dummy hash now, so the first
+    // unknown-user refusal after a restart costs what every later one does.
+    axiam_auth::password::warm_up_equalisation();
+
     // Boot: mint a one-time bootstrap setup token if this database has never
     // been bootstrapped (SECHRD-04 / D-03b). No-op on every subsequent boot.
     // Errors are logged, never fatal — an unminted token just means the
-    // env-var gate (AXIAM_BOOTSTRAP_ADMIN_EMAIL) remains the only way in,
-    // which is a safe (fail-closed) degraded state, not a startup blocker.
+    // bootstrap is refused until `setup-token --remint` mints one, which is a
+    // safe (fail-closed) degraded state, not a startup blocker.
     match axiam_db::mint_bootstrap_setup_token_if_needed(&pool.handle_for_repo().current()).await {
         Ok(Some(token)) => {
             // D-03b: the ONE deliberate secret-log exception — logged exactly
@@ -544,9 +554,10 @@ async fn main() -> std::io::Result<()> {
                 setup_token = %token,
                 "AXIAM first-run bootstrap setup token minted. Use this token \
                  ONCE to complete first-admin bootstrap (POST \
-                 /api/v1/admin/bootstrap, `setup_token` field) if \
-                 AXIAM_BOOTSTRAP_ADMIN_EMAIL is not set. This token will not \
-                 be shown again."
+                 /api/v1/admin/bootstrap, `setup_token` field). It is ALWAYS \
+                 required, even when AXIAM_BOOTSTRAP_ADMIN_EMAIL is set (that \
+                 only restricts the email). This token will not be shown \
+                 again; treat this log as secret until bootstrap completes."
             );
         }
         Ok(None) => {}

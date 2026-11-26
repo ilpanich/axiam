@@ -417,7 +417,7 @@ per `CLAUDE.md` after any `target/` wipe.
 >
 > **Two registries the plan did not mention, and the tests found.** The new
 > routes 403'd before the handler ran until they were added to
-> `middleware::csrf::CSRF_EXEMPT_SUFFIXES` and `permissions::PUBLIC_PATHS` —
+> `middleware::csrf::CSRF_EXEMPT_PATHS` and `permissions::PUBLIC_PATHS` —
 > both, as the CSRF module's own comment warns. The exemption is safe here for
 > the opposite reason the profile-page registration pair is *not* exempt: that
 > caller is signed in and carries the cookie an attacker would ride, this one

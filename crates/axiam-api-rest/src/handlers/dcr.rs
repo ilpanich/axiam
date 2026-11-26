@@ -405,6 +405,7 @@ async fn audit_registration<C: Connection + Clone>(
                 "client_id": client_id,
                 "error": refusal.map(DcrError::error_code),
             })),
+            organization_id: None,
         })
         .await
     {
@@ -676,6 +677,7 @@ async fn audit_configuration<C: Connection + Clone>(
                 "error": refusal.map(ConfigRefusal::code),
                 "token_rotated": matches!(operation, ConfigOperation::Update) && refusal.is_none(),
             })),
+            organization_id: None,
         })
         .await
     {

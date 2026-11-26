@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use axiam_amqp::{
     AmqpManager, AmqpOutboundPublisher, InProcessMailPublisher, InProcessOutbound,
-    InProcessShutdown, MailOutboundPublisher, OutboundDeliverers, OutboundRetryConfig,
-    spawn_in_process_consumer, spawn_outbound_consumer,
+    InProcessShutdown, InternalQueueGate, InternalSigner, MailOutboundPublisher,
+    OutboundDeliverers, OutboundRetryConfig, spawn_in_process_consumer, spawn_outbound_consumer,
 };
 use axiam_core::error::AxiamResult;
 use axiam_core::models::mail::OutboundMailMessage;
@@ -33,17 +33,28 @@ pub enum OutboundTransport {
         /// The publisher per kind, kept so the kind's consumer can use it for
         /// its TTL-delayed retry republish.
         publishers: HashMap<OutboundKind, AmqpOutboundPublisher>,
+        /// Seals every message the publishers write (SA-14).
+        signer: InternalSigner,
+        /// Verifies every message the consumers read (SA-14).
+        gate: InternalQueueGate,
     },
     /// The minimal profile: bounded in-process queues, lost on restart.
     InProcess(InProcessOutbound),
 }
 
 impl OutboundTransport {
-    /// The broker-backed transport.
-    pub fn amqp(manager: Arc<AmqpManager>) -> Self {
+    /// The broker-backed transport. `signer` seals what its publishers write
+    /// and `gate` verifies what its consumers read (SA-14, N3).
+    pub fn amqp(
+        manager: Arc<AmqpManager>,
+        signer: InternalSigner,
+        gate: InternalQueueGate,
+    ) -> Self {
         Self::Amqp {
             manager,
             publishers: HashMap::new(),
+            signer,
+            gate,
         }
     }
 
@@ -81,6 +92,8 @@ impl OutboundTransport {
             Self::Amqp {
                 manager,
                 publishers,
+                signer,
+                ..
             } => {
                 let channel = manager
                     .create_publisher_channel()
@@ -88,7 +101,7 @@ impl OutboundTransport {
                     .unwrap_or_else(|e| {
                         panic!("Failed to create the AMQP {kind} publisher channel: {e}")
                     });
-                let publisher = AmqpOutboundPublisher::new(channel);
+                let publisher = AmqpOutboundPublisher::new(channel, signer.clone());
                 publishers.insert(kind, publisher.clone());
                 Arc::new(publisher)
             }
@@ -111,6 +124,8 @@ impl OutboundTransport {
             Self::Amqp {
                 manager,
                 publishers,
+                gate,
+                ..
             } => {
                 let publisher = publishers
                     .get(&kind)
@@ -125,6 +140,7 @@ impl OutboundTransport {
                     publisher,
                     audit_repo,
                     cfg,
+                    gate.clone(),
                 );
             }
             Self::InProcess(hub) => {

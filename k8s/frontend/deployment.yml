@@ -18,6 +18,9 @@ spec:
         app: axiam
         component: frontend
     spec:
+      # Least privilege: this pod never calls the Kubernetes API, so it gets no
+      # service-account token mounted (SA-45).
+      automountServiceAccountToken: false
       # Pod-level restricted security context (KSV-0118). nginx-unprivileged
       # runs as UID/GID 101; container-level contexts below remain authoritative.
       securityContext:

@@ -929,6 +929,126 @@ async fn a_lockout_after_approval_refuses_the_redemption() {
     assert_eq!(stored(&f, &id).await.status, CibaRequestStatus::Redeemed);
 }
 
+async fn refresh_token_rows(f: &Fixture) -> u64 {
+    use surrealdb::types::SurrealValue;
+
+    #[derive(SurrealValue)]
+    struct CountRow {
+        total: u64,
+    }
+    let mut res =
+        f.db.query("SELECT count() AS total FROM oauth2_refresh_token GROUP ALL")
+            .await
+            .unwrap();
+    let rows: Vec<CountRow> = res.take(0).unwrap();
+    rows.first().map(|r| r.total).unwrap_or(0)
+}
+
+async fn change_credential(f: &Fixture) {
+    SurrealUserRepository::new(f.db.clone())
+        .update(
+            f.tenant_id,
+            f.user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$replacement".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// QR18-1 — see the device flow's twin: a datastore event stamps the user's
+/// credential epoch in the transaction that writes the refresh token, so the
+/// change lands after the pre-check and only the post-mint re-read can see it.
+async fn change_credential_when_a_refresh_token_is_written(f: &Fixture) {
+    f.db.query(
+        "DEFINE EVENT qr18_1_race ON TABLE oauth2_refresh_token WHEN $event = 'CREATE' THEN { \
+             UPDATE type::record('user', $after.user_id) SET \
+                 credential_changed_at = time::now(), credential_version += 1; \
+         }",
+    )
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+}
+
+async fn live_refresh_token_rows(f: &Fixture) -> u64 {
+    use surrealdb::types::SurrealValue;
+
+    #[derive(SurrealValue)]
+    struct CountRow {
+        total: u64,
+    }
+    let mut res = f
+        .db
+        .query("SELECT count() AS total FROM oauth2_refresh_token WHERE revoked = false GROUP ALL")
+        .await
+        .unwrap();
+    let rows: Vec<CountRow> = res.take(0).unwrap();
+    rows.first().map(|r| r.total).unwrap_or(0)
+}
+
+/// QR18-1: the post-mint re-check on the CIBA path. The pre-check passes; the
+/// change lands with the refresh-token write; the token just minted is revoked
+/// and the poll answers `invalid_grant` with no tokens.
+#[actix_web::test]
+async fn qr18_1_a_credential_change_landing_with_the_refresh_token_write_revokes_it() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    let (_, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+    approve(&f, &id, Uuid::new_v4()).await;
+    change_credential_when_a_refresh_token_is_written(&f).await;
+    let (status, json) = token!(app, f, &f.ciba, &id);
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (400, Some("invalid_grant")),
+        "{json:?}"
+    );
+    assert!(json.get("access_token").is_none(), "minted: {json:?}");
+    assert!(json.get("refresh_token").is_none(), "minted: {json:?}");
+    assert_eq!(refresh_token_rows(&f).await, 1, "the write happened");
+    assert_eq!(live_refresh_token_rows(&f).await, 0, "and was revoked");
+}
+
+/// SR17-1: an approval given before a password reset or change is not
+/// redeemable after it: `invalid_grant`, no tokens, no refresh-token row.
+#[actix_web::test]
+async fn sr17_1_an_approval_given_before_a_credential_change_refuses_the_redemption() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    let (_, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+    approve(&f, &id, Uuid::new_v4()).await;
+    change_credential(&f).await;
+    let (status, json) = token!(app, f, &f.ciba, &id);
+    assert_eq!(
+        (status, json["error"].as_str()),
+        (400, Some("invalid_grant"))
+    );
+    assert!(json.get("access_token").is_none(), "minted: {json:?}");
+    assert!(json.get("refresh_token").is_none(), "minted: {json:?}");
+    assert_eq!(refresh_token_rows(&f).await, 0);
+    assert_eq!(stored(&f, &id).await.status, CibaRequestStatus::Redeemed);
+}
+
+/// The control: a request approved after the credential change still mints.
+#[actix_web::test]
+async fn sr17_1_an_approval_given_after_a_credential_change_still_mints() {
+    let f = setup().await;
+    let app = app!(f, permissive());
+    change_credential(&f).await;
+    let (_, body) = bc_authorize!(app, f, &f.ciba, "&login_hint=alice");
+    let id = body["auth_req_id"].as_str().unwrap().to_owned();
+    approve(&f, &id, Uuid::new_v4()).await;
+    let (status, json) = token!(app, f, &f.ciba, &id);
+    assert_eq!(status, 200, "{json:?}");
+    assert!(json["refresh_token"].is_string());
+    assert_eq!(refresh_token_rows(&f).await, 1);
+}
+
 /// Two concurrent token requests for one approved request: exactly one gets
 /// tokens, on the engine production runs.
 #[actix_web::test]

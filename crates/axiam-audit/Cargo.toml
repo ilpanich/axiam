@@ -21,4 +21,4 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

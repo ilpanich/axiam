@@ -267,6 +267,7 @@ async fn pgp_sign_audit_batch_answers_503_under_a_held_gate() {
         ip_address: None,
         metadata: serde_json::json!({}),
         timestamp: chrono::Utc::now(),
+        organization_id: None,
     }];
     answers_503_within_the_bound(&f, f.pgp.sign_audit_batch(tenant_id, entries)).await;
 }

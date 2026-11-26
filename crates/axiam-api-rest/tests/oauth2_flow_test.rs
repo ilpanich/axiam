@@ -1026,7 +1026,9 @@ async fn p23w1_12_userinfo_and_introspection_answer_for_a_suspended_account() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
-    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    // SA-41: introspection reports a token inactive once the session its `sid`
+    // names is gone, so the signed-in user needs a session row, as in production.
+    let (_session_id, user_jwt) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
     let app = test_app!(db, auth);
 
     let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
@@ -1983,7 +1985,9 @@ async fn introspect_active_access_token() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
-    let user_jwt = mint_token(&auth, user_id, tenant_id, org_id);
+    // SA-41: introspection reports a token inactive once the session its `sid`
+    // names is gone, so the signed-in user needs a session row, as in production.
+    let (_session_id, user_jwt) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
     let app = test_app!(db, auth);
 
     let (client_id, client_secret, redirect_uri) = create_client(&app, &user_jwt).await;
@@ -2481,8 +2485,11 @@ async fn client_auth_failure_system_rows(
     db: &Surreal<TestDb>,
 ) -> Vec<axiam_core::models::audit::AuditLogEntry> {
     use axiam_core::repository::{AuditLogFilter, AuditLogRepository};
+    // The whole partition: a row for an unknown tenant records no
+    // organization, so no organization's `list_system` returns it (SA-02, N1).
     axiam_db::SurrealAuditLogRepository::new(db.clone())
-        .list_system(
+        .list(
+            uuid::Uuid::nil(),
             AuditLogFilter {
                 action: Some("oauth2.client_auth_failed".into()),
                 ..Default::default()

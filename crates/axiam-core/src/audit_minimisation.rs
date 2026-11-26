@@ -205,6 +205,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: ip.map(str::to_owned),
             metadata,
+            organization_id: None,
         }
     }
 

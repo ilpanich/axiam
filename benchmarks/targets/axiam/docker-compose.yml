@@ -205,9 +205,9 @@ services:
       # `http` (shipped default) or `ws` (opt-in; a labelled sensitivity cell).
       AXIAM__DB__ENGINE: "${AXIAM__DB__ENGINE:-http}"
       AXIAM__DB__WS_REQUEST_DEADLINE_SECS: "${AXIAM__DB__WS_REQUEST_DEADLINE_SECS:-60}"
-      # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so
-      # runner/seed.sh can POST /api/v1/admin/bootstrap without a setup_token.
-      # Bench-only; the production compose deliberately does not preset this.
+      # First-run bootstrap restriction: only this email may bootstrap. It is an
+      # ADDITIONAL restriction — runner/seed.sh still sends the setup token it
+      # reads from this container's first-boot log. Bench-only.
       AXIAM_BOOTSTRAP_ADMIN_EMAIL: "${BENCH_ADMIN_EMAIL:-admin@bench.dev}"
       AXIAM__AUTH__JWT_PRIVATE_KEY_PEM: "${AXIAM__AUTH__JWT_PRIVATE_KEY_PEM:?required}"
       AXIAM__AUTH__JWT_PUBLIC_KEY_PEM: "${AXIAM__AUTH__JWT_PUBLIC_KEY_PEM:?required}"

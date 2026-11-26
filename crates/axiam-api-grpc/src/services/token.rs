@@ -5,11 +5,13 @@ use axiam_auth::error::AuthError;
 use axiam_auth::token::validate_access_token;
 use axiam_core::error::AxiamError;
 use axiam_core::repository::UserRepository;
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use axiam_auth::token::ValidatedClaims;
 
+use crate::middleware::strict_revocation::SessionRevocationCheck;
 use crate::proto::token_service_server::TokenService;
 use crate::proto::{
     CnfClaim, IntrospectTokenRequest, IntrospectTokenResponse, RptPermission, ValidateTokenRequest,
@@ -46,11 +48,54 @@ pub struct TokenServiceImpl<U: UserRepository> {
     /// a token whose account may no longer act as inactive. `ValidateToken`
     /// stays a local signature-and-claims check and reads nothing.
     user_repo: U,
+    /// Read by `IntrospectToken` only (SA-41): a token whose `sid` session is
+    /// no longer live reports `active: false`. `None` skips the check.
+    session_check: Option<Arc<dyn SessionRevocationCheck>>,
 }
 
 impl<U: UserRepository> TokenServiceImpl<U> {
     pub fn new(config: AuthConfig, user_repo: U) -> Self {
-        Self { config, user_repo }
+        Self {
+            config,
+            user_repo,
+            session_check: None,
+        }
+    }
+
+    /// Have `IntrospectToken` report a token inactive once the session its
+    /// `sid` claim names is revoked or expired (SA-41). The checker should
+    /// hold no validation cache: a negative answer must never be stale.
+    #[must_use]
+    pub fn with_session_check(mut self, check: Arc<dyn SessionRevocationCheck>) -> Self {
+        self.session_check = Some(check);
+        self
+    }
+
+    /// Whether the session a token names is still live.
+    ///
+    /// The session is named by `sid`, else by `jti`
+    /// (`AccessTokenClaims::session_reference`, the rule the REST extractor and
+    /// REST introspection apply): a first-party sign-in token carries its
+    /// session id in `jti` and no `sid`. Only a user token can name a session;
+    /// a client-credentials or service-account token, and a token of a grant
+    /// that names none (exchanged, RPT, device), is unaffected. A user token
+    /// whose reference is not a session id cannot be live.
+    async fn session_is_live(&self, claims: &axiam_auth::token::AccessTokenClaims) -> bool {
+        let Some(check) = &self.session_check else {
+            return true;
+        };
+        if claims.sub_kind != axiam_auth::token::SubjectKind::User {
+            return true;
+        }
+        let Some(reference) = claims.session_reference() else {
+            return true;
+        };
+        let (Ok(sid), Ok(tenant_id)) =
+            (Uuid::parse_str(reference), claims.tenant_id.parse::<Uuid>())
+        else {
+            return false;
+        };
+        check.is_session_active(tenant_id, sid).await
     }
 
     /// Whether the account a user token names may still act (#520,
@@ -172,7 +217,8 @@ impl<U: UserRepository + 'static> TokenService for TokenServiceImpl<U> {
             // call; `ValidateToken` stays the read-free local check.
             Ok(validated)
                 if validated.0.tenant_id == caller_tenant
-                    && self.subject_may_act(&validated.0).await? =>
+                    && self.subject_may_act(&validated.0).await?
+                    && self.session_is_live(&validated.0).await =>
             {
                 let claims = validated.0;
                 let cnf = wire_cnf(&claims);

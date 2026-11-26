@@ -65,6 +65,19 @@ dbcaps := "capped"
 #                    Write its cells to their own results tree (see claude_dev/
 #                    run6-runbook.md): they must not be medianed with full-profile cells.
 deploy := "full"
+# caches selects each target's read-cache posture (see README "Caches and
+# fairness"):
+#   default — every target exactly as it ships. AXIAM (v1.4+), Keycloak and
+#             authentik cache reads in-process or in their database; Zitadel's
+#             object caches ship off. This is the head-to-head matrix.
+#   strict  — AXIAM with its decision, session-validation and record caches
+#             OFF: every request does its full database work. The labelled
+#             "uncached" reference; other targets run their shipped caches and
+#             say so. Write these cells to their own results tree.
+#   on      — every target with the read caches it has turned ON: AXIAM as
+#             shipped, Zitadel with its memory-connector object caches,
+#             Keycloak and authentik as shipped (theirs are on already).
+caches := "default"
 # repeat controls how many times `bench-matrix` runs the whole target×profile
 # ×scenario matrix (C1: median-of-N). Each pass writes into its own
 # results/run-<i>/ subtree (same flat per-cell layout underneath), and
@@ -94,6 +107,27 @@ bench-up:
     set -euo pipefail
     source profiles/{{profile}}.env
     COMPOSE="targets/{{target}}/docker-compose.yml"
+    # --- read-cache posture (caches=default|strict|on) ---
+    case "{{caches}}" in
+      default) echo "[bench-up] caches=default: {{target}} runs its shipped read caches" ;;
+      strict)
+        if [ "{{target}}" = "axiam" ]; then
+          export AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false
+          export AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=0
+          export AXIAM__DB__RECORD_CACHE_TTL_SECS=0
+          echo "[bench-up] caches=strict: AXIAM decision, session-validation and record caches OFF (labelled uncached reference)"
+        else
+          echo "[bench-up] caches=strict applies to AXIAM only; {{target}} runs its shipped caches" >&2
+        fi ;;
+      on)
+        if [ "{{target}}" = "zitadel" ]; then
+          export BENCH_ZITADEL_CACHE_MEMORY=true BENCH_ZITADEL_CACHE_CONNECTOR=memory
+          echo "[bench-up] caches=on: Zitadel instance/milestones/organization caches ON (memory connector)"
+        else
+          echo "[bench-up] caches=on: {{target}} already ships its read caches on"
+        fi ;;
+      *) echo "[bench-up] unknown caches='{{caches}}' (use default, strict or on)" >&2; exit 1 ;;
+    esac
     # Per-stack credentials (never literals): generated once per stack, required by
     # every compose file, removed by bench-down. See runner/bench-creds.sh.
     # shellcheck source=runner/bench-creds.sh
@@ -759,7 +793,7 @@ bench-matrix:
             continue
           fi
           echo "=== run $i: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
-          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} bench-up
+          just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} caches={{caches}} bench-up
           just target=$t profile=$p bench-seed
           just target=$t profile=$p bench-run
           just target=$t bench-down
@@ -830,7 +864,7 @@ bench-dry-run:
           continue
         fi
         echo "=== dry-run: $t / $p (rl={{rl}} dbcaps={{dbcaps}}) ==="
-        if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} bench-up; then
+        if ! just target=$t profile=$p rl={{rl}} dbcaps={{dbcaps}} build={{build}} deploy={{deploy}} caches={{caches}} bench-up; then
           note "$t" "$p" "(bench-up)" FAIL "stack never came up / never became ready — see the compose ps+logs dumped above"
           teardown "$t" "$p"
           continue
@@ -1124,7 +1158,7 @@ bench-nested:
 
     for t in {{nestedtargets}}; do
       echo "=== nested sweep: $t / {{profile}} (rl={{rl}} dbcaps={{dbcaps}}) ==="
-      just target=$t profile={{profile}} rl={{rl}} dbcaps={{dbcaps}} build={{build}} bench-up
+      just target=$t profile={{profile}} rl={{rl}} dbcaps={{dbcaps}} build={{build}} caches={{caches}} bench-up
       # Seed ONCE per target, into the sweep root. seed.sh honours
       # BENCH_RESULTS_DIR for its post-smoke-check marker, and run-benchmark.sh
       # refuses to start without that marker in ITS results dir — which is a

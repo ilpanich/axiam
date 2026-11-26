@@ -1125,6 +1125,39 @@ def build_report(cells, multi_run=False):
             "",
         ]
 
+    # 1d. Read-cache posture (`just caches=…`, README "Caches and fairness").
+    # Every target caches something by default — AXIAM (v1.4+) its decisions,
+    # sessions and tenant/client/user records for 5 s; Keycloak its realms,
+    # users and sessions; authentik its flows, policies and data — except
+    # Zitadel, whose object caches ship off. The table states which posture
+    # each target's cells ran under; a non-default posture is a labelled
+    # sensitivity cell and must not be medianed with the head-to-head matrix.
+    postures: dict = {}
+    for c in cells:
+        meta = c.get("meta") or {}
+        postures.setdefault(meta.get("target", "?"), set()).add(meta.get("cache_profile", "unrecorded"))
+    if postures:
+        lines += [
+            "## Read-cache posture",
+            "",
+            "`default` is the target as it ships. `strict` (AXIAM only) turns its decision, "
+            "session-validation and record caches off — every request does its full database "
+            "work. `on` (Zitadel) turns on its optional memory-connector object caches. "
+            "`unrecorded` cells predate this field: AXIAM before v1.4 shipped its caches off.",
+            "",
+            md_table(["target", "cache profile(s) in this report"],
+                     [[t, ", ".join(sorted(p))] for t, p in sorted(postures.items())]),
+            "",
+        ]
+        mixed = [t for t, p in postures.items() if len(p) > 1]
+        if mixed:
+            lines += [
+                f"> **Mixed cache postures for {', '.join(sorted(mixed))}.** Cells of different "
+                "postures are different measurements: report them side by side, never as one "
+                "median.",
+                "",
+            ]
+
     # 2. Efficiency comparison per (scenario, profile) across targets
     lines += ["## Efficiency comparison (across targets)", "",
               "Higher `thr/core` and lower `cpu_ms/req` is better. "

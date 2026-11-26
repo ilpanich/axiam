@@ -145,10 +145,15 @@ services:
       # /api/v1/organizations/{id}/settings after bootstrap; that is the step
       # that actually holds, and this one is its deployment-wide backstop.
       AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS: "${AXIAM__AUTH__MAX_FAILED_LOGIN_ATTEMPTS:-1000000}"
-      # --- Authz decision cache (D7) ----------------------------------------------
-      # Default OFF (today's behavior). Flip ENABLED=true only for the labeled
-      # cache-sensitivity pass — never for the head-to-head matrix.
-      AXIAM__AUTHZ__DECISION_CACHE_ENABLED: "${AXIAM__AUTHZ__DECISION_CACHE_ENABLED:-false}"
+      # --- Caches: product defaults (v1.4) -----------------------------------------
+      # The head-to-head matrix runs every target with its SHIPPED caches, and
+      # since v1.4 AXIAM ships its read caches ON (5 s): the decision cache, the
+      # session-validation cache and the tenant/client/user record caches.
+      # `just caches=strict …` turns all three off for the labelled "uncached"
+      # reference cells; `caches=on` turns on the optional caches of a target
+      # that ships them off (Zitadel). See benchmarks/README.md "Caches and
+      # fairness". The values below MUST track the product defaults.
+      AXIAM__AUTHZ__DECISION_CACHE_ENABLED: "${AXIAM__AUTHZ__DECISION_CACHE_ENABLED:-true}"
       AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS: "${AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS:-5}"
       AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES: "${AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES:-10000}"
       # --- Authz batch strategy (D10/H3) ------------------------------------------
@@ -190,10 +195,16 @@ services:
       # container (compose forwards only the names in this block).
       AXIAM__SERVER__TCP_NODELAY: "${AXIAM__SERVER__TCP_NODELAY:-true}"
       # --- I6: session-validation cache ------------------------------------
-      # Shipped default is 0 = OFF. The run-5 I6 matrix needs it set to a
-      # non-zero TTL (5) or the cell measures nothing new. The server logs a
-      # WARN naming the active TTL at startup; its absence means it is off.
-      AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS: "${AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS:-0}"
+      # Shipped default is 5 since v1.4 (it was 0 = off); `caches=strict` sets 0.
+      AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS: "${AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS:-5}"
+      # --- Record caches (tenant / client / user), v1.4 ---------------------
+      # Shipped default 5; `caches=strict` sets 0.
+      AXIAM__DB__RECORD_CACHE_TTL_SECS: "${AXIAM__DB__RECORD_CACHE_TTL_SECS:-5}"
+      AXIAM__DB__RECORD_CACHE_MAX_ENTRIES: "${AXIAM__DB__RECORD_CACHE_MAX_ENTRIES:-10000}"
+      # --- Datastore engine, v1.4 -------------------------------------------
+      # `http` (shipped default) or `ws` (opt-in; a labelled sensitivity cell).
+      AXIAM__DB__ENGINE: "${AXIAM__DB__ENGINE:-http}"
+      AXIAM__DB__WS_REQUEST_DEADLINE_SECS: "${AXIAM__DB__WS_REQUEST_DEADLINE_SECS:-60}"
       # First-run bootstrap gate (D-03a): satisfies the fail-closed admin gate so
       # runner/seed.sh can POST /api/v1/admin/bootstrap without a setup_token.
       # Bench-only; the production compose deliberately does not preset this.

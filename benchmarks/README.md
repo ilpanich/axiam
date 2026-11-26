@@ -369,6 +369,47 @@ AXIAM cell. It needs Docker Compose >= 2.24 (`!reset` / `!override`).
 * `BENCH_SCENARIO_ONLY="a.js b.js"` (the inverse of `BENCH_SCENARIO_EXCLUDE`) runs a
   chosen set of cells behind one settle gate; an unknown name is a hard error.
 
+### Caches and fairness (`caches=`)
+
+Every product under test answers some reads from a cache by default, and the
+benchmark's workload — one seeded user, one client, one resource, hammered
+for two minutes — keeps any cache at a hit rate near 100 %. A cache-on number
+is therefore a *best case* for every target, and comparing one target with its
+caches on against another with them off would measure the posture, not the
+product. So each target runs **as it ships**, the posture is recorded in every
+cell's `meta.json` (`cache_profile`), and two labelled variants exist:
+
+| target | what it caches by default | `caches=strict` | `caches=on` |
+|---|---|---|---|
+| AXIAM (v1.4+) | authorization decisions, session validity, tenant / OAuth2 client / user records — in process, **5 s TTL**, invalidated on write on the same replica | all three **off**: every request does its full database work (the "uncached" reference) | as shipped |
+| Keycloak | realms, users, authorization, keys — local Infinispan caches (up to 10,000 entries each), invalidated across nodes; sessions held in memory | as shipped (not switchable here) | as shipped |
+| authentik (2025.10+) | data, flow plans and policies in its PostgreSQL-backed cache, **300 s** each (`AUTHENTIK_CACHE__TIMEOUT*`) | as shipped | as shipped |
+| Zitadel | **nothing**: its object caches (instance, milestones, organization) are a beta feature with no connector configured | as shipped | **on**, memory connector |
+
+```bash
+just targets="axiam keycloak zitadel authentik" bench-matrix                # head-to-head, as shipped
+just target=axiam caches=strict bench-up bench-seed bench-run bench-down    # AXIAM uncached reference
+just target=zitadel caches=on bench-up bench-seed bench-run bench-down      # Zitadel with its caches on
+```
+
+Rules for reporting:
+
+- **The head-to-head table is `caches=default`.** Say in the same breath that
+  AXIAM's caches bound staleness at 5 s and Keycloak's are invalidation-driven,
+  so the two are not the same guarantee.
+- **`strict` and `on` cells are sensitivity cells.** Write them to their own
+  results tree, like `deploy=minimal`; `report.py` lists every target's
+  postures and flags a report that mixes them.
+- **AXIAM `strict` is the number to quote for "database work per request"** —
+  it is what a cache miss costs, which is what a deployment with many distinct
+  users sees more often than this workload does.
+
+Sources: [Keycloak — configuring distributed caches](https://www.keycloak.org/server/caching),
+[Red Hat build of Keycloak — local cache sizes](https://docs.redhat.com/en/documentation/red_hat_build_of_keycloak/26.2/html/server_configuration_guide/caching-),
+[Zitadel — caches](https://zitadel.com/docs/self-hosting/manage/cache),
+[authentik 2025.10 configuration](https://version-2025-10.goauthentik.io/install-config/configuration/),
+[authentik — "We removed Redis"](https://goauthentik.io/blog/2025-11-13-we-removed-redis/).
+
 ### Memory at rest (`runner/resting-sample.sh`)
 
 The per-cell sampler only runs under load. `runner/resting-sample.sh <target> <stage>`

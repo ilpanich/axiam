@@ -512,6 +512,17 @@ listener's existing 30 s timeout.
 
 ### 8.5 D–F — caches: what "revocation latency" means
 
+**Decision (accepted 5 s):** D and E are on by default since this branch, and
+F was built — tenant, OAuth2 client and user record caches, 5 s TTL,
+`AXIAM__DB__RECORD_CACHE_TTL_SECS`, used only by read-only hot lookups, with
+credential material blanked in cached accounts and invalidation on every write
+through the owning repository. The decision-cache broadcast stays opt-in (it
+needs RabbitMQ, which the minimal profile has not). The benchmark gained a
+`caches=default|strict|on` posture so these defaults do not make the
+head-to-head silently incomparable (`benchmarks/README.md`, "Caches and
+fairness").
+
+
 The 262 ms of run 5 is **not** the staleness bound. It was the time for a
 revocation made through the API to be visible on the same replica, where the
 caches are invalidated in the same call. The bounds are:

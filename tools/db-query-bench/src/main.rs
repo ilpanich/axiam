@@ -261,8 +261,9 @@ async fn seed() -> Result<()> {
         .map(|(_, u)| *u)
         .collect();
     let user_id = bench_users[0];
-    let users_created = user_ids.len();
-    eprintln!("users: {users_created} in {:?}", t0.elapsed());
+    // Every creation above either succeeded or returned early, so the count is
+    // the requested one; it is not read back from the id list.
+    eprintln!("users: {users_n} in {:?}", t0.elapsed());
 
     // Sessions.
     let t0 = Instant::now();

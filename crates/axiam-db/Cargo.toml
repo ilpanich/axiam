@@ -17,7 +17,7 @@ axiam-auth = { workspace = true }
 # already-shipped axiam-db -> axiam-auth relationship.
 axiam-pki = { workspace = true }
 argon2 = { workspace = true }
-surrealdb = { workspace = true, features = ["protocol-http"] }
+surrealdb = { workspace = true, features = ["protocol-http", "protocol-ws"] }
 arc-swap = { workspace = true }
 surrealdb-types = "4"
 serde = { workspace = true }

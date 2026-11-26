@@ -500,6 +500,16 @@ round trip on 4.0.1 (§6). Recommended path, if wanted: an opt-in
 days (idle, restarts, a TCP-killing proxy) before it is considered as a
 default. Not implemented.
 
+### 8.4.1 C — decision: **implemented, opt-in**
+
+`AXIAM__DB__ENGINE=ws` (default `http`). Both engines go through the SDK's
+protocol-agnostic engine, so the choice is a start-up setting, not a type.
+Because the SDK has no per-query timeout on its remote engines (its
+`query_timeout` is honoured only by the gRPC and embedded engines), the bound
+is on the request: REST by `AXIAM__DB__WS_REQUEST_DEADLINE_SECS` (default
+60 s, above the 30 s SSF long poll; `503` + `Retry-After`), gRPC by the
+listener's existing 30 s timeout.
+
 ### 8.5 D–F — caches: what "revocation latency" means
 
 The 262 ms of run 5 is **not** the staleness bound. It was the time for a

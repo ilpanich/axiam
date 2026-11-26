@@ -954,6 +954,33 @@ What it does and does not do:
 > particular a rotated client secret keeps working on the other replicas for up
 > to the TTL. Set it to `0` where that window is not acceptable.
 
+## Datastore engine: HTTP or WebSocket (v1.4)
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__DB__ENGINE` | `http` (default) or `ws`. |
+| `AXIAM__DB__WS_REQUEST_DEADLINE_SECS` | With `ws`: the longest a REST request may take before it is answered `503` with `Retry-After` (default `60`; `0` = none). Ignored with `http`. |
+
+AXIAM moved to the HTTP engine because the WebSocket engine of older
+SurrealDB SDKs lost its namespace and database after a reconnect and answered
+"not found" for records that existed (SDK issue #5750). The 4.0 SDK replays the
+connection's `use` and `signin` on every reconnect, and a restart probe found
+no lost namespace (`claude_dev/db-query-optimization.md` §8.4), so WebSocket is
+offered again, **opt-in**:
+
+* It saves the per-request authentication and parsing the HTTP engine costs
+  the database — about 240–290 µs of SurrealDB CPU per round trip on 4.0.1.
+* While the connection is down a query **waits** for it to come back instead of
+  failing. The SDK has no per-query timeout on its remote engines, so AXIAM
+  bounds the request instead: REST requests by
+  `AXIAM__DB__WS_REQUEST_DEADLINE_SECS` (above the 30 s an SSF long poll may
+  wait), gRPC requests by the listener's existing 30 s timeout.
+* A URL with a scheme (`ws://`, `wss://`, `http://`, `https://`) is used as
+  given; a bare `host:port` gets the scheme of the chosen engine.
+
+Soak it in your environment — idle periods, database restarts, a proxy that
+drops idle connections — before relying on it.
+
 ## TCP_NODELAY on the REST listener (I5)
 
 | Key | Purpose |

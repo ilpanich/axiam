@@ -1852,6 +1852,69 @@ async fn reconnect_probe(engine: &str, secs: u64, interval_ms: u64, fx: &Fixture
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// AXIAM's own pool over either engine (AXIAM__DB__ENGINE)
+// ---------------------------------------------------------------------------
+
+/// Connect through `axiam_db::DbPool` — AXIAM's handles, re-signin and
+/// reconnect loop — with the chosen engine, then read the fixture user through
+/// the real repository every `interval_ms` for `secs` seconds, printing every
+/// change of outcome. Restart the server while it runs.
+async fn pool_probe(engine: &str, secs: u64, interval_ms: u64, fx: &Fixture) -> Result<()> {
+    let config = axiam_db::DbConfig {
+        url: env("SURREAL_ADDR", "127.0.0.1:8001"),
+        namespace: NS.into(),
+        database: DB.into(),
+        engine: if engine == "ws" {
+            axiam_db::DbEngine::Ws
+        } else {
+            axiam_db::DbEngine::Http
+        },
+        ..Default::default()
+    };
+    println!("endpoint {}", config.endpoint());
+    let pool = axiam_db::DbPool::connect(&config).await?;
+    let users = SurrealUserRepository::new(pool.handle_for_repo());
+    let t0 = Instant::now();
+    let (mut ok, mut missing, mut errors) = (0u64, 0u64, 0u64);
+    let mut last = String::new();
+    while t0.elapsed() < Duration::from_secs(secs) {
+        let outcome = match tokio::time::timeout(
+            Duration::from_secs(5),
+            users.get_by_id(fx.tenant_id, fx.user_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                ok += 1;
+                "found".to_owned()
+            }
+            Ok(Err(axiam_core::error::AxiamError::NotFound { .. })) => {
+                missing += 1;
+                "NOT FOUND (namespace lost?)".to_owned()
+            }
+            Ok(Err(e)) => {
+                errors += 1;
+                format!(
+                    "error: {}",
+                    e.to_string().chars().take(100).collect::<String>()
+                )
+            }
+            Err(_) => {
+                errors += 1;
+                "timeout (5 s)".to_owned()
+            }
+        };
+        if outcome != last {
+            println!("{:>7.1}s  {outcome}", t0.elapsed().as_secs_f64());
+            last = outcome;
+        }
+        tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+    }
+    println!("pool-probe\tengine={engine}\tfound={ok}\tnot_found={missing}\terrors={errors}");
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -1886,6 +1949,12 @@ async fn main() -> Result<()> {
         }
         "explain" => explain(&fx).await,
         "probe" => probe().await,
+        "pool-probe" => {
+            let engine = args.get(2).cloned().unwrap_or_else(|| "ws".into());
+            let secs: u64 = args.get(3).map_or(Ok(60), |s| s.parse())?;
+            let interval: u64 = args.get(4).map_or(Ok(200), |s| s.parse())?;
+            pool_probe(&engine, secs, interval, &fx).await
+        }
         "reconnect-probe" => {
             let engine = args.get(2).cloned().unwrap_or_else(|| "ws".into());
             let secs: u64 = args.get(3).map_or(Ok(60), |s| s.parse())?;

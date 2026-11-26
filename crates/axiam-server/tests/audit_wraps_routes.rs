@@ -130,6 +130,7 @@ async fn a_request_to_a_federation_route_is_audited_and_keyed_on_its_principal()
             ..RateLimitConfig::default()
         },
         route_options: RouteOptions::default(),
+        request_deadline: None,
     };
     let app = init_service(compose_app(deps.clone())).await;
 

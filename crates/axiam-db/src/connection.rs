@@ -71,7 +71,7 @@ use std::time::Duration;
 use rand::RngExt;
 use serde::Deserialize;
 use surrealdb::Surreal;
-use surrealdb::engine::remote::http::{Client, Http};
+use surrealdb::engine::any::{Any as Client, connect as connect_any};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::NotAllowedError;
 use tokio::task::JoinHandle;
@@ -173,6 +173,56 @@ pub struct DbConfig {
     /// Bound on the entries of each record cache. Overridable via
     /// `AXIAM__DB__RECORD_CACHE_MAX_ENTRIES`; default 10 000.
     pub record_cache_max_entries: usize,
+    /// Which SDK protocol carries the queries ([`DbEngine`]). Overridable via
+    /// `AXIAM__DB__ENGINE` (`http` or `ws`); default `http`.
+    pub engine: DbEngine,
+    /// With [`DbEngine::Ws`], the most time a REST request may take before it
+    /// is answered `503` (`AXIAM__DB__WS_REQUEST_DEADLINE_SECS`, default 60;
+    /// `0` = none).
+    ///
+    /// The WebSocket engine does not fail a query while it reconnects: the
+    /// query waits for the connection to come back. The SDK offers no
+    /// per-query timeout on its remote engines, so the bound is applied to the
+    /// request instead — above the 30 s an SSF long poll may legitimately wait,
+    /// and above the gRPC listener's own 30 s request timeout, so a healthy
+    /// request never meets it. Ignored with [`DbEngine::Http`], which fails a
+    /// query at once when the server is unreachable.
+    pub ws_request_deadline_secs: u64,
+}
+
+/// The SDK protocol AXIAM's handles use.
+///
+/// `Http` (the default) is stateless per request — namespace, database and
+/// token travel with every query — and fails fast when the server is down.
+/// `Ws` keeps one connection per pooled handle, saving the per-request
+/// authentication and parsing the HTTP engine pays (≈ 240–290 µs of server CPU
+/// per round trip on SurrealDB 4.0.1); since SDK 4.0 it replays `use`/`signin`
+/// on every reconnect, which is what AXIAM moved to HTTP to avoid (#5750).
+/// Opt-in: see `claude_dev/db-query-optimization.md` §8.4.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbEngine {
+    /// The HTTP engine (default).
+    #[default]
+    Http,
+    /// The WebSocket engine (opt-in).
+    Ws,
+}
+
+impl DbConfig {
+    /// The SDK endpoint for [`Self::url`]: the URL itself when it names a
+    /// scheme, otherwise `http://` or `ws://` in front of it per [`Self::engine`].
+    #[must_use]
+    pub fn endpoint(&self) -> String {
+        if self.url.contains("://") {
+            return self.url.clone();
+        }
+        let scheme = match self.engine {
+            DbEngine::Http => "http",
+            DbEngine::Ws => "ws",
+        };
+        format!("{scheme}://{}", self.url)
+    }
 }
 
 impl std::fmt::Debug for DbConfig {
@@ -189,6 +239,7 @@ impl std::fmt::Debug for DbConfig {
             .field("reconnect_max_retries", &self.reconnect_max_retries)
             .field("pool_size", &self.pool_size)
             .field("record_cache_ttl_secs", &self.record_cache_ttl_secs)
+            .field("engine", &self.engine)
             .finish_non_exhaustive()
     }
 }
@@ -212,6 +263,8 @@ impl Default for DbConfig {
             pool_acquire_timeout_secs: 5,
             record_cache_ttl_secs: crate::record_cache::DEFAULT_RECORD_CACHE_TTL_SECS,
             record_cache_max_entries: crate::record_cache::DEFAULT_RECORD_CACHE_MAX_ENTRIES,
+            engine: DbEngine::Http,
+            ws_request_deadline_secs: 60,
         }
     }
 }
@@ -428,7 +481,7 @@ impl DbManager {
         config: &DbConfig,
         ttl: Duration,
     ) -> Result<(DbSlot<Client>, JoinHandle<()>, JoinHandle<()>), surrealdb::Error> {
-        let db = Surreal::new::<Http>(&config.url).await?;
+        let db = connect_any(config.endpoint()).await?;
         db.signin(Root {
             username: config.username.clone(),
             password: config.password.clone(),
@@ -451,7 +504,7 @@ impl DbManager {
     /// enough even when [`crate::DbPool`] builds N handles). `pub(crate)` so the
     /// pool module can run it once before constructing its handles.
     pub(crate) async fn extend_root_token_duration(config: &DbConfig, ttl: Duration) {
-        let setup = match Surreal::new::<Http>(&config.url).await {
+        let setup = match connect_any(config.endpoint()).await {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "token-duration setup: connect failed (continuing)");
@@ -575,7 +628,7 @@ impl DbManager {
     /// when the proactive re-signin task above did not run in time and the
     /// cached token has ALREADY expired.
     ///
-    /// Builds a BRAND-NEW `Surreal::new::<Http>` connection with its own
+    /// Builds a BRAND-NEW `connect_any(config.endpoint())` connection with its own
     /// fresh session and signs in on it, rather than attempting
     /// `invalidate()`+`signin()` on the stale handle: every request on an
     /// already-401ing handle — including `Signin`/`Invalidate` themselves —
@@ -587,7 +640,7 @@ impl DbManager {
     /// (PERF-04) wraps a full jittered-backoff reconnect loop and
     /// poisoned-connection eviction around this.
     pub async fn reconnect(config: &DbConfig) -> Result<Surreal<Client>, surrealdb::Error> {
-        let db = Surreal::new::<Http>(&config.url).await?;
+        let db = connect_any(config.endpoint()).await?;
         db.signin(Root {
             username: config.username.clone(),
             password: config.password.clone(),

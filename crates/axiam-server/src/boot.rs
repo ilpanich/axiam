@@ -371,6 +371,9 @@ pub struct AppDeps<C: Connection + Clone + 'static> {
     pub rate_limit: RateLimitConfig,
     /// Which optional route groups are mounted.
     pub route_options: RouteOptions,
+    /// The REST request deadline of the WebSocket database engine
+    /// (`AXIAM__DB__WS_REQUEST_DEADLINE_SECS`); `None` with the HTTP engine.
+    pub request_deadline: Option<std::time::Duration>,
 }
 
 /// The `App` the REST listener serves, factored out of [`serve`] unchanged so
@@ -390,6 +393,11 @@ where
     C: Connection + Clone + 'static,
 {
     App::new()
+        // Innermost, so everything outside it — audit, CORS, tracing — sees a
+        // request that outlived it as an ordinary 503.
+        .wrap(axiam_api_rest::middleware::request_deadline::RequestDeadline::new(
+            deps.request_deadline,
+        ))
         .wrap(SecurityHeadersMiddleware)
         // F4 P23W3-03 (T-325): the default builder's field set, with query
         // values (a SAML handle, `RelayState`, `state`, a reset token) and
@@ -658,6 +666,10 @@ where
             .unwrap_or_default(),
     )
     .with_provisioning_sink(provisioning_sink.clone());
+    let user_repo = match &record_caches {
+        Some(c) => user_repo.with_record_caches(Arc::clone(c)),
+        None => user_repo,
+    };
     let group_repo = SurrealGroupRepository::new(pool.handle_for_repo())
         .with_provisioning_sink(provisioning_sink.clone());
     let role_repo = SurrealRoleRepository::new(pool.handle_for_repo());
@@ -666,10 +678,6 @@ where
     let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo());
     let scim_token_repo = SurrealScimTokenRepository::new(pool.handle_for_repo());
     let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo());
-    let user_repo = match &record_caches {
-        Some(c) => user_repo.with_record_caches(Arc::clone(c)),
-        None => user_repo,
-    };
 
     // §15.2 / §16.6 — legacy service-account secret hashes.
     //
@@ -778,7 +786,7 @@ where
             let cache = Arc::new(axiam_db::SessionValidationCache::new(
                 std::time::Duration::from_secs(ttl_secs),
             ));
-            tracing::warn!(
+            tracing::info!(
                 ttl_secs,
                 "session-validation cache enabled (I6) — a session revoked on \
                  another replica may remain acceptable here for up to ttl_secs; \
@@ -3353,6 +3361,8 @@ where
         app_state,
         rate_limit: rate_limit_cfg,
         route_options,
+        request_deadline: (config.db.engine == axiam_db::DbEngine::Ws)
+            .then(|| std::time::Duration::from_secs(config.db.ws_request_deadline_secs)),
     };
     let http_server = HttpServer::new(move || {
         compose_app(deps.clone())

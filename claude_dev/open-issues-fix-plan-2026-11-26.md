@@ -885,6 +885,50 @@ from `[]`, add `requireScope`. The sandbox has no Xcode: build and test with
 say so plainly in the `EXECUTED` block and rely on the repository's CI after the
 push. Do not claim a test run that did not happen.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `fc21cb3`; review fixes `5d5f821`
+> (round 1) and `359a4aa` (round 2). NOT COMPILED, NOT RUN:** the sandbox has
+> no Swift toolchain (`which swift` empty; download.swift.org refused by the
+> proxy, 403), and the repository's CI runs only on pull requests, so the first
+> `swift build`/`swift test` is the PR's CI. Every "fails before the fix" below
+> is by inspection, not observed.
+>
+> - **SWI-R1-1:** `JwtClaims` no longer models `purpose`/`roles`;
+>   `VerifiedToken` reads `carriesPurpose` from the raw verified payload
+>   (`keys.contains("purpose")`), so `purpose: null` is refused
+>   (`GuardTests.testN14RefusesNullPurpose`). **SWI-R1-2:** README at 1.69, rows
+>   10–12. **SWI-R1-3:** changelog entry for `AuditLogEntry.organizationID`
+>   (checked against `ManagementModels.swift`). **SWI-R1-4/5:** new ID-token and
+>   logout fixtures (`makeIDToken`, `makeLogoutToken`), five ID-token mint sites
+>   moved to them; `assertRefused(reason:)` checks the reason.
+> - **O-1 (D-4):** `JwksVerifier` gets an injectable clock and
+>   `unknownKidCooldown` (60 s): one re-fetch per window, window opened before
+>   the fetch; `JwksUnknownKidCooldownTests` (fifty unknown kids → at most one
+>   fetch; rotated key accepted after one). **O-2 / #880:** kid-less and
+>   unknown-kid failures carry `unknown_kid` on the logout and ID-token paths;
+>   server-shaped two-key test, rules 10/11 off-path test. **O-3 (D-3):**
+>   `AxiamUser.rolesClaimPresent`, `scopes: [String]?`; `requireRole` 403 on an
+>   absent or non-string-array `roles` (was 401), never reads `scope`;
+>   `requireScope` (single-space split, any-of per contract, stacking = all).
+> - **Not anticipated:** the guard strips `unknown_kid` from its own 401 so
+>   §28.4's `invalid_token` stays uniform; the unknown-kid error no longer echoes
+>   the token's `kid`.
+> - **Verification run:** `cmp` of the three vendored files (identical);
+>   `python3 Scripts/gen_management.py --check` (current); TLS-bypass grep
+>   (clean). Nothing else.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L-1 (rule 11(e)/(f)
+> docs missing), L-2 (rule 11(g) cases missing), L-3 (new-kid token arriving
+> during the window's in-flight re-fetch refused), L-4 (unbounded fetching on a
+> failing or empty JWKS), N-1 (payload parse failed open), N-2, N-3 — all fixed
+> in `5d5f821`; N-4 (trailer names a model) not changed: the session mandates
+> that attribution trailer. Round 2: medium-clean; L-5 (L-3's test did not
+> exercise the path), **L-6 (round 1's failure throttle refused every token for
+> 60 s after one failed refresh, even with keys cached)**, N-5 (11(e)/(f)
+> labels swapped), N-6 (bare `catch`) — all fixed in `359a4aa` (stale keys
+> served while a failure is throttled; gated-transport test; changelog
+> Security bullet). Round 2 was the last low/nit round; the round-2 fixes were
+> not re-reviewed. Nothing open.
+
 ---
 
 ## 6. Wave C — close-out

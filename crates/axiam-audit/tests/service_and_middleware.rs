@@ -283,13 +283,16 @@ async fn a_token_path_segment_is_redacted_even_when_no_route_matches() {
         "/api/v1/account/export/super-secret-handle/",
         "/api/v1//account/export/super-secret-handle",
         "/api/v1/account/export/super-secret-handle/extra",
+        "/api/v1/account/export//super-secret-handle",
+        "/api/v1/account/export///super-secret-handle",
+        "/api/v1/account//export/super-secret-handle",
     ] {
         let req = test::TestRequest::get().uri(uri).to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 404, "{uri} must not match the route");
     }
 
-    wait_for_entries(&repo, 3).await;
+    wait_for_entries(&repo, 6).await;
     let entries = repo.snapshot();
     let actions: Vec<&str> = entries.iter().map(|e| e.action.as_str()).collect();
     assert!(

@@ -866,27 +866,56 @@ where
 /// What a bearer-value path segment is replaced by in anything recorded.
 pub const REDACTED_PATH_SEGMENT: &str = "[redacted]";
 
-/// Route parameters whose path segment is a bearer value
-/// (`/account/export/{token}`).
+/// Route patterns (relative to the API scope) whose final segment is a bearer
+/// value: `/account/export/{token}`.
 ///
-/// The single list: the audit row (`action`) and the REST tracing span both
-/// redact through [`redacted_path`], so a route added here is covered in both.
-pub const REDACTED_PATH_PARAMETERS: &[&str] = &["token"];
+/// The single list. Both redaction paths derive from it: a matched request
+/// redacts every segment whose placeholder name appears here
+/// ([`bearer_parameter_names`]); a request that matched no route redacts the
+/// segment that follows the pattern's literal prefix
+/// ([`redacted_unmatched_path`]). The audit row (`action`) and the REST tracing
+/// span both go through [`redacted_path`], so a route added here is covered in
+/// both, and in both the matched and the unmatched spelling. Each pattern is
+/// literal segments followed by one `{placeholder}`.
+pub const BEARER_ROUTE_PATTERNS: &[&str] = &["/account/export/{token}"];
 
-/// Path segment pairs after which the next segment is a bearer value, for a
-/// request that matched no route pattern (see [`redacted_path`]). One entry per
-/// route in [`REDACTED_PATH_PARAMETERS`] (`/account/export/{token}`).
-const BEARER_PATH_PREFIXES: &[(&str, &str)] = &[("account", "export")];
+/// The name inside a `{name}` or `{name:regex}` placeholder, if `segment` is one.
+fn placeholder_name(segment: &str) -> Option<&str> {
+    segment
+        .strip_prefix('{')
+        .and_then(|p| p.strip_suffix('}'))
+        .map(|p| p.split(':').next().unwrap_or_default())
+}
+
+/// Placeholder names of [`BEARER_ROUTE_PATTERNS`].
+fn bearer_parameter_names() -> impl Iterator<Item = &'static str> {
+    BEARER_ROUTE_PATTERNS
+        .iter()
+        .flat_map(|pattern| pattern.split('/'))
+        .filter_map(placeholder_name)
+}
+
+/// The literal segments of `pattern` before its placeholder.
+fn bearer_prefix(pattern: &str) -> Vec<&str> {
+    pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .take_while(|segment| placeholder_name(segment).is_none())
+        .collect()
+}
 
 /// `path` with every segment that `pattern` (the matched route) marks with a
-/// [`REDACTED_PATH_PARAMETERS`] placeholder replaced by [`REDACTED_PATH_SEGMENT`].
+/// [`BEARER_ROUTE_PATTERNS`] placeholder replaced by [`REDACTED_PATH_SEGMENT`].
 ///
-/// Fails **closed**. A request shaped wrongly for its route (a trailing `/`, a
-/// doubled `//`) matches no pattern, so the router answers 404 without ever
-/// consuming the single-use handle in it; the handle is still valid, and
-/// copying it verbatim into an append-only audit row would hand it to every
-/// reader of the log. With no usable pattern, any segment that follows a
-/// [`BEARER_PATH_PREFIXES`] pair is redacted instead.
+/// Fails **closed for the routes in [`BEARER_ROUTE_PATTERNS`]**. A request
+/// shaped wrongly for its route (a trailing `/`, a doubled `//`) matches no
+/// pattern, so the router answers 404 without ever consuming the single-use
+/// handle in it; the handle is still valid, and copying it verbatim into an
+/// append-only audit row would hand it to every reader of the log. With no
+/// usable pattern, the segment that follows a pattern's literal prefix
+/// (ignoring empty segments) is redacted instead. This covers only the routes
+/// listed there: a bearer value in a route that is not listed is recorded
+/// as-is, matched or not.
 pub fn redacted_path(path: &str, pattern: Option<&str>) -> String {
     let segments: Vec<&str> = path.split('/').collect();
     let Some(placeholders) = pattern
@@ -898,31 +927,34 @@ pub fn redacted_path(path: &str, pattern: Option<&str>) -> String {
     segments
         .iter()
         .zip(placeholders)
-        .map(|(segment, placeholder)| {
-            let name = placeholder
-                .strip_prefix('{')
-                .and_then(|p| p.strip_suffix('}'))
-                .map(|p| p.split(':').next().unwrap_or_default());
-            match name {
-                Some(name) if REDACTED_PATH_PARAMETERS.contains(&name) => REDACTED_PATH_SEGMENT,
+        .map(
+            |(segment, placeholder)| match placeholder_name(placeholder) {
+                Some(name) if bearer_parameter_names().any(|n| n == name) => REDACTED_PATH_SEGMENT,
                 _ => segment,
-            }
-        })
+            },
+        )
         .collect::<Vec<_>>()
         .join("/")
 }
 
 /// [`redacted_path`] for a request with no usable route pattern.
+///
+/// Empty segments (`//`, a trailing `/`) are skipped when matching a prefix, so
+/// `/account/export//<token>` is recognised like `/account/export/<token>`.
 fn redacted_unmatched_path(segments: &[&str]) -> String {
+    let mut previous: Vec<&str> = Vec::new();
     segments
         .iter()
-        .enumerate()
-        .map(|(index, segment)| {
-            let follows_prefix = index >= 2
-                && !segment.is_empty()
-                && BEARER_PATH_PREFIXES.iter().any(|(first, second)| {
-                    segments[index - 2] == *first && segments[index - 1] == *second
-                });
+        .map(|segment| {
+            if segment.is_empty() {
+                return *segment;
+            }
+            let follows_prefix = BEARER_ROUTE_PATTERNS.iter().any(|pattern| {
+                let prefix = bearer_prefix(pattern);
+                previous.len() >= prefix.len()
+                    && previous[previous.len() - prefix.len()..] == prefix[..]
+            });
+            previous.push(segment);
             if follows_prefix {
                 REDACTED_PATH_SEGMENT
             } else {
@@ -1019,5 +1051,48 @@ fn actor_type_of(claims: &axiam_auth::token::ValidatedClaims) -> ActorType {
         SubjectKind::User => ActorType::User,
         SubjectKind::ServiceAccount => ActorType::ServiceAccount,
         SubjectKind::OAuth2Client => ActorType::System,
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    /// QR2-4: every `{placeholder}` in the pattern list is a bearer parameter
+    /// and has a literal prefix to match when no route matches.
+    #[test]
+    fn every_bearer_pattern_has_a_prefix_and_one_trailing_placeholder() {
+        for pattern in BEARER_ROUTE_PATTERNS {
+            let segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+            let (last, literals) = segments.split_last().expect("non-empty pattern");
+            assert!(
+                placeholder_name(last).is_some(),
+                "{pattern}: no placeholder"
+            );
+            assert!(!literals.is_empty(), "{pattern}: no literal prefix");
+            assert!(
+                literals.iter().all(|s| placeholder_name(s).is_none()),
+                "{pattern}: placeholders must come last"
+            );
+            assert_eq!(bearer_prefix(pattern), literals);
+        }
+        assert!(bearer_parameter_names().any(|n| n == "token"));
+    }
+
+    #[test]
+    fn unmatched_spellings_are_redacted() {
+        for path in [
+            "/api/v1/account/export/H",
+            "/api/v1/account/export//H",
+            "/api/v1/account/export///H",
+            "/api/v1/account//export/H",
+            "/api/v1/account/export/H/",
+            "/api/v1/account/export//H/extra",
+        ] {
+            let out = redacted_path(path, None);
+            assert!(!out.contains('H') || out.contains("[redacted]"), "{out}");
+            assert!(!out.split('/').any(|s| s == "H"), "{path} -> {out}");
+        }
+        assert_eq!(redacted_path("/api/v1/users/H", None), "/api/v1/users/H");
     }
 }

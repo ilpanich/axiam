@@ -2761,6 +2761,17 @@ fn build_counting_tenant_reads(
     client: ClientOutcome,
     tenant: TenantOutcome,
 ) -> (Svc, Arc<std::sync::atomic::AtomicUsize>) {
+    build_counting_tenant_reads_with_session(client, tenant, None)
+}
+
+/// [`build_counting_tenant_reads`] with `session` behind the session lookup —
+/// for an introspection test, whose user token is active only while the
+/// session it names is live (SA-41).
+fn build_counting_tenant_reads_with_session(
+    client: ClientOutcome,
+    tenant: TenantOutcome,
+    session: Option<axiam_core::models::session::Session>,
+) -> (Svc, Arc<std::sync::atomic::AtomicUsize>) {
     let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
     let tenants = MockTenantRepo::new(tenant);
     let reads = tenants.1.clone();
@@ -2771,7 +2782,12 @@ fn build_counting_tenant_reads(
         tenants,
         MockRefreshRepo::new(),
         MockUserRepo::default(),
-        MockSessionRepo::default(),
+        MockSessionRepo(
+            session,
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+        ),
         MockAuditRepo::default(),
         test_config(),
         2_592_000,
@@ -7245,22 +7261,27 @@ async fn a_prefetched_tenant_answers_as_the_read_did() {
 #[tokio::test]
 async fn introspection_decides_on_the_account_read_with_the_client() {
     let tenant_id = client_tenant();
+    // A first-party sign-in token names its session by `jti`; the session is
+    // live, so only the account decides (SA-41).
+    let sid = Uuid::new_v4();
     let token = issue_access_token(
         Uuid::new_v4(),
         tenant_id,
         Uuid::new_v4(),
         &["profile".to_string()],
         &test_config(),
-        Uuid::new_v4().to_string(),
+        sid.to_string(),
         AUD_USER,
     )
     .unwrap();
+    let live = || Some(sa41_session(sid, chrono::Duration::hours(1)));
 
     // Without prefetching: the user repository's active account.
     PREFETCH.with(|p| *p.borrow_mut() = None);
-    let (svc, _) = build_counting_tenant_reads(
+    let (svc, _) = build_counting_tenant_reads_with_session(
         ClientOutcome::Found(make_client(&["refresh_token"], &[])),
         TenantOutcome::Found,
+        live(),
     );
     assert!(
         svc.introspect_token(tenant_id, introspect_req(&token), &no_cert())
@@ -7271,9 +7292,10 @@ async fn introspection_decides_on_the_account_read_with_the_client() {
 
     // With it: the account read alongside the client, and no tenant read.
     prefetching(TenantOutcome::Found, UserPrefetch::NotFound);
-    let (svc, tenant_reads) = build_counting_tenant_reads(
+    let (svc, tenant_reads) = build_counting_tenant_reads_with_session(
         ClientOutcome::Found(make_client(&["refresh_token"], &[])),
         TenantOutcome::Found,
+        live(),
     );
     assert!(
         !svc.introspect_token(tenant_id, introspect_req(&token), &no_cert())
@@ -7286,9 +7308,10 @@ async fn introspection_decides_on_the_account_read_with_the_client() {
 
     // A failed account read is a server error, as it was.
     prefetching(TenantOutcome::Found, UserPrefetch::Db);
-    let (svc, _) = build_counting_tenant_reads(
+    let (svc, _) = build_counting_tenant_reads_with_session(
         ClientOutcome::Found(make_client(&["refresh_token"], &[])),
         TenantOutcome::Found,
+        live(),
     );
     assert_eq!(
         svc.introspect_token(tenant_id, introspect_req(&token), &no_cert())

@@ -477,6 +477,92 @@ auth_service_test`, `-p axiam-api-rest --test opaque_login_test`, fmt, clippy.
 changes a signed token's header, and needs a short security argument (below).
 **Confirm D-1 with the owner before starting.**
 
+> **EXECUTED (2026-11-26, Opus 5.5), commit `c4c4e44`. D-1 confirmed by the
+> owner before the task started.** New `axiam_auth::token::sign_logout_token`
+> goes through `sign_claims`, the access/ID-token signer; `issue_logout_token`
+> (`axiam-oauth2/src/logout.rs`) calls it, so the header is exactly
+> `{alg: EdDSA, typ: logout+jwt, kid}` with the `ed25519_jwk_kid` kid.
+> `sign_purpose_token` still adds no `kid`
+> (`a_purpose_token_names_no_key_and_still_verifies` passes).
+>
+> - **Regression tests** (`logout.rs`): `logout_token_header_names_its_jwks_key`
+>   — unfixed: `left: None, right: Some("2f3403f5b7be848d")`;
+>   `a_relying_party_selects_the_logout_key_by_kid` (two-key JWKS, signing key
+>   not first) — unfixed: panic `a logout token must carry a kid`. Both pass.
+> - **Pins** (pass before and after): `a_logout_token_is_refused_as_an_access_token_by_its_claims_alone`
+>   (re-signed as `at+jwt`, `JWT`, untyped, with `aud=axiam:user` and the root
+>   issuer: refused by `decode_access_token` and `…_any_audience`, strict and
+>   relaxed); REST `middleware_test::a_logout_token_is_not_a_bearer_access_token`
+>   (401 on `AuthenticatedUser` and `TenantContext`; control access token 200);
+>   gRPC `grpc_units::a_logout_token_is_not_a_bearer_access_token` (interceptor
+>   `UNAUTHENTICATED`, `ValidateToken` `valid=false`, `IntrospectToken`
+>   `active=false`). The gRPC pin uses the new signer, so it cannot run on
+>   unfixed code; the REST pin was not run there.
+> - **Security argument (Part 1 step 3).** With a `kid`, the logout token is
+>   the one AXIAM token besides the access, ID and SSF tokens that a
+>   strictly-by-`kid` verifier finds a key for (purpose tokens still carry
+>   none). It is refused on every access-token path by its header and,
+>   independently, by its claims. *Server:* every door that admits an access
+>   token (REST extractors `validate_access_token`, audit middleware, gRPC
+>   `AuthInterceptor`, `ValidateToken`, `IntrospectToken`, `/oauth2/introspect`,
+>   RFC 8693 subject/actor tokens) verifies with the configured deployment key,
+>   never by `kid`, so the `kid` changes nothing server-side; three independent
+>   checks refuse the token: (1) `check_access_token_type` (`logout+jwt` is
+>   neither `at+jwt` nor untyped, whatever `REQUIRE_ACCESS_TOKEN_TYP` says);
+>   (2) `aud` is a client id, not `axiam:user`/`axiam:m2m`; (3)
+>   `AccessTokenClaims` requires `tenant_id` and `org_id`, which a logout token
+>   lacks — (3) alone refuses it even re-signed as `at+jwt`. AMQP admits no
+>   bearer token. *SDKs at 1.68:* rule 10 refuses `typ`; rule 4 independently
+>   refuses it (`tenant_id` REQUIRED and equal to the configured tenant, fail
+>   closed without one). *SDKs before 1.68 (no rule 10):* rule 4 alone refuses
+>   it, and it is enforced on the guard path of every release of all eleven
+>   SDKs, checked at the parent of each SDK's 1.68 commit and at the oldest
+>   commit of each clone (2026-08-30 … 2026-09-24, before 1.0.0), with
+>   `git log -S` showing no removal: Go `ValidateClaims`, Rust
+>   `Claims.tenant_id: String` (no default), TypeScript `assertTenantClaim`,
+>   Python `_verify_claims`, Java/Kotlin/Swift `assertTenant`, C#/PHP
+>   `ApplyClaimPolicy`/`applyClaimPolicy`, C++ `TokenAuthenticator`, C
+>   `AXIAM_JWT_VERIFY_TENANT` in `AXIAM_JWT_VERIFY_STRICT`. *Other SDK paths:*
+>   the SSF receiver refuses it by `typ` and `exp`/`sub`; the ID-token check by
+>   the missing `nonce`. **No SDK version accepts a logout token as an access
+>   token; the stop condition did not apply.**
+> - **Contract 1.69** (`sdks/CONTRACT.md`): §8 protocol rule 4 (pointer to the
+>   requester event), §8 consumer obligation 4 (discard-event table), §8
+>   "Against a server older than 1.68" rewritten (requester needs 1.68+; an SDK
+>   MUST NOT offer an unsigned-response opt-out; the withdrawn 1.68 MAY is
+>   recorded), §10.1 rule 12 and "Scope", §12.7.3 rule 1 (select by `kid`;
+>   kid-less → `unknown_kid`; unknown → §12.4 rule 2; rules 10/11 off),
+>   §12.7.6 (the 1.69 tests), §34.11 (e) table (1.69 row added), new §34.13,
+>   Breaking Changes Log, §27, footer. `website/src/contractAnchors.ts`
+>   regenerated (it was stale at 1.64, so the diff also adds §12.8 and §37
+>   anchors); second run identical. Upgrade note in `docs/deployment/README.md`.
+> - **Appendix A:** A.1 verdict **remove the opt-out** (D-2, second branch),
+>   evidence below; A.2 the canonical discard event.
+> - **Verification:** `axiam-oauth2 --lib` 678 passed; `axiam-auth --lib` 296
+>   (1 pre-existing ignored); `grpc_units` 60; `middleware_test`
+>   (`--no-default-features`) 9; clippy `-D warnings` and fmt clean for the four
+>   crates (one `needless_borrow` in the new test fixed); `check-spec-digest.py`
+>   unaffected; `gen-management-registry.py --check` OK;
+>   `check-doc-links.sh` OK (586 links). Not run: website build.
+> - **Not anticipated:** (1) **the C SDK's `find_key` falls back to the only
+>   key of a one-key JWKS** on the ID-token and logout paths — a §12.4 rule 2
+>   defect; the contract says so and OI-19 removes it. (2) The A.1 verdict made
+>   §8 normative (MUST NOT offer the opt-out). (3) `website/src/threatModel.ts`
+>   (SA-03 text) still says the logout token has no `kid`, and
+>   `website/src/docs/reference.ts` prose ("twenty-three amendments since
+>   1.39") is stale: both go to OI-06.
+>
+> **§5.0 re-vendoring (orchestrator, 2026-11-26).** `sdks/CONTRACT.md` at
+> `c4c4e44` copied into all eleven SDK trees; `cmp` identical in each.
+> `openapi.json` and `management-registry.json` were already identical,
+> `proto/` identical in the nine SDKs that vendor it. **Found:** every SDK's
+> previous copy differed from the server's pre-1.69 contract in one line
+> (§ session-validation cache, "default 5 s since v1.4"), which exists only on
+> the branch of open PR #893; the SDKs had vendored that branch's text. The
+> re-vendoring restores the server's main text ("default `0`, off", matching
+> `AuthConfig` default `session_validation_cache_ttl_secs: 0`). When #893 merges,
+> that line must be re-synced downstream.
+
 **Part 1 — the server emits `kid` on logout tokens (#880, D-1).**
 1. Test first, in the `axiam-oauth2` logout tests: decode the header of a minted
    logout token and assert `kid` equals the `kid` published at `/oauth2/jwks`

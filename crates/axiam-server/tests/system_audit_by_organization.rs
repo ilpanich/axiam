@@ -206,6 +206,7 @@ async fn an_organization_reads_only_its_own_rows_of_the_system_partition() {
         app_state: AppState::for_test(db.clone(), auth.clone()),
         rate_limit: RateLimitConfig::default(),
         route_options: RouteOptions::default(),
+        request_deadline: None,
     };
     let app = init_service(compose_app(deps)).await;
 

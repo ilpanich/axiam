@@ -297,6 +297,51 @@ callbacks (OIDC, OAuth2 social, SAML), and has a constraint that a local fix
 violates easily: the check must not move to `consume_login_state`, which would
 reopen the anonymous suspension oracle closed by SR1-8.
 
+> **EXECUTED (2026-11-26, Opus 5.5), commit `c6ede3d`.** `OidcFederationService`
+> and `SamlFederationService` take an optional `SharedTenantAdmission`
+> (`with_tenant_admission`, the `AuthService` pattern; `axiam-federation` uses
+> only the `axiam-core` port, no `Cargo.toml` changed, layering script OK). The
+> shared helper `oidc::admit_tenant` runs after the upstream answer verified and
+> before provisioning: in `handle_callback_for` (after signature, nonce, claim
+> mapping), `handle_oauth2_callback` (after userinfo and the verified-email
+> rule) and `handle_saml_response_for` (after signature, profile and replay
+> checks). New `FederationError::TenantSuspended` → `AxiamError::TenantSuspended`
+> (403 `tenant_suspended`). The `create_session_and_tokens` check stays as a
+> backstop; nothing moved into `consume_login_state`. Wired in
+> `axiam-server/src/boot.rs` for both services.
+>
+> - **Regression tests** (each also asserts 403, no session cookie, no
+>   federation link, zero `login.post_auth` reactor calls). Unfixed code, each:
+>   `no user may be provisioned in a suspended tenant  left: 1 right: 0`.
+>   `federation_first_time_sso_test::an_oidc_sign_in_to_a_suspended_tenant_is_refused`
+>   (extended), `…::a_social_sign_in_to_a_suspended_tenant_provisions_nothing`,
+>   `sec095_federated_login_gate_test::saml::a_saml_acs_sign_in_to_a_suspended_tenant_provisions_nothing`
+>   (the SAML harness lives there, not in the first-time-SSO file).
+> - **Oracle pins (step 4)**, pass before and after: unverified OIDC callback,
+>   social callback and SAML assertion answer identically for a suspended and an
+>   active tenant. Positive controls prove the count queries see real rows.
+> - **Step 5, other paths:** native provider-ID-token grant — not vulnerable
+>   (`live_tenant` refuses before the token is verified), pinned by
+>   `provider_id_token_test::a_native_sign_in_to_a_suspended_tenant_provisions_nothing`;
+>   X4 token exchange JIT — not vulnerable (`authenticate_client` first, covered
+>   by `tenant_suspension_test`); directory JIT — not vulnerable (QR3-1);
+>   Apple form callback, SAML form ACS, admin `oidc/callback` and `saml/acs` —
+>   fixed by the same service change; every other `CreateUser` in production
+>   source is `#[cfg(test)]`; WebAuthn, OPAQUE, password, mTLS do not provision.
+> - **Verification:** libxml2/xmlsec1/protoc installed with apt, so SAML ran
+>   with default features. `federation_first_time_sso_test` 11,
+>   `sec095_federated_login_gate_test` 58, `provider_id_token_test` 25,
+>   `federation_login_providers_test` 9 passed; `--no-default-features`: 11 and
+>   4 passed; `axiam-federation --lib` 418 passed; fmt and clippy
+>   (`--all-targets -D warnings`, both feature sets) clean for
+>   `axiam-federation`, `axiam-api-rest`, `axiam-server`. **Not run:** the
+>   `axiam-server` integration tests; `boot.rs` was compiled and linted only.
+> - **Not anticipated:** (1) the admission is optional, like `AuthService`'s:
+>   a service built without it admits (test harnesses), and no test exercises
+>   the `boot.rs` wiring itself; (2) the SAML refusal spends the assertion (the
+>   replay row is written first), so it cannot be replayed after the suspension
+>   lifts; (3) the T-510 residual line is left for OI-06, as this plan says.
+
 **Where.** `crates/axiam-api-rest/src/handlers/federation_login.rs` and its
 sibling callbacks; `crates/axiam-federation/src/oidc.rs`, `saml.rs`; the
 `provision_or_link_identity` and `sso_login_post_auth` call sites.

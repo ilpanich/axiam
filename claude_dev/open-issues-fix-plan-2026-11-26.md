@@ -959,6 +959,48 @@ SOVERSION is already 6 for the unreleased 1.4.0; do not bump it again, but say
 so in the changelog. Remove the README carve-out. CPL-R5-1: delete the changelog
 bullet about the never-shipped test defect.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `e6978c0`; review fixes `672a621`
+> (round 1), `db4c05c` (round 2).**
+>
+> - **CPL-R1-6, 11(b):** `TokenAuthenticator` keeps `roles` only when it is an
+>   array of strings; `["admin",7]`, `["admin",null]`, a string, an object and
+>   `null` leave no partial list; new `AxiamUser::roles_claim_present` (absent
+>   or malformed → false; `[]` → true) appended with default `true` so existing
+>   `{id, tenant, {roles}}` aggregates still compile (a default identity still
+>   fails every `require_role`). Regression test `§11.2 rule 11(b): a roles
+>   claim that is not an array of strings fails require_role` — unfixed:
+>   `[FAIL] … !(role_guard_passes(",\"roles\":[\"admin\",7]"))` (and the `null`,
+>   `[7,"admin"]` rows). **11(d):** new `require_scope` / `AxiamUser::has_scope`
+>   (single-space split, whole-entry case-sensitive match, any-of; 401 without
+>   identity, 403 on a miss). **11(e)/(f)** documented in `guard.hpp` and the
+>   README (exclusion list per the contract: ID token, UserInfo, RPT, console
+>   sign-in token, mTLS device token; client-credentials `[]`). README
+>   carve-out removed; conformance §9–§13 in full at 1.69. ABI: `AxiamUser`
+>   layout changed, SOVERSION stays 6 (unreleased 1.4.0), stated in the
+>   changelog.
+> - **CPL-R5-1:** the bullet deleted.
+> - **#880:** not reproduced — `verify_logout_token` already selects by `kid`
+>   through `verify_with_reason` (C++ never had C's one-key fallback). Pins:
+>   server-shaped token against a two-key JWKS, kid-less and unknown kid →
+>   `unknown_kid`, rules 10 and 11 off the logout and ID-token paths (incl. a
+>   `purpose` claim, added in round 1) while `TokenAuthenticator` refuses all.
+> - **Verification:** CI configure (tests + examples) with g++ default
+>   standard, ctest 1694 cases / 0 failed; ASan+UBSan ctest pass;
+>   `gen_management.py --check` current. Not run: the g++-14/clang-18/g++-16/
+>   clang-23 matrix legs, gdb-repeat, coverage, docs. **Valgrind:** the first
+>   run aborted with `terminate called without an active exception` in
+>   `test_device_auth_tls.cpp`; the reviewer ran the full suite under valgrind at
+>   the baseline and at HEAD (0 errors each) and traced the abort to a
+>   pre-existing test defect (a joinable thread destroyed when the call under
+>   test throws), fixed test-only in rounds 1 and 2.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; low (the rules-10/11
+> test exercised rule 10 only), nits (11(e)/(f) label in the changelog;
+> exclusion list missing RPT and console token) — fixed in `672a621` together
+> with the TLS-test join. Round 2: medium-clean; one nit (client built after
+> the server thread started) — fixed in `db4c05c`. Commit-trailer nit not
+> changed (session-mandated). Nothing open.
+
 **OI-19 — `axiam-c-sdk` (#87) · Sonnet 5.5.** C-R3-1: narrow the "not retried"
 claim to what the code does and add the missing test for the management
 no-retry branch. C-R3-2: stop buffering a body the SDK will discard: enforce

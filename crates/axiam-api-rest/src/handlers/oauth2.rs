@@ -432,6 +432,7 @@ async fn audit_prompt_none<C: Connection + Clone>(
                 "client_id": truncate_bytes_on_char_boundary(client_id),
                 "error": refusal.map(OAuth2Error::error_code),
             })),
+            organization_id: None,
         })
         .await
     {
@@ -651,6 +652,19 @@ async fn resolve_authorize_principal<C: Connection + Clone>(
     use actix_web::ResponseError;
 
     let auth_error = match maybe_user.into_result() {
+        // **SA-04 / N6.** A token AXIAM minted for an OAuth2 client (code,
+        // refresh, CIBA grants carry `client_id` and the authorizing `sid`) is
+        // not the person's own authorization: a relying party holding one of
+        // its user's tokens must not mint a code for another client in the
+        // user's name. The same rule the approval surfaces apply (T-447,
+        // `minted_for_client`). The request is treated as anonymous — not
+        // answered 403 — so a browser that happens to send a stale header
+        // still reaches the login page, and the error handed to Path 2 is the
+        // one a request carrying no credential produces
+        // (`missing_credentials`, shared with the extractor): a client that
+        // did not opt into `browser_sso` answers invariant 4's 401 byte for
+        // byte.
+        Ok(user) if user.minted_for_client() => crate::extractors::auth::missing_credentials(),
         Ok(user) => {
             // Path 1. `tenant_id` on the query is ignored here, deliberately:
             // the tenant a token was minted for is the tenant it acts in, and
@@ -3189,6 +3203,7 @@ pub(crate) async fn append_client_auth_failure_audit<C: Connection + Clone>(
                 "claimed_tenant_id_untrusted": tenant_note.map(|_| tenant_id.to_string()),
                 "unattributed_reason": tenant_note,
             })),
+            organization_id: None,
         })
         .await
     {
@@ -4296,6 +4311,7 @@ async fn audit_sensitive_claims_released<C: Connection + Clone>(
                 "client_id": truncate_bytes_on_char_boundary(client_id),
                 "claims": claim_names,
             })),
+            organization_id: None,
         })
         .await
     {
@@ -5559,6 +5575,7 @@ impl NativeLoginAudit<'_> {
                 outcome,
                 ip_address: self.ip_address.clone(),
                 metadata: Some(metadata),
+                organization_id: None,
             })
             .await
         {

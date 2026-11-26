@@ -609,6 +609,7 @@ async fn audit_decision<C: Connection + Clone>(
         outcome: AuditOutcome::Success,
         ip_address: client_ip(http),
         metadata: Some(metadata),
+        organization_id: None,
     };
     if let Err(e) = state.audit_repo.append(entry).await {
         tracing::error!(error = %e, action, "failed to write a CIBA decision audit row");

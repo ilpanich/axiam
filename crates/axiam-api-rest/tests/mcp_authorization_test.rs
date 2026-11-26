@@ -74,7 +74,7 @@ use axiam_core::models::settings::{
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
-    OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
+    OrganizationRepository, SessionRepository, SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
     SurrealOAuth2ClientRepository, SurrealOrganizationRepository, SurrealSettingsRepository,
@@ -222,13 +222,30 @@ async fn make_tenant(db: &Surreal<TestDb>, org_id: Uuid, slug: &str, auth: &Auth
         })
         .await
         .unwrap();
+    // SA-41: introspection reports a token inactive once the session its `sid`
+    // names is gone, so the signed-in user needs a session row, as in production.
+    let session = axiam_db::repository::SurrealSessionRepository::new(db.clone())
+        .create(axiam_core::models::session::CreateSession {
+            tenant_id: tenant.id,
+            user_id: user.id,
+            token_hash: Uuid::new_v4().to_string(),
+            ip_address: None,
+            user_agent: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            authenticated_at: chrono::Utc::now(),
+            amr: vec![],
+            browser_token_hash: None,
+            lineage_id: None,
+        })
+        .await
+        .unwrap();
     let token = issue_access_token(
         user.id,
         tenant.id,
         org_id,
         &[],
         auth,
-        Uuid::new_v4().to_string(),
+        session.id.to_string(),
         axiam_auth::token::AUD_USER,
     )
     .unwrap();
@@ -1266,6 +1283,14 @@ async fn v2_a_tenant_path_binds_the_token_to_that_tenant() {
 /// check to buy a better error message on a request that is already refused is
 /// the thing `redirect_uri.rs` and `resource.rs` argue against at length.
 ///
+/// **Since SA-40 the guard decodes.** `tenant_path`'s duplicate-selector check
+/// compares percent-decoded keys, so `tenant%5Fid` is refused by the guard
+/// itself, before authentication, exactly like the plain spelling: a `400
+/// invalid_request` with or without a credential. The account below describes
+/// the position when the test was written, when the guard matched the raw
+/// string and a stranger got a `401`; it is kept for the history and for the
+/// extractor backstop, which the with-credential case still exercises.
+///
 /// **What this test is for.** The acceptance rests on the extractor's field
 /// type and on a dependency's duplicate-field behaviour, not on the guard —
 /// which is to say on nothing the guard's own tests would notice. No case in
@@ -1298,15 +1323,14 @@ async fn mcp06_a_percent_encoded_tenant_id_on_a_tenant_path_is_still_refused() {
         "the guard's own refusal, for contrast: {body}"
     );
 
-    // `tenant%5Fid` is `tenant_id` once decoded. The guard's raw-string match
-    // misses it; the extractor refuses it anyway.
+    // `tenant%5Fid` is `tenant_id` once decoded. Since SA-40 the guard decodes
+    // keys, so it refuses this spelling itself, as it refuses the control.
     for spelling in ["tenant%5Fid", "tenant%5fid"] {
         let path = format!("/t/{}/oauth2/authorize?{spelling}={}", f.a.id, f.b.id);
 
-        // With a credential, this is the refusal the review's acceptance rests
-        // on: the middleware has appended `&tenant_id={path tenant}`, the
-        // extractor sees two pairs decoding to one non-sequence field, and
-        // `serde_urlencoded` answers `duplicate field`.
+        // With a credential: still a 400. Since SA-40 the guard refuses it
+        // before the extractor is reached; the extractor's `duplicate field`
+        // answer (the MCP-06 acceptance) is the second line behind it.
         let (status, _, body) = get_as_user(&app, &path, &f.a.token).await;
         assert_eq!(
             status, 400,
@@ -1316,16 +1340,18 @@ async fn mcp06_a_percent_encoded_tenant_id_on_a_tenant_path_is_still_refused() {
              needs to decode after all: {body}"
         );
 
-        // Without one, the refusal comes earlier and is a 401. Worth pinning
-        // beside the 400 because it is the shape a stranger actually gets, and
-        // because it is the reason the guard's own `400` is not what a
-        // first reading of §7 predicts here: authentication is refused before
-        // the query is ever deserialised, so the extractor's answer needs a
-        // credential to be observable at all.
+        // Without one: the same 400. The guard runs before authentication
+        // (the control above shows it for the plain spelling), and since SA-40
+        // it percent-decodes keys, so the encoded spelling no longer reaches
+        // authentication to be answered 401 as it did before SA-40.
         let (status, body) = get_json(&app, &path).await;
         assert_eq!(
-            status, 401,
-            "{spelling} with no credential is refused before the query is read: {body}"
+            status, 400,
+            "{spelling} with no credential is refused by the guard before authentication: {body}"
+        );
+        assert_eq!(
+            body["error"], "invalid_request",
+            "the guard's own refusal, as for the control: {body}"
         );
     }
 }

@@ -90,6 +90,7 @@ impl AuditLogRepository for RecordingRepo {
             ip_address: input.ip_address.clone(),
             metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
             timestamp: chrono::Utc::now(),
+            organization_id: None,
         };
         self.entries.lock().unwrap().push(input);
         Ok(entry)
@@ -104,6 +105,7 @@ impl AuditLogRepository for RecordingRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _: AuditLogFilter,
         _: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {

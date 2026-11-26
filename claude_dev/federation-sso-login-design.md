@@ -301,7 +301,7 @@ required**; this was verified rather than assumed.
 | `POST` | `/api/v1/auth/federation/handoff` | none | Exchange a handoff code for session cookies (§5.2). |
 
 Every one is registered in **both** `PUBLIC_PATHS`
-(`crates/axiam-api-rest/src/permissions.rs`) and `CSRF_EXEMPT_SUFFIXES`
+(`crates/axiam-api-rest/src/permissions.rs`) and `CSRF_EXEMPT_PATHS`
 (`crates/axiam-api-rest/src/middleware/csrf.rs`) — both registries must cover a
 route for it to work unauthenticated, which is a thing this codebase has already
 been bitten by once (28-05/CQ-B40). Every one is rate-limited with the same

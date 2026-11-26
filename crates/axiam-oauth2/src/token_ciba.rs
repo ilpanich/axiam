@@ -210,11 +210,7 @@ where
         };
 
         // --- 7. the subject, re-read after the approval is spent ------------
-        let refused = || {
-            OAuth2Error::InvalidGrant(
-                "the account this grant was issued for can no longer sign in".into(),
-            )
-        };
+        let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
         let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
             Ok(user) => user,
             Err(AxiamError::NotFound { .. }) => return Err(refused()),
@@ -225,6 +221,19 @@ where
                 %tenant_id,
                 %user_id,
                 "refusing a CIBA redemption: the account may no longer sign in or is locked out"
+            );
+            return Err(refused());
+        }
+        // SA-06 (SR17-1): an approval given before the user's last credential
+        // change is not redeemable after it (see `crate::credential_epoch`).
+        // The bound is the instant the user decided; a row with none falls
+        // back to the request's creation.
+        let approved_at = redeemed.decided_at.unwrap_or(redeemed.created_at);
+        if crate::credential_epoch::changed_since(&user, approved_at) {
+            tracing::info!(
+                %tenant_id,
+                %user_id,
+                "refusing a CIBA redemption: the user's credential changed at or after the approval"
             );
             return Err(refused());
         }
@@ -247,6 +256,14 @@ where
             .as_deref()
             .unwrap_or(axiam_auth::token::AUD_USER)
             .to_owned();
+        // SA-18 (N15) — the `roles` claim when the approved scopes carry it.
+        let roles = self
+            .roles_claim_for(
+                tenant_id,
+                crate::roles_claim::RolesSubject::Principal(user_id),
+                &redeemed.scopes,
+            )
+            .await?;
         let minting = self.minting_config(ctx.issuer.as_deref());
         let access_token = axiam_auth::token::AccessTokenSpec::user(
             user_id,
@@ -256,6 +273,7 @@ where
         )
         .aud(&audience)
         .scopes(&redeemed.scopes)
+        .roles(roles)
         .cnf(cnf)
         .ext(ext)
         .client_id(Some(&client.client_id))
@@ -265,10 +283,11 @@ where
 
         let refresh_token = if client.grant_types.iter().any(|g| g == "refresh_token") {
             let raw_refresh = generate_refresh_token();
+            let minted_hash = hash_refresh_token(&raw_refresh);
             self.refresh_token_repo
                 .create(CreateRefreshToken {
                     tenant_id,
-                    token_hash: hash_refresh_token(&raw_refresh),
+                    token_hash: minted_hash.clone(),
                     client_id: client.client_id.clone(),
                     user_id: Some(user_id),
                     scopes: redeemed.scopes.clone(),
@@ -290,6 +309,18 @@ where
                 })
                 .await
                 .map_err(|e| OAuth2Error::ServerError(e.to_string()))?;
+            // SA-06 (SR17-1): re-read after the write; a later credential
+            // change revokes the token just minted.
+            crate::credential_epoch::recheck_after_mint(
+                &self.user_repo,
+                &self.refresh_token_repo,
+                tenant_id,
+                user_id,
+                approved_at,
+                &minted_hash,
+                crate::credential_epoch::REFUSED,
+            )
+            .await?;
             Some(raw_refresh)
         } else {
             None

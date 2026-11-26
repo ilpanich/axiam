@@ -43,6 +43,23 @@ async fn setup_db() -> Surreal<Db> {
     db
 }
 
+/// A user the message can be addressed to (SA-14: mail of every type but
+/// `Notification` whose user cannot be read is not sent at all).
+async fn seed_user(db: &Surreal<Db>, tenant_id: Uuid) -> Uuid {
+    use axiam_core::repository::UserRepository;
+    SurrealUserRepository::new(db.clone())
+        .create(axiam_core::models::user::CreateUser {
+            tenant_id,
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            password: format!("fixture-{}", Uuid::new_v4()),
+            metadata: None,
+        })
+        .await
+        .expect("seed user")
+        .id
+}
+
 fn email_key() -> [u8; 32] {
     [0xBCu8; 32]
 }
@@ -111,7 +128,8 @@ async fn delivery_failure_first_attempt_returns_retry_needed() {
     let tenant_repo = SurrealTenantRepository::new(db.clone());
     let org_repo = SurrealOrganizationRepository::new(db.clone());
 
-    let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
+    let mut msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
+    msg.user_id = seed_user(&db, tenant_id).await;
     let outcome = send_with_retry_and_audit(
         &msg,
         &EmailEgress::default(),
@@ -139,7 +157,7 @@ async fn exhausted_retries_writes_delivery_failed_audit_without_recipient() {
     let db = setup_db().await;
     let org_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
-    let user_id = Uuid::new_v4();
+    let user_id = seed_user(&db, tenant_id).await;
     seed_failing_email_config(&db, org_id, tenant_id).await;
 
     let email_repo = SurrealEmailConfigRepository::new(db.clone(), email_key());
@@ -275,7 +293,7 @@ async fn export_ready_resolves_real_org_id() {
     let db = setup_db().await;
     let org_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
-    let user_id = Uuid::new_v4();
+    let user_id = seed_user(&db, tenant_id).await;
 
     // Seed an org-level email config keyed to the REAL org_id, pointing at a
     // fake/unreachable SMTP sink (127.0.0.1:1 — nothing listens there, so
@@ -479,9 +497,9 @@ async fn the_identity_context_fills_every_placeholder_the_templates_use() {
 
 #[tokio::test]
 async fn a_missing_user_costs_the_greeting_and_not_the_email() {
-    // A lookup that does not resolve contributes no keys. The greeting renders
-    // without a name, which is worse than with one and far better than a
-    // password-reset link that never arrives.
+    // A lookup that does not resolve contributes the honest placeholder. (For
+    // a recipient-bearing type, SA-14 then refuses to send at all — see
+    // `send_with_retry_and_audit`; the context itself still never fails.)
     let db = setup_db().await;
     let (org_id, tenant_id, _) = seed_identity(&db).await;
 

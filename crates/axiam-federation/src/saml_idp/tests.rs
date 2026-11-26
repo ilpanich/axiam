@@ -214,6 +214,8 @@ fn user_in(tenant_id: Uuid) -> User {
         phone_number_verified_at: None,
         address: None,
         directory_external_id: None,
+        credential_changed_at: None,
+        credential_version: 0,
         metadata: serde_json::json!({
             OIDC_METADATA_KEY: {
                 "name": "Ada Lovelace",
@@ -247,6 +249,7 @@ fn session_for(user: &User) -> Session {
         refresh_replay_grace_accepted: 0,
         refresh_replay_refused: 0,
         lineage_id: Uuid::nil(),
+        credential_version: None,
     }
 }
 

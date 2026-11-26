@@ -93,6 +93,7 @@ fn test_auth_config(lifetime: u64) -> AuthConfig {
         max_concurrent_hashes: 0,
         hash_acquire_timeout_secs: 5,
         session_validation_cache_ttl_secs: 0,
+        require_access_token_typ: true,
     }
 }
 

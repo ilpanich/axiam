@@ -327,6 +327,10 @@ pub struct AppState<C: Connection + Clone> {
     /// external-consent gate applies. See [`crate::client_managed_by_cache`]
     /// for why that field — and only that field — is safe to remember.
     pub client_managed_by_cache: Arc<crate::client_managed_by_cache::ClientManagedByCache>,
+    /// QR2-8 / SR2-4: what an organization or tenant id named in a token-less
+    /// request's path resolved to, for the system audit partition's
+    /// organization. See [`crate::audit_organization`] for what it bounds.
+    pub system_audit_org_cache: Arc<crate::audit_organization::SystemAuditOrgCache>,
     pub user_repo: SurrealUserRepository<C>,
     pub group_repo: SurrealGroupRepository<C>,
     pub role_repo: SurrealRoleRepository<C>,
@@ -654,7 +658,9 @@ impl<C: Connection + Clone> AppState<C> {
             refresh_token_repo.clone(),
             auth_config.clone(),
             Arc::clone(&crypto_semaphore),
-        );
+        )
+        // SA-13 (N16): as the composition root attaches it.
+        .with_tenant_admission(Arc::new(tenant_repo.clone()));
         let webauthn_service =
             WebauthnService::new(webauthn_cred_repo.clone(), auth_config.clone())
                 .expect("test WebauthnService construction");
@@ -762,6 +768,12 @@ impl<C: Connection + Clone> AppState<C> {
         // settings-backed value.
         let refresh_reuse_policy: axiam_oauth2::refresh_reuse::SharedRefreshReusePolicy =
             settings_policy;
+        // SA-18 (N15): the `roles` claim's global role names, read by every
+        // grant that mints an access token carrying the `roles` scope.
+        let role_source: axiam_oauth2::roles_claim::SharedRoleSource =
+            Arc::new(axiam_oauth2::roles_claim::RepositoryRoleSource::new(
+                SurrealRoleRepository::new(db.clone()),
+            ));
         let authorize_service =
             AuthorizeService::new(oauth2_client_repo.clone(), auth_code_repo.clone(), 600)
                 .with_scope_policy(Arc::clone(&scope_policy));
@@ -790,7 +802,8 @@ impl<C: Connection + Clone> AppState<C> {
             )),
         )
         .with_scope_policy(Arc::clone(&scope_policy))
-        .with_refresh_reuse_policy(refresh_reuse_policy);
+        .with_refresh_reuse_policy(refresh_reuse_policy)
+        .with_role_source(Arc::clone(&role_source));
         // B2: the URI the user is told to visit. Derived from the OIDC issuer
         // rather than configured separately — a verification URI on a
         // different origin from the issuer is a phishing shape, and deriving
@@ -839,7 +852,8 @@ impl<C: Connection + Clone> AppState<C> {
             2_592_000,
             verification_uri,
         )
-        .with_scope_policy(Arc::clone(&scope_policy));
+        .with_scope_policy(Arc::clone(&scope_policy))
+        .with_role_source(Arc::clone(&role_source));
         // B3: the exchanged-token ceiling. The ordinary access-token lifetime
         // is the right default — an exchange is a narrowing, so it has no
         // business producing something longer-lived than a normal token — and
@@ -849,7 +863,8 @@ impl<C: Connection + Clone> AppState<C> {
             tenant_repo.clone(),
             auth_config.clone(),
             auth_config.access_token_lifetime_secs as i64,
-        );
+        )
+        .with_role_source(Arc::clone(&role_source));
         let password_reset_service = PasswordResetService::new(
             user_repo.clone(),
             password_reset_token_repo,
@@ -881,6 +896,7 @@ impl<C: Connection + Clone> AppState<C> {
             tenant_repo,
             tenant_org_cache,
             client_managed_by_cache: Arc::new(Default::default()),
+            system_audit_org_cache: Arc::new(Default::default()),
             user_repo: user_repo.clone(),
             group_repo: SurrealGroupRepository::new(db.clone()),
             role_repo: SurrealRoleRepository::new(db.clone()),

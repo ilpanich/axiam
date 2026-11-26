@@ -80,6 +80,8 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+mod org_scope_support;
+
 const TEST_PEER: &str = "127.0.0.1:40000";
 const ENTRY: &str = "6f9619ff-8b86-d011-b42d-00c04fc964ff";
 const OTHER_ENTRY: &str = "0b9f1a52-1d5e-4a64-9b33-5a1f9f3d2c10";
@@ -450,6 +452,15 @@ impl World {
 
     fn admin_token(&self) -> String {
         self.token_for(self.admin)
+    }
+
+    /// A token for a user of the organization's reserved scope tenant, created
+    /// on the call. The organization baseline is refused to a caller of an
+    /// ordinary tenant (SA-02, N8).
+    async fn org_admin_token(&self) -> String {
+        let scope = org_scope_support::organization_scope(&self.db, self.org_id).await;
+        let operator = active_user(&self.db, scope, "org-admin").await;
+        org_scope_support::user_token(&self.auth, operator, scope, self.org_id)
     }
 
     /// `AppState` with the directory bundle the production composition builds:
@@ -1572,6 +1583,7 @@ async fn required_is_refused_for_a_tenant_with_an_enabled_directory_on_every_set
     assert_eq!(json_of(&text)["error"], "conflict");
 
     // set_org, for the tenant that inherits the organization's baseline.
+    let org_token = w.org_admin_token().await;
     let mut org_body = serde_json::json!({
         "min_length": 12, "require_uppercase": true, "require_lowercase": true,
         "require_digits": true, "require_symbols": false, "password_history_count": 5,
@@ -1589,7 +1601,7 @@ async fn required_is_refused_for_a_tenant_with_an_enabled_directory_on_every_set
         request(
             Method::PUT,
             &format!("/api/v1/organizations/{}/settings", w.org_id),
-            &token,
+            &org_token,
         )
         .set_json(org_body.clone()),
     )
@@ -1604,7 +1616,7 @@ async fn required_is_refused_for_a_tenant_with_an_enabled_directory_on_every_set
         request(
             Method::PUT,
             &format!("/api/v1/organizations/{}/settings", w.org_id),
-            &token,
+            &org_token,
         )
         .set_json(org_body),
     )

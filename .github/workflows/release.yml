@@ -83,6 +83,13 @@ jobs:
               for i, t in enumerate(tags):
                   found[f"{path} image tag #{i + 1}"] = t
 
+          dev = re.findall(r"AXIAM_IMAGE_TAG:-([^}\s]+)\}",
+                           open("docker/docker-compose.dev.yml").read())
+          if not dev:
+              sys.exit("::error::No AXIAM_IMAGE_TAG default found in docker/docker-compose.dev.yml.")
+          for i, t in enumerate(dev):
+              found[f"docker/docker-compose.dev.yml AXIAM_IMAGE_TAG default #{i + 1}"] = t
+
           bad = False
           for where, version in found.items():
               ok = version == want

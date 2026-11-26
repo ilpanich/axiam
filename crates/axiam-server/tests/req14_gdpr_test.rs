@@ -99,6 +99,7 @@ async fn export_audit_pagination_covers_all_entries() {
                 outcome: AuditOutcome::Success,
                 ip_address: None,
                 metadata: None,
+                organization_id: None,
             })
             .await
             .unwrap();

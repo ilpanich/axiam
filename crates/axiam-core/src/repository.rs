@@ -267,6 +267,41 @@ pub trait UserRepository: Send + Sync {
     /// may outlive it (the atomicity audit's item A). Every writer inherits
     /// this — self-service, an administrator, SCIM — because it is decided
     /// here, against the stored value, and not by the caller.
+    ///
+    /// A write that sets `password_hash` also, **in the same transaction**
+    /// (SA-06, N7; SR4-2):
+    ///
+    /// - retires the user's OPAQUE record, the verifier of the *previous*
+    ///   password, which must not keep authenticating. With
+    ///   [`UpdateUser::opaque_record`] set, the new record replaces it; with
+    ///   none, the existing record is deleted;
+    /// - stamps the user's credential epoch, `credential_changed_at`;
+    /// - bumps the user's `credential_version`.
+    ///
+    /// A caller that has a new OPAQUE record for the new password passes it as
+    /// [`UpdateUser::opaque_record`]. It must **never** write the hash here and
+    /// then store the record separately (for example through
+    /// [`OpaqueCredentialRepository::upsert`]): a concurrent writer's hash could
+    /// commit between the two writes and end up beside this writer's record.
+    /// The epoch and the version are what refuse the short-lived artefacts of
+    /// the old credential — an MFA challenge or setup token, the WebAuthn state
+    /// token, an in-flight OPAQUE login — issued before the change. Every
+    /// writer of the hash inherits all of this (reset, self-service change,
+    /// SCIM); a caller that cannot supply a record, such as SCIM, must not
+    /// write a password for a tenant whose OPAQUE mode is `required`.
+    ///
+    /// A write that sets `password_hash` (with or without
+    /// [`UpdateUser::opaque_record`]) is **refused** for a directory account,
+    /// one whose [`User::directory_external_id`] is set: its password belongs
+    /// to the tenant's directory (G-3), and a local hash or OPAQUE record would
+    /// be a second credential the directory never sees. The refusal is a
+    /// `Validation` error with the message of the auth layer's
+    /// `DirectoryAccountPassword`, decided inside the write's transaction, and
+    /// nothing is written (SA-06, QR6-1). Callers that refuse a directory
+    /// account first keep doing so; this holds the rule for any that forgets.
+    ///
+    /// A credential write for a user that does not exist in `tenant_id` is
+    /// `NotFound` and writes nothing — in particular no OPAQUE record (QR6-4).
     fn update(
         &self,
         tenant_id: Uuid,
@@ -399,6 +434,127 @@ pub trait UserRepository: Send + Sync {
                 .await?;
             }
             Ok(true)
+        }
+    }
+
+    /// Stage `encrypted_secret` as the user's **pending** TOTP secret
+    /// (SA-43, h08-authn-recovery): the secret a TOTP enrolment has issued and
+    /// the user has not yet confirmed with a code.
+    ///
+    /// It is written to its own column, never to `mfa_secret`, so starting an
+    /// enrolment cannot replace a confirmed authenticator (the old secret keeps
+    /// answering `verify_mfa` until the new one is confirmed) and cannot create
+    /// a live TOTP factor on an account whose `mfa_enabled` flag a passkey
+    /// already turned on. A second enrolment replaces the pending secret.
+    ///
+    /// The default implementation refuses, so a test double that never enrols
+    /// TOTP needs nothing new.
+    fn stage_pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _encrypted_secret: String,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not stage TOTP enrolments".into(),
+            ))
+        }
+    }
+
+    /// The user's pending TOTP secret ([`Self::stage_pending_mfa_secret`]),
+    /// `None` when no enrolment is in progress. `NotFound` for no such user.
+    ///
+    /// The default implementation answers `None`: a test double has no
+    /// enrolment in progress.
+    fn pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<String>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Confirm a TOTP enrolment: make the pending secret the user's
+    /// `mfa_secret`, clear the pending column and set `mfa_enabled`, in one
+    /// write **only if** the pending secret is still `expected` — the one the
+    /// caller verified the user's code against.
+    ///
+    /// `Ok(true)` when the swap happened; `Ok(false)` when the pending secret
+    /// changed (a concurrent re-enrolment) or is gone, and the caller refuses
+    /// the confirmation.
+    ///
+    /// The default implementation refuses, as for
+    /// [`Self::stage_pending_mfa_secret`].
+    fn promote_pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+        _expected: &str,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not stage TOTP enrolments".into(),
+            ))
+        }
+    }
+
+    /// Drop the user's pending TOTP secret, if any (SA-43): an administrator's
+    /// MFA reset leaves no enrolment behind to be confirmed later.
+    ///
+    /// The default implementation does nothing, consistent with
+    /// [`Self::pending_mfa_secret`]'s default of no enrolment in progress.
+    fn clear_pending_mfa_secret(
+        &self,
+        _tenant_id: Uuid,
+        _user_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async { Ok(()) }
+    }
+
+    /// Spend an MFA setup token (SA-43, h08-authn-recovery): record its `jti`
+    /// in the shared single-use store until `expires_at` (the token's `exp`,
+    /// after which the token is refused on its own and the sweep removes the
+    /// row).
+    ///
+    /// `Ok(())` the first time; `Err(AxiamError::ReplayDetected)` on every
+    /// later attempt, decided by a UNIQUE index rather than a read, so of two
+    /// completions sent together exactly one passes.
+    ///
+    /// The default implementation refuses, so a test double that never
+    /// completes a forced enrolment needs nothing new.
+    fn consume_mfa_setup_token(
+        &self,
+        _tenant_id: Uuid,
+        _jti: &str,
+        _expires_at: DateTime<Utc>,
+    ) -> impl Future<Output = AxiamResult<()>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not record setup tokens".into(),
+            ))
+        }
+    }
+
+    /// Whether an MFA setup token's `jti` has already been spent
+    /// ([`Self::consume_mfa_setup_token`]) in `tenant_id`.
+    ///
+    /// A read, so it decides nothing on its own: a token it reports unspent
+    /// may still lose the spend. It lets the TOTP setup enrolment refuse a
+    /// spent token before it stages anything (SR1-2), as the spend already
+    /// refuses it at confirmation.
+    ///
+    /// The default implementation refuses, as for
+    /// [`Self::consume_mfa_setup_token`].
+    fn mfa_setup_token_spent(
+        &self,
+        _tenant_id: Uuid,
+        _jti: &str,
+    ) -> impl Future<Output = AxiamResult<bool>> + Send {
+        async {
+            Err(AxiamError::Internal(
+                "this user repository does not record setup tokens".into(),
+            ))
         }
     }
 
@@ -1205,6 +1361,44 @@ pub trait ServiceAccountRepository: Send + Sync {
 
 pub trait SessionRepository: Send + Sync {
     fn create(&self, input: CreateSession) -> impl Future<Output = AxiamResult<Session>> + Send;
+    /// SA-06 (N7, SR10-1): [`Self::create`] for a sign-in that has just
+    /// verified a credential, refused when that credential has since changed.
+    ///
+    /// `expected_credential_version` is the [`User::credential_version`] read
+    /// together with the credential that was verified. The user's stored
+    /// version (absent counts as 0) is compared with it **in the same
+    /// transaction as the write**, so a password reset or change that commits
+    /// between the verification and this call cannot be survived by the
+    /// session: nothing is created (and a session row is also the refresh
+    /// token, so no refresh token exists either).
+    ///
+    /// A mismatch is answered `AxiamError::AuthenticationFailed` with the
+    /// reason `"invalid credentials"`, exactly what a wrong password gets, so
+    /// the refusal discloses nothing new. No implementation may fall back to a
+    /// check-then-create: that is the race this method exists to close.
+    ///
+    /// The method also **stores** `expected_credential_version` on the new row
+    /// ([`Session::credential_version`]). Refresh rotation depends on it: the
+    /// next rotation of the row compares that stored version with the user's.
+    /// An implementation that checks but does not store breaks rotation.
+    ///
+    /// [`Session::credential_version`]: crate::models::session::Session::credential_version
+    ///
+    /// SR13-1: this guarantee is only as strong as the datastore's isolation.
+    /// SurrealDB 4 transactions are SNAPSHOT: a concurrent credential write is
+    /// not detected as a conflict with the transaction that read the user, so a
+    /// reset that commits and revokes between that read and this commit can be
+    /// followed by the row committing anyway. The check here is therefore
+    /// necessary but not sufficient; the caller must re-read the user's
+    /// version after this returns and, if it moved, delete the returned session
+    /// (`AuthService::create_session_and_tokens` does) before issuing any token.
+    ///
+    /// [`User::credential_version`]: crate::models::user::User::credential_version
+    fn create_if_credential_version(
+        &self,
+        input: CreateSession,
+        expected_credential_version: i64,
+    ) -> impl Future<Output = AxiamResult<Session>> + Send;
     fn get_by_id(
         &self,
         tenant_id: Uuid,
@@ -1339,7 +1533,15 @@ pub trait SessionRepository: Send + Sync {
     /// Invalidate all sessions for a user except one (e.g., on password
     /// change — preserve the caller's current session).
     ///
+    /// The kept session is **re-stamped** with the user's current credential
+    /// version ([`Session::credential_version`]) in the same transaction that
+    /// deletes the other sessions, so it can still rotate after the credential
+    /// change that prompted this call. An implementation that only deletes
+    /// would compile and silently stop the kept session from rotating.
+    ///
     /// Returns the number of sessions deleted.
+    ///
+    /// [`Session::credential_version`]: crate::models::session::Session::credential_version
     fn invalidate_user_sessions_except(
         &self,
         tenant_id: Uuid,
@@ -1624,9 +1826,16 @@ pub trait AuditLogRepository: Send + Sync {
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;
-    /// List audit logs for unauthenticated/system requests (nil tenant_id).
+    /// List the system partition's entries (nil `tenant_id`) that record
+    /// `organization_id` as their organization (SA-02, N1).
+    ///
+    /// A system entry whose organization was not resolved — every one written
+    /// before [`AuditLogEntry::organization_id`] existed among them — is
+    /// returned for no organization. The whole partition is `list(Uuid::nil(), …)`,
+    /// which no handler calls.
     fn list_system(
         &self,
+        organization_id: Uuid,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> impl Future<Output = AxiamResult<PaginatedResult<AuditLogEntry>>> + Send;

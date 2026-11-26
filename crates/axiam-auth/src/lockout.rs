@@ -279,6 +279,8 @@ mod tests {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: None,
+            credential_version: 0,
             metadata: serde_json::Value::Null,
             created_at: Utc::now(),
             updated_at: Utc::now(),

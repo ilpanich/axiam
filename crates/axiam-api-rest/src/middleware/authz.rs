@@ -29,10 +29,67 @@ use crate::permissions::PUBLIC_PATHS;
 // Public-path check
 // ---------------------------------------------------------------------------
 
+/// How many times a path segment is percent-decoded before it is judged.
+///
+/// Three rounds cover any realistic chain of proxies that each decode once
+/// (the client's own encoding, one or two intermediaries). More rounds buy
+/// nothing legitimate and hand an unauthenticated caller a cost: every round
+/// is a pass over the whole segment, so an unbounded loop is quadratic in the
+/// segment's length (SR1-1).
+const MAX_DECODE_ROUNDS: usize = 3;
+
+/// Whether `segment` is `.` or `..` once percent-decoded, or is encoded so
+/// deeply that it cannot be judged within [`MAX_DECODE_ROUNDS`].
+///
+/// Decoding is repeated, so a double-encoded `%252e%252e` is caught too,
+/// whatever number of decoding layers a proxy in front of the server happens
+/// to have stripped. The repetition is bounded and **fails closed**: a segment
+/// that is still changing after the last round is treated as a dot segment, so
+/// [`normalize_for_public_check`] answers `None` and the path is not public.
+fn is_dot_segment(segment: &str) -> bool {
+    let mut current = segment.to_owned();
+    for _ in 0..=MAX_DECODE_ROUNDS {
+        if current == "." || current == ".." {
+            return true;
+        }
+        let decoded = percent_decode_lossy(&current);
+        if decoded == current {
+            return false;
+        }
+        current = decoded;
+    }
+    // Still changing after the last round: refuse to judge it, fail closed.
+    true
+}
+
+/// Decodes `%XX` escapes; malformed escapes are kept verbatim.
+fn percent_decode_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Normalizes `path` for the public-path allowlist check (SECHRD-11 / T-24-11).
 ///
 /// - Collapses repeated `/` into a single `/`.
-/// - Rejects (returns `None`) any path with a literal `..` path segment.
+/// - Rejects (returns `None`) any path with a `.` or `..` path segment,
+///   literal or percent-encoded (`%2e%2e`, `%2E`, double-encoded).
 ///
 /// This function performs **no** rewriting/canonicalization for routing
 /// purposes — it exists solely to produce a fail-closed input to
@@ -44,7 +101,7 @@ fn normalize_for_public_check(path: &str) -> Option<String> {
     // per-segment comparison is sufficient here because the only decision
     // this function feeds is a boolean allow/deny, not a rewritten path
     // used for filesystem or routing access.
-    if path.split('/').any(|segment| segment == "..") {
+    if path.split('/').any(is_dot_segment) {
         return None;
     }
 
@@ -256,6 +313,57 @@ where
 #[cfg(test)]
 mod tests {
     use super::{is_public_path, matches_public_allowlist};
+
+    #[test]
+    fn percent_encoded_dot_segments_are_never_public() {
+        for path in [
+            "/api/docs/%2e%2e/v1/users",
+            "/api/docs/%2E%2E/v1/users",
+            "/api/docs/.%2e/v1/users",
+            "/api/docs/%2e./v1/users",
+            "/api/docs/%2e/v1/users",
+            "/api/docs/%252e%252e/v1/users",
+            "/api/docs/../v1/users",
+        ] {
+            assert!(
+                !is_public_path(path),
+                "{path} must not be classified public"
+            );
+        }
+        // Legitimate public paths are unaffected, including encoded non-dot bytes.
+        assert!(is_public_path("/api/docs/openapi.json"));
+        assert!(is_public_path("/api/docs/swagger%2Dui.css"));
+    }
+
+    /// SR1-1: the decode loop is bounded and fails closed. A segment of
+    /// `%25` followed by `25` repeated shortens by two bytes per round, so an
+    /// unbounded loop runs once per repeat over a string of that length
+    /// (quadratic). The bounded loop answers "dot segment" (so: not public)
+    /// after a fixed number of rounds instead of grinding through all of them.
+    #[test]
+    fn deeply_encoded_segment_fails_closed_in_bounded_time() {
+        use super::{is_dot_segment, normalize_for_public_check};
+
+        let deep = format!("%{}", "25".repeat(30_000));
+        let started = std::time::Instant::now();
+        assert!(
+            is_dot_segment(&deep),
+            "a segment still decoding after the round bound must fail closed"
+        );
+        assert!(normalize_for_public_check(&format!("/api/v1/{deep}")).is_none());
+        assert!(!is_public_path(&format!("/api/v1/{deep}")));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "decoding must be bounded, took {:?}",
+            started.elapsed()
+        );
+
+        // Ordinary encodings (one, two, three layers) are unaffected.
+        assert!(!is_dot_segment("swagger%2Dui.css"));
+        assert!(!is_dot_segment("a%2541b"));
+        assert!(is_dot_segment("%252e%252e"));
+        assert!(is_dot_segment("%25252e%25252e"));
+    }
 
     #[test]
     fn public_paths_are_recognized() {

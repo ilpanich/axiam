@@ -79,6 +79,22 @@ pub enum WebhookError {
     /// missing/deleted webhook apart from a decrypt failure.
     #[error("webhook lookup failed: {0}")]
     WebhookLookupFailed(String),
+    /// SA-14 (N3): the webhook is disabled, so nothing is sent. Terminal:
+    /// the deliverer dead-letters rather than retries it.
+    #[error("webhook is disabled")]
+    Disabled,
+    /// SA-14 (N3): the webhook does not subscribe to the message's event, so
+    /// nothing is sent. Terminal, as [`Self::Disabled`].
+    #[error("webhook is not subscribed to this event")]
+    NotSubscribed,
+}
+
+impl WebhookError {
+    /// Whether retrying cannot change the answer: the webhook, as stored, does
+    /// not accept this delivery.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Disabled | Self::NotSubscribed)
+    }
 }
 
 impl From<WebhookError> for crate::error::AxiamApiError {
@@ -95,6 +111,9 @@ impl From<WebhookError> for crate::error::AxiamApiError {
             }
             WebhookError::WebhookLookupFailed(msg) => {
                 axiam_core::error::AxiamError::WebhookDelivery(msg).into()
+            }
+            e @ (WebhookError::Disabled | WebhookError::NotSubscribed) => {
+                axiam_core::error::AxiamError::WebhookDelivery(e.to_string()).into()
             }
             other => axiam_core::error::AxiamError::Crypto(other.to_string()).into(),
         }
@@ -271,6 +290,17 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
             .await
             .map_err(|e| WebhookError::WebhookLookupFailed(e.to_string()))?;
 
+        // SA-14 (N3): this is the sink of every queued delivery, so it enforces
+        // what `emit` filters on — a message already queued when the webhook
+        // was disabled or its subscription changed, or one written onto the
+        // queue by anyone else, is not POSTed. Exact match, as `get_by_event`.
+        if !webhook.enabled {
+            return Err(WebhookError::Disabled);
+        }
+        if !webhook.events.iter().any(|e| e == event_type) {
+            return Err(WebhookError::NotSubscribed);
+        }
+
         let body = serde_json::to_string(payload).unwrap_or_default();
 
         // SEC-031: Decrypt the stored secret before HMAC computation.
@@ -343,8 +373,9 @@ impl<W: WebhookRepository + Clone + 'static> WebhookDeliveryService<W> {
 /// * a `3xx`: `Retry` with a fixed reason; the `Location` is never followed
 ///   (P23W5-10, T-112), so the receiver's operator can fix the registered URL.
 /// * any other status: `Retry` with reason `non-2xx status: <code>`.
-/// * `WebhookError` (SSRF-blocked, secret-decrypt failure, lookup failure, ...):
-///   `Retry` with the error's text. Today's behaviour retries every failure up to
+/// * `WebhookError::Disabled` / `NotSubscribed` (SA-14): `DeadLetter`.
+/// * any other `WebhookError` (SSRF-blocked, secret-decrypt failure, lookup
+///   failure, ...): `Retry` with the error's text. Today's behaviour retries every failure up to
 ///   `AXIAM__WEBHOOK__MAX_ATTEMPTS`; this classification keeps that.
 impl<W: WebhookRepository + Clone + 'static> OutboundDeliverer for WebhookDeliveryService<W> {
     fn kind(&self) -> OutboundKind {
@@ -380,6 +411,10 @@ impl<W: WebhookRepository + Clone + 'static> OutboundDeliverer for WebhookDelive
                 },
                 Ok(status) => DeliveryOutcome::Retry {
                     reason: format!("non-2xx status: {}", status.as_u16()),
+                },
+                // SA-14: a disabled or unsubscribed webhook stays that way.
+                Err(e) if e.is_terminal() => DeliveryOutcome::DeadLetter {
+                    reason: e.to_string(),
                 },
                 Err(e) => DeliveryOutcome::Retry {
                     reason: e.to_string(),

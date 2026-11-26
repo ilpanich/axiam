@@ -353,6 +353,7 @@ mod tests {
             outcome: AuditOutcome::Success,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         };
         let at = chrono::Utc::now();
         loss.record_dropped(

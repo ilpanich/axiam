@@ -61,73 +61,73 @@ export interface ThreatModelSummary {
 }
 
 export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
- "version": "2.46.0",
+ "version": "2.47.0",
  "diagramCount": 10,
- "total": 495,
+ "total": 529,
  "open": 21,
- "mitigated": 464,
+ "mitigated": 498,
  "notApplicable": 10,
  "areas": [
   {
    "id": 0,
    "title": "System diagram",
-   "total": 34,
+   "total": 37,
    "open": 2,
    "notApplicable": 0
   },
   {
    "id": 1,
    "title": "Authentication & session management",
-   "total": 36,
+   "total": 40,
    "open": 0,
    "notApplicable": 0
   },
   {
    "id": 2,
    "title": "OAuth2 / OIDC authorization server",
-   "total": 92,
+   "total": 94,
    "open": 0,
    "notApplicable": 0
   },
   {
    "id": 3,
    "title": "Federation — SAML SP & OIDC relying party",
-   "total": 129,
+   "total": 132,
    "open": 3,
    "notApplicable": 0
   },
   {
    "id": 4,
    "title": "Authorization engine — RBAC, hierarchy & scopes",
-   "total": 27,
+   "total": 31,
    "open": 0,
    "notApplicable": 0
   },
   {
    "id": 5,
    "title": "PKI, certificates & IoT device identity",
-   "total": 32,
+   "total": 33,
    "open": 1,
    "notApplicable": 0
   },
   {
    "id": 6,
    "title": "Audit, webhooks, email & notifications",
-   "total": 56,
+   "total": 59,
    "open": 2,
    "notApplicable": 0
   },
   {
    "id": 7,
    "title": "Deployment & platform (Kubernetes)",
-   "total": 30,
+   "total": 35,
    "open": 6,
    "notApplicable": 0
   },
   {
    "id": 8,
    "title": "Client SDKs & admin UI integration surface",
-   "total": 28,
+   "total": 37,
    "open": 3,
    "notApplicable": 0
   },
@@ -142,13 +142,13 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
  "categories": [
   {
    "name": "Spoofing",
-   "total": 109,
+   "total": 119,
    "open": 4,
    "notApplicable": 2
   },
   {
    "name": "Tampering",
-   "total": 97,
+   "total": 101,
    "open": 1,
    "notApplicable": 2
   },
@@ -160,19 +160,19 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "Information disclosure",
-   "total": 113,
+   "total": 120,
    "open": 7,
    "notApplicable": 1
   },
   {
    "name": "Denial of service",
-   "total": 61,
+   "total": 63,
    "open": 4,
    "notApplicable": 4
   },
   {
    "name": "Elevation of privilege",
-   "total": 98,
+   "total": 109,
    "open": 4,
    "notApplicable": 1
   }
@@ -186,19 +186,19 @@ export const THREAT_MODEL_SUMMARY: ThreatModelSummary = {
   },
   {
    "name": "High",
-   "total": 202,
+   "total": 207,
    "open": 9,
    "notApplicable": 6
   },
   {
    "name": "Medium",
-   "total": 209,
+   "total": 226,
    "open": 8,
    "notApplicable": 3
   },
   {
    "name": "Low",
-   "total": 41,
+   "total": 53,
    "open": 2,
    "notApplicable": 1
   }

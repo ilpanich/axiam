@@ -3,6 +3,7 @@
 use axiam_authz::AuthorizationEngine;
 use axiam_authz::types::{AccessDecision, AccessRequest, SubjectScope};
 use axiam_core::error::AxiamError;
+use axiam_core::models::tenant::TenantAdmission;
 use axiam_core::repository::{
     AmqpNonceRepository, GroupRepository, PermissionRepository, ResourceRepository, RoleRepository,
     ScopeRepository,
@@ -37,7 +38,8 @@ pub enum AuthzOutcome {
     /// they collapse to a single outcome here without changing behavior.
     NackDrop,
     /// The request was accepted and evaluated; the caller must publish this
-    /// serialized [`AuthzResponse`] payload to `axiam.authz.response`, then ack
+    /// serialized, signed [`AuthzResponse`] payload to the queue
+    /// [`response_routing_key`] names for the delivery's `reply_to`, then ack
     /// the original delivery once the broker confirms the publish.
     Publish(Vec<u8>),
 }
@@ -53,11 +55,18 @@ pub enum AuthzOutcome {
 /// [`AuthzOutcome::NackDrop`], matching the original `nack(requeue: false)`
 /// (and the two `nack(BasicNackOptions::default())`, whose `requeue` also
 /// defaults to `false`) branches exactly.
-pub async fn process_authz_request<R, P, Res, S, G, N>(
+///
+/// SA-13 (N16, D-3): `tenants` answers whether the request's tenant still
+/// admits its principals. A verified, fresh request for a suspended tenant is
+/// answered — published, so the caller is not left waiting for a timeout — as a
+/// denial with `reason_code` `tenant_suspended`, and the engine is not asked.
+#[allow(clippy::too_many_arguments)]
+pub async fn process_authz_request<R, P, Res, S, G, N, T>(
     raw: &[u8],
     engine: &AuthorizationEngine<R, P, Res, S, G>,
     master_signing_key: &[u8],
     nonce_repo: &N,
+    tenants: &T,
     replay_skew: chrono::Duration,
     now: chrono::DateTime<Utc>,
 ) -> AuthzOutcome
@@ -68,6 +77,7 @@ where
     S: ScopeRepository,
     G: GroupRepository,
     N: AmqpNonceRepository,
+    T: TenantAdmission + ?Sized,
 {
     // Deserialize request. Bad payload → nack requeue:false (not re-deliverable).
     let mut request: AuthzRequest = match serde_json::from_slice(raw) {
@@ -154,6 +164,51 @@ where
     }
 
     let correlation_id = request.correlation_id;
+    // SA-15 (N2): every response names its tenant and echoes this nonce.
+    let nonce = request.nonce;
+
+    // SA-13 (N16, D-3): a suspended tenant's principals are refused at every
+    // door, this one included — after the signature, freshness and replay
+    // checks (an unverified message learns nothing), before the engine.
+    match tenants.admit(tenant_id).await {
+        Ok(()) => {}
+        Err(AxiamError::TenantSuspended) => {
+            warn!(
+                tenant_id = %tenant_id,
+                correlation_id = %correlation_id,
+                "AuthzRequest for a suspended tenant — denying (SA-13)"
+            );
+            let response = AuthzResponse {
+                correlation_id,
+                allowed: false,
+                reason: Some(AxiamError::TenantSuspended.to_string()),
+                reason_code: Some("tenant_suspended".to_string()),
+                tenant_id,
+                nonce,
+                hmac_signature: None,
+            };
+            return publish_signed(response, master_signing_key, key_version);
+        }
+        Err(e) => {
+            // The tenant could not be read: refused as an engine error is,
+            // since "I could not tell" must not read as an allow.
+            error!(
+                error = %e,
+                correlation_id = %correlation_id,
+                "Could not read the tenant of an authz request"
+            );
+            let response = AuthzResponse {
+                correlation_id,
+                allowed: false,
+                reason: Some("internal error".to_string()),
+                reason_code: None,
+                tenant_id,
+                nonce,
+                hmac_signature: None,
+            };
+            return publish_signed(response, master_signing_key, key_version);
+        }
+    }
 
     // Build access request and evaluate.
     let access_request = AccessRequest {
@@ -182,6 +237,9 @@ where
                 _ => Some(decision.reason().to_string()),
             },
             reason_code: Some(decision.reason_code().to_string()),
+            tenant_id,
+            nonce,
+            hmac_signature: None,
         },
         Err(e) => {
             error!(
@@ -197,12 +255,25 @@ where
                 // authorization outcome, and labelling it `no_grant` would tell
                 // the caller to go ask an admin for access they may already have.
                 reason_code: None,
+                tenant_id,
+                nonce,
+                hmac_signature: None,
             }
         }
     };
 
-    // Serialize response. (Serializing an AuthzResponse is effectively
-    // infallible; a failure maps to the same requeue:false nack as before.)
+    publish_signed(response, master_signing_key, key_version)
+}
+
+/// SA-15 (N2): sign `response` with the request's per-tenant subkey and
+/// serialize it. (Serializing an `AuthzResponse` is effectively infallible; a
+/// failure maps to the same requeue:false nack as before.)
+fn publish_signed(
+    mut response: AuthzResponse,
+    master_signing_key: &[u8],
+    key_version: u8,
+) -> AuthzOutcome {
+    response.sign(master_signing_key, key_version);
     match serde_json::to_vec(&response) {
         Ok(p) => AuthzOutcome::Publish(p),
         Err(e) => {
@@ -212,11 +283,43 @@ where
     }
 }
 
+/// SA-15 (N2): the routing key (on the default exchange) a decision is
+/// published with. A request whose AMQP `reply_to` property names a queue is
+/// answered there, so a producer can read its decisions from a queue only it
+/// consumes; without one (or with an empty one) the decision goes to the shared
+/// [`queues::AUTHZ_RESPONSE`] queue, as before. Either way the response is
+/// signed and bound to its request (see [`AuthzResponse`]), so the route is not
+/// what a requester trusts.
+///
+/// SR1-5: a `reply_to` naming one of the server's own queues
+/// ([`is_server_internal_queue`]) is not honoured — the decision goes to the
+/// shared queue, as for a request without one. Publishing there with the
+/// server's broker credentials would let any requester write into the mail,
+/// outbound, audit or authz queues (and their retry and dead-letter queues),
+/// where each such message is refused and audited: cheap noise that buries
+/// real alerts. The shared queue rather than no answer, so a misconfigured but
+/// honest requester still gets its (signed) decision; nothing else about the
+/// name is restricted, since integrators may use named reply queues.
+pub fn response_routing_key(reply_to: Option<&str>) -> &str {
+    match reply_to {
+        Some(queue) if !queue.is_empty() && !is_server_internal_queue(queue) => queue,
+        _ => queues::AUTHZ_RESPONSE,
+    }
+}
+
+/// Whether `queue` is one of the server's own queues: every queue AXIAM
+/// declares is named `axiam.…`.
+pub fn is_server_internal_queue(queue: &str) -> bool {
+    queue.starts_with("axiam.")
+}
+
 /// Start consuming authorization requests from the `axiam.authz.request` queue.
 ///
 /// Each message is deserialized, evaluated through the authorization engine,
-/// and the result is published to `axiam.authz.response`. Messages are
-/// acknowledged on success or nacked on failure.
+/// and the result is published — signed with the request's tenant subkey and
+/// bound to its `nonce` (SA-15, N2) — to the request's AMQP `reply_to` queue,
+/// or to `axiam.authz.response` when it names none. Messages are acknowledged
+/// on success or nacked on failure.
 ///
 /// SEC-022/SECHRD-08: Every `AuthzRequest` is verified before processing —
 /// the per-tenant subkey is derived from `master_signing_key` + the
@@ -229,11 +332,15 @@ where
 /// [`MIN_ACCEPTED_KEY_VERSION`], its `issued_at` is outside the ±`replay_skew`
 /// freshness window, or its `nonce` has already been consumed (a duplicate in
 /// the durable `nonce_repo` store is a replay). There is no v1 grace path.
-pub async fn start_authz_consumer<R, P, Res, S, G, N>(
+///
+/// SA-13 (N16): `tenants` is the tenant lifecycle check
+/// [`process_authz_request`] applies to every verified request.
+pub async fn start_authz_consumer<R, P, Res, S, G, N, T>(
     channel: Channel,
     engine: AuthorizationEngine<R, P, Res, S, G>,
     master_signing_key: Vec<u8>,
     nonce_repo: N,
+    tenants: T,
     replay_skew: chrono::Duration,
 ) where
     R: RoleRepository + 'static,
@@ -242,6 +349,7 @@ pub async fn start_authz_consumer<R, P, Res, S, G, N>(
     S: ScopeRepository + 'static,
     G: GroupRepository + 'static,
     N: AmqpNonceRepository + 'static,
+    T: TenantAdmission + 'static,
 {
     info!("Starting authorization AMQP consumer");
 
@@ -280,6 +388,7 @@ pub async fn start_authz_consumer<R, P, Res, S, G, N>(
             &engine,
             &master_signing_key,
             &nonce_repo,
+            &tenants,
             replay_skew,
             Utc::now(),
         )
@@ -298,10 +407,31 @@ pub async fn start_authz_consumer<R, P, Res, S, G, N>(
             }
         };
 
+        // SA-15 (N2): answer on the request's `reply_to` queue when it names
+        // one, otherwise on the shared response queue as before.
+        let reply_to = delivery
+            .properties
+            .reply_to()
+            .as_ref()
+            .map(|queue| queue.as_str().to_owned());
+        if let Some(queue) = reply_to.as_deref()
+            && is_server_internal_queue(queue)
+        {
+            // SR1-5: logged, not audited — an audit row per refused
+            // `reply_to` would be the very noise the refusal prevents.
+            warn!(
+                delivery_tag = tag,
+                reply_to = queue,
+                "authz request names a server-internal queue as reply_to; \
+                 answering on the shared response queue instead (SR1-5)"
+            );
+        }
+        let routing_key = response_routing_key(reply_to.as_deref()).to_owned();
+
         let confirm = match channel
             .basic_publish(
                 "".into(),
-                queues::AUTHZ_RESPONSE.into(),
+                routing_key.as_str().into(),
                 BasicPublishOptions::default(),
                 &payload,
                 BasicProperties::default()

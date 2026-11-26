@@ -343,22 +343,55 @@ async fn failed_binds_count_and_lock_and_then_stop_reaching_the_directory() {
 /// the directory: unavailable, misconfigured, not configured, restricted, or
 /// no authenticator at all — each refuses the correct local password, and none
 /// counts against the account.
+///
+/// `UserRepository::update` refuses that write since QR6-1 (asserted first),
+/// so the hash is planted straight into the row instead: what a row stored
+/// before the rule, or written by any other route, could still carry. Login
+/// must not depend on the write having been refused.
 #[tokio::test]
 async fn there_is_no_fallback_to_a_local_hash() {
     let h = harness().await;
     let local = fresh_password();
     let hash = axiam_auth::password::hash_password(&local, None).unwrap();
-    h.users
+    let refused = h
+        .users
         .update(
             h.tenant_id,
             h.directory_user,
             UpdateUser {
-                password_hash: Some(hash),
+                password_hash: Some(hash.clone()),
                 ..Default::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
+    assert!(
+        matches!(
+            &refused,
+            Err(AxiamError::Validation { message })
+                if message == &AuthError::DirectoryAccountPassword.to_string()
+        ),
+        "the repository refuses a local hash for a directory account, got {refused:?}"
+    );
+    h.db.query(
+        "UPDATE type::record('user', $id) SET password_hash = $hash \
+             WHERE tenant_id = $tenant_id",
+    )
+    .bind(("id", h.directory_user.to_string()))
+    .bind(("tenant_id", h.tenant_id.to_string()))
+    .bind(("hash", hash.clone()))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+    assert_eq!(
+        h.users
+            .get_by_id(h.tenant_id, h.directory_user)
+            .await
+            .unwrap()
+            .password_hash,
+        hash,
+        "the usable local hash is in place for the rest of the test"
+    );
 
     for failure in [
         DirectoryAuthError::Unavailable,

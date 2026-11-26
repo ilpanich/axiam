@@ -608,6 +608,36 @@ static MIGRATIONS: &[Migration] = &[
         name: "session_lineage",
         sql: SCHEMA_V115,
     },
+    Migration {
+        version: 116,
+        name: "audit_log_system_organization",
+        sql: SCHEMA_V116,
+    },
+    Migration {
+        version: 117,
+        name: "user_credential_changed_at",
+        sql: SCHEMA_V117,
+    },
+    Migration {
+        version: 118,
+        name: "user_credential_version",
+        sql: SCHEMA_V118,
+    },
+    Migration {
+        version: 119,
+        name: "session_credential_version",
+        sql: SCHEMA_V119,
+    },
+    Migration {
+        version: 120,
+        name: "account_deletion_prior_status",
+        sql: SCHEMA_V120,
+    },
+    Migration {
+        version: 121,
+        name: "user_mfa_pending_secret",
+        sql: SCHEMA_V121,
+    },
 ];
 
 // -----------------------------------------------------------------------
@@ -5849,9 +5879,252 @@ DEFINE FIELD IF NOT EXISTS lineage_id ON TABLE session_client TYPE option<string
 DEFINE INDEX IF NOT EXISTS idx_session_client_lineage ON TABLE session_client FIELDS tenant_id, lineage_id;
 ";
 
+// -----------------------------------------------------------------------
+// Schema v116 — the organization of a system audit row (SA-02, N1)
+// -----------------------------------------------------------------------
+//
+// `GET /api/v1/audit-logs/system` returned the whole nil-tenant partition —
+// the unattributed request rows and deleted-tenant records of every
+// organization — to any organization-level principal. `organization_id` is
+// the organization a system row concerns, written on a new row only where the
+// server resolved it with certainty; the endpoint returns a row only to that
+// organization.
+//
+// One optional column and its index, **no `DEFAULT` and no backfill**: the
+// audit log is append-only, so an existing row is never updated. A row
+// written before this version reads `NONE`, which the endpoint returns to
+// nobody (said so in `docs/admin/README.md`). The index serves that read:
+// tenant (always nil there), organization, newest first.
+const SCHEMA_V116: &str = "\
+DEFINE FIELD IF NOT EXISTS organization_id ON TABLE audit_log TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS idx_audit_tenant_org_time ON TABLE audit_log FIELDS tenant_id, organization_id, timestamp;
+";
+
+// -----------------------------------------------------------------------
+// Schema v117 — the credential epoch of a user (SA-06, N7; S-1, S-6)
+// -----------------------------------------------------------------------
+//
+// `credential_changed_at` is when a credential that proves who is signing in
+// last changed: the Argon2 hash or the OPAQUE record, written or deleted. It is
+// written by the same transaction as the credential and is read to refuse the
+// short-lived artefacts of the *previous* credential — an MFA challenge token,
+// an MFA setup token, an in-flight OPAQUE login — that a reset or change did
+// not otherwise reach.
+//
+// **Clock.** The epoch is stamped with the datastore's clock (`time::now()`
+// inside the credential's own statement or transaction; QR17-4), the clock that
+// stamps the `created_at` (`DEFAULT time::now()`) of sessions, refresh tokens,
+// authorization codes, device grants and CIBA requests it is compared with, so
+// those comparisons are independent of any application replica's skew. (An
+// earlier revision bound the application replica's `Utc::now()`.) The
+// artefacts that an application replica stamps itself — an MFA token's
+// `iat`/`iat_ns`, an OPAQUE login's `issued_at`, a WebAuthn state token's
+// `iat_ns` — are compared with it as the credential version's fallback only;
+// that comparison now spans two clocks, as the version check (which compares
+// none) is the primary one.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a row that has not had
+// a credential change since this version reads `NONE`, and a user with no
+// epoch is refused nothing, exactly as before.
+const SCHEMA_V117: &str = "\
+DEFINE FIELD IF NOT EXISTS credential_changed_at ON TABLE user TYPE option<datetime>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v118 — the credential version of a user (SA-06, N7; review SR3-1)
+// -----------------------------------------------------------------------
+//
+// `credential_version` is a counter bumped, in the same transaction, by every
+// write that stamps `credential_changed_at` (v117). It is read in the same row
+// as the Argon2 hash and embedded in the artefacts a login issues, which are
+// refused when it no longer equals the user's value. The timestamp compares two
+// application clocks and leaves a window of one datastore round trip; the
+// counter compares no clock at all.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a user whose
+// credential has not changed since this version reads `NONE`, which the
+// application treats as version 0.
+const SCHEMA_V118: &str = "\
+DEFINE FIELD IF NOT EXISTS credential_version ON TABLE user TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v119 — the credential version a session was written under (SA-06,
+// N7; review SR16-1)
+// -----------------------------------------------------------------------
+//
+// One optional column, **no `DEFAULT` and no backfill**: a session written
+// before this version reads `NONE`, and refresh rotation handles that as a
+// legacy row (it compares the user's `credential_changed_at` with the row's
+// `created_at` instead) so an upgrade logs nobody out.
+const SCHEMA_V119: &str = "\
+DEFINE FIELD IF NOT EXISTS credential_version ON TABLE session TYPE option<int>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v120 — the status an account had before an erasure request (SA-09,
+// N11)
+// -----------------------------------------------------------------------
+//
+// `account_deletion.prior_status`: the user's status when the request parked it
+// as `Inactive`, written in the request's transaction and restored by a
+// cancel, so cancelling no longer re-activates a suspended, locked or
+// unverified account.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a request written
+// before this version reads `NONE`, and a cancel restores `Active` for it, as
+// every cancel did before.
+const SCHEMA_V120: &str = "\
+DEFINE FIELD IF NOT EXISTS prior_status ON TABLE account_deletion TYPE option<string>;
+";
+
+// -----------------------------------------------------------------------
+// Schema v121 — the pending TOTP secret of a user (SA-43, h08-authn-recovery)
+// -----------------------------------------------------------------------
+//
+// `mfa_pending_secret` holds the encrypted secret a TOTP enrolment issued and
+// the user has not confirmed yet. `confirm_mfa` moves it into `mfa_secret`, so
+// starting an enrolment no longer replaces a confirmed authenticator, and no
+// longer makes a live TOTP factor on an account whose `mfa_enabled` a passkey
+// turned on.
+//
+// One optional column, **no `DEFAULT` and no backfill**: a row with no
+// enrolment in progress reads `NONE`. An enrolment started before this version
+// (a secret under `mfa_enabled = false`) is still confirmed from `mfa_secret`.
+const SCHEMA_V121: &str = "\
+DEFINE FIELD IF NOT EXISTS mfa_pending_secret ON TABLE user TYPE option<string>;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-43 (h08-authn-recovery) — v121 is the one optional
+    /// `mfa_pending_secret` column on `user`, additive, no `DEFAULT`, no
+    /// backfill.
+    #[test]
+    fn v121_adds_only_the_optional_pending_mfa_secret_column() {
+        let statements: Vec<&str> = SCHEMA_V121
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS mfa_pending_secret ON TABLE user TYPE option<string>"],
+        );
+        assert!(is_additive(SCHEMA_V121));
+    }
+
+    /// SA-09 (N11) — v120 is the one optional `prior_status` column on
+    /// `account_deletion`, additive, no `DEFAULT`, no backfill.
+    #[test]
+    fn v120_adds_only_the_optional_prior_status_column() {
+        let statements: Vec<&str> = SCHEMA_V120
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS prior_status ON TABLE account_deletion TYPE option<string>"
+            ],
+        );
+        assert!(is_additive(SCHEMA_V120));
+    }
+
+    /// SA-06 (N7, SR16-1) — v119 is the one optional `credential_version`
+    /// column on `session`, additive, no `DEFAULT`, no backfill.
+    #[test]
+    fn v119_adds_only_the_optional_session_credential_version_column() {
+        let statements: Vec<&str> = SCHEMA_V119
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS credential_version ON TABLE session TYPE option<int>"],
+        );
+        assert!(is_additive(SCHEMA_V119));
+    }
+
+    /// SA-06 (N7, SR3-1) — v118 is the one optional `credential_version`
+    /// column on `user`, additive, no `DEFAULT`, no backfill.
+    #[test]
+    fn v118_adds_only_the_optional_credential_version_column() {
+        let statements: Vec<&str> = SCHEMA_V118
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            ["DEFINE FIELD IF NOT EXISTS credential_version ON TABLE user TYPE option<int>"],
+        );
+        assert!(is_additive(SCHEMA_V118));
+    }
+
+    /// SA-06 (N7) — v117 is the one optional `credential_changed_at` column on
+    /// `user`, and nothing else: no `DEFAULT`, no backfill, no index.
+    #[test]
+    fn v117_adds_only_the_optional_credential_epoch_column() {
+        let statements: Vec<&str> = SCHEMA_V117
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS credential_changed_at ON TABLE user \
+              TYPE option<datetime>"
+            ],
+        );
+        for forbidden in [
+            "UPDATE",
+            "REMOVE",
+            "DELETE",
+            "OVERWRITE",
+            "DEFAULT ",
+            "INDEX",
+        ] {
+            assert!(
+                !SCHEMA_V117.contains(forbidden),
+                "v117 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V117));
+    }
+
+    /// SA-02 (N1) — v116 is the one optional `organization_id` column on
+    /// `audit_log` and its index, and nothing else: no `DEFAULT`, no backfill
+    /// (the audit log is append-only).
+    #[test]
+    fn v116_adds_only_the_system_audit_organization_column_and_index() {
+        let statements: Vec<&str> = SCHEMA_V116
+            .split(';')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "DEFINE FIELD IF NOT EXISTS organization_id ON TABLE audit_log \
+                 TYPE option<string>",
+                "DEFINE INDEX IF NOT EXISTS idx_audit_tenant_org_time ON TABLE audit_log \
+                 FIELDS tenant_id, organization_id, timestamp",
+            ],
+        );
+        for forbidden in ["UPDATE", "REMOVE", "DELETE", "OVERWRITE", "DEFAULT "] {
+            assert!(
+                !SCHEMA_V116.contains(forbidden),
+                "v116 must not contain {forbidden}: it is additive DDL with no backfill"
+            );
+        }
+        assert!(is_additive(SCHEMA_V116));
+    }
 
     /// #837/#838 — v114 is three optional columns on the two short-lived
     /// federation tables, and nothing else: no `DEFAULT`, no backfill, no index.
@@ -8012,10 +8285,23 @@ mod tests {
         assert_eq!(versions, sorted, "migrations must be unique and ascending");
         assert_eq!(
             versions.last(),
-            Some(&115),
-            "v115 is the newest migration (#844, D-N43 — `lineage_id` on `session`, \
+            Some(&121),
+            "v121 is the newest migration (SA-43, h08-authn-recovery — \
+             `user.mfa_pending_secret`, the unconfirmed TOTP secret, optional, absent reading \
+             as no enrolment in progress); v120 was (SA-09, N11 — `account_deletion.prior_status`, the \
+             status an account had before an erasure request, optional, absent reading as \
+             Active); v119 was (SA-06, N7, SR16-1 — `session.credential_version`, \
+             the credential version a session was written under, optional, absent reading as a \
+             legacy row); \
+             v118 was SA-06, N7, SR3-1 — `user.credential_version`, the \
+             credential counter, optional, absent reading as 0); \
+             v117 was SA-06, N7 — `user.credential_changed_at`, the \
+             credential epoch, optional, absent reading as no change on record); \
+             v116 was SA-02, N1 — `audit_log.organization_id`, the \
+             organization a system-partition row concerns, optional, absent reading as none); \
+             v115 was #844, D-N43 — `lineage_id` on `session`, \
              `oauth2_refresh_token` and `session_client`, the session lineage key a logout \
-             ends, optional, absent reading as the row's own session id); v114 is #837/#838; \
+             ends, optional, absent reading as the row's own session id; v114 is #837/#838; \
              v113 was G-B, #817 — `oauth2_client.default_idp`, a \
              client's default sign-in provider, optional, absent reading as none; v112 was \
              G-A, #816, D-N10 — the `federation_id_token_replay` \

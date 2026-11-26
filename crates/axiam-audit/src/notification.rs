@@ -653,6 +653,7 @@ where
 
     fn list_system(
         &self,
+        organization_id: Uuid,
         filter: axiam_core::repository::AuditLogFilter,
         pagination: axiam_core::repository::Pagination,
     ) -> impl std::future::Future<
@@ -660,7 +661,7 @@ where
             axiam_core::repository::PaginatedResult<axiam_core::models::audit::AuditLogEntry>,
         >,
     > + Send {
-        self.inner.list_system(filter, pagination)
+        self.inner.list_system(organization_id, filter, pagination)
     }
 
     fn get_by_ids(
@@ -1178,6 +1179,7 @@ mod tests {
             outcome,
             ip_address: Some("203.0.113.7".into()),
             metadata: None,
+            organization_id: None,
         }
     }
 

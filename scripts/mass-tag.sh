@@ -65,7 +65,7 @@
 #                      mirrors both of those fields; docs/api/openapi.json is a
 #                      symlink to the spec and follows; the frontend Sidebar
 #                      version string and its test; the two k8s deployment image
-#                      tags; website/src/apiIndex.ts API_VERSION (the website
+#                      tags; the dev compose AXIAM_IMAGE_TAG default; website/src/apiIndex.ts API_VERSION (the website
 #                      mirror of info.version); and
 #                      crates/axiam-opaque-wasm/Cargo.toml, which is
 #                      outside the workspace and so inherits nothing.
@@ -1053,6 +1053,7 @@ bump_versions() {
       sub_literal frontend/src/components/layout/Sidebar.test.tsx  "$old" "$version"
       sub_literal k8s/server/deployment.yml                        "$old" "$version"
       sub_literal k8s/frontend/deployment.yml                      "$old" "$version"
+      sub_literal docker/docker-compose.dev.yml                    "$old" "$version"
       bump_cargo_lock_axiam                                        "$old" "$version"
       bump_opaque_dep_reqs                                                  "$version"
       # Excluded from the workspace (it only builds for wasm32), so it carries

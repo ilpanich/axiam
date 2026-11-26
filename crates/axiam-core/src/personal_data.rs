@@ -166,6 +166,14 @@ pub const USER_COLUMNS: &[UserColumn] = &[
                boolean and never as the secret itself.",
     },
     UserColumn {
+        name: "mfa_pending_secret",
+        erasure: Some(Erasure::ToNone),
+        export: None,
+        note: "SA-43: a credential — the encrypted TOTP secret of an enrolment \
+               not yet confirmed. Erased with `mfa_secret` and, like it, never \
+               exported.",
+    },
+    UserColumn {
         name: "failed_login_attempts",
         erasure: None,
         export: None,
@@ -310,6 +318,36 @@ pub const USER_COLUMNS: &[UserColumn] = &[
                erasure rather than the subject; the tombstone never sets it \
                and the export does not carry it.",
     },
+    UserColumn {
+        name: "credential_changed_at",
+        erasure: None,
+        export: None,
+        note: "SA-06 (schema v117): server-internal credential-epoch \
+               bookkeeping, `skip_serializing` on the model. It is the instant \
+               the Argon2 hash or OPAQUE record last changed, compared with the \
+               `created_at` of short-lived artefacts to refuse those of a \
+               superseded credential; it describes the credential's lifetime \
+               and not the subject. Path-specific and not cleared: the Art. 17 \
+               pipeline restamps it to the erasure's own `time::now()` (the \
+               hash is replaced, so the epoch moves), so what survives is the \
+               erasure time and not a record of the subject's earlier \
+               behaviour. Not exported, for the reason `password_hash` is not: \
+               the Art. 15 `profile` section describes the subject, not the \
+               credential store.",
+    },
+    UserColumn {
+        name: "credential_version",
+        erasure: None,
+        export: None,
+        note: "SA-06 (schema v118): a counter bumped in the same transaction \
+               as every write that stamps `credential_changed_at`, so that an \
+               artefact built from a credential read that raced a reset is \
+               refused without comparing two clocks. Its value means nothing \
+               beyond \"changed\" and says nothing about the subject (like \
+               `mail_epoch`); it is never cleared, because resetting it to \
+               zero would let an artefact of an earlier credential match \
+               again. Not exported.",
+    },
 ];
 
 /// The `SET` clause fragment both erasure statements share, derived from
@@ -427,6 +465,7 @@ mod tests {
              password_hash = '', \
              mfa_enabled = false, \
              mfa_secret = NONE, \
+             mfa_pending_secret = NONE, \
              last_failed_login_at = NONE, \
              locked_until = NONE, \
              metadata = {}, \

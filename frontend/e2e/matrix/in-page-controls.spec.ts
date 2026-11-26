@@ -1,6 +1,7 @@
 import { test, expect, Locator, Page } from "@playwright/test";
 import {
   MATRIX_PRINCIPALS,
+  canActOnOrganization,
   effectivePermissions,
   holds,
   readFixture,
@@ -28,7 +29,10 @@ import {
  * ---------------------------------------------------------------------------
  *
  * `GATED_CONTROLS` holds the controls whose visibility is decided by exactly
- * one permission on a page reachable without first selecting anything.
+ * one permission on a page reachable without first selecting anything — plus,
+ * where the server's handler also calls `require_organization_principal`,
+ * organization standing (`GatedControl.organizationOnly`), which no permission
+ * expresses.
  * `SELECTION_GATED_CONTROLS`, below it, holds the three that only exist after
  * a row is selected — `ScopesPanel`, `EffectiveAccessPanel` and the per-row
  * bind-certificate action on service accounts.
@@ -54,6 +58,25 @@ interface GatedControl {
   permission: string;
   /** The permission guarding the page itself — no page, no control. */
   pagePermission: string;
+  /**
+   * Whether the server ALSO requires an unrestricted organization principal
+   * for the action behind this control — i.e. its handler calls
+   * `handlers::org_scope::require_organization_principal` (SA-02). That guard
+   * refuses, whatever permissions the caller holds:
+   *
+   * - a tenant's own administrator (its record does not live in the
+   *   organization's reserved tenant), and
+   * - an organization-level principal whose roles are confined to particular
+   *   tenants (`tenant_scope`, surfaced as `reachable_tenant_ids` on
+   *   `/auth/me`) — `mx-org-a-admin` in this matrix.
+   *
+   * The same standing as `NavDestination.organizationOnly`, read the same way
+   * (`canActOnOrganization`, which mirrors the UI's `useCanActOnOrganization`).
+   * For such a control "expected visible" is `permission && standing`; a model
+   * that knew only the permission would demand the control back for exactly
+   * the principals SA-02 exists to refuse.
+   */
+  organizationOnly?: boolean;
   /** How to find it once the page has settled. */
   locate: (page: Page) => Locator;
 }
@@ -78,6 +101,13 @@ const GATED_CONTROLS: GatedControl[] = [
     label: "the tenant/system audit scope switch",
     permission: "audit_logs:list_system",
     pagePermission: "audit_logs:list",
+    // `GET /api/v1/audit-logs/system` (`handlers::audit::list_system`) calls
+    // `require_organization_principal` since SA-02 (N1; owner decisions QR9-1,
+    // QR9-2, QR10-2): a tenant admin and a tenant-restricted organization
+    // principal both get 403 even holding `audit_logs:list_system`, and
+    // `AuditLogsPage` draws the switch only for
+    // `can("audit_logs:list_system") && useCanActOnOrganization()`.
+    organizationOnly: true,
     locate: (page) => page.getByRole("tablist", { name: "Audit log scope" }),
   },
   {
@@ -232,7 +262,7 @@ for (const principal of MATRIX_PRINCIPALS) {
   test.describe(`in-page controls — ${principal.username}`, () => {
     test.use({ storageState: principal.storageState });
 
-    test("every gated control is offered exactly when its permission allows it", async ({
+    test("every gated control is offered exactly when the server would allow it", async ({
       page,
     }) => {
       test.setTimeout(120_000);
@@ -244,6 +274,11 @@ for (const principal of MATRIX_PRINCIPALS) {
           `every assertion below would be measuring nothing`,
       ).not.toBeNull();
       if (!perms) return;
+
+      // Organization standing, for the controls whose server handler also
+      // calls `require_organization_principal` (SA-02). Read once from
+      // `/auth/me` — the oracle stays the server, not a per-principal table.
+      const actsOnOrganization = await canActOnOrganization(page);
 
       for (const control of GATED_CONTROLS) {
         // A control on a page this principal cannot open is not a finding —
@@ -266,17 +301,28 @@ for (const principal of MATRIX_PRINCIPALS) {
           .toBe(false);
         if (denied) continue;
 
-        const allowed = holds(perms, control.permission);
+        const permitted = holds(perms, control.permission);
+        const allowed = permitted && (!control.organizationOnly || actsOnOrganization);
         const count = await control.locate(page).count();
 
+        const rule = control.organizationOnly
+          ? `${control.permission} AND an unrestricted organization principal ` +
+            `(require_organization_principal, SA-02)`
+          : control.permission;
         expect
           .soft(
             count > 0,
             allowed
-              ? `${principal.username} holds ${control.permission} but ${control.label} ` +
-                `is not rendered on ${control.path} — a control the server would allow, hidden`
-              : `${principal.username} does NOT hold ${control.permission} but ${control.label} ` +
-                `is rendered on ${control.path} — a control the server would refuse, offered`,
+              ? `${principal.username} satisfies ${rule} but ${control.label} is not ` +
+                `rendered on ${control.path} — a control the server would allow, hidden`
+              : !permitted
+                ? `${principal.username} does NOT hold ${control.permission} but ${control.label} ` +
+                  `is rendered on ${control.path} — a control the server would refuse, offered`
+                : `${principal.username} holds ${control.permission} but is not an unrestricted ` +
+                  `organization principal (tenant-level, or organization-level with ` +
+                  `reachable_tenant_ids), yet ${control.label} is rendered on ${control.path} — ` +
+                  `the server requires ${rule} and answers 403, so this is a control the ` +
+                  `server would refuse, offered`,
           )
           .toBe(allowed);
       }

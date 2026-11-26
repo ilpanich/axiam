@@ -40,14 +40,30 @@ function page(items: unknown[], total: number) {
   return { items, total, offset: 0, limit: 20 };
 }
 
-/** The System tab is gated on audit_logs:list_system. */
-function asSystemAuditor(permissions = ["audit_logs:list", "audit_logs:list_system"]) {
+/**
+ * The System tab is gated on `audit_logs:list_system` AND on being able to act
+ * on the whole organization — the server's `list_system` calls
+ * `require_organization_principal`, which refuses a principal that does not
+ * live in the organization scope or whose roles are restricted to particular
+ * tenants (SA-02, review QR9-1).
+ *
+ * The default is therefore an unrestricted organization administrator:
+ * `organization_level` with no `reachable_tenant_ids`.
+ */
+function asSystemAuditor(
+  permissions = ["audit_logs:list", "audit_logs:list_system"],
+  overrides: Partial<AuthUser> = {}
+) {
   const u: AuthUser = {
     id: "admin",
     username: "admin",
     email: "admin@x.io",
     permissions,
     tenant_id: "t1",
+    principal_tenant_id: "org-tenant",
+    org_id: "o1",
+    organization_level: true,
+    ...overrides,
   };
   useAuthStore.setState({ user: u, isAuthenticated: true, isInitializing: false });
 }
@@ -213,6 +229,47 @@ describe("AuditLogsPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("hides the System tab from an organization principal confined to particular tenants (QR9-1)", async () => {
+    // It holds the permission (its organization-scope role carries it, and
+    // `/auth/me` reports it for the reached tenant it has selected), but the
+    // server refuses it `/audit-logs/system` on standing: its roles are
+    // restricted to particular tenants of the organization.
+    asSystemAuditor(undefined, { reachable_tenant_ids: ["t1"] });
+    apiMock.get.mockResolvedValue(res({ items: logs, total: 2, offset: 0, limit: 20 }));
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText("user.created");
+    expect(
+      screen.queryByRole("tablist", { name: "Audit log scope" })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "System" })).not.toBeInTheDocument();
+    expect(
+      apiMock.get.mock.calls.some((c) =>
+        (c[0] as string).startsWith("/api/v1/audit-logs/system")
+      )
+    ).toBe(false);
+  });
+
+  it("hides the System tab from a tenant principal holding the permission (QR9-1)", async () => {
+    // A tenant's own administrator does not live in the organization scope,
+    // so `require_organization_principal` refuses it whatever it holds.
+    asSystemAuditor(undefined, {
+      principal_tenant_id: "t1",
+      organization_level: false,
+    });
+    apiMock.get.mockResolvedValue(res({ items: logs, total: 2, offset: 0, limit: 20 }));
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText("user.created");
+    expect(screen.queryByRole("tab", { name: "System" })).not.toBeInTheDocument();
+  });
+
+  it("offers the System tab to an unrestricted organization administrator (QR9-1)", async () => {
+    asSystemAuditor();
+    apiMock.get.mockResolvedValue(res({ items: logs, total: 2, offset: 0, limit: 20 }));
+    renderWithProviders(<AuditLogsPage />);
+    await screen.findByText("user.created");
+    expect(screen.getByRole("tab", { name: "System" })).toBeInTheDocument();
+  });
+
   it("switches to the system endpoint and back", async () => {
     asSystemAuditor();
     apiMock.get.mockResolvedValue(res({ items: logs, total: 2, offset: 0, limit: 20 }));
@@ -230,9 +287,10 @@ describe("AuditLogsPage", () => {
       ).toBe(true)
     );
     // The description follows the scope, so the page never claims the system
-    // trail is "performed in this tenant" — system entries carry no tenant.
+    // trail is "performed in this tenant" — system entries carry no tenant —
+    // and says it holds only the caller's organization's entries (SA-02).
     expect(
-      screen.getByText(/unauthenticated and system requests/)
+      screen.getByText(/system entries recorded for your organization, which carry no tenant/)
     ).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("tab", { name: "Tenant" }));

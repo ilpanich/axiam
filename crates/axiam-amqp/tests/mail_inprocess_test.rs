@@ -70,7 +70,22 @@ async fn a_failing_message_is_retried_in_process_then_leaves_one_audit_row() {
     let db = setup_db().await;
     let org_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
-    let user_id = Uuid::new_v4();
+    // SA-14: the recipient is the user record's address or nobody, so the
+    // message names a real user.
+    let user_id = {
+        use axiam_core::repository::UserRepository;
+        SurrealUserRepository::new(db.clone())
+            .create(axiam_core::models::user::CreateUser {
+                tenant_id,
+                username: "alice".into(),
+                email: "alice@example.com".into(),
+                password: format!("fixture-{}", Uuid::new_v4()),
+                metadata: None,
+            })
+            .await
+            .unwrap()
+            .id
+    };
     SurrealEmailConfigRepository::new(db.clone(), email_key())
         .set_org_config(
             org_id,

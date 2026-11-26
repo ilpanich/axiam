@@ -859,7 +859,8 @@ async fn an_instance_that_loses_its_lease_stops_in_order_and_keeps_its_audit_row
 
     // Every request audited before the loss is in the trail.
     let rows = SurrealAuditLogRepository::new(db.clone())
-        .list_system(
+        .list(
+            Uuid::nil(),
             AuditLogFilter {
                 action: Some("GET /api/v1/auth/me".into()),
                 ..Default::default()

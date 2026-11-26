@@ -69,8 +69,9 @@ pub struct JobStatus {
     pub last_success_at: Option<String>,
     /// RFC 3339 timestamp of the last run that returned an error.
     pub last_failure_at: Option<String>,
-    /// The last error text, for the operator who is now looking at this page
-    /// wondering what went wrong.
+    /// The category of the last error (for example `database_error` or
+    /// `directory_unavailable`), never its text: this page is unauthenticated.
+    /// The detail is in the server log.
     pub last_error: Option<String>,
     /// Consecutive failures since the last success. Reset to 0 on success.
     pub consecutive_failures: u32,

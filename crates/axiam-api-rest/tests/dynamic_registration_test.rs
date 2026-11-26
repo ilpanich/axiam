@@ -62,6 +62,9 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+mod org_scope_support;
+use org_scope_support::org_operator_token;
+
 const TEST_PEER: &str = "127.0.0.1:12345";
 const CSRF_TOKEN: &str = "test-csrf-token";
 const ISSUER: &str = "https://localhost";
@@ -97,6 +100,10 @@ struct Fixture {
     org_id: Uuid,
     tenant_id: Uuid,
     user_token: String,
+    /// For a user of the organization's reserved scope tenant: the
+    /// organization baseline is refused to a caller of an ordinary tenant
+    /// (SA-02, N8).
+    org_token: String,
 }
 
 async fn setup() -> Fixture {
@@ -148,12 +155,15 @@ async fn setup() -> Fixture {
     )
     .unwrap();
 
+    let org_token = org_operator_token(&db, &auth, org.id, "org-admin").await;
+
     Fixture {
         db,
         auth,
         org_id: org.id,
         tenant_id: tenant.id,
         user_token,
+        org_token,
     }
 }
 
@@ -183,7 +193,7 @@ macro_rules! put_org_settings {
         let req = test::TestRequest::put()
             .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
             .uri(&format!("/api/v1/organizations/{}/settings", $f.org_id))
-            .insert_header(("Authorization", format!("Bearer {}", $f.user_token)))
+            .insert_header(("Authorization", format!("Bearer {}", $f.org_token)))
             .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
             .insert_header(("X-CSRF-Token", CSRF_TOKEN))
             .set_json($input)

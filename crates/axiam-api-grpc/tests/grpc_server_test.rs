@@ -177,6 +177,16 @@ async fn boot(
     tls: GrpcTls,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    boot_at("127.0.0.1:0".parse().unwrap(), tls, shutdown).await
+}
+
+/// [`boot`] on a chosen address, for the tests that connect to the listener.
+#[allow(clippy::type_complexity)]
+async fn boot_at(
+    addr: SocketAddr,
+    tls: GrpcTls,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (db, user_repo) = setup().await;
     let engine = make_engine(&db);
     let (reactor_engine, reactor_repo, reactor_audit_repo, reactor_routing_invalidator) =
@@ -187,7 +197,6 @@ async fn boot(
         grpc_authz_per_sec: 100,
         ..GrpcConfig::default()
     };
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     start_grpc_server(
         addr,
@@ -214,6 +223,8 @@ async fn boot(
         std::sync::Arc::new(axiam_auth::lockout::StaticLockoutPolicy(
             axiam_auth::lockout::policy_from_config(&test_auth_config()),
         )),
+        // SA-12: `UserService`'s own engine (the type is not `Clone`).
+        make_engine(&db),
         tls,
         axiam_core::models::deployment::DeploymentProfile::Full,
         shutdown,
@@ -322,4 +333,104 @@ async fn shared_rate_limit_layer_is_cloneable() {
     let layer = GrpcSharedRateLimitLayer::new(db, "grpc_authz", 100, 0);
     // Cloning is what tonic/tower does per connection — cover the Clone impl.
     let _clone = layer.clone();
+}
+
+/// SA-44: the inbound message cap is stated, not inherited from tonic. A pin
+/// of the constant only; the behaviour is proven by the test below.
+#[test]
+fn inbound_message_cap_is_four_mib() {
+    assert_eq!(
+        axiam_api_grpc::server::MAX_DECODING_MESSAGE_BYTES,
+        4 * 1024 * 1024
+    );
+}
+
+/// QR1-8: the cap is applied by the running server, not only declared. A
+/// message just over 4 MiB sent to a service is refused with
+/// `ResourceExhausted`/`OutOfRange` before the service sees it, and one just
+/// under the cap is accepted by the same service. (Were the
+/// `max_decoding_message_size` calls removed from `server.rs`, this would still
+/// hold for as long as tonic's default is 4 MiB; it is the test that notices
+/// that default changing, which the constant pin cannot.)
+#[tokio::test]
+async fn the_running_server_refuses_a_message_over_the_cap() {
+    use axiam_api_grpc::proto::{IntrospectTokenRequest, IntrospectTokenResponse};
+
+    // The literal, not the constant: the test states the cap the server must
+    // enforce, so changing the constant (or tonic's default) fails it.
+    let cap: usize = 4 * 1024 * 1024;
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let server = tokio::spawn(boot_at(addr, GrpcTls::Plaintext, std::future::pending()));
+
+    let channel = {
+        let mut connected = None;
+        for _ in 0..100 {
+            if let Ok(channel) = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+                .unwrap()
+                .connect()
+                .await
+            {
+                connected = Some(channel);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        connected.expect("the gRPC server must come up")
+    };
+
+    let token = axiam_auth::token::issue_access_token(
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4(),
+        &["profile".to_string()],
+        &test_auth_config(),
+        uuid::Uuid::new_v4().to_string(),
+        axiam_auth::token::AUD_USER,
+    )
+    .unwrap();
+
+    let call = |padding: usize| {
+        let channel = channel.clone();
+        let token = token.clone();
+        async move {
+            let mut request = tonic::Request::new(IntrospectTokenRequest {
+                access_token: "a".repeat(padding),
+            });
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            let mut grpc = tonic::client::Grpc::new(channel);
+            grpc.ready().await.unwrap();
+            grpc.unary::<_, IntrospectTokenResponse, _>(
+                request,
+                "/axiam.v1.TokenService/IntrospectToken".parse().unwrap(),
+                tonic_prost::ProstCodec::default(),
+            )
+            .await
+        }
+    };
+
+    // Positive control: a message under the cap reaches the service (which
+    // answers `active: false` for a string that is not a token).
+    let under = call(cap - 4096)
+        .await
+        .expect("a message under the cap must be accepted");
+    assert!(!under.into_inner().active);
+
+    let over = call(cap + 4096)
+        .await
+        .expect_err("a message over the cap must be refused");
+    assert!(
+        matches!(
+            over.code(),
+            tonic::Code::ResourceExhausted | tonic::Code::OutOfRange
+        ),
+        "an oversized message must be refused by the size limit, got {over:?}"
+    );
+
+    server.abort();
 }

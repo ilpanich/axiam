@@ -21,16 +21,20 @@ use axiam_api_rest::authz::{AllowAllAuthzChecker, AuthzChecker};
 use axiam_api_rest::register_api_v1_routes;
 use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
+use axiam_auth::token::{generate_refresh_token, hash_refresh_token};
 use axiam_core::models::opaque::{OpaqueKsf, OpaqueMode, OpaqueSuite};
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::password_reset::CreatePasswordResetToken;
 use axiam_core::models::settings::system_defaults;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::{CreateUser, UpdateUser, UserStatus};
 use axiam_core::repository::{
-    OrganizationRepository, SettingsRepository, TenantRepository, UserRepository,
+    OpaqueCredentialRepository, OrganizationRepository, PasswordResetTokenRepository,
+    SettingsRepository, TenantRepository, UserRepository,
 };
 use axiam_db::repository::{
-    SurrealOrganizationRepository, SurrealSessionRepository, SurrealSettingsRepository,
+    SurrealOpaqueCredentialRepository, SurrealOrganizationRepository,
+    SurrealPasswordResetTokenRepository, SurrealSessionRepository, SurrealSettingsRepository,
     SurrealTenantRepository, SurrealUserRepository,
 };
 use axiam_opaque::{AxiamKsf, ClientLoginState, ClientRegistrationState};
@@ -77,6 +81,11 @@ fn password() -> &'static str {
 fn new_password() -> &'static str {
     static VALUE: OnceLock<String> = OnceLock::new();
     VALUE.get_or_init(|| format!("Bx{}2", Uuid::new_v4().simple()))
+}
+
+fn reset_password() -> &'static str {
+    static VALUE: OnceLock<String> = OnceLock::new();
+    VALUE.get_or_init(|| format!("Dx{}4", Uuid::new_v4().simple()))
 }
 
 fn wrong_password() -> &'static str {
@@ -1081,4 +1090,372 @@ async fn a_tenant_user_omitting_the_tenant_is_refused_identically_on_both_paths(
         opaque_status, password_status,
         "the two login paths must refuse an unreachable workspace alike"
     );
+}
+
+// -----------------------------------------------------------------------
+// N7 / SA-06: a password write retires the record that verifies the old one
+// -----------------------------------------------------------------------
+
+/// Mint a reset token directly (mail delivery is not wired in tests) and
+/// redeem it at `POST /auth/reset/confirm`, optionally with an `opaque` record.
+async fn confirm_reset(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    new_password: &str,
+    opaque: Option<serde_json::Value>,
+) -> u16 {
+    let raw = generate_refresh_token();
+    SurrealPasswordResetTokenRepository::new(db.clone())
+        .create(CreatePasswordResetToken {
+            tenant_id,
+            user_id,
+            token_hash: hash_refresh_token(&raw),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        })
+        .await
+        .unwrap();
+    let mut body = serde_json::json!({
+        "tenant_id": tenant_id,
+        "token": raw,
+        "new_password": new_password,
+    });
+    if let Some(o) = opaque {
+        body["opaque"] = o;
+    }
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/reset/confirm")
+        .set_json(body)
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+async fn record_exists(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> bool {
+    SurrealOpaqueCredentialRepository::new(db.clone())
+        .get_by_user(tenant_id, user_id)
+        .await
+        .is_ok()
+}
+
+#[actix_web::test]
+async fn n7_a_reset_without_a_record_retires_the_old_opaque_record() {
+    // `enrolled_app!` leaves the account on `new_password()` with a record.
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("n7-reset");
+    assert!(record_exists(&db, tenant_id, user_id).await);
+
+    let status = confirm_reset(&app, &db, tenant_id, user_id, reset_password(), None).await;
+    assert_eq!(status, 200, "optional mode accepts a reset with no record");
+
+    // The OPAQUE endpoint must no longer answer to the pre-reset password.
+    let (_, _, finish, _, cookies) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_ne!(
+        finish, 200,
+        "the pre-reset password must not sign in over OPAQUE"
+    );
+    assert!(
+        !cookies.iter().any(|c| c.name() == "axiam_access"),
+        "no session may be issued for the pre-reset password"
+    );
+    assert!(
+        !record_exists(&db, tenant_id, user_id).await,
+        "the stale record must be gone"
+    );
+
+    // Controls: the password path agrees.
+    assert!(
+        password_login(&app, org_id, tenant_id, new_password())
+            .await
+            .is_none(),
+        "the old password must not work over the password endpoint"
+    );
+    assert!(
+        password_login(&app, org_id, tenant_id, reset_password())
+            .await
+            .is_some(),
+        "the new password works over the password endpoint"
+    );
+}
+
+/// `login/start` for `password`, then the client's `KE3`, held back: the
+/// attacker's "login always in flight" (S-1). Returns the pieces `finish_held`
+/// sends.
+async fn start_and_hold(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    org_id: Uuid,
+    tenant_id: Uuid,
+    password: &str,
+) -> (String, String) {
+    let (state, ke1) = ClientLoginState::start(password).unwrap();
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/opaque/login/start")
+        .set_json(serde_json::json!({
+            "org_id": org_id,
+            "tenant_id": tenant_id,
+            "username_or_email": USERNAME,
+            "ke1": ke1,
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "login/start");
+    let started: serde_json::Value = test::read_body_json(resp).await;
+    let ksf = ksf_from_response(&started);
+    let finished = state
+        .finish(password, started["ke2"].as_str().unwrap(), &ksf)
+        .expect("the client opens KE2 with the right password");
+    (
+        started["opaque_session"].as_str().unwrap().to_string(),
+        finished.ke3,
+    )
+}
+
+async fn finish_held(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    held: &(String, String),
+) -> (u16, bool) {
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/opaque/login/finish")
+        .set_json(serde_json::json!({ "opaque_session": held.0, "ke3": held.1 }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status().as_u16();
+    let session = resp
+        .response()
+        .cookies()
+        .any(|c| c.name() == "axiam_access");
+    (status, session)
+}
+
+/// S-1 (SA-06 / N7): a login started before a reset must not finish after it.
+#[actix_web::test]
+async fn s1_a_login_in_flight_across_a_reset_is_refused() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("s1-inflight");
+
+    // Control: a login that is not interrupted finishes.
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    assert_eq!(finish_held(&app, &held).await, (200, true), "control");
+
+    // The attacker, holding the old password, has an exchange in flight...
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    // ...the victim resets (with no new record, so the old one is retired)...
+    let status = confirm_reset(&app, &db, tenant_id, user_id, reset_password(), None).await;
+    assert_eq!(status, 200);
+    // ...and the pending exchange must not mint a session the reset never saw.
+    let (finish, session) = finish_held(&app, &held).await;
+    assert_eq!(
+        finish, 401,
+        "the in-flight login must be refused after a reset"
+    );
+    assert!(!session, "no session cookie may be issued");
+
+    // A login started after the reset is unaffected (password path agrees).
+    assert!(
+        password_login(&app, org_id, tenant_id, reset_password())
+            .await
+            .is_some()
+    );
+}
+
+/// SR3-1: an exchange built from the record a reset then replaces must not
+/// finish, even when the epoch the reset stamped is *older* than the exchange's
+/// issue time — the state the race between the record read and the reset's
+/// commit leaves behind, which the timestamp comparison alone accepts. The
+/// credential version sealed into the exchange is what refuses it.
+#[actix_web::test]
+async fn sr3_1_an_exchange_built_from_the_replaced_record_is_refused() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("sr3-1-inflight");
+
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    let status = confirm_reset(&app, &db, tenant_id, user_id, reset_password(), None).await;
+    assert_eq!(status, 200);
+    // Put the epoch before the exchange's issue time.
+    db.query("UPDATE type::record('user', $id) SET credential_changed_at = time::now() - 1h")
+        .bind(("id", user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (finish, session) = finish_held(&app, &held).await;
+    assert_eq!(
+        finish, 401,
+        "an exchange built from the replaced record must be refused"
+    );
+    assert!(!session, "no session cookie may be issued");
+}
+
+/// S-1 control: enrolment wrote a record and so stamped the credential epoch;
+/// a login started after it is not refused.
+#[actix_web::test]
+async fn s1_a_login_started_after_the_last_credential_write_finishes() {
+    let (_db, org_id, tenant_id, _user_id, app) = enrolled_app!("s1-fresh");
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    assert_eq!(finish_held(&app, &held).await, (200, true));
+}
+
+#[actix_web::test]
+async fn n7_a_change_without_a_record_retires_the_old_opaque_record() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("n7-change");
+    assert!(record_exists(&db, tenant_id, user_id).await);
+
+    // Self-service change to a new password, sending no `opaque` field.
+    let (access, csrf) = password_login(&app, org_id, tenant_id, new_password())
+        .await
+        .expect("password login with the current password");
+    let req = test::TestRequest::post()
+        .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+        .uri("/api/v1/auth/password/change")
+        .cookie(actix_web::cookie::Cookie::new("axiam_access", access))
+        .cookie(actix_web::cookie::Cookie::new("axiam_csrf", csrf.clone()))
+        .insert_header(("X-CSRF-Token", csrf))
+        .set_json(serde_json::json!({
+            "current_password": new_password(),
+            "new_password": reset_password(),
+        }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status().as_u16(), 204);
+
+    let (_, _, finish, _, cookies) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_ne!(
+        finish, 200,
+        "the pre-change password must not sign in over OPAQUE"
+    );
+    assert!(!cookies.iter().any(|c| c.name() == "axiam_access"));
+    assert!(
+        !record_exists(&db, tenant_id, user_id).await,
+        "the stale record must be gone"
+    );
+    assert!(
+        password_login(&app, org_id, tenant_id, reset_password())
+            .await
+            .is_some(),
+        "the new password works over the password endpoint"
+    );
+}
+
+#[actix_web::test]
+async fn n7_control_a_reset_with_a_new_record_keeps_it() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("n7-reset-ctl");
+    let enrollment = build_enrollment(&app, org_id, tenant_id, reset_password())
+        .await
+        .expect("register/start");
+
+    let status = confirm_reset(
+        &app,
+        &db,
+        tenant_id,
+        user_id,
+        reset_password(),
+        Some(enrollment),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    assert!(record_exists(&db, tenant_id, user_id).await);
+    let (_, _, finish, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, reset_password()).await;
+    assert_eq!(finish, 200, "OPAQUE login with the new password works");
+    let (_, _, old_finish, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_ne!(
+        old_finish, 200,
+        "the old password no longer works over OPAQUE"
+    );
+    assert!(
+        password_login(&app, org_id, tenant_id, reset_password())
+            .await
+            .is_some()
+    );
+}
+
+#[actix_web::test]
+async fn n7_control_a_change_with_a_new_record_keeps_it() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("n7-change-ctl");
+    let (access, csrf) = password_login(&app, org_id, tenant_id, new_password())
+        .await
+        .unwrap();
+    let status = enroll_via_password_change(
+        &app,
+        org_id,
+        tenant_id,
+        &access,
+        &csrf,
+        new_password(),
+        reset_password(),
+    )
+    .await;
+    assert_eq!(status, 204);
+
+    assert!(record_exists(&db, tenant_id, user_id).await);
+    let (_, _, finish, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, reset_password()).await;
+    assert_eq!(finish, 200);
+    assert!(
+        password_login(&app, org_id, tenant_id, reset_password())
+            .await
+            .is_some()
+    );
+}
+
+/// SA-13 (N16, D-3): an OPAQUE sign-in to a suspended tenant issues no session,
+/// whatever the exchange proves, and the refusal carries `tenant_suspended`.
+/// Un-suspending restores it.
+#[actix_web::test]
+async fn an_opaque_sign_in_to_a_suspended_tenant_is_refused() {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let (db, org_id, tenant_id, _user_id, app) = enrolled_app!("suspended");
+    let tenants = SurrealTenantRepository::new(db.clone());
+    let set_status = |status| UpdateTenant {
+        status: Some(status),
+        ..Default::default()
+    };
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Suspended))
+        .await
+        .unwrap();
+
+    let (start_status, started, finish_status, finished, cookies) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert!(
+        !cookies.iter().any(|c| c.name() == "axiam_access"),
+        "no session for a suspended tenant: start {start_status} {started}, \
+         finish {finish_status} {finished}"
+    );
+    let refusal = if start_status == 200 {
+        (finish_status, finished)
+    } else {
+        (start_status, started)
+    };
+    assert_eq!(refusal.0, 403, "refusal: {}", refusal.1);
+    assert_eq!(
+        refusal.1["error"], "tenant_suspended",
+        "refusal: {}",
+        refusal.1
+    );
+
+    tenants
+        .update(tenant_id, set_status(TenantStatus::Active))
+        .await
+        .unwrap();
+    let (_, _, status, _, _) =
+        opaque_login(&app, org_id, tenant_id, USERNAME, new_password()).await;
+    assert_eq!(status, 200, "un-suspending restores OPAQUE sign-in");
 }

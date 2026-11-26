@@ -35,6 +35,9 @@ use uuid::Uuid;
 
 type TestDb = surrealdb::engine::local::Db;
 
+mod org_scope_support;
+use org_scope_support::org_operator_token;
+
 /// Loopback peer address: `/account/export`, `/account/delete` and
 /// `/account/delete/cancel` are all wrapped with a per-route governor
 /// rate limiter (server.rs) which requires a resolvable peer address —
@@ -839,8 +842,11 @@ async fn erasure_honours_the_configured_window() {
     let app = test_app!(f.db, auth);
 
     // Shorten the org baseline to 7 days through the public endpoint, so this
-    // exercises the same path an operator takes.
-    let (bearer, header) = auth_headers(&token);
+    // exercises the same path an operator takes — an organization-level
+    // operator: the baseline is refused to a caller of an ordinary tenant
+    // (SA-02, N8).
+    let operator_token = org_operator_token(&f.db, &auth, f.org_id, "gdpr-operator").await;
+    let (bearer, header) = auth_headers(&operator_token);
     let mut settings = json!({
         "min_length": 12,
         "require_uppercase": true,

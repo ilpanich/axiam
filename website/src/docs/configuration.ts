@@ -356,10 +356,10 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
         ],
       },
-      { type: "h", id: "authz-cache", text: "Authorization decision cache (optional)" },
+      { type: "h", id: "authz-cache", text: "Authorization decision cache" },
       {
         type: "p",
-        text: "An optional per-tenant cache that skips the SurrealDB round-trips per check. Off by default; enabling it changes performance only, never the decision returned. Every access-narrowing mutation invalidates the affected entries immediately, so no revocation can leave a stale allow — the TTL is only a bounded-staleness backstop.",
+        text: "A per-tenant cache that skips the SurrealDB round-trips of a repeated check. On by default since v1.4 (5 s TTL); it changes performance only, never the decision returned. Every access-narrowing mutation invalidates the affected entries immediately, so no revocation can leave a stale allow — the TTL is only a bounded-staleness backstop.",
       },
       {
         type: "table",
@@ -367,8 +367,8 @@ export const CONFIGURATION_PAGES: DocPage[] = [
         rows: [
           [
             "AXIAM__AUTHZ__DECISION_CACHE_ENABLED",
-            "Master switch (default false).",
-            "false",
+            "Master switch (default true since v1.4). Across replicas a revocation can take up to the TTL unless the RabbitMQ broadcast is enabled.",
+            "true",
           ],
           [
             "AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS",
@@ -628,9 +628,9 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ],
           [
             "AXIAM__AUTHZ__DECISION_CACHE_ENABLED",
-            "false",
+            "true (since v1.4)",
             "true",
-            "true if your checks go over gRPC — measured 13× there at a favourable keyspace, ~+32% at a realistic one; REST checks gain only ~5%",
+            "true — measured 13× on gRPC checks at a favourable keyspace, ~+32% at a realistic one",
             "true",
           ],
           [

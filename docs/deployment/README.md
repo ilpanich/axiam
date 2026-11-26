@@ -789,13 +789,14 @@ which one a given image was built with.
 
 ## Authorization decision cache (optional, D7)
 
-An optional per-tenant cache of authorization decisions that skips the 3–4
-SurrealDB round-trips per check. **Off by default**; enabling it changes
-performance only, never the decision an endpoint returns.
+A per-tenant cache of authorization decisions that skips the SurrealDB work of a
+repeated check. **On by default since v1.4** (5 s TTL; it was off before);
+it changes performance only, never the decision an endpoint returns — except
+for the bounded revocation window described below.
 
 | Key | Purpose |
 |---|---|
-| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | Master switch. Default `false` — the authorization path is then byte-for-byte identical to a build without the cache. Set `true` to enable. |
+| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | Master switch. Default `true`. Set `false` and the authorization path is byte-for-byte identical to a build without the cache. |
 | `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | Cached-decision TTL in seconds (default `5`). Also the upper bound on revocation latency if an invalidation event is ever missed — keep it short. |
 | `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | Max cached decisions **per tenant** before FIFO eviction (default `10000`). Memory bound. |
 | `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` | Cross-replica invalidation over RabbitMQ. Default `false`. See [below](#cross-replica-invalidation-42). Requires the cache to be enabled. |
@@ -812,7 +813,7 @@ self-heals within `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and
 the per-mutation invalidation table are in the
 [Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).
 
-> **⚠ Multi-replica caveat — read before enabling, unless you also enable the
+> **⚠ Multi-replica caveat — applies by default, unless you also enable the
 > broadcast channel below.** On its own the cache and its invalidation are
 > **process-local**. "Revocation is immediate" is then a **single-process**
 > property. Run two or more replicas and a revocation handled by one replica
@@ -821,10 +822,10 @@ the per-mutation invalidation table are in the
 > `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (default 5 s)** — on every read path,
 > including the `RequirePermission` guard on the admin endpoints, and with no
 > audit signal distinguishing a cached allow from a fresh one. In the
-> Kubernetes manifests under `k8s/` (multi-replica by default) either set
-> `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` or leave
-> `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false`, unless a ≤ TTL revocation
-> window is an accepted risk.
+> Kubernetes manifests under `k8s/` (multi-replica by default) the default
+> accepts a ≤ 5 s revocation window across replicas; set
+> `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` to bring it back to
+> milliseconds, or `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` to remove it.
 
 ### Cross-replica invalidation (§4.2)
 
@@ -897,7 +898,7 @@ had this one (its interceptor validates the JWT signature and stops).
 
 | Key | Purpose |
 |---|---|
-| `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` | TTL in seconds for a *positive* session-validity answer. Default `0` = **disabled** (every request reads). Suggested starting value when enabling: `5`, matching the decision cache. |
+| `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` | TTL in seconds for a *positive* session-validity answer. Default **`5`** since v1.4 (it was `0`), matching the decision cache. `0` disables it — every request then reads. |
 
 What the cache stores and does not store:
 
@@ -916,10 +917,10 @@ What the cache stores and does not store:
 > its invalidation are **process-local**. On a single replica a logout or
 > password change takes effect immediately. With two or more replicas, a
 > session revoked on replica A stays acceptable on replicas B…N for up to
-> `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`. Keep it at `0` in the
-> multi-replica `k8s/` manifests unless that window is an accepted risk — and
-> if you have already accepted the decision cache's window, accept this one at
-> the same value, not a longer one.
+> `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` — 5 s by default. Unlike
+> the decision cache there is no broadcast channel for this one: set it to `0`
+> in a multi-replica deployment that needs a logout to reach every replica on
+> the next request, and never set it longer than the decision cache's TTL.
 
 ## TCP_NODELAY on the REST listener (I5)
 

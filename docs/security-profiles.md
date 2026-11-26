@@ -251,11 +251,11 @@ AXIAM__GRPC__STRICT_REVOCATION=true
 
 Every gRPC request then re-checks session validity, matching REST.
 
-**Enable the session-validation cache alongside it**, or you are choosing one
-datastore read per gRPC request:
+**Keep the session-validation cache on alongside it** (the default since v1.4),
+or you are choosing one datastore read per gRPC request:
 
 ```bash
-AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=5
+AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=5   # the default
 ```
 
 With the cache on, the hot path costs a hash lookup and only a miss costs a

@@ -427,10 +427,13 @@ pub struct AuthConfig {
     pub hash_acquire_timeout_secs: u64,
     /// I6: TTL, in seconds, of the process-local **session-validation cache**.
     ///
-    /// `0` (the default) disables the cache entirely — every authenticated
-    /// request performs its own SurrealDB read to confirm the session behind the
-    /// access token's `jti` still exists (D-15 / REQ-7). A non-zero value lets
-    /// repeated requests inside the window reuse the last positive answer.
+    /// Default **`5`** (on since the database-cost review,
+    /// `claude_dev/db-query-optimization.md` §8.5): repeated requests inside the
+    /// window reuse the last positive answer. `0` disables the cache entirely —
+    /// every authenticated request then performs its own SurrealDB read to
+    /// confirm the session behind the access token's `jti` still exists
+    /// (D-15 / REQ-7); set it for a deployment that wants revocation to reach
+    /// every replica on the next request.
     ///
     /// Override via `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`.
     ///
@@ -452,8 +455,8 @@ pub struct AuthConfig {
     /// affected: cached entries carry the row's own `expires_at` and are
     /// rejected exactly on time regardless of the TTL.
     ///
-    /// Suggested starting point when enabling: `5`, matching the decision
-    /// cache's default.
+    /// The default matches the decision cache's TTL, so the two caches bound
+    /// the same window.
     pub session_validation_cache_ttl_secs: u64,
 }
 
@@ -699,6 +702,11 @@ impl AuthConfig {
     }
 }
 
+/// Default of [`AuthConfig::session_validation_cache_ttl_secs`]: 5 s, the
+/// decision cache's default TTL. The revocation bound it adds is per replica —
+/// see the field's documentation.
+pub const DEFAULT_SESSION_VALIDATION_CACHE_TTL_SECS: u64 = 5;
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
@@ -756,8 +764,9 @@ impl Default for AuthConfig {
             // B1: 0 = auto → min(available_parallelism, 4) at construction.
             max_concurrent_hashes: 0,
             hash_acquire_timeout_secs: 5,
-            // I6: opt-in. 0 = no session-validation cache (today's behaviour).
-            session_validation_cache_ttl_secs: 0,
+            // I6: on by default since the database-cost review (5 s, the
+            // decision cache's TTL). 0 = no session-validation cache.
+            session_validation_cache_ttl_secs: DEFAULT_SESSION_VALIDATION_CACHE_TTL_SECS,
         }
     }
 }

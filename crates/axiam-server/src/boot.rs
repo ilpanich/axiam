@@ -723,8 +723,8 @@ where
             pool.handle_for_repo(),
         ))
     });
-    // I6: optional short-TTL session-validation cache. Opt-in via
-    // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (0 = off, the default);
+    // I6: short-TTL session-validation cache, on by default (5 s;
+    // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`, 0 = off);
     // every session-deleting path in the repository invalidates it, so on a
     // single replica revocation stays immediate and the TTL only bounds
     // cross-replica staleness — the same contract as the D7 decision cache.
@@ -732,8 +732,8 @@ where
         0 => {
             tracing::info!(
                 "session-validation cache disabled (every authenticated request \
-                 re-reads its session row); enable with \
-                 AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS"
+                 re-reads its session row; \
+                 AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=0)"
             );
             session_repo
         }
@@ -743,8 +743,9 @@ where
             ));
             tracing::warn!(
                 ttl_secs,
-                "session-validation cache ENABLED (I6) — a session revoked on \
-                 another replica may remain acceptable here for up to ttl_secs"
+                "session-validation cache enabled (I6) — a session revoked on \
+                 another replica may remain acceptable here for up to ttl_secs; \
+                 set AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=0 to disable"
             );
             session_repo.with_validation_cache(cache)
         }
@@ -1852,13 +1853,13 @@ where
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
-    // D7: build the shared authorization decision cache. `None` unless
-    // `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true` — when `None`, every engine
-    // below is constructed exactly as before (no cache, zero behaviour
-    // change). The SAME `Arc<DecisionCache>` is cloned into the REST, gRPC and
-    // AMQP engines so an invalidation triggered from a REST mutation handler is
-    // observed on every read path (all role/permission/resource mutations are
-    // REST endpoints).
+    // D7: build the shared authorization decision cache — on by default;
+    // `None` when `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false`, and then every
+    // engine below is constructed without a cache. The SAME
+    // `Arc<DecisionCache>` is cloned into the REST, gRPC and AMQP engines so
+    // an invalidation triggered from a REST mutation handler is observed on
+    // every read path (all role/permission/resource mutations are REST
+    // endpoints).
     let decision_cache = config.authz.build_decision_cache();
     if let Some(cache) = decision_cache.as_ref() {
         tracing::info!(

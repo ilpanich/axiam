@@ -7,11 +7,11 @@
 //! scope)` tuple, so a repeated check can skip the 3–4 sequential SurrealDB
 //! round-trips the engine would otherwise issue (see the D6 tuning report).
 //!
-//! The cache is **opt-in** and feature-flagged: [`AuthorizationEngine`] only
+//! The cache is **on by default** and switchable: [`AuthorizationEngine`] only
 //! consults it when one has been attached via
-//! [`AuthorizationEngine::with_decision_cache`], which `axiam-server` does only
-//! when `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true`. When absent, the engine's
-//! code path is byte-for-byte identical to today (zero behaviour change).
+//! [`AuthorizationEngine::with_decision_cache`], which `axiam-server` does
+//! unless `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false`. When absent, the
+//! engine's code path is byte-for-byte the uncached one.
 //!
 //! [`AuthorizationEngine`]: crate::engine::AuthorizationEngine
 //! [`AuthorizationEngine::with_decision_cache`]: crate::engine::AuthorizationEngine::with_decision_cache

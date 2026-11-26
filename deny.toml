@@ -3,6 +3,14 @@
 # Policy decisions: .planning/phases/06-ci-cd-infrastructure-hardening/06-CONTEXT.md (D-01..D-03)
 
 [advisories]
+# Report unmaintained crates anywhere in the graph, transitive ones included.
+# cargo-deny 0.22.0 changed the default from "all" to "workspace" (direct
+# dependencies only, EmbarkStudios/cargo-deny#924). That would silently stop
+# surfacing notices like bincode (RUSTSEC-2025-0141) or humantime
+# (RUSTSEC-2026-0542), which reach us through SurrealDB, and would leave their
+# ignore entries below unmatched (`-D advisory-not-detected` fails the job).
+# Stated explicitly so the policy does not move with the tool version.
+unmaintained = "all"
 # Advisory IDs to ignore. Every entry MUST carry id + reason + review date (D-02).
 #
 # THIS LIST IS DELIBERATELY SHORTER THAN THE cargo-audit ONE in

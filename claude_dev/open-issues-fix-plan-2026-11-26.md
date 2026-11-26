@@ -792,6 +792,55 @@ repository's CI runs. This task closes #561, with a closing comment that lists
 where the outcome differs from the issue's acceptance text (versions, host, no
 valid authentik cell).
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `b05ce81`.** Every figure copied
+> verbatim from the seventh draft and cited to its section.
+>
+> - **Keycloak document:** header and sourcing note (Keycloak 26.8.1, AXIAM
+>   1.3.0/1.3.1, SurrealDB 4.0.1, cloud VM; run 6 and 6b pass B only; run 6c only
+>   as the regression size). Summary: token issuance 3.9× at 2 CPUs (1,610 vs
+>   411 req/s) and 3.5× at 4 (3,234 vs 934); JWKS 7.9×; login on par (§1).
+>   **Keycloak wins introspection (1,940 vs 1,582; 3,952 vs 3,272) and REST
+>   userinfo (3,862 vs 1,411; 7,807 vs 2,963), and whole-stack CPU per request
+>   (1.30 vs 1.86; 0.52 vs 2.01 cpu·ms, §7) — in the summary.** Database-bound
+>   (§3, §5); SurrealDB 4.0.1 regression 13–38% / 8–37% (§4); server RSS 54–75
+>   vs 708–941 MiB, 89–133 vs 1,082–1,170 at 4/4 (§7); no memory reduction
+>   observed for Keycloak 26.8, "a different host, so a direction, not a
+>   measurement of its release-note claim" (§7). Also replaced: the run-5
+>   "12 000+/s gRPC userinfo" (now 3,078 and 6,369 req/s, §1).
+> - **Zitadel document:** server RSS 54–75 vs 127–137 MiB; resting footprint by
+>   resident set AXIAM 373 vs 593 MiB, by cgroup working set Zitadel 172 vs
+>   AXIAM 216 MiB (§7); under-load rows (§10.1); the 207.3 MiB minimal profile
+>   kept, labelled as the 2026-10-05 measurement. Data plane: 3.8× and 4.6×
+>   token issuance, introspection in req/s (the draft prints no multiple), JWKS
+>   21×, gRPC userinfo 12.6× and 28× (§1). Zitadel's login and fallback refresh
+>   named as failing the validity gate.
+> - **authentik document:** run as a fourth target; **no cell passed the
+>   validity gate, so no throughput or latency comparison**; only the resting
+>   footprint (1,668 MiB: server 983, worker 347, PostgreSQL 338, against
+>   AXIAM's 373; §7); next round per §13 item 7. **Gap against #561's
+>   acceptance text** ("so that the authentik comparison can make a performance
+>   statement"): not met, recorded in the document's change log and in the
+>   closing comment.
+> - Dated change-log line (2026-11-26) in each of the three documents.
+> - **Website:** the stale `Benchmarks.tsx` sentence now names the seventh
+>   draft; the obsolete `NEXT` roadmap item removed. **Spot-check of ten
+>   figures** (two per section): client-credentials takeaway, introspection
+>   takeaway (§1); run 6b refresh and Zitadel gRPC userinfo (§3); run 6c client
+>   credentials and refresh at 4 CPUs (§4); TLS 1.3/mTLS JWKS and client
+>   credentials (§6) — all matched; whole-stack memory under load (§10.1) —
+>   **two mismatches corrected in `website/src/data.ts`**: AXIAM 288–415 →
+>   287–415, Keycloak 853–1,105 → 853–1,107. Not verifiable verbatim (derived
+>   per-core figures and three core-usage values) and left as they are; to be
+>   checked against `provenance/` by the maintainer.
+> - **Grep for run-5 multiples:** only the three comparison documents had
+>   unlabelled ones (all replaced). Outside them, `README.md` "the run-6 report
+>   is pending (#561)" and `docs/security-profiles.md` "a run-6 deliverable"
+>   were stale and corrected. Website mentions of run 5 are explicitly labelled.
+> - **Verification:** website `npm run build` OK (no test script exists);
+>   `docSectionsAreComplete()` called through Vite `ssrLoadModule` → `[]`;
+>   `check-doc-links.sh` OK (586 links). The closing comment for #561 is
+>   prepared and is posted with the pull request (issues close on merge).
+
 ---
 
 ## 5. Wave B — SDKs

@@ -389,6 +389,30 @@ that covers the ACS, fmt, clippy, layering script.
 
 **Verify.** `cargo test -p axiam-audit --lib`, fmt, clippy.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `ca02a9a`.** SR2-1:
+> `redacted_unmatched_path` compares against the previous **non-empty**
+> segments. QR2-4: fixed by derivation — `BEARER_PATH_PREFIXES` and
+> `REDACTED_PATH_PARAMETERS` are replaced by one
+> `BEARER_ROUTE_PATTERNS = &["/account/export/{token}"]`; matched routes redact
+> the placeholders named there, unmatched routes the segment after each
+> pattern's literal prefix. The "Fails closed" doc now says it covers only the
+> listed routes. The tracing span (`axiam-api-rest/src/middleware/request_span.rs`)
+> calls the same `redacted_path`, so the fix reaches both.
+>
+> - **Regression test:** `service_and_middleware::a_token_path_segment_is_redacted_even_when_no_route_matches`
+>   gains `export//…`, `export///…` and `account//export/…`. Unfixed code:
+>   `token leaked into audit action of an unmatched request: [… "GET /api/v1/account/export//super-secret-handle", …]`.
+>   Fixed: passes. New unit tests `redaction_tests::unmatched_spellings_are_redacted`
+>   (six spellings; `/users/H` untouched) and
+>   `redaction_tests::every_bearer_pattern_has_a_prefix_and_one_trailing_placeholder`
+>   (a shape check: it cannot detect a `{token}` route registered in
+>   `axiam-api-rest` but absent from the list).
+> - **Verification:** `axiam-audit --lib` 24 passed; `--test service_and_middleware`
+>   45 passed; whole crate green (one pre-existing ignored test); fmt and clippy
+>   `--all-targets -D warnings` clean; `cargo check -p axiam-api-rest --no-default-features` OK.
+> - **Not anticipated:** the plan's verify line names `--lib` only, but the
+>   regression test is an integration test.
+
 ### OI-04 — #872 and #873: the credential-superseded rule · Sonnet 5.5
 
 **Where.** `crates/axiam-core/src/models/user.rs`

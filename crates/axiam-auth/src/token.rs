@@ -791,6 +791,27 @@ pub fn sign_purpose_token<T: Serialize>(
     sign_with_header(claims, typ, None, config)
 }
 
+/// Sign an OIDC back-channel logout token (`typ: logout+jwt`) with the
+/// deployment key, naming that key's JWKS `kid` (#880, contract 1.69).
+///
+/// Unlike a purpose token, a logout token is verified by a **relying party**,
+/// through the JWKS, and standard RP libraries — the AXIAM SDKs among them —
+/// select the key by `kid`: without one the token is unverifiable for them, and
+/// ambiguous for everybody once a rotation publishes two keys. So it is signed
+/// through [`sign_claims`], the same header as the access and ID tokens.
+///
+/// The `kid` makes it a token a strictly-by-`kid` verifier finds a key for, so
+/// what keeps it from passing for an access token is not the key lookup but its
+/// `typ` (refused by every access-token decoder here, and by CONTRACT §10.1
+/// rule 10) and its claim set, which carries no `tenant_id` or `org_id`
+/// (refused by [`AccessTokenClaims`] and by §10.1 rule 4).
+pub fn sign_logout_token<T: Serialize>(
+    claims: &T,
+    config: &AuthConfig,
+) -> Result<String, AuthError> {
+    sign_claims(claims, TYP_LOGOUT_TOKEN, config)
+}
+
 /// The `kid` of an Ed25519 public key: the first 16 hex characters (64 bits)
 /// of SHA-256 over the raw 32-byte key.
 ///

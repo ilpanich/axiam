@@ -819,6 +819,7 @@ operator step before or during the rollout, the others only need to be known.
 | SA-11 | SAML SP requires an `AudienceRestriction` | **act** if an IdP omits it |
 | SA-14 | Internal AMQP queues are signed | **act**: drain the queues |
 | SA-15 | Authz responses are signed and routed by `reply_to` | none; additive |
+| #880 | Back-channel logout tokens carry a `kid` (contract 1.69) | none; see [Back-channel logout tokens name their key](#back-channel-logout-tokens-name-their-key-880-contract-169) |
 | SA-10 | Guarded fetches ignore environment proxies | **act** if egress is proxy-only |
 | SA-16 | SurrealDB credentials move out of argv; dev image tag | **act** if you customised the SurrealDB command |
 | SA-09 | Erasure cancel restores the prior account status | none |
@@ -831,7 +832,9 @@ operator step before or during the rollout, the others only need to be known.
 producers and consumers together (SA-14), keep
 `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` for the length of a mixed-version
 rollout only (SA-03), and re-sync the SDKs afterwards: the SDK contract is
-1.68 and every SDK ships it as 1.4.0.
+1.69 (1.68 plus the logout-token `kid` and the AMQP requester rules of
+[§34.13](../../sdks/CONTRACT.md#§3413-contract-169--the-logout-token-kid-and-the-authz-requester-rules))
+and every SDK ships it as 1.4.0.
 
 ### SA-01 — bootstrap needs the setup token on every path
 
@@ -1008,6 +1011,28 @@ fields are unaffected. A requester that sets `reply_to` now receives its answer
 on that queue instead of the shared `axiam.authz.response`, except a queue
 named `axiam.…`, which is reserved: such a request is answered on the shared
 queue.
+
+### Back-channel logout tokens name their key (#880, contract 1.69)
+
+A back-channel logout token is now signed with the `kid` that `/oauth2/jwks`
+publishes for the signing key, as access and ID tokens already were; its
+header is `{"alg":"EdDSA","typ":"logout+jwt","kid":"…"}`. Nothing else in the
+token changes, and nothing needs configuring.
+
+- **Relying parties that verify logout tokens need nothing.** A standard OIDC
+  library that selects the JWKS key by `kid` now finds it; one that tried every
+  key keeps working.
+- **An SDK-based relying party could not verify a genuine logout token before
+  this release** (except with the C SDK against a one-key JWKS): the AXIAM SDKs
+  select the key by `kid`, and the token carried none, so every back-channel
+  logout was refused at the RP. It works as soon as the server is upgraded,
+  with the SDK release the RP already runs; SDK 1.4.0 (contract 1.69) adds the
+  tests that keep it working. A logout token minted by a replica of the
+  previous release still carries no `kid` and is refused, as every logout token
+  was before.
+- The `kid` does not make a logout token usable as an access token: every
+  access-token door refuses it by its `typ` and, independently, because it has
+  no `tenant_id` (CONTRACT §34.13 (a)).
 
 ### SA-10 — no egress proxy for guarded fetches
 

@@ -6,7 +6,7 @@
 const BLOB = "https://github.com/ilpanich/axiam/blob/main/sdks/CONTRACT.md";
 
 /** The contract version these anchors were derived from. */
-export const CONTRACT_VERSION = "1.64";
+export const CONTRACT_VERSION = "1.69";
 
 /** Section number (without the `§`) to its GitHub heading anchor. */
 export const CONTRACT_ANCHORS: Record<string, string> = {
@@ -46,6 +46,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "34": "#§34-cross-sdk-conformance-review-of-the-phase-23-ports-contract-159",
  "35": "#§35-certificate-revocation-lists-informative",
  "36": "#§36-network-segments-reply-profiles-and-the-radius-decision-contract-162",
+ "37": "#§37-native-sign-in-with-a-provider-id-token-contract-165",
  "1.1": "#§11-grpc-only-operations",
  "1.1.1": "#§111-validate_token-and-introspect_token-contract-151",
  "3a": "#§3a-resource-server-middleware-csrf-inbound",
@@ -76,6 +77,7 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "12.7.4": "#§1274-per-language-naming-map",
  "12.7.5": "#§1275-sensitivet-applicability",
  "12.7.6": "#§1276-required-tests",
+ "12.8": "#§128-login-glue--browser-binding-and-return_to-contract-168",
  "14.1": "#§141-canonical-operation-set-and-endpoint-map",
  "14.2": "#§142-polling-normative--the-part-implementations-get-wrong",
  "14.3": "#§143-device_login--the-composed-helper",
@@ -271,6 +273,11 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "34.6": "#§346-contract-162--the-110-release",
  "34.7": "#§347-contract-163--the-111-release",
  "34.8": "#§348-contract-164--the-112-release",
+ "34.9": "#§349-contract-165--the-120-release",
+ "34.10": "#§3410-contract-166--post-120-sign-in-hardening",
+ "34.11": "#§3411-contract-167--security-audit-2026-11-14-wave-1-status-changes-one-additive-response-member",
+ "34.12": "#§3412-contract-168--security-audit-2026-11-14-wave-2-verifier-rules-the-signed-authz-response-login-glue",
+ "34.13": "#§3413-contract-169--the-logout-token-kid-and-the-authz-requester-rules",
  "36.1": "#§361-canonical-operation-set",
  "36.2": "#§362-shapes-normative",
  "36.3": "#§363-server-rules-every-sdk-can-observe-normative",
@@ -281,7 +288,16 @@ export const CONTRACT_ANCHORS: Record<string, string> = {
  "36.8": "#§368-required-tests",
  "36.9": "#§369-what-an-sdk-does-not-do",
  "36.10": "#§3610-per-sdk-posture",
- "36.11": "#§3611-the-decision-route--not-sdk-work-informative-except-rule-6"
+ "36.11": "#§3611-the-decision-route--not-sdk-work-informative-except-rule-6",
+ "37.1": "#§371-canonical-operation-and-endpoint-map",
+ "37.2": "#§372-semantics-normative",
+ "37.3": "#§373-error-mapping",
+ "37.4": "#§374-native_nonce--the-pair-the-two-parties-need-should",
+ "37.5": "#§375-per-language-naming-map",
+ "37.6": "#§376-sensitivet-applicability",
+ "37.7": "#§377-who-uses-it",
+ "37.8": "#§378-what-an-sdk-does-not-do",
+ "37.9": "#§379-required-tests"
 };
 
 /**

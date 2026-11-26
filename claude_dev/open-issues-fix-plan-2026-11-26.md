@@ -844,7 +844,127 @@ push. Do not claim a test run that did not happen.
 
 ## Appendix A — cross-SDK rules (written by OI-05)
 
-> **A.1 — the unsigned-response opt-out (#881).** *To be written by OI-05.*
->
-> **A.2 — the discarded-response security event (#883).** *To be written by
-> OI-05.*
+Normative text: CONTRACT 1.69, §8 "Signed authorization responses" (consumer
+obligation 4 and "Against a server older than 1.68") and §34.13 (b), (c). The
+seven AMQP SDK tasks (OI-10 to OI-14, OI-16, OI-17) port what follows.
+
+### A.1 — the unsigned-response opt-out (#881): **remove it**
+
+**Verdict (D-2, second branch): no supported server configuration sends an
+unsigned `AuthzResponse` to a `reply_to` queue, so the opt-out is removed from
+all seven SDKs** (`AllowUnsignedResponses` in Go and the equivalents: Rust,
+TypeScript `acceptUnsignedResponses`, Python, Java, C#, PHP), together with its
+tests, its `unsigned` flag on the decision type where one exists, and its
+"accepted UNSIGNED" log line. 1.4.0 is unreleased, so nothing released breaks.
+
+Evidence, from the server code:
+
+1. **A 1.68+ server signs every response it publishes.** In
+   `crates/axiam-amqp/src/authz_consumer.rs`, `process_authz_request` has
+   exactly two outcomes: `AuthzOutcome::NackDrop` (no response at all: a bad
+   payload, a failed request signature, `key_version` below 2, a stale
+   `issued_at`, a replayed nonce, a nonce-store error) and
+   `AuthzOutcome::Publish`, which every answering branch — the engine's allow,
+   deny and `denied_by_rule`, the engine error, `tenant_suspended`, the tenant
+   read error — reaches only through `publish_signed`, which calls
+   `AuthzResponse::sign` (`crates/axiam-amqp/src/messages.rs`) unconditionally.
+   `AuthzResponse` is built nowhere else in the server. `start_authz_consumer`
+   publishes only that payload. There is no configuration that disables it:
+   `AmqpConfig::signing_key` is mandatory ("there is no unsigned code path",
+   D-05c; `resolve_signing_key` fails closed), and the minimal profile
+   (`AXIAM__AMQP__ENABLED=false`) consumes no authorization request at all.
+2. **A pre-1.68 server never answers on `reply_to`.** Before SA-15
+   (`2e5b126`, 2026-11-21) the consumer published every decision to
+   `queues::AUTHZ_RESPONSE` (`git show 2e5b126^:crates/axiam-amqp/src/authz_consumer.rs`,
+   the `basic_publish` with `queues::AUTHZ_RESPONSE.into()`); `reply_to` was not
+   read. No released server version contains SA-15 (the last release, 1.3.1, is
+   of 2026-11-11), so "1.68 server" means a server built from `main` after
+   SA-15.
+3. **The SDK requester never reads the shared queue.** All seven declare an
+   exclusive, broker-named reply queue and refuse one whose name starts with
+   `axiam.` (e.g. Go `NewAuthzRequester`: `strings.HasPrefix(queue,
+   serverQueuePrefix)`; the same `SERVER_QUEUE_PREFIX` constant in the other six).
+4. **A mixed-version rollout gains nothing from it either.** A request taken by
+   an old replica is answered unsigned on the shared queue, which the requester
+   does not read, so the check times out with or without the opt-out; a request
+   taken by a new replica is answered signed.
+
+So the only unsigned message that can arrive on a requester's reply queue is
+one published by something other than the server — and RabbitMQ lets any
+principal that may publish an authorization request publish to any queue whose
+name it knows (§8 trust boundary). The opt-out would have accepted such a forged
+`allowed: true` on its `correlation_id` alone. It is not a rolling-upgrade aid;
+it is the one path that admits the forgery the signature exists to refuse.
+
+**Canonical paragraph** for the README, the changelog entry and the doc comment
+of the requester (adapt the type and method names, keep the content):
+
+> The AMQP authorization requester requires an AXIAM server of 1.68 or later
+> (contract 1.68). Such a server signs every authorization response with the
+> tenant's AMQP subkey and answers on the requester's private `reply_to` queue.
+> A server older than 1.68 ignores `reply_to` and answers, unsigned, only on the
+> shared `axiam.authz.response` queue, which this requester never reads: against
+> it every check times out. There is no option to accept unsigned responses
+> (CONTRACT 1.69 §8): no AXIAM server sends one to a reply queue, so an unsigned
+> response can only have been published by someone else, and it is discarded and
+> logged. During a rolling upgrade from a pre-1.68 server, use REST or gRPC
+> authorization until every replica runs 1.68 or later.
+
+Changelog wording (under the 1.4.0 `[Unreleased]` section, "Removed" or
+"Changed"): *"The AMQP authz requester no longer offers an opt-out for unsigned
+responses (`<option name>`, added earlier in 1.4.0 and never released): no AXIAM
+server sends one to a reply queue, so the option could admit only a forged
+response (CONTRACT 1.69 §8, server #881). The requester requires a 1.68 server."*
+
+Tests: delete the opt-out's positive tests; keep (or add) one test that a
+well-formed **unsigned** response for an outstanding `correlation_id` is
+discarded with reason `unsigned`, the check keeps waiting, and the A.2 event is
+logged.
+
+### A.2 — the discarded-response security event (#883)
+
+CONTRACT §8 protocol rule 4 was written for a consumer and reads "tenant context
+(if available from other message fields)"; for a requester, whose discarded body
+is untrusted, that is ambiguous, so contract 1.69 fixes the event in §8 consumer
+obligation 4 (and points to it from protocol rule 4). Every SDK emits it on
+**every** discard path of the requester:
+
+| Discard (consumer obligation) | `reason` |
+|---|---|
+| rule 1: not JSON; `allowed` missing or not a boolean; `tenant_id`, `nonce` or `correlation_id` missing; the body does not end in the `hmac_signature` member, or it is not 64 hex digits | `malformed` |
+| rule 1: no `hmac_signature` member at all (an unsigned response; A.1) | `unsigned` |
+| rule 2: the HMAC does not verify under the requester's own tenant subkey | `signature` |
+| rule 3: `tenant_id` is not the requester's tenant | `tenant` |
+| rule 3: no outstanding request has this `correlation_id` and `nonce` (a second answer to a retired request included) | `unknown_request` |
+
+One event per discard, at warning level, on the SDK's existing security-event
+channel (the logger the requester already uses for security warnings), carrying
+exactly:
+
+| Member | Meaning |
+|---|---|
+| `timestamp` | when the response was discarded, RFC 3339 UTC |
+| `exchange` | the exchange of the delivery as the broker reported it; `""` for the default exchange, where the server publishes every answer |
+| `routing_key` | the delivery's routing key: the requester's own reply queue name (the `amq.gen-…` queue it declared and sent as `reply_to`) |
+| `tenant_id` | the requester's **own** configured tenant, never the `tenant_id` the response claims |
+| `reason` | one of `malformed`, `unsigned`, `signature`, `tenant`, `unknown_request` |
+
+The canonical names are snake_case; an SDK MAY spell them in its language's case
+(`routingKey`, `tenantId` — TypeScript already does). Where the transport seam
+cannot report a delivery's exchange or routing key, the requester supplies the
+values it consumes from (`""` and its reply queue name), which are the same for
+every delivery it can receive.
+
+**Never in the event, the message text or any other log line of the discard
+path:** a signature value (received or computed), a `nonce`, the subkey or
+master key, the body, or any member read from the body (`correlation_id`,
+`tenant_id` as claimed, `allowed`, `reason`, `reason_code`). The body is
+unauthenticated input, and `correlation_id` with `nonce` is what a same-tenant
+forger needs.
+
+**Log tests** (extend the existing ones): for at least the `signature`,
+`tenant` and `unsigned` paths, assert that `routing_key` equals the reply
+queue's name and `tenant_id` equals the requester's tenant, that `reason` is the
+expected code, and that neither the received `hmac_signature` hex, the computed
+one, nor the request's `nonce` appears anywhere in the emitted event (search the
+serialized event, message included).

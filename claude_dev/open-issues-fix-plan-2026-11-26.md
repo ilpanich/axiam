@@ -654,6 +654,51 @@ the code (§1.2) and the `EXECUTED` block lists the symbol it was checked agains
 #890-2 changed the test), fmt for touched crates, `npm run build` in `website/`
 if `threatModel.ts` changed, and the docs link check the repository's CI runs.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `688566b`.** Documentation and
+> comments only; every item fixed, none rejected. Each statement was checked
+> against the code:
+>
+> - **#874** (README SA-06): `User::credential_superseded` /
+>   `credential_superseded_at` (`axiam-core/src/models/user.rs`) — the version
+>   decides when present, the timestamp only without one.
+> - **#879-1** (README SA-14): "must not grant SDK principals consume (read)
+>   access" — publish is authorised on the exchange, not per queue.
+>   **#879-2** (`handlers/auth.rs`): the service refuses first —
+>   `complete_authenticated_login` step 3b and `admit_tenant`; `boot.rs` wires
+>   `with_tenant_admission`, so the handler check is a backstop.
+> - **#890-1** (`mfa_methods.rs` `reset_mfa`): checked against
+>   `confirm_mfa_with_setup_token`. **#890-2** (`grpc_server_test.rs`): wording
+>   fixed; the bound-listener change was **not** made — `start_grpc_server`
+>   takes a `SocketAddr`, so it would need a production signature change, which
+>   the plan excludes. **#890-3**: the CSRF banner names `CSRF_EXEMPT_PATHS`
+>   (exact) and `CSRF_EXEMPT_PREFIXES`; four test comments say `jti`, checked
+>   against `issue_access_token` (no `sid`).
+> - **#891-1** (README SA-13, `tenant-suspension.md`, T-510 in the threat model
+>   and `ThreatDragonModels/Axiam/Axiam.json`): "once no replica of the previous
+>   release is still serving" — `SurrealTenantRepository::update`. **#891-2**:
+>   `POST`/`PUT`/`PATCH` and SCIM `POST /Users` —
+>   `refuse_password_write_under_opaque_required`. **#891-3**:
+>   `/api/v1/account/consents/oidc-scopes` among the 403 routes, `/oauth2/authorize`
+>   described separately — `minted_for_client` handling in `oauth2.rs`.
+>   **#891-4** (`internal-queue-signing.md`). **#891-5**: the executed audit
+>   plan's counts corrected to `token_exchange_test` 31,
+>   `resource_indicators_test` 20 (counted `#[actix_web::test]`). **#891-6**:
+>   SA-44's gRPC lead added to the 2.47.0 non-reproduced list. **#891-7**: mail
+>   has no `.retry` queues — `axiam-amqp/src/connection.rs`.
+> - **Threat model (orchestrator additions):** T-510 residual (3) records #877
+>   closed by OI-02 and, beyond the brief, #878 closed by OI-01; T-500 (SA-03)
+>   now says the logout token carries the JWKS `kid` since 1.69 and carries the
+>   condensed OI-05 argument (deployment-key verification; `typ`, `aud`,
+>   missing `tenant_id`/`org_id`; SDK rules 10 and 4; the three pins).
+>   `website/src/threatModel.ts` regenerated (529 threats, counts unchanged).
+>   `website/src/docs/reference.ts`: the amendment count is now computed from
+>   `CONTRACT_VERSION` (30 since 1.39) instead of the stale "twenty-three".
+> - **Verification:** fmt (`axiam-auth`, `axiam-api-rest`, `axiam-api-grpc`)
+>   clean; clippy `--all-targets --no-default-features -D warnings` clean;
+>   website `npm ci` + `npm run build` OK (no website test script exists);
+>   `check-doc-links.sh` OK (586 links). `grpc_server_test` not run (comment
+>   only).
+
 ### OI-07 — #561: runs 6, 6b and 6c in the comparison documents · Sonnet 5.5
 
 **State found on 2026-11-26.** The issue text is older than the runs. What

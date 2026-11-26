@@ -559,7 +559,6 @@ const NEXT = [
   "A like-for-like OAuth2 refresh-grant cell against Keycloak — AXIAM seeded through the authorization-code flow with PKCE (harness ready)",
   "authentik: still no valid cell at 4/4 (it roughly doubled, still above the 2 s gate) — a larger envelope, or an explanation",
   "Profile the Python SDK gap",
-  "The seventh draft of PUBLIC_BENCH_ANALYSIS.md from runs 6 and 6b",
 ];
 
 /* ---- why build AXIAM at all? ------------------------------------------- */
@@ -1779,8 +1778,8 @@ export default function Benchmarks() {
             <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>
               benchmarks/PUBLIC_BENCH_ANALYSIS.md
             </code>{" "}
-            is still the run-5 analysis until its seventh draft is written from
-            this run. Sources: benchmark run 6 of 2026-11-20/21 (median-of-3
+            is the seventh draft, written from runs 6, 6b and 6c; every figure
+            on this page is cited there. Sources: benchmark run 6 of 2026-11-20/21 (median-of-3
             capped matrix × three profiles × four targets, 66 of 84 cells
             valid, against the digest-pinned{" "}
             <code style={{ color: "#67e8f9", fontFamily: "ui-monospace,Menlo,monospace" }}>

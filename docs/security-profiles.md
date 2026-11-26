@@ -266,8 +266,8 @@ only revocations that happened out of band (on another replica, or directly in
 the datastore). Run 5 measured the event path at 262 ms.
 
 Expect the gRPC check profile to approach REST's revocation-checked one. The
-labelled bench cell for strict-mode overhead is a run-6 deliverable; until it
-exists, treat "approaches REST's profile" as a prediction rather than a
+labelled bench cell for strict-mode overhead was deferred in run 6 (benchmark
+draft §8, §13 item 6) and is still outstanding; until it exists, treat "approaches REST's profile" as a prediction rather than a
 measurement.
 
 ### Which one you want

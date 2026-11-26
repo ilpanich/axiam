@@ -189,17 +189,41 @@ not authentik's.
    several security-relevant features (mTLS, RADIUS EAP-TLS, account lockdown,
    password history, SSF) sit behind the enterprise licence [A3].
 
-No performance claim is made here, and none will be until the numbers exist.
-Authentik now has a benchmark target (`benchmarks/targets/authentik/`, G-10),
-and benchmark run 6 will measure it, alongside Keycloak 26.8.0 and Zitadel
-v4.19.4, against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps.
-Its 2026.8 move to Rust entrypoints makes older intuitions unreliable, so the
-measurement, not an expectation, will settle it. The numbers follow the run.
+**Performance: no comparison is made, and the reason is now measured, not
+awaited.** Authentik 2026.8.5 was run as a fourth benchmark target
+(`benchmarks/targets/authentik/`, G-10) in the seventh benchmark draft
+(`benchmarks/PUBLIC_BENCH_ANALYSIS.md`): run 6 (2026-11-20/21, AXIAM 1.3.0,
+SurrealDB 4.0.1, every server and database at 2 CPUs) and run 6b pass B (4
+CPUs), on one 16-vCPU AMD EPYC Genoa cloud VM. **None of its cells passed the
+validity gate** (0/3 repeats valid on every run-6 cell; at 4 CPUs two cells
+were 1/3, still invalid), with its PostgreSQL pegged at 2 CPUs and above the
+2 s p95 gate at 4 (draft §8). Its token-issuance cell, for example, is marked
+invalid at 5 req/s in run 6 (draft §1), and a row that failed the gate is
+never part of a claim, so **no throughput or latency comparison with AXIAM is
+made, or implied, in either direction**. The draft records that, with its
+worker carrying the server cap, the authentik stack had 6 CPU / 5 GiB at 2
+CPUs against Keycloak's 4 / 3, and it does not attribute the failure to
+that envelope or to the product (§8).
+
+**The one valid figure is the resting footprint** (draft §7, run 6, whole stack
+freshly started, median of 6–8 samples): **1,668 MiB** resident set (1,682 MiB
+with the fixture), made up of server 983 MiB + worker 347 MiB + PostgreSQL
+338 MiB, against **373 MiB** for AXIAM's whole stack (398 MiB with the
+fixture). By cgroup working set, fresh, authentik is 819 MiB against AXIAM's
+216 MiB. Both are resting figures, not a performance result, and they cover
+authentik's server, worker and PostgreSQL only (no Redis, per the draft's
+target definition).
+
+What the draft plans next for authentik is in its §13 item 7: **a larger
+envelope for it, or an explanation** of why it produced no valid cell. Until
+that round measures a valid cell, this document makes no performance claim
+about authentik.
 
 ## 5. Change log
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-11-26 | G-10 (benchmark currency, #561) closed for this comparison, **short of the issue's acceptance text**. The issue asked for authentik 2026.8 as a fourth target "so that the authentik comparison can make a performance statement"; the target was added and measured (authentik **2026.8.5**, not the 2026.8.3 the issue named; AXIAM **1.3.0** in run 6 and **1.3.1** in run 6b, SurrealDB **4.0.1**, one 16-vCPU AMD EPYC Genoa cloud VM, 2026-11-20 to 2026-11-22; run 6c, SurrealDB 3.3.5, did not enter this comparison), but **no authentik cell passed the validity gate**, so the comparison still cannot make a performance statement. The "run 6 will measure it" paragraph of §4 is replaced by that finding; the only figure added is the resting footprint, **1,668 MiB whole stack** (server 983, worker 347, PostgreSQL 338; seventh draft §7) against AXIAM's 373 MiB. The draft's next round plans a larger envelope or an explanation (§13 item 7). No other row changed. | [A2] |
 | 2026-10-13 | RADIUS: the FreeRADIUS-backend route ships as a recipe (1.0.1, W6.2, D3; maintainer decision D-2): the "outposts" row now reads *recipe, not native*, and gap item 6 says what the recipe does and does not do. The "no CRL is published" caveat of the 2026-10-06 entry is removed: the CRL has been published since 1.0.0. | — |
 | 2026-10-09 | Outbound SCIM limit restated (1.0.0, #550, documentation only): the per-target breaker shipped — a target with five consecutive failures is not called again until its backoff has passed — so an unresponsive downstream no longer holds a replica's other targets back for every queued reference; more than one delivery in flight per replica is deferred to 1.0.x. | — |
 | 2026-10-06 | W6 comparison refresh (G-10, G-11). **G-11 (RADIUS)** decided (D-77): the native RADIUS front end is declined for now, the FreeRADIUS-backend route applies when a named adopter asks, and a CRL is to be published regardless; the "outposts" row and gap item 6 now say that AXIAM has no RADIUS today, link the decision record and its reopen condition, and say that no CRL is published yet (T-102 reopened at threat model 2.36.0). **G-10 (benchmark currency)**: authentik now has a benchmark target (`benchmarks/targets/authentik/`) and run 6 will measure authentik 2026.8.3, Keycloak 26.8.0 and Zitadel v4.19.4 against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps; the no-performance-claim paragraph keeps its claim and gives the new reason, and no number is added before the run. **Not-do statement:** outbound SCIM delivers one attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 (P23W5-07) is decided. | [A2] |

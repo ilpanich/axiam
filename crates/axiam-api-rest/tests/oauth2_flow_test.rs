@@ -1026,7 +1026,7 @@ async fn p23w1_12_userinfo_and_introspection_answer_for_a_suspended_account() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
-    // SA-41: introspection reports a token inactive once the session its `sid`
+    // SA-41: introspection reports a token inactive once the session its `jti`
     // names is gone, so the signed-in user needs a session row, as in production.
     let (_session_id, user_jwt) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
     let app = test_app!(db, auth);
@@ -1985,7 +1985,7 @@ async fn introspect_active_access_token() {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let user_id = create_admin_user(&db, tenant_id).await;
-    // SA-41: introspection reports a token inactive once the session its `sid`
+    // SA-41: introspection reports a token inactive once the session its `jti`
     // names is gone, so the signed-in user needs a session row, as in production.
     let (_session_id, user_jwt) = signed_in_session(&db, &auth, user_id, tenant_id, org_id).await;
     let app = test_app!(db, auth);

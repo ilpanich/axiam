@@ -7,6 +7,7 @@
 //! reachable only through the settings handler, where a query error surfaces as
 //! a 500 with the reason swallowed.
 
+use axiam_core::error::AxiamError;
 use axiam_core::models::opaque::{CreateOpaqueCredential, OpaqueKsf, OpaqueKsfParams, OpaqueSuite};
 use axiam_core::models::organization::CreateOrganization;
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
@@ -206,5 +207,505 @@ async fn another_tenants_users_are_not_counted() {
             .await
             .unwrap(),
         0
+    );
+}
+
+// N7 / SA-06: `UserRepository::update` is the one writer of the Argon2id hash
+// (password reset, self-service change, SCIM). A write of the hash retires the
+// OPAQUE record that verifies the previous password, in the same transaction;
+// every other write leaves it alone.
+
+async fn has_record(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> bool {
+    SurrealOpaqueCredentialRepository::new(db.clone())
+        .get_by_user(tenant_id, user_id)
+        .await
+        .is_ok()
+}
+
+#[tokio::test]
+async fn writing_the_password_hash_retires_the_opaque_record() {
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "rotated").await;
+    enrol(&db, tenant_id, user_id).await;
+    assert!(has_record(&db, tenant_id, user_id).await);
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$not-checked-here".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !has_record(&db, tenant_id, user_id).await,
+        "a record for the previous password must not outlive the hash"
+    );
+}
+
+#[tokio::test]
+async fn writing_the_hash_and_the_email_together_retires_the_record() {
+    // Both writes share one transaction; the statement slot the row is read
+    // back from must still be the UPDATE's.
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "both").await;
+    enrol(&db, tenant_id, user_id).await;
+
+    let updated = SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                email: Some("both-new@example.com".into()),
+                password_hash: Some("$argon2id$not-checked-here".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated.email, "both-new@example.com");
+    assert!(!has_record(&db, tenant_id, user_id).await);
+}
+
+#[tokio::test]
+async fn an_update_that_leaves_the_hash_alone_keeps_the_record() {
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "untouched").await;
+    enrol(&db, tenant_id, user_id).await;
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                username: Some("untouched-renamed".into()),
+                email: Some("untouched-new@example.com".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(has_record(&db, tenant_id, user_id).await);
+}
+
+// SA-06 / SR3-1: the credential version moves in the same transaction as every
+// write that stamps the credential epoch, and only those.
+
+async fn version_of(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> i64 {
+    SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .credential_version
+}
+
+#[tokio::test]
+async fn the_credential_version_counts_every_credential_write_and_no_other() {
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "versioned").await;
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        0,
+        "a user nobody has changed reads as version 0"
+    );
+
+    // A write that is not a credential write leaves it alone.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                email: Some("versioned-new@example.com".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(version_of(&db, tenant_id, user_id).await, 0);
+
+    // Every write of the hash, every record write and every record delete moves it.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$not-checked-here".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(version_of(&db, tenant_id, user_id).await, 1, "hash write");
+
+    // An upsert stamps exactly once per row written (QR8-2): the create of a
+    // first enrolment and the update of a later one each move it by one.
+    let mut seen = version_of(&db, tenant_id, user_id).await;
+    enrol(&db, tenant_id, user_id).await;
+    let after_create = version_of(&db, tenant_id, user_id).await;
+    assert_eq!(after_create, seen + 1, "record create");
+    seen = after_create;
+    enrol(&db, tenant_id, user_id).await;
+    let after_update = version_of(&db, tenant_id, user_id).await;
+    assert_eq!(after_update, seen + 1, "record update");
+    seen = after_update;
+
+    // A delete that removes a row reports `true` and moves the version; a
+    // second one removes nothing, reports `false` and leaves the version alone.
+    let opaque = SurrealOpaqueCredentialRepository::new(db.clone());
+    assert!(
+        opaque.delete_for_user(tenant_id, user_id).await.unwrap(),
+        "delete of an existing record reports true"
+    );
+    let after_delete = version_of(&db, tenant_id, user_id).await;
+    assert!(after_delete > seen, "record delete");
+    seen = after_delete;
+    assert!(
+        !opaque.delete_for_user(tenant_id, user_id).await.unwrap(),
+        "delete with no record reports false"
+    );
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        seen,
+        "a no-op delete must not bump the version"
+    );
+
+    // The directory path stamps the epoch, so it moves the version too.
+    users
+        .mark_directory_account(tenant_id, user_id, "cn=versioned,dc=example")
+        .await
+        .unwrap();
+    assert!(
+        version_of(&db, tenant_id, user_id).await > seen,
+        "directory mark"
+    );
+}
+
+// SA-06 / N7 / SR4-2: a hash write that carries the new OPAQUE record writes
+// the hash, replaces the record, stamps the epoch and bumps the version in ONE
+// transaction. Before, the record was a separate upsert after the hash write,
+// so a writer that committed in between left its hash next to this one's record.
+
+fn record_for(tenant_id: Uuid, user_id: Uuid, marker: &str) -> CreateOpaqueCredential {
+    CreateOpaqueCredential {
+        tenant_id,
+        user_id,
+        credential_identifier: marker.repeat(32),
+        suite: OpaqueSuite::default(),
+        ksf_params: OpaqueKsfParams::defaults_for(OpaqueKsf::Argon2id),
+        record: marker.repeat(192),
+    }
+}
+
+async fn stored_identifier(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> Option<String> {
+    SurrealOpaqueCredentialRepository::new(db.clone())
+        .get_by_user(tenant_id, user_id)
+        .await
+        .ok()
+        .map(|c| c.credential_identifier)
+}
+
+async fn hash_of(db: &Surreal<TestDb>, tenant_id: Uuid, user_id: Uuid) -> String {
+    SurrealUserRepository::new(db.clone())
+        .get_by_id(tenant_id, user_id)
+        .await
+        .unwrap()
+        .password_hash
+}
+
+#[tokio::test]
+async fn a_hash_write_with_a_record_stores_both_from_the_same_write() {
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "atomic-both").await;
+    enrol(&db, tenant_id, user_id).await; // identifier "00.."
+    let before = version_of(&db, tenant_id, user_id).await;
+
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$hash-a".into()),
+                opaque_record: Some(record_for(tenant_id, user_id, "aa")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(hash_of(&db, tenant_id, user_id).await, "$argon2id$hash-a");
+    assert_eq!(
+        stored_identifier(&db, tenant_id, user_id).await.as_deref(),
+        Some("aa".repeat(32).as_str()),
+        "the record is the one that came with the hash, not the stale one"
+    );
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        before + 1,
+        "one write, one version bump"
+    );
+}
+
+#[tokio::test]
+async fn a_hash_write_with_a_record_creates_it_when_none_existed() {
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "atomic-create").await;
+    assert!(!has_record(&db, tenant_id, user_id).await);
+
+    SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$hash-a".into()),
+                opaque_record: Some(record_for(tenant_id, user_id, "aa")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stored_identifier(&db, tenant_id, user_id).await.as_deref(),
+        Some("aa".repeat(32).as_str())
+    );
+}
+
+#[tokio::test]
+async fn a_reset_without_a_record_that_lands_after_a_change_with_one_leaves_no_stale_record() {
+    // The interleaving of SR4-2: the attacker's change (hash A + record A)
+    // commits, then the victim's reset (hash V, no record). Before, the change
+    // was hash-write then upsert, so the reset could land between the two and
+    // the record written second outlived it.
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "interleaved").await;
+
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$hash-a".into()),
+                opaque_record: Some(record_for(tenant_id, user_id, "aa")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$hash-v".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(hash_of(&db, tenant_id, user_id).await, "$argon2id$hash-v");
+    assert!(
+        !has_record(&db, tenant_id, user_id).await,
+        "the record that answers to the attacker's password must not pair with the reset's hash"
+    );
+}
+
+#[tokio::test]
+async fn the_later_of_two_changes_with_records_wins_both_hash_and_record() {
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "two-changes").await;
+
+    for (hash, marker) in [("$argon2id$hash-a", "aa"), ("$argon2id$hash-b", "bb")] {
+        users
+            .update(
+                tenant_id,
+                user_id,
+                UpdateUser {
+                    password_hash: Some(hash.into()),
+                    opaque_record: Some(record_for(tenant_id, user_id, marker)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(hash_of(&db, tenant_id, user_id).await, "$argon2id$hash-b");
+    assert_eq!(
+        stored_identifier(&db, tenant_id, user_id).await.as_deref(),
+        Some("bb".repeat(32).as_str())
+    );
+}
+
+#[tokio::test]
+async fn a_record_without_a_hash_or_for_another_user_is_refused_and_writes_nothing() {
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "refused").await;
+    let other = active_user(&db, tenant_id, "refused-other").await;
+    let before = version_of(&db, tenant_id, user_id).await;
+
+    let no_hash = users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                opaque_record: Some(record_for(tenant_id, user_id, "aa")),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(no_hash.is_err(), "a record with no hash write is refused");
+
+    let wrong_user = users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$hash-a".into()),
+                opaque_record: Some(record_for(tenant_id, other, "aa")),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(wrong_user.is_err(), "a record for another user is refused");
+
+    assert_eq!(version_of(&db, tenant_id, user_id).await, before);
+    assert_ne!(hash_of(&db, tenant_id, user_id).await, "$argon2id$hash-a");
+    assert!(!has_record(&db, tenant_id, other).await);
+}
+
+// SA-06 / QR6-1 (owner decision "Enforce in the repository"): a directory
+// account's password belongs to the tenant's directory. `update` itself refuses
+// to write a local hash or an OPAQUE record for one, so no caller can give it a
+// second credential the directory never sees, whatever check it forgets.
+
+#[tokio::test]
+async fn a_directory_account_refuses_a_hash_write_with_or_without_a_record_and_nothing_changes() {
+    let (db, tenant_id) = setup().await;
+    let users = SurrealUserRepository::new(db.clone());
+    let user_id = active_user(&db, tenant_id, "directory-backed").await;
+    users
+        .mark_directory_account(tenant_id, user_id, "uid=directory-backed,ou=people")
+        .await
+        .unwrap();
+    let hash_before = hash_of(&db, tenant_id, user_id).await;
+    let version_before = version_of(&db, tenant_id, user_id).await;
+    assert!(!has_record(&db, tenant_id, user_id).await);
+
+    let hash_only = users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$local-hash".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(hash_only, Err(AxiamError::Validation { .. })),
+        "a local hash for a directory account is refused, got {hash_only:?}"
+    );
+
+    let with_record = users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                password_hash: Some("$argon2id$local-hash".into()),
+                opaque_record: Some(record_for(tenant_id, user_id, "aa")),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(with_record, Err(AxiamError::Validation { .. })),
+        "a local hash and OPAQUE record for a directory account are refused, got {with_record:?}"
+    );
+
+    assert_eq!(hash_of(&db, tenant_id, user_id).await, hash_before);
+    assert_eq!(version_of(&db, tenant_id, user_id).await, version_before);
+    assert!(
+        !has_record(&db, tenant_id, user_id).await,
+        "no OPAQUE record may be written for a directory account"
+    );
+
+    // A write that touches no credential is unaffected.
+    users
+        .update(
+            tenant_id,
+            user_id,
+            UpdateUser {
+                metadata: Some(serde_json::json!({"note": "still writable"})),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("a non-credential write to a directory account still succeeds");
+}
+
+// SA-06 / QR6-4: the record a hash write carries is written only if the user
+// UPDATE matched a row. Before, the DELETE/CREATE ran regardless and committed,
+// so a write against a missing (or purged) user left an orphan record behind
+// its `NotFound`.
+
+#[tokio::test]
+async fn a_hash_write_with_a_record_for_a_missing_user_is_not_found_and_writes_no_record() {
+    let (db, tenant_id) = setup().await;
+    let missing = Uuid::new_v4();
+
+    let outcome = SurrealUserRepository::new(db.clone())
+        .update(
+            tenant_id,
+            missing,
+            UpdateUser {
+                password_hash: Some("$argon2id$hash-a".into()),
+                opaque_record: Some(record_for(tenant_id, missing, "aa")),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(outcome, Err(AxiamError::NotFound { .. })),
+        "a missing user is NotFound, got {outcome:?}"
+    );
+    assert!(
+        !has_record(&db, tenant_id, missing).await,
+        "no opaque_credential row may outlive a write that matched no user"
+    );
+}
+
+// QR8-2: `upsert` bumps the credential version only when a row was written, and
+// a first enrolment bumps exactly once (the UPDATE attempt that matched nothing
+// used to bump too, and the CREATE then bumped again).
+#[tokio::test]
+async fn an_upsert_bumps_the_credential_version_exactly_once_per_row_written() {
+    let (db, tenant_id) = setup().await;
+    let user_id = active_user(&db, tenant_id, "upserted").await;
+    assert_eq!(version_of(&db, tenant_id, user_id).await, 0);
+
+    enrol(&db, tenant_id, user_id).await;
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        1,
+        "a first enrolment moves the version by exactly 1"
+    );
+
+    enrol(&db, tenant_id, user_id).await;
+    assert_eq!(
+        version_of(&db, tenant_id, user_id).await,
+        2,
+        "replacing the record moves the version by exactly 1 more"
     );
 }

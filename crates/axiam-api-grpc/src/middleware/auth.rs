@@ -58,6 +58,12 @@ impl Interceptor for AuthInterceptor {
         // service mesh, so machine callers are the norm, while user tokens
         // reach it through SDK callers doing the same checks. What is fixed
         // here is the *unstated* third case.
+        //
+        // SA-03 (N10): that third case is now refused by default
+        // (`allow_missing_aud_as_user` defaults to `false`), and
+        // `validate_access_token` above has already refused anything that is
+        // not typed `at+jwt` or that carries a `purpose` claim — the WebAuthn
+        // state token this branch once admitted had no `aud` at all.
         match claims.0.aud.as_deref() {
             Some(AUD_USER) | Some(AUD_M2M) => {}
             None => {

@@ -177,13 +177,9 @@ async fn an_unreachable_directory_is_a_failure_in_job_health_and_changes_nothing
 
     let status = &health.snapshot()[0];
     assert_eq!(status.consecutive_failures, 1);
-    assert!(
-        status
-            .last_error
-            .as_deref()
-            .unwrap()
-            .contains("directory_unavailable")
-    );
+    // SA-44: the unauthenticated health page carries a category, not the
+    // error text (the detail is in the log); the directory tag is kept.
+    assert_eq!(status.last_error.as_deref(), Some("directory_unavailable"));
     assert!(status.last_success_at.is_none());
 
     // Nothing changed, and the state records the failure.

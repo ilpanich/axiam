@@ -16,6 +16,9 @@ SubjectConfirmationData validation tests (R1.5 / SEC-005 residual) and integrati
 | `scd_expired_response.xml` | **R1.5 negative.** Signed `SubjectConfirmationData/@NotOnOrAfter="2020-01-01T00:00:00Z"` (long past) while `<Conditions>` is still valid until 2099, so only the SCD clock check can reject it. Assertion `ID="scd-expired-1"`. |
 | `scd_foreign_in_response_to_response.xml` | **R1.5 negative.** `Response/@InResponseTo="_axiam-req-1"` (attacker-rewritable, unsigned) but the signed `SubjectConfirmationData/@InResponseTo="_attacker-req-9"`. Assertion `ID="scd-foreign-irt-1"`. |
 | `scd_missing_confirmation_response.xml` | **R1.5 fail-closed vector.** Authentic, correctly signed assertion with **no** `<SubjectConfirmation>` at all — bearer confirmation is REQUIRED by the profile, so this must be rejected rather than silently accepted. Assertion `ID="scd-missing-confirmation-1"`. |
+| `scd_no_audience_foreign_recipient_response.xml` | **SA-11 / N21 negative (the report's fixture).** SP-initiated shape, but `<Conditions>` carries **no** `<AudienceRestriction>` and the signed `@Recipient` names another SP. Assertion `ID="scd-no-audience-foreign-recipient-1"`. |
+| `scd_no_audience_response.xml` | **SA-11 / N21 negative.** No `<AudienceRestriction>`, correct `@Recipient`: isolates the mandatory-audience rule (D-5). Assertion `ID="scd-no-audience-1"`. |
+| `scd_foreign_audience_response.xml` | **SA-11 / N21 negative.** `<AudienceRestriction>` names `https://other-sp.example.com`, correct `@Recipient`. Assertion `ID="scd-foreign-audience-1"`. |
 | `signing_cert.pem` | The PEM certificate loaded as `idp_signing_cert_pem` in the test `FederationConfig`. Read it from this file — never hard-code it; `generate.sh` rotates it on every run. |
 | `generate.sh` | Reproducibility script — regenerates all files from scratch. Run when the key needs rotation or format changes. |
 

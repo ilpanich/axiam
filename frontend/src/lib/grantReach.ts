@@ -1,4 +1,4 @@
-import { useAuthStore } from "@/stores/auth";
+import { useAuthStore, type AuthUser } from "@/stores/auth";
 
 /**
  * How far a grant reaches, in words an operator can act on.
@@ -98,6 +98,42 @@ export function useCanActOnOrganization(): boolean {
   const user = useAuthStore((s) => s.user);
   if (user?.organization_level !== true) return false;
   return !Array.isArray(user.reachable_tenant_ids);
+}
+
+/**
+ * Whether `user` may act on the organization-level record of **one named
+ * tenant** — the tenant record itself, its signing CAs, its audit export.
+ *
+ * Mirrors `handlers::org_scope::require_organization_principal_for_tenant`,
+ * the per-tenant form of the guard [`useCanActOnOrganization`] mirrors:
+ *
+ * 1. the principal's own record lives in the organization's reserved tenant
+ *    (`organization_level`), and
+ * 2. its roles reach that tenant — every tenant when `reachable_tenant_ids` is
+ *    absent, otherwise only the ones it lists.
+ *
+ * A tenant's own administrator fails the first condition, for its own tenant
+ * as much as any other: the record belongs to the organization.
+ *
+ * Like every gate here, not a security boundary — the server checks the same
+ * two conditions — only a way to stop offering what would be refused.
+ */
+export function organizationPrincipalReaches(
+  user: AuthUser | null | undefined,
+  tenantId: string,
+): boolean {
+  if (user?.organization_level !== true) return false;
+  const reach = user.reachable_tenant_ids;
+  return !Array.isArray(reach) || reach.includes(tenantId);
+}
+
+/**
+ * [`organizationPrincipalReaches`] for the signed-in user, as a predicate so a
+ * list can ask it once per row.
+ */
+export function useOrganizationPrincipalReaches(): (tenantId: string) => boolean {
+  const user = useAuthStore((s) => s.user);
+  return (tenantId) => organizationPrincipalReaches(user, tenantId);
 }
 
 /**

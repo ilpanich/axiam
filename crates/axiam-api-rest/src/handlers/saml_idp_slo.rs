@@ -216,6 +216,7 @@ async fn audit<C: Connection + Clone>(
             outcome,
             ip_address: peer_ip(req),
             metadata: Some(detail),
+            organization_id: None,
         })
         .await
     {

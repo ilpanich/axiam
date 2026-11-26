@@ -38,3 +38,5 @@ axiam-db = { workspace = true }
 surrealdb = { workspace = true, features = ["kv-mem"] }
 tokio-test = { workspace = true }
 tracing-subscriber = { workspace = true }
+# SA-14: a loopback mail provider whose received requests a test can read.
+wiremock = "0.6"

@@ -167,6 +167,13 @@ fn invalid_request(description: &str) -> HttpResponse {
     })
 }
 
+/// Whether the query carries a `tenant_id` key once its keys are
+/// percent-decoded (`tenant%5Fid=` is the same key to the handlers' query
+/// extractor, so it must be the same key here).
+fn query_names_tenant_id(query: &str) -> bool {
+    url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == "tenant_id")
+}
+
 /// `path?query` with `tenant_id` appended, as a `Uri` (T21.6).
 ///
 /// Only the query is rewritten. The path is left exactly as actix matched it,
@@ -226,11 +233,7 @@ where
 
         // 2. Two tenant selectors on one request is refused outright, agreeing
         //    or not. See the module docs.
-        if req
-            .query_string()
-            .split('&')
-            .any(|pair| pair == "tenant_id" || pair.starts_with("tenant_id="))
-        {
+        if query_names_tenant_id(req.query_string()) {
             return refuse(
                 req,
                 invalid_request(
@@ -275,7 +278,24 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::uri_with_tenant;
+    use super::{query_names_tenant_id, uri_with_tenant};
+
+    #[test]
+    fn an_encoded_tenant_id_key_is_still_a_tenant_selector() {
+        for q in [
+            "tenant_id=x",
+            "tenant_id",
+            "a=1&tenant%5Fid=x",
+            "tenant%5fid=x",
+            "%74enant_id=x",
+            "tenant%5Fid",
+        ] {
+            assert!(query_names_tenant_id(q), "{q} must be refused");
+        }
+        for q in ["", "client_id=a", "x_tenant_id=1", "a=tenant_id"] {
+            assert!(!query_names_tenant_id(q), "{q} must be allowed");
+        }
+    }
     use actix_web::http::uri::Uri;
     use uuid::Uuid;
 

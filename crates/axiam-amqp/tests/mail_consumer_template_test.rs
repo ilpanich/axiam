@@ -66,6 +66,23 @@ async fn setup_db() -> Surreal<Db> {
     db
 }
 
+/// A user the message can be addressed to (SA-14: a reset mail whose user
+/// cannot be read is not sent at all).
+async fn seed_user(db: &Surreal<Db>, tenant_id: Uuid) -> Uuid {
+    use axiam_core::repository::UserRepository;
+    SurrealUserRepository::new(db.clone())
+        .create(axiam_core::models::user::CreateUser {
+            tenant_id,
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            password: format!("fixture-{}", Uuid::new_v4()),
+            metadata: None,
+        })
+        .await
+        .expect("seed user")
+        .id
+}
+
 fn email_key() -> [u8; 32] {
     [0xBCu8; 32]
 }
@@ -246,7 +263,9 @@ async fn custom_tenant_template_is_used_when_present() {
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
+    let mut msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
+    // SA-14: the recipient is the user record's address or nobody.
+    msg.user_id = seed_user(&db, tenant_id).await;
     let outcome = send_with_retry_and_audit(
         &msg,
         &EmailEgress::default(),
@@ -306,7 +325,9 @@ async fn template_fetch_error_falls_back_to_builtin_and_still_attempts_delivery(
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
+    let mut msg = make_msg(MailType::PasswordReset, org_id, tenant_id, 0);
+    // SA-14: the recipient is the user record's address or nobody.
+    msg.user_id = seed_user(&db, tenant_id).await;
     let outcome = send_with_retry_and_audit(
         &msg,
         &EmailEgress::default(),

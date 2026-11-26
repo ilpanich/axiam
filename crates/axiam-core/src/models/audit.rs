@@ -32,6 +32,19 @@ pub struct AuditLogEntry {
     pub ip_address: Option<String>,
     pub metadata: serde_json::Value,
     pub timestamp: DateTime<Utc>,
+    /// The organization a **system-partition** row (nil `tenant_id`) concerns,
+    /// recorded only where the server resolved it with certainty (SA-02, N1):
+    /// a deleted tenant's organization, a verified SCIM token's tenant's, or an
+    /// organization or tenant the request's path names and that exists.
+    /// `GET /api/v1/audit-logs/system` returns a row only to an organization
+    /// principal of this organization, and a row without one to nobody.
+    ///
+    /// Always `None` on a tenant's own rows, whose organization is their
+    /// tenant's, and on every system row written before the field existed.
+    /// Omitted from the serialized form when `None`, so an existing row's
+    /// export line and dead-letter line are what they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +57,21 @@ pub struct CreateAuditLogEntry {
     pub outcome: AuditOutcome,
     pub ip_address: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    /// The organization a **system-partition** row (nil `tenant_id`) concerns,
+    /// recorded only where the server resolved it with certainty (SA-02, N1):
+    /// a deleted tenant's organization, a verified SCIM token's tenant's, or an
+    /// organization or tenant the request's path names and that exists.
+    /// `GET /api/v1/audit-logs/system` returns a row only to an organization
+    /// principal of this organization, and a row without one to nobody.
+    ///
+    /// Always `None` on a tenant's own rows, whose organization is their
+    /// tenant's, and on every system row written before the field existed.
+    /// Omitted from the serialized form when `None`, so an existing row's
+    /// export line and dead-letter line are what they were.
+    ///
+    /// The repository writes it only on a row whose `tenant_id` is nil.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<Uuid>,
 }
 
 /// The action namespaces the server reserves for its own **control records**

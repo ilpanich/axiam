@@ -33,7 +33,7 @@ That seeds **two** administrators, because they are two different things:
 
 | | Lives in | Signs in with | Used by |
 |---|---|---|---|
-| `admin@axiam.dev` | the organization's own reserved scope | **no tenant** — the field is left blank | `b6-organization-scope` |
+| `admin@axiam.dev` | the organization's own reserved scope | **no tenant** — the field is left blank | `b6-organization-scope`; `b7`'s organization-baseline step |
 | `tenant-admin@axiam.dev` | the `default` tenant | `default` as the tenant | `b1`, `b2`, `b3`, `b5`, `b7` |
 
 The super-admin administers the organization and every tenant in it; the

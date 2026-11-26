@@ -68,6 +68,100 @@ pub struct AuditAttribution {
     pub org_id: Uuid,
 }
 
+/// A second audit row a handler asks the middleware to record beside the
+/// request row (QR13-1, QR13-2).
+///
+/// For a response whose status says less than what happened: a password reset
+/// or change that stored the new credential and then failed to revoke the
+/// account's sessions answers 500, so the request row is a `Failure`, yet the
+/// credential change is real and a `password_changed` notification rule must
+/// see it. The row is attributed exactly as the request row is (the verified
+/// token's tenant, else the [`AuditAttribution`]) and goes through the same
+/// worker, so it is appended and offered to the notification sink the way every
+/// request row is. Ignored on a row the middleware could not place in a tenant.
+#[derive(Debug, Clone)]
+pub struct AuditSupplementalRow {
+    /// The audit action (not a request line).
+    pub action: String,
+    /// Who acted.
+    pub actor_id: Uuid,
+    /// What kind of principal acted.
+    pub actor_type: ActorType,
+    /// The outcome the row records.
+    pub outcome: AuditOutcome,
+    /// Row metadata; `http_status` and `authenticated` are added.
+    pub metadata: serde_json::Value,
+}
+
+/// The organization a request the middleware records in the **system**
+/// partition (nil tenant) concerns (SA-02, N1).
+///
+/// For a request with neither a verified token nor an [`AuditAttribution`]:
+/// the row stays in the system partition, and records this organization as
+/// its `organization_id`, which is what lets `GET /api/v1/audit-logs/system`
+/// show it to that organization and to no other. Ignored on a row attributed
+/// to a tenant.
+///
+/// An **optional, handler-side override**, and no production code inserts it
+/// today (only tests do). The organization of such a row normally arrives
+/// through a [`PendingAuditOrganization`], which
+/// `axiam_api_rest::audit_organization` inserts after the handler has run and
+/// answers from a lookup of the server's own, off the response path (SR4-3);
+/// that module says what counts as resolved. A handler that already holds the
+/// organization, proven by the server and never taken from a client-supplied
+/// value, may insert this instead: the resolver then starts no lookup, and the
+/// middleware records this organization and ignores any pending one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditOrganization {
+    /// The organization the request concerns.
+    pub org_id: Uuid,
+}
+
+/// The organization of a system-partition request row, **still being looked
+/// up** when the response leaves (SA-02 review SR4-3).
+///
+/// The lookup that decides a row's [`AuditOrganization`] may need a datastore
+/// read, and a response must not wait on one: it would hold token-less
+/// responses on the datastore and let a client time whether the organization
+/// or tenant its path names exists. So the resolver inserts this instead,
+/// starts the lookup on a task of its own, and sends the answer through it.
+/// The middleware carries it beside the row on the channel, and the audit
+/// worker waits for the answer — until [`PENDING_ORGANIZATION_WAIT`] after the
+/// row was queued — before it appends the row. No answer, or `None`, records
+/// no organization.
+///
+/// Read only where [`AuditOrganization`] is: on a row neither a verified token
+/// nor an [`AuditAttribution`] places in a tenant's log, and only when no
+/// [`AuditOrganization`] was inserted. A row the channel refuses goes to the
+/// dead-letter file at once, without waiting, and so without an organization.
+#[derive(Debug)]
+pub struct PendingAuditOrganization(oneshot::Receiver<Option<Uuid>>);
+
+impl PendingAuditOrganization {
+    /// A pending answer, and the sender the lookup answers through. Dropping
+    /// the sender unanswered counts as "no organization".
+    pub fn channel() -> (oneshot::Sender<Option<Uuid>>, Self) {
+        let (tx, rx) = oneshot::channel();
+        (tx, Self(rx))
+    }
+
+    /// The answer, waiting no later than `deadline`.
+    async fn wait_until(self, deadline: tokio::time::Instant) -> Option<Uuid> {
+        tokio::time::timeout_at(deadline, self.0).await.ok()?.ok()?
+    }
+}
+
+/// How long after a row is queued the audit worker may still wait for its
+/// [`PendingAuditOrganization`]; past that it appends the row without one. One
+/// point read; a datastore that does not answer within this would not take the
+/// append either, and the worker must not stall behind it indefinitely.
+///
+/// The bound runs from when the row was **queued**, not from when the worker
+/// reaches it (QR5-2): rows whose lookups stall together expire together, so N
+/// of them hold the worker about one wait in total, not N waits one after
+/// another while every row behind them backs up into the dead-letter file.
+pub const PENDING_ORGANIZATION_WAIT: Duration = Duration::from_secs(5);
+
 /// One audit entry plus the organization it belongs to.
 ///
 /// `CreateAuditLogEntry` carries a tenant but no organization, and the
@@ -76,7 +170,9 @@ pub struct AuditAttribution {
 /// will send with. Rather than widening the persisted audit row — the
 /// organization is derivable from the tenant and storing it would be a second
 /// copy that can disagree — it travels beside the entry on the channel and is
-/// dropped before the write.
+/// dropped before the write. (A system-partition row is the exception: its
+/// tenant is nil, so nothing derives its organization, and the entry carries
+/// it as `organization_id` — see [`AuditOrganization`].)
 #[derive(Debug, Clone)]
 pub struct AuditEvent {
     /// The entry to append.
@@ -150,6 +246,11 @@ enum Queued {
     Event {
         event: AuditEvent,
         occurred_at: DateTime<Utc>,
+        /// The organization of a system-partition row, when it was still being
+        /// looked up as the response left (SR4-3), and the deadline for its
+        /// answer: [`PENDING_ORGANIZATION_WAIT`] after the row was queued
+        /// (QR5-2).
+        pending_organization: Option<(PendingAuditOrganization, tokio::time::Instant)>,
     },
     Barrier(oneshot::Sender<()>),
 }
@@ -291,6 +392,7 @@ impl AuditMiddleware {
                     org_id: Uuid::nil(),
                 },
                 occurred_at: Utc::now(),
+                pending_organization: None,
             };
             // Another sender may have taken the last free slots since the
             // check; that refusal is shed like the others.
@@ -385,7 +487,10 @@ fn offer(tx: &mpsc::Sender<Queued>, loss: &RequestAuditLoss, queued: Queued) -> 
         TrySendError::Full(q) => (DeadLetterReason::ChannelFull, q),
         TrySendError::Closed(q) => (DeadLetterReason::ChannelClosed, q),
     };
-    if let Queued::Event { event, occurred_at } = queued {
+    if let Queued::Event {
+        event, occurred_at, ..
+    } = queued
+    {
         loss.record_dropped(event.entry, occurred_at, reason);
     }
     false
@@ -402,7 +507,24 @@ async fn audit_worker<A: AuditLogRepository>(
     let mut last_drop_report: Option<Instant> = None;
     while let Some(queued) = rx.recv().await {
         let (event, occurred_at) = match queued {
-            Queued::Event { event, occurred_at } => (event, occurred_at),
+            Queued::Event {
+                event,
+                occurred_at,
+                pending_organization,
+            } => {
+                let mut event = event;
+                // SR4-3: the organization the resolver was still looking up
+                // when the response left. Waited for here, off the response
+                // path; only a system-partition row that names none yet takes it.
+                // The deadline was fixed when the row was queued (QR5-2).
+                if let Some((pending, deadline)) = pending_organization {
+                    let organization = pending.wait_until(deadline).await;
+                    if event.entry.tenant_id.is_nil() && event.entry.organization_id.is_none() {
+                        event.entry.organization_id = organization;
+                    }
+                }
+                (event, occurred_at)
+            }
             Queued::Barrier(reached) => {
                 // Everything queued before the barrier has been appended (or
                 // failed and been logged). The caller may have given up.
@@ -541,6 +663,10 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let path = req.path().to_string();
+        // SA-44: the path recorded in the action, with any segment that a
+        // `{token}` route parameter matched replaced (the single-use account
+        // export handle must not be copied into the audit log).
+        let recorded_path = redacted_path(&path, req.match_pattern().as_deref());
 
         // Skip health/readiness endpoints.
         if SKIP_PATHS.iter().any(|p| path.starts_with(p)) {
@@ -580,22 +706,34 @@ where
         let fut = self.service.call(req);
 
         Box::pin(async move {
-            let (status, result, attribution, verdict) = match fut.await {
-                Ok(res) => {
-                    let s = res.status().as_u16();
-                    let extensions = res.request().extensions();
-                    let attribution = extensions.get::<AuditAttribution>().copied();
-                    let verdict = extensions
-                        .get::<axiam_auth::carrier::AuthVerdict>()
-                        .copied();
-                    drop(extensions);
-                    (s, Ok(res), attribution, verdict)
-                }
-                Err(err) => {
-                    let s = err.as_response_error().status_code().as_u16();
-                    (s, Err(err), None, None)
-                }
-            };
+            let (status, result, attribution, verdict, system_org, pending_org, supplement) =
+                match fut.await {
+                    Ok(res) => {
+                        let s = res.status().as_u16();
+                        let mut extensions = res.request().extensions_mut();
+                        let attribution = extensions.get::<AuditAttribution>().copied();
+                        let verdict = extensions
+                            .get::<axiam_auth::carrier::AuthVerdict>()
+                            .copied();
+                        let system_org = extensions.get::<AuditOrganization>().copied();
+                        let pending_org = extensions.remove::<PendingAuditOrganization>();
+                        let supplement = extensions.remove::<AuditSupplementalRow>();
+                        drop(extensions);
+                        (
+                            s,
+                            Ok(res),
+                            attribution,
+                            verdict,
+                            system_org,
+                            pending_org,
+                            supplement,
+                        )
+                    }
+                    Err(err) => {
+                        let s = err.as_response_error().status_code().as_u16();
+                        (s, Err(err), None, None, None, None, None)
+                    }
+                };
 
             let outcome = if status < 400 {
                 AuditOutcome::Success
@@ -618,11 +756,33 @@ where
             // expiry. The actor is still the token's subject either way.
             let authenticated =
                 user_info.is_some() && verdict != Some(axiam_auth::carrier::AuthVerdict::Refused);
-            let (actor_id, tenant_id, org_id, actor_type) = match user_info {
-                Some((uid, tid, oid, kind)) => (uid, tid, oid, kind),
+            // The organization of a system-partition row (SA-02, N1): only a
+            // row neither the token nor an attribution places in a tenant's
+            // log records one, and only as `AuditOrganization` resolved it —
+            // or, still being looked up, as the worker will receive it
+            // through the `PendingAuditOrganization` (SR4-3).
+            let system_partition = user_info.is_none() && attribution.is_none();
+            // The wait for it is bounded from now, as the row is queued, not
+            // from whenever the worker reaches it (QR5-2).
+            let pending_organization = pending_org
+                .filter(|_| system_partition && system_org.is_none())
+                .map(|pending| {
+                    (
+                        pending,
+                        tokio::time::Instant::now() + PENDING_ORGANIZATION_WAIT,
+                    )
+                });
+            let (actor_id, tenant_id, org_id, actor_type, organization_id) = match user_info {
+                Some((uid, tid, oid, kind)) => (uid, tid, oid, kind, None),
                 None => match attribution {
-                    Some(a) => (Uuid::nil(), a.tenant_id, a.org_id, ActorType::System),
-                    None => (Uuid::nil(), Uuid::nil(), Uuid::nil(), ActorType::System),
+                    Some(a) => (Uuid::nil(), a.tenant_id, a.org_id, ActorType::System, None),
+                    None => (
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        ActorType::System,
+                        system_org.map(|o| o.org_id),
+                    ),
                 },
             };
 
@@ -640,16 +800,38 @@ where
                 tenant_id,
                 actor_id,
                 actor_type,
-                action: format!("{method} {path}"),
+                action: format!("{method} {recorded_path}"),
                 resource_id: None,
                 outcome,
                 ip_address,
                 metadata: Some(metadata),
+                organization_id,
             };
             // The path and the forwarded address are the client's to size; the
             // row, its dead-letter line and the notification all see them cut
             // to a bound (R1W2-02).
             crate::dead_letter::bound_fields(&mut entry);
+
+            // The handler's second row, placed in the same tenant as the
+            // request row; none for a row that has no tenant.
+            let supplemental = supplement.filter(|_| !tenant_id.is_nil()).map(|row| {
+                let mut extra = row.metadata;
+                if let Some(map) = extra.as_object_mut() {
+                    map.insert("http_status".into(), status.into());
+                    map.insert("authenticated".into(), authenticated.into());
+                }
+                CreateAuditLogEntry {
+                    tenant_id,
+                    actor_id: row.actor_id,
+                    actor_type: row.actor_type,
+                    action: row.action,
+                    resource_id: None,
+                    outcome: row.outcome,
+                    ip_address: entry.ip_address.clone(),
+                    metadata: Some(extra),
+                    organization_id: None,
+                }
+            });
 
             // `try_send`, never `send`: a full channel must not hold the
             // response. The row it refuses is counted and offered to the
@@ -660,12 +842,95 @@ where
                 Queued::Event {
                     event: AuditEvent { entry, org_id },
                     occurred_at,
+                    pending_organization,
                 },
             );
+            if let Some(mut entry) = supplemental {
+                crate::dead_letter::bound_fields(&mut entry);
+                offer(
+                    &tx,
+                    &loss,
+                    Queued::Event {
+                        event: AuditEvent { entry, org_id },
+                        occurred_at,
+                        pending_organization: None,
+                    },
+                );
+            }
 
             result
         })
     }
+}
+
+/// What a bearer-value path segment is replaced by in anything recorded.
+pub const REDACTED_PATH_SEGMENT: &str = "[redacted]";
+
+/// Route parameters whose path segment is a bearer value
+/// (`/account/export/{token}`).
+///
+/// The single list: the audit row (`action`) and the REST tracing span both
+/// redact through [`redacted_path`], so a route added here is covered in both.
+pub const REDACTED_PATH_PARAMETERS: &[&str] = &["token"];
+
+/// Path segment pairs after which the next segment is a bearer value, for a
+/// request that matched no route pattern (see [`redacted_path`]). One entry per
+/// route in [`REDACTED_PATH_PARAMETERS`] (`/account/export/{token}`).
+const BEARER_PATH_PREFIXES: &[(&str, &str)] = &[("account", "export")];
+
+/// `path` with every segment that `pattern` (the matched route) marks with a
+/// [`REDACTED_PATH_PARAMETERS`] placeholder replaced by [`REDACTED_PATH_SEGMENT`].
+///
+/// Fails **closed**. A request shaped wrongly for its route (a trailing `/`, a
+/// doubled `//`) matches no pattern, so the router answers 404 without ever
+/// consuming the single-use handle in it; the handle is still valid, and
+/// copying it verbatim into an append-only audit row would hand it to every
+/// reader of the log. With no usable pattern, any segment that follows a
+/// [`BEARER_PATH_PREFIXES`] pair is redacted instead.
+pub fn redacted_path(path: &str, pattern: Option<&str>) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    let Some(placeholders) = pattern
+        .map(|pattern| pattern.split('/').collect::<Vec<_>>())
+        .filter(|placeholders| placeholders.len() == segments.len())
+    else {
+        return redacted_unmatched_path(&segments);
+    };
+    segments
+        .iter()
+        .zip(placeholders)
+        .map(|(segment, placeholder)| {
+            let name = placeholder
+                .strip_prefix('{')
+                .and_then(|p| p.strip_suffix('}'))
+                .map(|p| p.split(':').next().unwrap_or_default());
+            match name {
+                Some(name) if REDACTED_PATH_PARAMETERS.contains(&name) => REDACTED_PATH_SEGMENT,
+                _ => segment,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// [`redacted_path`] for a request with no usable route pattern.
+fn redacted_unmatched_path(segments: &[&str]) -> String {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let follows_prefix = index >= 2
+                && !segment.is_empty()
+                && BEARER_PATH_PREFIXES.iter().any(|(first, second)| {
+                    segments[index - 2] == *first && segments[index - 1] == *second
+                });
+            if follows_prefix {
+                REDACTED_PATH_SEGMENT
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Extract `(subject_id, tenant_id, org_id, actor_type)` from cached

@@ -29,9 +29,14 @@ services:
     depends_on:
       surrealdb-init:
         condition: service_completed_successfully
-    command: start --user root --pass root --log info surrealkv:/data/axiam.db
+    # Credentials travel as environment variables, not `--user`/`--pass`: a flag
+    # lands in argv, readable via /proc/<pid>/cmdline; `surreal start` reads these.
+    command: start --log info surrealkv:/data/axiam.db
+    environment:
+      SURREAL_USER: root
+      SURREAL_PASS: root
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - e2e-surrealdb-data:/data
     healthcheck:
@@ -102,8 +107,8 @@ services:
     container_name: axiam-e2e-rabbitmq
     ports:
       # A6: 5671 (AMQPS) only — there is no plaintext listener to publish.
-      - "5671:5671"
-      - "15672:15672"
+      - "127.0.0.1:5671:5671"
+      - "127.0.0.1:15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: axiam
       RABBITMQ_DEFAULT_PASS: axiam
@@ -119,7 +124,7 @@ services:
       retries: 5
 
   # axiam-server — BUILT FROM PR SOURCE (build: key instead of stale registry image).
-  # Using image: ghcr.io/axiamhq/axiam/server:latest is deliberately absent here:
+  # Using image: ghcr.io/ilpanich/axiam/server:latest is deliberately absent here:
   # that tag is stale/absent for PR branches and would produce false-green E2E (W8).
   # COOKIE_SECURE=false so auth cookies work over plain http:// in CI (D-18).
   # NEVER set AXIAM__AUTH__COOKIE_SECURE=false in staging or production.
@@ -166,7 +171,10 @@ services:
       # scripts/e2e-mtls-native-check.sh — which sends no header at all and is
       # unaffected by this setting.
       AXIAM__AUTH__TRUST_FORWARDED_CLIENT_CERT: "true"
-      # Bootstrap guard: only requests with this email are accepted by /admin/bootstrap.
+      # Bootstrap restriction: only requests with this email are accepted by
+      # /admin/bootstrap, and they must ALSO carry the one-time setup token from
+      # this container's first-boot log (scripts/e2e-bootstrap.sh reads it via
+      # scripts/first-boot-token.sh). The email alone is not a credential.
       # NOTE: the bootstrap handler reads this via `std::env::var` directly (NOT
       # through the `AXIAM__`-prefixed config layer), so the OS env var name must
       # be exactly AXIAM_BOOTSTRAP_ADMIN_EMAIL (single underscore). A double

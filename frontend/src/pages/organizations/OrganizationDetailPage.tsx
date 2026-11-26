@@ -38,6 +38,7 @@ import { FormDialog } from "@/components/FormDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { OrgEmailConfigPanel } from "./EmailConfigPanel";
 import { usePermissions } from "@/hooks/usePermissions";
+import { useCanActOnOrganization } from "@/lib/grantReach";
 import { StatusBadge } from "@/components/StatusBadge";
 import { SecretRevealModal } from "@/components/SecretRevealModal";
 import { CertificateViewDialog } from "@/components/CertificateViewDialog";
@@ -1749,7 +1750,19 @@ function SettingsTab({
 export function OrganizationDetailPage() {
   const { orgId } = useParams<{ orgId: string }>();
   const { can } = usePermissions();
-  const canReadEmail = can("email_config:read");
+  // The organization's security settings and email configuration are acts on
+  // the organization as a whole: the server's handlers call
+  // `require_organization_principal`, which refuses a principal outside the
+  // organization scope and one whose roles are restricted to particular
+  // tenants, whatever it holds (SA-02, review QR9-1). Neither tab is drawn for
+  // such a caller.
+  const canActOnOrganization = useCanActOnOrganization();
+  const canReadSettings = canActOnOrganization;
+  const canReadEmail = can("email_config:read") && canActOnOrganization;
+  const hiddenTabs: Tab[] = [
+    ...(canReadSettings ? [] : (["settings"] as Tab[])),
+    ...(canReadEmail ? [] : (["email"] as Tab[])),
+  ];
   const [activeTab, setActiveTab] = useState<Tab>("tenants");
   // D-19: SettingsTab's dirty state, lifted up so switching AWAY from the
   // Settings tab (a local component-state change, not a router navigation)
@@ -1824,12 +1837,12 @@ export function OrganizationDetailPage() {
       <TabBar
         active={activeTab}
         onChange={handleTabChange}
-        hidden={canReadEmail ? [] : ["email"]}
+        hidden={hiddenTabs}
       />
 
       {activeTab === "tenants" && <TenantsTab orgId={orgId} />}
       {activeTab === "certificates" && <CaCertificatesTab orgId={orgId} />}
-      {activeTab === "settings" && (
+      {activeTab === "settings" && canReadSettings && (
         <SettingsTab
           key={settingsResetKey}
           orgId={orgId}

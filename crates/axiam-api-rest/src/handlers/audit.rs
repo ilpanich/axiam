@@ -48,15 +48,33 @@ pub async fn list<C: Connection + Clone>(
 /// `GET /api/v1/audit-logs/system`
 ///
 /// Returns audit entries for unauthenticated/system requests (nil tenant_id).
-/// Requires authentication — only logged-in users can query system audit logs.
+///
+/// Of the caller's organization only (SA-02, N1): the partition is
+/// deployment-wide, and this returns the entries whose recorded
+/// `organization_id` is the caller's own. The server records one on a new
+/// entry only where it resolved it with certainty — a deleted tenant's
+/// organization, a verified SCIM token's tenant's, an organization or tenant
+/// the request's path names and that exists. An entry with none, every entry
+/// written before the field existed among them, is returned to nobody.
+///
+/// Organization-level: requires `audit_logs:list_system` and a caller whose
+/// own record lives in the organization's scope tenant and whose role
+/// assignments are not restricted to particular tenants. A tenant
+/// administrator is refused `403` whatever its role holds, and so is an
+/// organization-level principal whose roles name particular tenants: the
+/// partition belongs to the organization as a whole.
 #[utoipa::path(
     get,
     path = "/api/v1/audit-logs/system",
     tag = "audit",
     params(Pagination, AuditLogFilter),
     responses(
-        (status = 200, description = "Paginated system audit log entries",
+        (status = 200, description = "Paginated system audit log entries of the caller's \
+                                      organization",
          body = inline(PaginatedResult<AuditLogEntry>)),
+        (status = 403, description = "The caller is not an organization-level principal, is \
+                                      one whose role assignments are restricted to particular \
+                                      tenants, or lacks `audit_logs:list_system`"),
     ),
     security(("bearer" = []))
 )]
@@ -70,9 +88,26 @@ pub async fn list_system<C: Connection + Clone>(
     RequirePermission::new("audit_logs:list_system", Uuid::nil())
         .check(&user, authz.get_ref().as_ref())
         .await?;
+    // SA-02 (N1): the nil-tenant partition is deployment-wide — it holds the
+    // unattributed request rows (client IP, method and path) of every tenant,
+    // other organizations' included. Reading it is an organization-level act,
+    // never a tenant administrator's, whatever its role carries. See
+    // `handlers::org_scope`.
+    //
+    // And only the rows of the caller's own organization (review Q-3/S-2):
+    // the organization of the caller's own record, as the datastore has it —
+    // read from the scope tenant the guard has just loaded (QR2-10).
+    let organization_id =
+        crate::handlers::org_scope::require_organization_principal(&user, state.get_ref())
+            .await?
+            .organization_id;
     let result = state
         .audit_repo
-        .list_system(filter.into_inner(), pagination.into_inner())
+        .list_system(
+            organization_id,
+            filter.into_inner(),
+            pagination.into_inner(),
+        )
         .await?;
     Ok(HttpResponse::Ok().json(result))
 }

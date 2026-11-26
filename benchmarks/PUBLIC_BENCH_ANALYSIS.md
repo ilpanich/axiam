@@ -706,7 +706,8 @@ current numbers.
 | `POST /api/v1/authz/check` | 1 800/min | ~1 032/s | ❌ FAIL — 2 699/min (+50%) |
 | gRPC authz | 100/s | ~1 268/s | ❌ FAIL — 181/min (~1/33) |
 | gRPC identity | 500/s | ~12 307/s | ❌ FAIL — 1 504/min (~1/20) |
-| `POST /oauth2/revoke`, gRPC admin / infra | 60/min, 10/s / 100/s | — | not covered by a scenario |
+| `POST /oauth2/revoke` | 60/min | — | not covered by a scenario |
+| gRPC admin / infra | 10/s / 100/s | — | not covered by a scenario |
 
 Posture guidance is unchanged: `internet` (default), `gateway` or `mesh`;
 human endpoints keep strict per-IP limits in every profile. The standing

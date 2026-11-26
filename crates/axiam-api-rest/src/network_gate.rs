@@ -302,6 +302,7 @@ impl StaleRefusal {
                 "before": self.before,
                 "after": self.after,
             })),
+            organization_id: None,
         };
         if let Err(audit_error) = audit.append(entry).await {
             tracing::error!(
@@ -676,6 +677,7 @@ fn cleared_row(
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: Some(metadata),
+        organization_id: None,
     }))
 }
 
@@ -752,6 +754,7 @@ async fn audit_refusal<C: Connection + Clone>(
         outcome: AuditOutcome::Denied,
         ip_address: None,
         metadata: Some(metadata),
+        organization_id: None,
     };
     if let Err(error) = state.audit_repo.append(entry).await {
         tracing::error!(

@@ -1655,6 +1655,7 @@ async fn audit_conversion_to_public<C: Connection + Clone>(
             "device_grants_deleted": revoked.device_grants,
             "revocation_complete": revocation_complete,
         })),
+        organization_id: None,
     };
     if let Err(e) = state.audit_repo.append(entry).await {
         tracing::error!(
@@ -1699,6 +1700,7 @@ async fn audit_client_write<C: Connection + Clone>(
         outcome: AuditOutcome::Success,
         ip_address: client_ip(http),
         metadata: Some(metadata),
+        organization_id: None,
     };
     if let Err(e) = state.audit_repo.append(entry).await {
         tracing::error!(

@@ -14,23 +14,28 @@ use tracing::error;
 
 use crate::connection::queues;
 use crate::error::AmqpError;
+use crate::internal_envelope::{InternalSigner, MAIL_PURPOSE};
 
 /// Publishes outbound mail messages to the `axiam.mail.outbound` queue (D-14).
 ///
 /// Use `create_publisher_channel` on the `AmqpManager` to obtain a channel
 /// with publisher confirms enabled before wrapping it here.
+///
+/// SA-14 (N3): every message is sealed in the server-only signed envelope
+/// ([`crate::internal_envelope`]); the mail consumer refuses anything else.
 #[derive(Clone)]
 pub struct MailOutboundPublisher {
     channel: Channel,
+    signer: InternalSigner,
 }
 
 impl MailOutboundPublisher {
-    pub fn new(channel: Channel) -> Self {
-        Self { channel }
+    pub fn new(channel: Channel, signer: InternalSigner) -> Self {
+        Self { channel, signer }
     }
 
     async fn publish_inner(&self, msg: OutboundMailMessage) -> Result<(), AmqpError> {
-        let payload = serde_json::to_vec(&msg).map_err(|e| {
+        let payload = seal_mail(&self.signer, &msg).map_err(|e| {
             error!(error = %e, "Failed to serialize OutboundMailMessage");
             AmqpError::Publish(e.to_string())
         })?;
@@ -60,6 +65,14 @@ impl MailOutboundPublisher {
             Ok(_) => Ok(()),
         }
     }
+}
+
+/// Seal `msg` for `axiam.mail.outbound`, current from now.
+pub fn seal_mail(
+    signer: &InternalSigner,
+    msg: &OutboundMailMessage,
+) -> Result<Vec<u8>, serde_json::Error> {
+    signer.seal(MAIL_PURPOSE, msg, chrono::Utc::now())
 }
 
 impl MailPublisher for MailOutboundPublisher {

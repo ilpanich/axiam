@@ -546,7 +546,14 @@ pub fn build_discovery_document_for(
         subject_types_supported: vec!["public".into()],
         id_token_signing_alg_values_supported: vec!["EdDSA".into()],
         scopes_supported: {
-            let mut scopes = vec!["openid".into(), "profile".into(), "email".into()];
+            // SA-18 (N15) — `roles` adds the access token's `roles` claim; a
+            // client still obtains it only when registered for it.
+            let mut scopes = vec![
+                "openid".into(),
+                "profile".into(),
+                "email".into(),
+                crate::roles_claim::ROLES_SCOPE.into(),
+            ];
             if sensitive_scopes_enabled {
                 scopes.extend(crate::sensitive::SENSITIVE_SCOPES.map(String::from));
             }
@@ -612,6 +619,9 @@ pub fn build_discovery_document_for(
             "auth_time".into(),
             "acr".into(),
             "amr".into(),
+            // SA-18 (N15) — an access-token claim, emitted only for the
+            // `roles` scope; never in an ID token or UserInfo.
+            crate::roles_claim::ROLES_CLAIM.into(),
         ],
         // X7 G8 (W7). Appended after the closing bracket above rather than
         // inside it because these three are conditional and the ten are not —

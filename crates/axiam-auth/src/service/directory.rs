@@ -157,6 +157,12 @@ impl<
         identity: DirectoryIdentity,
     ) -> AxiamResult<LoginResult> {
         let tenant_id = input.tenant_id;
+        // QR3-1 (SA-13, N16): a suspended tenant admits no writes from its
+        // principals. The directory has just vouched for the password, so the
+        // refusal reveals nothing a wrong password would not; made here, it
+        // comes before the account is created, its groups mapped, the
+        // `login.post_auth` reactor called or any audit row written.
+        self.admit_tenant(tenant_id).await?;
         let Some(profile) = JitProfile::from_identity(&identity, &input.username_or_email) else {
             tracing::warn!(
                 target: "axiam::directory",
@@ -712,6 +718,7 @@ impl<
             outcome,
             ip_address,
             metadata: Some(metadata),
+            organization_id: None,
         })
         .await;
     }

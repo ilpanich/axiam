@@ -306,11 +306,10 @@ export async function ensureOnApp(page: Page): Promise<void> {
 }
 
 /**
- * The signed-in principal's effective permissions, read from the server.
- *
- * Taken from `GET /api/v1/auth/me` inside the page's own origin so the session
- * cookie and any acting-tenant state the app has set both apply — the same
- * answer the UI gates on, rather than a second opinion computed differently.
+ * Whether the signed-in principal may perform organization-level actions:
+ * organization-level AND not confined to particular tenants — what
+ * `require_organization_principal` checks on the server and
+ * `useCanActOnOrganization` mirrors in the UI.
  */
 export async function canActOnOrganization(page: Page): Promise<boolean> {
   await page.goto("/dashboard", { waitUntil: "networkidle" });
@@ -329,6 +328,13 @@ export async function canActOnOrganization(page: Page): Promise<boolean> {
   });
 }
 
+/**
+ * The signed-in principal's effective permissions, read from the server.
+ *
+ * Taken from `GET /api/v1/auth/me` inside the page's own origin so the session
+ * cookie and any acting-tenant state the app has set both apply — the same
+ * answer the UI gates on, rather than a second opinion computed differently.
+ */
 export async function effectivePermissions(page: Page): Promise<string[] | null> {
   await page.goto("/dashboard", { waitUntil: "networkidle" });
   return page.evaluate(async () => {

@@ -17,6 +17,7 @@ use lapin::Channel;
 use axiam_core::outbound::{OutboundError, OutboundFuture, OutboundMessage, OutboundPublisher};
 
 use crate::error::AmqpError;
+use crate::internal_envelope::InternalSigner;
 use crate::messages::WebhookMessage;
 use crate::outbound::AmqpOutboundPublisher;
 
@@ -31,10 +32,11 @@ pub struct WebhookPublisher {
 }
 
 impl WebhookPublisher {
-    /// Wrap a confirm-enabled publisher channel.
-    pub fn new(channel: Channel) -> Self {
+    /// Wrap a confirm-enabled publisher channel; `signer` seals every
+    /// message (SA-14).
+    pub fn new(channel: Channel, signer: InternalSigner) -> Self {
         Self {
-            inner: AmqpOutboundPublisher::new(channel),
+            inner: AmqpOutboundPublisher::new(channel, signer),
         }
     }
 

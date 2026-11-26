@@ -149,6 +149,12 @@ pub(crate) fn validate_enrollment<C: Connection + Clone>(
 
 /// Persist a validated record against `user_id`.
 ///
+/// Only for a user that has just been created, whose hash is not being
+/// rewritten (admin user creation). A password change or reset must not use it:
+/// those pass the record to the repository's `update` (`UpdateUser::opaque_record`)
+/// so the hash, the record, the epoch and the version are one transaction
+/// (SA-06 / N7, SR4-2).
+///
 /// `None` is a no-op, which is what the `disabled` and `optional`-without-a-
 /// record cases resolve to.
 pub(crate) async fn store_credential<C: Connection + Clone>(
@@ -160,10 +166,12 @@ pub(crate) async fn store_credential<C: Connection + Clone>(
     let Some(enrolled) = enrolled else {
         return Ok(());
     };
-    // G-3 (T23.3.2): never for a directory account. Every caller that can
-    // reach a directory account (change, reset) refuses it first; this is the
-    // one write of a record, so it holds the rule too, whatever a future
-    // caller forgets.
+    // G-3 (T23.3.2): never for a directory account. This function's only
+    // caller is admin user creation, which never meets one; the check stays so
+    // a future caller cannot use it to give a directory account a record. The
+    // password change and reset do not come here: they pass their record to
+    // `UserRepository::update`, which refuses a hash or record write for a
+    // directory account inside its own transaction (SA-06, QR6-1).
     let user = state.user_repo.get_by_id(tenant_id, user_id).await?;
     if user.is_directory_account() {
         return Err(axiam_auth::error::AuthError::DirectoryAccountPassword.into());

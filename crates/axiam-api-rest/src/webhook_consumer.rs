@@ -24,8 +24,8 @@
 
 use std::sync::Arc;
 
-use axiam_amqp::WebhookPublisher;
 use axiam_amqp::outbound::{OutboundDeliverers, run_outbound_consumer};
+use axiam_amqp::{InternalQueueGate, WebhookPublisher};
 use axiam_core::outbound::OutboundKind;
 use axiam_core::repository::{AuditLogRepository, WebhookRepository};
 use lapin::Channel;
@@ -47,7 +47,8 @@ pub use axiam_amqp::outbound::{OutboundRetryConfig as WebhookRetryConfig, backof
 /// `webhook.delivery_failed`; a malformed payload is nacked `requeue:false`.
 ///
 /// Returns when the delivery stream ends or the consume fails (logged); the
-/// caller supervises and reconnects.
+/// caller supervises and reconnects. `gate` verifies each delivery's signed
+/// envelope (SA-14).
 ///
 /// [`OutboundDeliverer`]: axiam_core::outbound::OutboundDeliverer
 pub async fn start_webhook_consumer<W, A>(
@@ -56,6 +57,7 @@ pub async fn start_webhook_consumer<W, A>(
     publisher: WebhookPublisher,
     audit_repo: A,
     cfg: WebhookRetryConfig,
+    gate: InternalQueueGate,
 ) where
     W: WebhookRepository + Clone + 'static,
     A: AuditLogRepository + 'static,
@@ -72,6 +74,7 @@ pub async fn start_webhook_consumer<W, A>(
         publisher.as_outbound(),
         &audit_repo,
         cfg,
+        &gate,
     )
     .await
     {

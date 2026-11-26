@@ -297,6 +297,27 @@ pub struct Session {
     /// predates the field; no repository produces one.
     #[serde(default)]
     pub lineage_id: Uuid,
+    /// SA-06 (N7, SR16-1) — the user's [`User::credential_version`] this
+    /// session was written under; the version-checked sign-in path stores it.
+    ///
+    /// Refresh rotation carries it to the successor through
+    /// `SessionRepository::create_if_credential_version`, which refuses when
+    /// the user's version has moved, so a reset that revokes sessions between
+    /// the rotation's consume and its create cannot be survived by the new
+    /// row. `SessionRepository::invalidate_user_sessions_except` re-stamps the
+    /// one session a password change deliberately keeps (`change_password`
+    /// reaches it through `revoke_all_sessions_except`).
+    ///
+    /// `None` for a row written before schema v119 (or by a path that checked
+    /// no credential, such as a federated sign-in): rotation then accepts it
+    /// only if the user's credential change is strictly earlier than
+    /// [`Self::created_at`] (a change at or after it is refused, as
+    /// `User::credential_changed_since` decides), and carries the user's
+    /// current version forward.
+    ///
+    /// [`User::credential_version`]: crate::models::user::User::credential_version
+    #[serde(default)]
+    pub credential_version: Option<i64>,
 }
 
 /// What an operator should read into a session's refresh-replay counters

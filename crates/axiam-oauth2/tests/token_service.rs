@@ -528,6 +528,9 @@ struct MockRefreshRepo {
     /// G-C — make `revoke_all_for_session` fail, to pin that a failed
     /// revocation does not change the client's answer.
     session_revocation_fails: bool,
+    /// SR16-1 — the hash every `revoke` call was made with, when a test asks
+    /// for the log (`with_revocation_log`).
+    revoked_hashes: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl MockRefreshRepo {
@@ -541,7 +544,13 @@ impl MockRefreshRepo {
             created: Arc::new(Mutex::new(Vec::new())),
             session_revocations: Arc::new(Mutex::new(Vec::new())),
             session_revocation_fails: false,
+            revoked_hashes: None,
         }
+    }
+    /// SR16-1 — record the hash of every `revoke` call into `log`.
+    fn with_revocation_log(mut self, log: Arc<Mutex<Vec<String>>>) -> Self {
+        self.revoked_hashes = Some(log);
+        self
     }
     /// G-C — a handle on [`Self::session_revocations`], taken before the repo
     /// is moved into the service.
@@ -599,7 +608,10 @@ impl RefreshTokenRepository for MockRefreshRepo {
             Get::NotFound => Err(not_found()),
         }
     }
-    async fn revoke(&self, _t: Uuid, _h: &str) -> AxiamResult<()> {
+    async fn revoke(&self, _t: Uuid, h: &str) -> AxiamResult<()> {
+        if let Some(log) = &self.revoked_hashes {
+            log.lock().unwrap().push(h.to_string());
+        }
         match self.revoke {
             RevokeMode::Ok => Ok(()),
             RevokeMode::NotFound => Err(not_found()),
@@ -671,8 +683,12 @@ impl RefreshTokenRepository for MockRefreshRepo {
 // Mock: UserRepository (only get_by_id is exercised)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct MockUserRepo;
+/// Counts reads per user id, so the ids below can answer differently the
+/// second time: the re-read that follows a mint is the read under test.
+#[derive(Clone, Default)]
+struct MockUserRepo {
+    reads: Arc<Mutex<std::collections::HashMap<Uuid, u32>>>,
+}
 
 /// F4 P23W1-01 — user ids for which [`MockUserRepo`] answers an account that
 /// may no longer sign in, or no account at all. Every other id is an `Active`
@@ -682,12 +698,37 @@ const INACTIVE_USER: Uuid = Uuid::from_u128(0x0f4_0002);
 const DELETED_USER: Uuid = Uuid::from_u128(0x0f4_0003);
 const LAPSED_PENDING_USER: Uuid = Uuid::from_u128(0x0f4_0004);
 const REMOVED_USER: Uuid = Uuid::from_u128(0x0f4_0005);
+/// SA-06 (SR16-1) — users whose credential changed an hour AFTER (so after any
+/// refresh token a test stages) and an hour BEFORE it.
+const CREDENTIAL_MOVED_USER: Uuid = Uuid::from_u128(0x5a06_0001);
+const CREDENTIAL_OLD_USER: Uuid = Uuid::from_u128(0x5a06_0002);
+/// SR17-1 / QR17-3 — a user whose FIRST read shows no credential change and
+/// whose later reads show one an hour in the future: a reset that lands after
+/// the pre-check and before the post-mint re-read.
+const CREDENTIAL_RACES_USER: Uuid = Uuid::from_u128(0x5a06_0003);
+/// QR17-3 — a user whose first read succeeds and whose later reads fail with a
+/// datastore error.
+const READ_FAILS_AFTER_FIRST_USER: Uuid = Uuid::from_u128(0x5a06_0004);
+/// QR17-3 — a user that exists for the first read and is gone for later ones.
+const REMOVED_AFTER_FIRST_USER: Uuid = Uuid::from_u128(0x5a06_0005);
 
 impl UserRepository for MockUserRepo {
     async fn create(&self, _i: CreateUser) -> AxiamResult<User> {
         unimplemented!()
     }
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
+        let nth_read = {
+            let mut reads = self.reads.lock().unwrap();
+            let n = reads.entry(id).or_insert(0);
+            *n += 1;
+            *n
+        };
+        if id == READ_FAILS_AFTER_FIRST_USER && nth_read > 1 {
+            return Err(AxiamError::Database("user read failed".into()));
+        }
+        if id == REMOVED_AFTER_FIRST_USER && nth_read > 1 {
+            return Err(not_found());
+        }
         let status = match id {
             LOCKED_USER => UserStatus::Locked,
             INACTIVE_USER => UserStatus::Inactive,
@@ -722,6 +763,15 @@ impl UserRepository for MockUserRepo {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: match id {
+                CREDENTIAL_MOVED_USER => Some(Utc::now() + chrono::Duration::hours(1)),
+                CREDENTIAL_OLD_USER => Some(Utc::now() - chrono::Duration::hours(1)),
+                CREDENTIAL_RACES_USER if nth_read > 1 => {
+                    Some(Utc::now() + chrono::Duration::hours(1))
+                }
+                _ => None,
+            },
+            credential_version: 0,
             metadata: serde_json::Value::Null,
             created_at,
             updated_at: Utc::now(),
@@ -913,6 +963,13 @@ impl axiam_core::repository::SessionRepository for MockSessionRepo {
     ) -> AxiamResult<axiam_core::models::session::Session> {
         unimplemented!()
     }
+    async fn create_if_credential_version(
+        &self,
+        _input: axiam_core::models::session::CreateSession,
+        _expected_credential_version: i64,
+    ) -> AxiamResult<axiam_core::models::session::Session> {
+        unimplemented!()
+    }
     async fn get_by_id(
         &self,
         _tenant_id: Uuid,
@@ -1027,6 +1084,7 @@ impl axiam_core::repository::AuditLogRepository for MockAuditRepo {
             ip_address: input.ip_address.clone(),
             metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         };
         self.0.lock().unwrap().push(input);
         Ok(entry)
@@ -1043,6 +1101,7 @@ impl axiam_core::repository::AuditLogRepository for MockAuditRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _filter: axiam_core::repository::AuditLogFilter,
         _pagination: axiam_core::repository::Pagination,
     ) -> AxiamResult<
@@ -1128,6 +1187,37 @@ fn build(
     build_with_upgrade_log(client, code, tenant, refresh).0
 }
 
+/// Same as [`build`], but the session store holds one live session, `session_id`
+/// (SA-41: introspection reads the session a sign-in token names, so a fixture
+/// token that is meant to be active needs a real session row behind it).
+fn build_with_live_session(
+    session_id: Uuid,
+    client: ClientOutcome,
+    code: MockCodeRepo,
+    tenant: TenantOutcome,
+    refresh: MockRefreshRepo,
+) -> Svc {
+    let log: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    TokenService::new(
+        MockClientRepo(client, log.clone()),
+        MockSaRepo(SaOutcome::NotFound, log.clone()),
+        code,
+        MockTenantRepo::new(tenant),
+        refresh,
+        MockUserRepo::default(),
+        MockSessionRepo(
+            Some(sa41_session(session_id, chrono::Duration::hours(1))),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            false,
+        ),
+        MockAuditRepo::default(),
+        test_config(),
+        2_592_000,
+        not_issued_here(),
+    )
+}
+
 /// Same as [`build`], but also hands back the log of
 /// `upgrade_client_secret_hash` calls so a test can assert that a legacy row
 /// was (or was not) migrated.
@@ -1144,7 +1234,7 @@ fn build_with_upgrade_log(
         code,
         MockTenantRepo::new(tenant),
         refresh,
-        MockUserRepo,
+        MockUserRepo::default(),
         MockSessionRepo::default(),
         MockAuditRepo::default(),
         test_config(),
@@ -1170,7 +1260,7 @@ fn build_with_session_log(
         code,
         MockTenantRepo::new(tenant),
         refresh,
-        MockUserRepo,
+        MockUserRepo::default(),
         MockSessionRepo(
             None,
             sessions.clone(),
@@ -2620,7 +2710,7 @@ fn build_counting_tenant_reads(
         dummy_code_repo(),
         tenants,
         MockRefreshRepo::new(),
-        MockUserRepo,
+        MockUserRepo::default(),
         MockSessionRepo::default(),
         MockAuditRepo::default(),
         test_config(),
@@ -2724,18 +2814,21 @@ async fn introspect_valid_access_token_same_tenant_active() {
     // real deployment can produce.
     let tenant_id = client_tenant();
     let cfg = test_config();
+    // A sign-in token's `jti` is its session's id; the session is live.
+    let session_id = Uuid::new_v4();
     let token = issue_access_token(
         Uuid::new_v4(),
         tenant_id,
         Uuid::new_v4(),
         &["profile".to_string()],
         &cfg,
-        Uuid::new_v4().to_string(),
+        session_id.to_string(),
         AUD_USER,
     )
     .unwrap();
 
-    let svc = build(
+    let svc = build_with_live_session(
+        session_id,
         ClientOutcome::Found(make_client(&["refresh_token"], &[])),
         dummy_code_repo(),
         TenantOutcome::Found,
@@ -2840,17 +2933,19 @@ async fn p23w1_12_introspection_reports_a_suspended_accounts_tokens_inactive() {
         (LAPSED_PENDING_USER, true),
         (Uuid::new_v4(), true),
     ] {
+        let session_id = Uuid::new_v4();
         let access = issue_access_token(
             user,
             tenant_id,
             Uuid::new_v4(),
             &["openid".to_string()],
             &cfg,
-            Uuid::new_v4().to_string(),
+            session_id.to_string(),
             AUD_USER,
         )
         .unwrap();
-        let svc = build(
+        let svc = build_with_live_session(
+            session_id,
             ClientOutcome::Found(make_client(&["refresh_token"], &[])),
             dummy_code_repo(),
             TenantOutcome::Found,
@@ -3346,7 +3441,7 @@ fn build_t254(client: ClientOutcome, refresh: MockRefreshRepo) -> (Svc, ReplayLo
         dummy_code_repo(),
         MockTenantRepo::new(TenantOutcome::Found),
         refresh,
-        MockUserRepo,
+        MockUserRepo::default(),
         MockSessionRepo(
             None,
             Arc::new(Mutex::new(Vec::new())),
@@ -3369,7 +3464,7 @@ fn build_sa(sa: SaOutcome) -> (Svc, UpgradeLog) {
         MockCodeRepo::none(),
         MockTenantRepo::new(TenantOutcome::Found),
         MockRefreshRepo::new(),
-        MockUserRepo,
+        MockUserRepo::default(),
         MockSessionRepo::default(),
         MockAuditRepo::default(),
         test_config(),
@@ -3500,7 +3595,7 @@ async fn a_tombstoned_tenants_service_account_authenticates_nowhere() {
             MockCodeRepo::none(),
             MockTenantRepo::new(tenants),
             MockRefreshRepo::new(),
-            MockUserRepo,
+            MockUserRepo::default(),
             MockSessionRepo::default(),
             MockAuditRepo::default(),
             test_config(),
@@ -4883,7 +4978,7 @@ fn build_g_c_with(
         dummy_code_repo(),
         MockTenantRepo::new(TenantOutcome::Found),
         refresh,
-        MockUserRepo,
+        MockUserRepo::default(),
         MockSessionRepo(None, invalidated.clone(), replays.clone(), invalidate_fails),
         audit,
         test_config(),
@@ -6006,6 +6101,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
         refresh_replay_grace_accepted: 0,
         refresh_replay_refused: 0,
         lineage_id: Uuid::nil(),
+        credential_version: None,
     };
 
     // The hand-built pre-migration row: the columns are simply absent.
@@ -6021,7 +6117,7 @@ async fn d9_a_pre_v68_grant_falls_back_to_the_live_session_and_then_to_nothing()
             dummy_code_repo(),
             MockTenantRepo::new(TenantOutcome::Found),
             MockRefreshRepo::new().with_get(stored),
-            MockUserRepo,
+            MockUserRepo::default(),
             MockSessionRepo(
                 session,
                 Arc::new(Mutex::new(Vec::new())),
@@ -6122,6 +6218,202 @@ async fn p23w1_01_a_refresh_grant_for_an_active_account_or_no_account_still_rota
             .await
             .unwrap();
         assert!(resp.refresh_token.is_some(), "{case}");
+    }
+}
+
+/// SA-06 (N7, SR16-1): a credential change revokes every refresh token of the
+/// user, and that revocation can land between the rotation's read of the token
+/// and its `create`. The successor, written after the change, must not
+/// survive: the rotation re-reads the user after the write and refuses a
+/// predecessor older than the last credential change, removing the successor.
+/// The control: a predecessor written after the last credential change, and a
+/// user with no change on record, rotate as before.
+#[tokio::test]
+async fn sr16_1_a_refresh_token_older_than_the_credential_change_leaves_no_successor() {
+    let refresh = MockRefreshRepo::new().with_get(make_refresh(
+        Some(CREDENTIAL_MOVED_USER),
+        "client-1",
+        &["openid"],
+    ));
+    let created = refresh.created.clone();
+    let revoked_successors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let refresh = refresh.with_revocation_log(revoked_successors.clone());
+    let svc = build(
+        ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+        dummy_code_repo(),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+        .await
+        .expect_err("a token older than the credential change must be refused");
+    assert_eq!(err.error_code(), "invalid_grant", "{err}");
+    let created = created.lock().unwrap();
+    assert_eq!(
+        created.len(),
+        1,
+        "the successor was written before the re-check"
+    );
+    assert_eq!(
+        revoked_successors.lock().unwrap().as_slice(),
+        [created[0].token_hash.clone()],
+        "and the re-check removes exactly that successor"
+    );
+}
+
+#[tokio::test]
+async fn sr16_1_a_refresh_token_newer_than_the_credential_change_still_rotates() {
+    for user in [CREDENTIAL_OLD_USER, Uuid::new_v4()] {
+        let refresh =
+            MockRefreshRepo::new().with_get(make_refresh(Some(user), "client-1", &["openid"]));
+        let revoked_successors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let refresh = refresh.with_revocation_log(revoked_successors.clone());
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .unwrap();
+        assert!(resp.refresh_token.is_some());
+        assert!(revoked_successors.lock().unwrap().is_empty());
+    }
+}
+
+/// QR17-3: the post-create re-check's two other outcomes. A user read that
+/// fails after the successor was written answers a server error; a user who no
+/// longer exists answers `invalid_grant`. Either way the successor is revoked
+/// (the same single hash) and nothing is returned.
+#[tokio::test]
+async fn qr17_3_a_failed_or_empty_user_re_read_after_the_successor_revokes_it() {
+    for (label, user, code) in [
+        ("read error", READ_FAILS_AFTER_FIRST_USER, "server_error"),
+        ("user removed", REMOVED_AFTER_FIRST_USER, "invalid_grant"),
+    ] {
+        let refresh =
+            MockRefreshRepo::new().with_get(make_refresh(Some(user), "client-1", &["openid"]));
+        let created = refresh.created.clone();
+        let revoked_successors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let refresh = refresh.with_revocation_log(revoked_successors.clone());
+        let svc = build(
+            ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+            dummy_code_repo(),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), refresh_req("tok"), &no_cert())
+            .await
+            .expect_err(label);
+        assert_eq!(err.error_code(), code, "{label}: {err}");
+        let created = created.lock().unwrap();
+        assert_eq!(created.len(), 1, "{label}: the successor was written");
+        assert_eq!(
+            revoked_successors.lock().unwrap().as_slice(),
+            [created[0].token_hash.clone()],
+            "{label}: and exactly that successor is revoked"
+        );
+    }
+}
+
+/// SR17-1: a code issued before a credential change mints nothing after it.
+/// The mock user's credential changed an hour after the code was written.
+#[tokio::test]
+async fn sr17_1_a_code_issued_before_a_credential_change_mints_nothing() {
+    let mut code = make_auth_code(&["profile"], None);
+    code.user_id = CREDENTIAL_MOVED_USER;
+    let refresh = MockRefreshRepo::new();
+    let created = refresh.created.clone();
+    let svc = build(
+        ClientOutcome::Found(make_client(
+            &["authorization_code", "refresh_token"],
+            &["profile"],
+        )),
+        MockCodeRepo::ok(code),
+        TenantOutcome::Found,
+        refresh,
+    );
+    let err = svc
+        .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+        .await
+        .expect_err("a code older than the credential change must be refused");
+    assert_eq!(err.error_code(), "invalid_grant", "{err}");
+    assert!(
+        created.lock().unwrap().is_empty(),
+        "no refresh token may be written"
+    );
+}
+
+/// The control: a code issued after the last credential change, and one for a
+/// user with no change on record, are redeemed as before.
+#[tokio::test]
+async fn sr17_1_a_code_issued_after_the_credential_change_is_still_redeemed() {
+    for user in [CREDENTIAL_OLD_USER, Uuid::new_v4()] {
+        let mut code = make_auth_code(&["profile"], None);
+        code.user_id = user;
+        let refresh = MockRefreshRepo::new();
+        let revoked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let refresh = refresh.with_revocation_log(revoked.clone());
+        let svc = build(
+            ClientOutcome::Found(make_client(
+                &["authorization_code", "refresh_token"],
+                &["profile"],
+            )),
+            MockCodeRepo::ok(code),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let resp = svc
+            .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+            .await
+            .unwrap();
+        assert!(resp.refresh_token.is_some());
+        assert!(revoked.lock().unwrap().is_empty());
+    }
+}
+
+/// SR17-1, the race: the credential changes after the pre-check and before the
+/// refresh token is written. The re-read after the write sees it, revokes the
+/// token it just minted and answers `invalid_grant`; a read error there
+/// revokes too and answers a server error.
+#[tokio::test]
+async fn sr17_1_a_credential_change_after_the_pre_check_revokes_the_minted_token() {
+    for (label, user, expected) in [
+        ("change", CREDENTIAL_RACES_USER, "invalid_grant"),
+        ("read error", READ_FAILS_AFTER_FIRST_USER, "server_error"),
+        ("user removed", REMOVED_AFTER_FIRST_USER, "invalid_grant"),
+    ] {
+        let mut code = make_auth_code(&["profile"], None);
+        code.user_id = user;
+        let refresh = MockRefreshRepo::new();
+        let created = refresh.created.clone();
+        let revoked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let refresh = refresh.with_revocation_log(revoked.clone());
+        let svc = build(
+            ClientOutcome::Found(make_client(
+                &["authorization_code", "refresh_token"],
+                &["profile"],
+            )),
+            MockCodeRepo::ok(code),
+            TenantOutcome::Found,
+            refresh,
+        );
+        let err = svc
+            .exchange(Uuid::new_v4(), auth_code_req(None), &no_cert())
+            .await
+            .expect_err(label);
+        assert_eq!(err.error_code(), expected, "{label}: {err}");
+        let created = created.lock().unwrap();
+        assert_eq!(created.len(), 1, "{label}: the token was written");
+        assert_eq!(
+            revoked.lock().unwrap().as_slice(),
+            [created[0].token_hash.clone()],
+            "{label}: and exactly that token is revoked"
+        );
     }
 }
 
@@ -6811,4 +7103,211 @@ async fn r681_a_confidential_clients_refresh_is_unchanged() {
         .expect("a confidential client's refresh needs no bound key");
     assert_eq!(resp.token_type, "DPoP");
     assert_eq!(created.lock().unwrap()[0].dpop_jkt, None);
+}
+
+// ---------------------------------------------------------------------------
+// SA-41 — PKCE downgrade, and introspection of a token whose session is gone
+// ---------------------------------------------------------------------------
+
+/// RFC 9700 §2.1.1 — a `code_verifier` presented for a code that carries no
+/// stored challenge is refused, not silently ignored (PKCE downgrade).
+#[tokio::test]
+async fn sa41_a_verifier_for_a_code_with_no_stored_challenge_is_refused() {
+    let svc = build(
+        ClientOutcome::Found(make_client(&["authorization_code"], &["profile"])),
+        MockCodeRepo::ok(make_auth_code(&["profile"], None)),
+        TenantOutcome::Found,
+        MockRefreshRepo::new(),
+    );
+    let verifier = "a-verifier-padded-to-at-least-forty-three-characters";
+    assert_eq!(
+        svc.exchange(Uuid::new_v4(), auth_code_req(Some(verifier)), &no_cert())
+            .await
+            .expect_err("a verifier with no stored challenge must be refused")
+            .error_code(),
+        "invalid_grant"
+    );
+}
+
+fn sa41_session(id: Uuid, expires_in: chrono::Duration) -> axiam_core::models::session::Session {
+    axiam_core::models::session::Session {
+        id,
+        tenant_id: client_tenant(),
+        user_id: Uuid::new_v4(),
+        token_hash: "t".into(),
+        ip_address: None,
+        user_agent: None,
+        expires_at: Utc::now() + expires_in,
+        created_at: Utc::now(),
+        authenticated_at: Utc::now(),
+        amr: vec![],
+        browser_token_hash: None,
+        refresh_replay_at: None,
+        refresh_replay_grace_accepted: 0,
+        refresh_replay_refused: 0,
+        lineage_id: Uuid::nil(),
+        credential_version: None,
+    }
+}
+
+/// Introspection reports `active: false` for a token whose `sid` session is
+/// gone or expired, and `active: true` while it is live.
+#[tokio::test]
+async fn sa41_introspection_reports_a_token_of_a_dead_session_inactive() {
+    let tenant_id = client_tenant();
+    let cfg = test_config();
+    let sid = Uuid::new_v4();
+    let token = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant_id,
+        Uuid::new_v4(),
+        Uuid::new_v4().to_string(),
+    )
+    .session(Some(sid))
+    .issue(&cfg)
+    .unwrap();
+
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    for (session, active, what) in [
+        (
+            Some(sa41_session(sid, chrono::Duration::hours(1))),
+            true,
+            "live",
+        ),
+        (None, false, "logged out"),
+        (
+            Some(sa41_session(sid, chrono::Duration::seconds(-5))),
+            false,
+            "expired",
+        ),
+    ] {
+        let svc = TokenService::new(
+            MockClientRepo(
+                ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+                upgrade.clone(),
+            ),
+            MockSaRepo(SaOutcome::NotFound, upgrade.clone()),
+            dummy_code_repo(),
+            MockTenantRepo::new(TenantOutcome::Found),
+            MockRefreshRepo::new(),
+            MockUserRepo::default(),
+            MockSessionRepo(
+                session,
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                false,
+            ),
+            MockAuditRepo::default(),
+            test_config(),
+            2_592_000,
+            not_issued_here(),
+        );
+        let resp = svc
+            .introspect_token(tenant_id, introspect_req(&token), &no_cert())
+            .await
+            .unwrap();
+        assert_eq!(resp.active, active, "session {what}");
+        if !active {
+            assert!(resp.sub.is_none() && resp.scope.is_none() && resp.exp.is_none());
+        }
+    }
+}
+
+/// QR1-1: introspection reads the session by the REST extractor's rule (`sid`,
+/// else `jti`, unless the token comes from a session-less grant).
+///
+/// A first-party sign-in token (password, OPAQUE, TOTP, WebAuthn, directory)
+/// stores its session id in `jti` and has NO `sid`. It must introspect inactive
+/// once its session row is gone, and active while it is live. Client
+/// credentials, service-account and device-grant tokens name no session and
+/// stay active whatever the session store holds.
+#[tokio::test]
+async fn qr1_1_introspection_reads_a_sign_in_tokens_session_from_jti() {
+    let tenant_id = client_tenant();
+    let cfg = test_config();
+    let session_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+
+    // The shape `AuthService::create_session_and_tokens` mints: `jti` is the
+    // session id, no `sid`, no `client_id`.
+    let sign_in = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant_id,
+        org_id,
+        session_id.to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    let client_credentials =
+        axiam_auth::token::AccessTokenSpec::oauth2_client("client-1", tenant_id, org_id)
+            .issue(&cfg)
+            .unwrap();
+    let service_account = axiam_auth::token::AccessTokenSpec::service_account(
+        Uuid::new_v4(),
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+    )
+    .issue(&cfg)
+    .unwrap();
+    // A user token of a grant that names no session (device grant): a fresh
+    // `jti` and a `client_id`, no `sid`.
+    let device_grant = axiam_auth::token::AccessTokenSpec::user(
+        Uuid::new_v4(),
+        tenant_id,
+        org_id,
+        Uuid::new_v4().to_string(),
+    )
+    .client_id(Some("client-1"))
+    .issue(&cfg)
+    .unwrap();
+
+    let upgrade: UpgradeLog = Arc::new(Mutex::new(Vec::new()));
+    // (stored session, token, expected `active`, what)
+    let cases: Vec<(Option<_>, &String, bool, &str)> = vec![
+        (
+            Some(sa41_session(session_id, chrono::Duration::hours(1))),
+            &sign_in,
+            true,
+            "sign-in token, live session",
+        ),
+        (None, &sign_in, false, "sign-in token, session deleted"),
+        (
+            Some(sa41_session(session_id, chrono::Duration::seconds(-5))),
+            &sign_in,
+            false,
+            "sign-in token, session expired",
+        ),
+        (None, &client_credentials, true, "client credentials"),
+        (None, &service_account, true, "service account"),
+        (None, &device_grant, true, "grant that names no session"),
+    ];
+    for (session, token, active, what) in cases {
+        let svc = TokenService::new(
+            MockClientRepo(
+                ClientOutcome::Found(make_client(&["refresh_token"], &[])),
+                upgrade.clone(),
+            ),
+            MockSaRepo(SaOutcome::NotFound, upgrade.clone()),
+            dummy_code_repo(),
+            MockTenantRepo::new(TenantOutcome::Found),
+            MockRefreshRepo::new(),
+            MockUserRepo::default(),
+            MockSessionRepo(
+                session,
+                Arc::new(Mutex::new(Vec::new())),
+                Arc::new(Mutex::new(Vec::new())),
+                false,
+            ),
+            MockAuditRepo::default(),
+            test_config(),
+            2_592_000,
+            not_issued_here(),
+        );
+        let resp = svc
+            .introspect_token(tenant_id, introspect_req(token), &no_cert())
+            .await
+            .unwrap();
+        assert_eq!(resp.active, active, "{what}");
+    }
 }

@@ -69,7 +69,13 @@ services:
         condition: service_completed_successfully
     # Persist on the mounted volume. Without a PATH argument the default is
     # `memory`, which wipes all state on every container restart.
-    command: start --user ${AXIAM__DB__USERNAME:?SurrealDB username required - run 'just minimal-up' or export AXIAM__DB__USERNAME} --pass ${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just minimal-up' or export AXIAM__DB__PASSWORD} --log info surrealkv:/data/axiam.db
+    # Credentials travel as environment variables, not as `--user`/`--pass`.
+    # A flag lands in argv, and /proc/<pid>/cmdline is world-readable on the
+    # host; /proc/<pid>/environ is owner-only. `surreal start` reads these.
+    command: start --log info surrealkv:/data/axiam.db
+    environment:
+      SURREAL_USER: ${AXIAM__DB__USERNAME:?SurrealDB username required - run 'just minimal-up' or export AXIAM__DB__USERNAME}
+      SURREAL_PASS: ${AXIAM__DB__PASSWORD:?SurrealDB password required - run 'just minimal-up' or export AXIAM__DB__PASSWORD}
     volumes:
       - surrealdb-data:/data
     healthcheck:

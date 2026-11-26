@@ -74,10 +74,13 @@ impl AuditLogRepository for Behind {
 
     async fn list_system(
         &self,
+        organization_id: uuid::Uuid,
         filter: AuditLogFilter,
         pagination: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
-        self.inner.list_system(filter, pagination).await
+        self.inner
+            .list_system(organization_id, filter, pagination)
+            .await
     }
 
     async fn get_by_ids(&self, tenant_id: Uuid, ids: &[Uuid]) -> AxiamResult<Vec<AuditLogEntry>> {
@@ -120,6 +123,7 @@ fn row(tenant_id: Uuid, action: &str) -> CreateAuditLogEntry {
         outcome: AuditOutcome::Success,
         ip_address: None,
         metadata: None,
+        organization_id: None,
     }
 }
 

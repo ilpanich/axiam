@@ -348,9 +348,12 @@ pub fn host_glob_matches(pattern: &str, host: &str) -> bool {
         }
         // `host` must end with `.suffix`, so the wildcard covers at least one
         // whole label and the comparison lands on a label boundary.
+        // Byte-slice comparison: indexing the `str` would panic on a non-ASCII
+        // host whose cut falls inside a multi-byte character.
+        let (host, suffix) = (host.as_bytes(), suffix.as_bytes());
         return host.len() > suffix.len() + 1
             && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-            && host.as_bytes()[host.len() - suffix.len() - 1] == b'.';
+            && host[host.len() - suffix.len() - 1] == b'.';
     }
     if pattern.contains('*') {
         return false;
@@ -949,6 +952,22 @@ pub fn validate_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-42 — a non-ASCII host must not panic (byte-slicing mid-codepoint).
+    #[test]
+    fn sa42_host_glob_matches_non_ascii_does_not_panic() {
+        for host in [
+            "é.example.com",
+            "ééé",
+            "aé",
+            "xé.com",
+            "日本語.example.com",
+            "ééééééééé",
+        ] {
+            assert!(!host_glob_matches("*.example.org", host), "{host}");
+        }
+        assert!(host_glob_matches("*.example.com", "é.example.com"));
+    }
     use axiam_core::models::settings::system_defaults;
 
     fn policy(mutate: impl FnOnce(&mut OidcPolicy)) -> OidcPolicy {

@@ -253,6 +253,8 @@ impl UserRepository for MockUserRepo {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: None,
+            credential_version: 0,
             metadata: serde_json::Value::Null,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -324,6 +326,7 @@ impl AuditLogRepository for MockAuditRepo {
             ip_address: input.ip_address.clone(),
             metadata: input.metadata.clone().unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         };
         self.appended.lock().unwrap().push(input);
         Ok(entry)
@@ -338,6 +341,7 @@ impl AuditLogRepository for MockAuditRepo {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _f: AuditLogFilter,
         _p: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -502,8 +506,11 @@ async fn template_fetch_failure_falls_back_and_still_processes() {
 }
 
 #[tokio::test]
-async fn user_lookup_failure_falls_back_to_advisory_address() {
-    // SEC-055 fallback branch: user repo returns NotFound → to_address used.
+async fn user_lookup_failure_sends_nothing() {
+    // SEC-055 / SA-14 (N3): the user repo returns NotFound. This used to fall
+    // back to the message's `to_address`, which handed the choice of recipient
+    // back to whoever wrote the message. It is now a send error: no attempt
+    // is made, so no retry is scheduled and no delivery-failure row written.
     let cfg = MockEmailConfigRepo {
         effective: Some(smtp_unreachable_config()),
     };
@@ -518,7 +525,6 @@ async fn user_lookup_failure_falls_back_to_advisory_address() {
         &MissingTenantRepo,
         &MissingOrgRepo,
     )
-    .await
-    .unwrap();
-    assert!(matches!(outcome, SendOutcome::RetryNeeded { .. }));
+    .await;
+    assert!(outcome.is_err(), "{outcome:?}");
 }

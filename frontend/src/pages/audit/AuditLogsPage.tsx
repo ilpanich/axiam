@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { cn, formatDateTime } from "@/lib/utils";
 import { usePermissions } from "@/hooks/usePermissions";
+import { useCanActOnOrganization } from "@/lib/grantReach";
 
 // ─── Outcome badge ────────────────────────────────────────────────────────────
 
@@ -133,9 +134,13 @@ type AuditScope = "tenant" | "system";
 /**
  * Switches between the tenant trail and the system trail.
  *
- * Rendered only when the operator holds `audit_logs:list_system` — the
- * tenant list is self-service for every authenticated user, the system list is
- * not, and showing a tab that always 403s teaches nothing.
+ * Rendered only when the operator holds `audit_logs:list_system` AND can act
+ * on the whole organization (`useCanActOnOrganization`) — the tenant list is
+ * self-service for every authenticated user, the system list is not, and
+ * showing a tab that always 403s teaches nothing. The server's `list_system`
+ * checks both: the permission, then `require_organization_principal`, which
+ * refuses a principal outside the organization scope and one whose roles are
+ * restricted to particular tenants, whatever it holds (SA-02, review QR9-1).
  */
 function ScopeSwitch({
   scope,
@@ -153,7 +158,7 @@ function ScopeSwitch({
     {
       id: "system",
       label: "System",
-      hint: "Unauthenticated and system requests — failed logins against unknown accounts, bootstrap, and anything else recorded before a tenant was known.",
+      hint: "System entries recorded for your organization — SCIM provisioning calls, requests to your organization's routes without a usable token, and deleted or purged tenants. Entries from before the upgrade, and requests that name no organization, are not shown.",
     },
   ];
 
@@ -314,7 +319,8 @@ export function AuditLogsPage() {
   // The two trails are separate endpoints, not a filter: system entries carry
   // the nil tenant id and are invisible to the tenant-scoped list, so there is
   // no query that returns both.
-  const canReadSystem = can("audit_logs:list_system");
+  const canActOnOrganization = useCanActOnOrganization();
+  const canReadSystem = can("audit_logs:list_system") && canActOnOrganization;
   const [scope, setScope] = useState<AuditScope>("tenant");
 
   // Raw filter inputs (undbounced for actors/actions)
@@ -503,7 +509,7 @@ export function AuditLogsPage() {
         title="Audit Logs"
         description={
           scope === "system"
-            ? "Append-only record of unauthenticated and system requests, which carry no tenant."
+            ? "Append-only record of the system entries recorded for your organization, which carry no tenant. Entries from before the upgrade and requests that name no organization are not shown."
             : "Append-only record of all actions performed in this tenant."
         }
       />

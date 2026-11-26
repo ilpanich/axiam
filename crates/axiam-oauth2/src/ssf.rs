@@ -1932,6 +1932,8 @@ mod tests {
             phone_number_verified_at: None,
             address: None,
             directory_external_id: None,
+            credential_changed_at: None,
+            credential_version: 0,
             metadata: json!({}),
             created_at: now,
             updated_at: now,

@@ -149,6 +149,30 @@ before you grant it. Two practical consequences:
   not behind a second permission. If that matters to your threat model, say
   so on the issue tracker; splitting it is a small change.
 
+**Password writes are refused when the tenant's OPAQUE mode is `required`.**
+Any write of a password retires the user's OPAQUE record in the same
+transaction (the record is a verifier of the *previous* password), and SCIM
+cannot supply a replacement: it carries a plaintext `password`, whereas an
+OPAQUE record is computed on the client so that the server never sees the
+password. Under `opaque_mode = required` the Argon2 login is refused, so the
+record SCIM would delete is the user's only usable credential. AXIAM therefore
+answers a `POST /Users` that carries `password`, a `PUT /Users/{id}` that
+carries `password` (a `PUT` never wrote one, but is told so rather than that it
+was), and a `PATCH /Users/{id}` that sets `password` with **`400` and
+`scimType: "mutability"`** (RFC 7644 §3.12), and changes nothing. The mode is
+the tenant's *effective* mode: the organization baseline unless the tenant
+overrides it upward. `optional` and `off` are unchanged, and so is a write that
+carries no password (including a `POST` that omits it). In a `required` tenant
+the user sets a password through the self-service change or reset flow, which
+enrols a fresh record.
+
+**Own-account writes need a first-party sign-in.** A token minted for an OAuth2
+client (an access token carrying a `client_id` claim, such as the one a relying
+party holds for its user) gets `403` on `PUT`, `PATCH` or `DELETE` of the
+caller's own `/scim/v2/Users/{id}`, before anything is read or written; these
+are the person's own acts, as on `PUT /api/v1/users/{user_id}`. Provisioning
+tokens, and administrators acting on other users, are unaffected.
+
 **Deprovisioning is immediate.** A SCIM `password` write, an `active: false`
 (via `PUT` or `PATCH`), and `DELETE /scim/v2/Users/{id}` each revoke every
 live session **and** every OAuth2 refresh token the target holds, in addition

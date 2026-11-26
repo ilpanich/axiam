@@ -171,6 +171,49 @@ pub struct AmqpConfig {
     /// [`crate::messages::DEFAULT_FRESHNESS_SKEW_SECS`] (5 minutes).
     #[serde(default = "default_replay_skew_secs")]
     pub replay_skew_secs: u64,
+    /// The server-internal queues' signed envelope (SA-14, N3):
+    /// `AXIAM__AMQP__INTERNAL_QUEUES__*`.
+    #[serde(default)]
+    pub internal_queues: InternalQueuesConfig,
+}
+
+/// The server-internal queues (`axiam.mail.outbound` and the outbound kinds'
+/// queues) carry a signed envelope ([`crate::internal_envelope`]). Their
+/// consumers always verify an envelope; this decides what they do with a
+/// message in the pre-SA-14, unsigned shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct InternalQueuesConfig {
+    /// `true` (the default): an unsigned message is rejected, dead-lettered
+    /// and audited. `false`: it is accepted with a warning — for one rolling
+    /// deployment while replicas of an earlier version still publish, never
+    /// as a steady state. `AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE`.
+    pub require_signature: bool,
+    /// How long (seconds) a signed message may wait in these queues before
+    /// it is refused as stale, and how long its nonce is kept
+    /// (`AXIAM__AMQP__INTERNAL_QUEUES__MAX_AGE_SECS`; QR1-2, SR1-2).
+    ///
+    /// Not the 5-minute replay skew: these are durable work queues, and a
+    /// message waits in them through a consumer outage, a backlog, or
+    /// head-of-line blocking in a `.retry` queue. The default,
+    /// [`DEFAULT_INTERNAL_QUEUE_MAX_AGE_SECS`], covers the longest outbound
+    /// retry TTL (the 1 h backoff ceiling) twice over for head-of-line
+    /// blocking, the mail consumer's in-process backoff (at most 20 s per
+    /// failing message ahead in the queue), and a consumer outage of most of
+    /// a day. A future-dated `issued_at` is still bounded by the replay skew.
+    pub max_age_secs: u64,
+}
+
+/// The default of [`InternalQueuesConfig::max_age_secs`]: 24 hours.
+pub const DEFAULT_INTERNAL_QUEUE_MAX_AGE_SECS: u64 = 86_400;
+
+impl Default for InternalQueuesConfig {
+    fn default() -> Self {
+        Self {
+            require_signature: true,
+            max_age_secs: DEFAULT_INTERNAL_QUEUE_MAX_AGE_SECS,
+        }
+    }
 }
 
 impl std::fmt::Debug for AmqpConfig {
@@ -189,6 +232,7 @@ impl std::fmt::Debug for AmqpConfig {
             .field("reconnect_delay_ms", &self.reconnect_delay_ms)
             .field("max_retries", &self.max_retries)
             .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("internal_queues", &self.internal_queues)
             .field(
                 "signing_key",
                 &self.signing_key.as_ref().map(|_| "<redacted>"),
@@ -237,6 +281,7 @@ impl Default for AmqpConfig {
             connect_timeout_ms: 30_000,
             signing_key: None,
             replay_skew_secs: default_replay_skew_secs(),
+            internal_queues: InternalQueuesConfig::default(),
         }
     }
 }
@@ -348,6 +393,17 @@ impl AmqpConfig {
     pub fn replay_skew(&self) -> chrono::Duration {
         chrono::Duration::seconds(self.replay_skew_secs as i64)
     }
+
+    /// The maximum age of a message on the server-internal queues
+    /// (`internal_queues.max_age_secs`), never below [`Self::replay_skew`].
+    pub fn internal_queue_max_age(&self) -> chrono::Duration {
+        chrono::Duration::seconds(
+            self.internal_queues
+                .max_age_secs
+                .max(self.replay_skew_secs)
+                .min(i64::MAX as u64) as i64,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +421,36 @@ mod tests {
         assert!(!off.enabled);
         // The Debug rendering states the profile (the boot log prints it).
         assert!(format!("{off:?}").contains("enabled: false"));
+    }
+
+    /// SA-14: the internal queues require a signature unless an operator says
+    /// otherwise, and an absent section keeps it required.
+    #[test]
+    fn internal_queues_require_a_signature_by_default() {
+        assert!(AmqpConfig::default().internal_queues.require_signature);
+        let empty: AmqpConfig = serde_json::from_str("{}").unwrap();
+        assert!(empty.internal_queues.require_signature);
+        let partial: AmqpConfig = serde_json::from_str(r#"{"internal_queues": {}}"#).unwrap();
+        assert!(partial.internal_queues.require_signature);
+        let off: AmqpConfig =
+            serde_json::from_str(r#"{"internal_queues": {"require_signature": false}}"#).unwrap();
+        assert!(!off.internal_queues.require_signature);
+    }
+
+    /// QR1-2 / SR1-2: the internal queues' maximum message age defaults to a
+    /// day, is settable, and is never below the replay skew.
+    #[test]
+    fn internal_queue_max_age_defaults_to_a_day_and_is_at_least_the_skew() {
+        let empty: AmqpConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.internal_queues.max_age_secs, 86_400);
+        assert_eq!(empty.internal_queue_max_age(), chrono::Duration::hours(24));
+        let set: AmqpConfig =
+            serde_json::from_str(r#"{"internal_queues": {"max_age_secs": 7200}}"#).unwrap();
+        assert!(set.internal_queues.require_signature);
+        assert_eq!(set.internal_queue_max_age(), chrono::Duration::hours(2));
+        let low: AmqpConfig =
+            serde_json::from_str(r#"{"internal_queues": {"max_age_secs": 10}}"#).unwrap();
+        assert_eq!(low.internal_queue_max_age(), low.replay_skew());
     }
 
     #[test]

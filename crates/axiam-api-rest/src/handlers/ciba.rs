@@ -282,6 +282,7 @@ async fn bc_authorize_inner<C: Connection + Clone>(
                 "delivery_mode": initiation.request.delivery_mode.as_str(),
                 "expires_at": initiation.request.expires_at.to_rfc3339(),
             })),
+            organization_id: None,
         };
         actix_web::rt::spawn(async move {
             if let Err(e) = audit_repo.append(entry).await {

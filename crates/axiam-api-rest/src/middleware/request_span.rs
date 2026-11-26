@@ -33,7 +33,7 @@ use tracing::Span;
 use tracing_actix_web::{DefaultRootSpanBuilder, RequestId, RootSpanBuilder};
 
 /// What a redacted value is replaced with.
-pub const REDACTED: &str = "[redacted]";
+pub const REDACTED: &str = axiam_audit::middleware::REDACTED_PATH_SEGMENT;
 
 /// The query parameters whose values are recorded as sent: identifiers of a
 /// tenant, organization or client, protocol switches and pagination. Never a
@@ -61,9 +61,6 @@ pub const KEPT_QUERY_PARAMETERS: &[&str] = &[
     "order",
 ];
 
-/// Route parameters whose path segment is a bearer value (`/account/export/{token}`).
-const REDACTED_PATH_PARAMETERS: &[&str] = &["token"];
-
 /// The span target the default builder's spans carry. Kept, so a deployment's
 /// `RUST_LOG` directives select the root span exactly as before (with the
 /// shipped `axiam=info` filter it is not recorded at all unless an operator
@@ -73,10 +70,11 @@ const SPAN_TARGET: &str = "tracing_actix_web::root_span_builder";
 /// `path` and `query` as they may be recorded: query values redacted except
 /// for [`KEPT_QUERY_PARAMETERS`], and every path segment that `pattern` (the
 /// matched route, `{name}` placeholders included) marks as a token replaced by
-/// [`REDACTED`].
+/// [`REDACTED`]. The path rule is [`axiam_audit::middleware::redacted_path`],
+/// the one the audit row uses, so the two cannot drift apart.
 #[must_use]
 pub fn redacted_target(path: &str, query: &str, pattern: Option<&str>) -> String {
-    let mut out = redacted_path(path, pattern);
+    let mut out = axiam_audit::middleware::redacted_path(path, pattern);
     if query.is_empty() {
         return out;
     }
@@ -107,32 +105,6 @@ fn percent_decoded_name(name: &str) -> String {
         .next()
         .map(|(decoded, _)| decoded.into_owned())
         .unwrap_or_default()
-}
-
-fn redacted_path(path: &str, pattern: Option<&str>) -> String {
-    let Some(pattern) = pattern else {
-        return path.to_owned();
-    };
-    let segments: Vec<&str> = path.split('/').collect();
-    let placeholders: Vec<&str> = pattern.split('/').collect();
-    if segments.len() != placeholders.len() {
-        return path.to_owned();
-    }
-    segments
-        .iter()
-        .zip(placeholders)
-        .map(|(segment, placeholder)| {
-            let name = placeholder
-                .strip_prefix('{')
-                .and_then(|p| p.strip_suffix('}'))
-                .map(|p| p.split(':').next().unwrap_or_default());
-            match name {
-                Some(name) if REDACTED_PATH_PARAMETERS.contains(&name) => REDACTED,
-                _ => segment,
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 fn http_flavor(version: actix_web::http::Version) -> &'static str {

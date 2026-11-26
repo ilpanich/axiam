@@ -96,6 +96,7 @@ impl AuditLogRepository for Datastore {
             ip_address: input.ip_address,
             metadata: input.metadata.unwrap_or(serde_json::Value::Null),
             timestamp: Utc::now(),
+            organization_id: None,
         })
     }
 
@@ -109,6 +110,7 @@ impl AuditLogRepository for Datastore {
     }
     async fn list_system(
         &self,
+        _organization_id: uuid::Uuid,
         _: AuditLogFilter,
         _: Pagination,
     ) -> AxiamResult<PaginatedResult<AuditLogEntry>> {
@@ -432,6 +434,7 @@ async fn an_unwritable_file_makes_the_rows_unrecoverable() {
             outcome: AuditOutcome::Failure,
             ip_address: None,
             metadata: None,
+            organization_id: None,
         },
         Utc::now(),
         &"datastore down",
@@ -525,6 +528,7 @@ fn request_row(action: &str) -> CreateAuditLogEntry {
         outcome: AuditOutcome::Failure,
         ip_address: Some("203.0.113.7".into()),
         metadata: Some(serde_json::json!({"http_status": 500, "authenticated": false})),
+        organization_id: None,
     }
 }
 

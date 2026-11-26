@@ -395,6 +395,11 @@ where
         // values (a SAML handle, `RelayState`, `state`, a reset token) and
         // `{token}` path segments redacted from `http.target`.
         .wrap(TracingLogger::<RedactingRootSpanBuilder>::new())
+        // SA-02 (N1): inside the audit wrap, so the organization it resolves
+        // for a system-partition request row is there when the row is built.
+        .wrap(actix_web::middleware::from_fn(
+            axiam_api_rest::audit_organization::system_audit_organization::<C, _>,
+        ))
         .wrap(deps.audit_middleware)
         .wrap(build_cors(&deps.cors_allowed_origins))
         // web::Data::new wraps rest_authz (Arc<dyn AuthzChecker>) to produce
@@ -593,11 +598,6 @@ where
         );
         None
     };
-    // The transport of the four outbound kinds, chosen with the profile.
-    let mut outbound = match &amqp {
-        Some(amqp) => OutboundTransport::amqp(Arc::clone(amqp)),
-        None => OutboundTransport::in_process(),
-    };
 
     // LIVE pooled-connection reference — registered in `AppState` so handlers
     // that need direct access (e.g. /api/v1/admin/bootstrap) resolve the
@@ -784,6 +784,9 @@ where
         std::sync::Arc::new(axiam_api_rest::SurrealScimTokenResolver::new(
             scim_token_repo.clone(),
             axiam_db::SurrealUserRepository::new(pool.handle_for_repo()),
+            // SA-13 (N16): a tombstoned or suspended tenant's tokens resolve to
+            // no principal.
+            SurrealTenantRepository::new(pool.handle_for_repo()),
         ));
     let audit_repo = SurrealAuditLogRepository::new(pool.handle_for_repo())
         .with_minimisation(audit_minimisation);
@@ -967,7 +970,9 @@ where
     // G-3 (T23.3.3): the rows for just-in-time provisioning, its refusals and
     // the linking of an account, on the same append-only repository (and the
     // same minimisation) as every other audit row.
-    .with_directory_audit(Arc::clone(&directory_audit_sink) as _);
+    .with_directory_audit(Arc::clone(&directory_audit_sink) as _)
+    // SA-13 (N16, D-3): a suspended tenant's sign-in and refresh are refused.
+    .with_tenant_admission(Arc::new(tenant_repo.clone()));
     // Password history repository — used by the password-change handler.
     let password_history_repo = SurrealPasswordHistoryRepository::new(pool.handle_for_repo());
     let consent_repo = axiam_db::SurrealConsentRepository::new(pool.handle_for_repo());
@@ -1266,6 +1271,38 @@ where
     // NEW-4: durable AMQP nonce store for replay protection, shared by the
     // authz + audit consumers and swept by the periodic cleanup task.
     let amqp_nonce_repo = SurrealAmqpNonceRepository::new(pool.handle_for_repo());
+    // SA-14 (N3): the server-internal queues (mail and the four outbound
+    // kinds) carry a signed envelope under a server-only key derived from the
+    // AMQP master key. Built here, where the key and the nonce store both exist.
+    let internal_queues = amqp_signing_key.as_ref().map(|key| {
+        (
+            axiam_amqp::InternalSigner::new(key.clone()),
+            axiam_amqp::InternalQueueGate::new(
+                key.clone(),
+                config.amqp.internal_queues.require_signature,
+                config.amqp.replay_skew(),
+                // QR1-2 / SR1-2: the work queues' own age bound, not the
+                // 5-minute skew of the SDK-facing queues.
+                config.amqp.internal_queue_max_age(),
+                amqp_nonce_repo.clone(),
+            ),
+        )
+    });
+    if !config.amqp.internal_queues.require_signature && amqp.is_some() {
+        tracing::warn!(
+            "AXIAM__AMQP__INTERNAL_QUEUES__REQUIRE_SIGNATURE=false: unsigned messages on the \
+             mail and outbound queues are accepted. Use this for one rolling deployment \
+             only (SA-14)."
+        );
+    }
+    // The transport of the four outbound kinds, chosen with the profile.
+    let mut outbound = match (&amqp, &internal_queues) {
+        (Some(amqp), Some((signer, gate))) => {
+            OutboundTransport::amqp(Arc::clone(amqp), signer.clone(), gate.clone())
+        }
+        (Some(_), None) => unreachable!("the broker profile resolves the AMQP signing key"),
+        (None, _) => OutboundTransport::in_process(),
+    };
     let federation_login_state_repo =
         SurrealFederationLoginStateRepository::new(pool.handle_for_repo());
     let sso_handoff_code_repo = SurrealSsoHandoffCodeRepository::new(pool.handle_for_repo());
@@ -1326,6 +1363,13 @@ where
     // by the token endpoint only after a refresh-token replay was refused.
     let refresh_reuse_policy: axiam_oauth2::refresh_reuse::SharedRefreshReusePolicy =
         settings_policy;
+    // SA-18 (N15) — the subject's global role names for the access token's
+    // `roles` claim, read by every grant whose scopes carry `roles` (code,
+    // refresh, client credentials, CIBA, device, native sign-in, exchange).
+    // Left unwired, such a grant is refused with `server_error`.
+    let role_source: axiam_oauth2::roles_claim::SharedRoleSource = Arc::new(
+        axiam_oauth2::roles_claim::RepositoryRoleSource::new(role_repo.clone()),
+    );
 
     // OAuth2 authorization code grant services.
     let authorize_service = AuthorizeService::new(
@@ -1368,6 +1412,8 @@ where
     .with_scope_policy(Arc::clone(&scope_policy))
     // G-C (#818) — see `refresh_reuse_policy` above.
     .with_refresh_reuse_policy(refresh_reuse_policy)
+    // SA-18 (N15) — see `role_source` above.
+    .with_role_source(Arc::clone(&role_source))
     // X5.1 — `private_key_jwt` (RFC 7523 §2.2), one of FAPI 2.0's two
     // client-authentication families.
     //
@@ -1420,7 +1466,8 @@ where
             .expect("refresh_token_lifetime_secs exceeds i64::MAX"),
         device_verification_uri,
     )
-    .with_scope_policy(Arc::clone(&scope_policy));
+    .with_scope_policy(Arc::clone(&scope_policy))
+    .with_role_source(Arc::clone(&role_source));
 
     // G-7 — CIBA. The pending-request store seals a ping-mode request's
     // notification credentials under `pki_encryption_key`, the key webhook
@@ -1481,7 +1528,8 @@ where
         config.auth.clone(),
         i64::try_from(config.auth.access_token_lifetime_secs)
             .expect("access_token_lifetime_secs exceeds i64::MAX"),
-    );
+    )
+    .with_role_source(Arc::clone(&role_source));
 
     // B5 / RFC 9126. Composed here at the root, not lazily: an AppState field
     // that only the test builder populates is exactly the gap that left B2's
@@ -2189,6 +2237,8 @@ where
         };
         let amqp_signing_key_clone = amqp_signing_key.clone();
         let authz_nonce_repo = amqp_nonce_repo.clone();
+        // SA-13 (N16): a suspended tenant's authz requests are denied.
+        let authz_tenant_repo = tenant_repo.clone();
         let died = fatal_stop.clone();
         tokio::spawn(async move {
             axiam_amqp::authz_consumer::start_authz_consumer(
@@ -2196,6 +2246,7 @@ where
                 amqp_engine,
                 amqp_signing_key_clone,
                 authz_nonce_repo,
+                authz_tenant_repo,
                 amqp_replay_skew,
             )
             .await;
@@ -2246,7 +2297,10 @@ where
                 .await
                 .expect("Failed to create AMQP mail outbound publisher channel");
             (
-                MailTransportPublisher::Amqp(MailOutboundPublisher::new(mail_pub_channel)),
+                MailTransportPublisher::Amqp(MailOutboundPublisher::new(
+                    mail_pub_channel,
+                    internal_signer(&internal_queues),
+                )),
                 None,
             )
         }
@@ -2468,9 +2522,14 @@ where
                 .await
                 .expect("Failed to create AMQP mail consumer channel");
             let died = fatal_stop.clone();
+            let (mail_signer, mail_gate) = internal_queues
+                .clone()
+                .expect("the broker profile resolves the AMQP signing key");
             tokio::spawn(async move {
                 axiam_amqp::start_mail_consumer(
                     mail_channel,
+                    mail_gate,
+                    mail_signer,
                     mail_egress,
                     mail_email_config_repo,
                     mail_audit_repo,
@@ -2656,6 +2715,29 @@ where
             None => engine,
         }
     };
+    // SA-12 (N4, D-2) — `UserServiceImpl`'s own `AuthorizationEngine`, built
+    // identically for the same reason as `grpc_reactor_engine` above.
+    let grpc_user_engine = {
+        let engine = axiam_authz::AuthorizationEngine::new(
+            role_repo.clone(),
+            permission_repo.clone(),
+            resource_repo.clone(),
+            scope_repo.clone(),
+            group_repo.clone(),
+        )
+        .with_batch_config(
+            config.authz.batch_strategy,
+            config.authz.batch_max_concurrency,
+        );
+        let engine = match decision_cache.as_ref() {
+            Some(cache) => engine.with_decision_cache(cache.clone()),
+            None => engine,
+        };
+        match invalidation_broadcaster.as_ref() {
+            Some(b) => engine.with_invalidation_broadcaster(b.clone()),
+            None => engine,
+        }
+    };
     let grpc_reactor_repo = reactor_repo.clone();
     // `pool` is moved into `health_checker` before this point (see the
     // comment near `session_client_repo` above), so this reuses the
@@ -2799,6 +2881,7 @@ where
             grpc_reactor_dispatch_available,
             grpc_crypto_semaphore,
             grpc_lockout_policy,
+            grpc_user_engine,
             grpc_tls,
             deployment_profile,
             async move {
@@ -2923,7 +3006,10 @@ where
                 .create_publisher_channel()
                 .await
                 .expect("Failed to create AMQP cleanup mail channel");
-            MailTransportPublisher::Amqp(MailOutboundPublisher::new(cleanup_mail_pub_channel))
+            MailTransportPublisher::Amqp(MailOutboundPublisher::new(
+                cleanup_mail_pub_channel,
+                internal_signer(&internal_queues),
+            ))
         }
         // The same in-process channel the rest of the process publishes to.
         None => mail_outbound_publisher.clone(),
@@ -3103,6 +3189,9 @@ where
         // `managed_by`, which never changes for a `client_id` — cache it
         // (see axiam_api_rest::client_managed_by_cache).
         client_managed_by_cache: Arc::new(Default::default()),
+        // QR2-8 / SR2-4: bounds the system-audit organization lookup (see
+        // axiam_api_rest::audit_organization).
+        system_audit_org_cache: Arc::new(Default::default()),
         user_repo: user_repo.clone(),
         group_repo: group_repo.clone(),
         role_repo: role_repo.clone(),
@@ -3692,6 +3781,17 @@ pub const LEASE_LOSS_STOP: ShutdownBudget = ShutdownBudget {
     cleanup: Duration::from_secs(2),
 };
 
+/// The internal-queue signer of the broker profile (SA-14). Only called where
+/// the broker is enabled, which resolves the AMQP signing key.
+fn internal_signer(
+    internal_queues: &Option<(axiam_amqp::InternalSigner, axiam_amqp::InternalQueueGate)>,
+) -> axiam_amqp::InternalSigner {
+    internal_queues
+        .as_ref()
+        .map(|(signer, _)| signer.clone())
+        .expect("the broker profile resolves the AMQP signing key")
+}
+
 /// Wait for the cleanup task for at most `bound` (#598); past it, abort the task
 /// — it is cut at the await it is in — and say so. Then wait, until the same
 /// deadline, for the unit of audited work it left in flight (an erasure, a
@@ -3789,9 +3889,79 @@ fn trusted_proxies_for_boot(
         .map_err(|e| format!("invalid rate-limit configuration: {e}"))
 }
 
+/// `AXIAM__AUTH__ALLOW_MISSING_AUD_AS_USER`, read by hand in `main` (the
+/// spelling operators already use).
+///
+/// The same variable is first read by the layered config loader
+/// (`load_config`), which binds it to `AuthConfig::allow_missing_aud_as_user`
+/// like every other `AXIAM__*` boolean. The loader accepts only `1`, `true`,
+/// `on`, `yes`, `0`, `false`, `off` and `no` (case-insensitive, untrimmed);
+/// any other value — an empty Compose `${VAR:-}`, a padded value, a typo —
+/// fails the load and the server does not start. This function never sees
+/// such a value.
+///
+/// It runs after a successful load and fails closed (S-9): only `true`, `1`
+/// or `yes` enable the switch. Of the values the loader accepts, the one
+/// whose outcome it changes is `on`: the loader reads it as `true`, and this
+/// override turns it back off.
+pub fn allow_missing_aud_override(value: &str) -> bool {
+    let value = value.trim();
+    ["true", "1", "yes"]
+        .iter()
+        .any(|on| value.eq_ignore_ascii_case(on))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    /// Q-9: the rolling-upgrade escape hatch loads from its documented
+    /// environment spelling — the `config` crate coerces the string to a
+    /// `bool` — and the default stays strict.
+    #[test]
+    fn require_access_token_typ_is_read_from_the_environment() {
+        assert!(config_from(&[]).auth.require_access_token_typ);
+        for off in ["false", "FALSE", "0", "no", "off"] {
+            let cfg = config_from(&[("AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP", off)]);
+            assert!(!cfg.auth.require_access_token_typ, "{off:?} must relax it");
+        }
+        let on = config_from(&[("AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP", "true")]);
+        assert!(on.auth.require_access_token_typ);
+
+        // A value that is not a boolean stops the load (and so the server)
+        // rather than silently leaving either posture in force.
+        let typo: HashMap<String, String> = [(
+            "AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP".to_owned(),
+            "flase".to_owned(),
+        )]
+        .into();
+        let loaded = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("AXIAM")
+                    .separator("__")
+                    .source(Some(typo)),
+            )
+            .build()
+            .and_then(|c| c.try_deserialize::<super::AppConfig>());
+        assert!(loaded.is_err(), "a typo must not load");
+    }
+
+    /// S-9: the `allow_missing_aud_as_user` override enables only on an
+    /// explicit affirmative. These are helper-level cases: at startup the
+    /// config loader has already refused every value it cannot read as a
+    /// boolean (empty, padded, a typo), so of the inputs below only `on`
+    /// reaches this function from a running server and changes its outcome.
+    #[test]
+    fn the_missing_aud_override_enables_only_on_an_affirmative() {
+        for on in ["true", "TRUE", " True ", "1", "yes", "YES", " yes\n"] {
+            assert!(super::allow_missing_aud_override(on), "{on:?}");
+        }
+        for off in [
+            "", " ", "false", "0", "no", "off", "on?", "ture", "enabled", "2",
+        ] {
+            assert!(!super::allow_missing_aud_override(off), "{off:?}");
+        }
+    }
 
     #[test]
     fn a_non_utf8_trusted_proxies_value_stops_the_boot() {

@@ -38,7 +38,7 @@ of §1.6, and writes the `EXECUTED` blocks. It does not implement tasks itself.
 | #889 | low | Audit redaction misses `export//<token>` (SR2-1, QR2-4) | OI-03 |
 | #890 | nit | Stale comments (`reset_mfa`, gRPC cap test, CSRF/session wording) | OI-06 |
 | #891 | low/nit | Upgrade-note and admin-doc corrections (nine items) | OI-06 |
-| #561 | Phase 23 G-10 | Benchmark currency: run-6 numbers in the comparisons and the website | OI-07 |
+| #561 | Phase 23 G-10 | Benchmark currency: runs 6, 6b and 6c in the three comparison documents (draft and website already done) | OI-07 |
 | #513 | Phase 23 G-1 | OpenID Basic OP and FAPI 2.0 certification submissions | **no task** (§7) |
 
 ### SDKs (one issue per repository, each a verbatim reviewer report)
@@ -199,7 +199,7 @@ where the change is local and the issue or this plan specifies it completely.
 | OI-04 | #872, #873 | One credential-superseded rule; the missing tests | Sonnet 5.5 |
 | OI-05 | #880, #881, #883 | Logout-token `kid`, CONTRACT 1.69, cross-SDK rules (Appendix A) | Opus 5.5 |
 | OI-06 | #874, #879, #890, #891 | Documentation and comment corrections | Sonnet 5.5 |
-| OI-07 | #561 | Run-6 numbers in the comparison documents and the website | Sonnet 5.5 |
+| OI-07 | #561 | Runs 6, 6b and 6c in the comparison documents; website spot-check | Sonnet 5.5 |
 
 ### Wave B — SDKs (one task per repository, parallel)
 
@@ -443,31 +443,98 @@ the code (§1.2) and the `EXECUTED` block lists the symbol it was checked agains
 #890-2 changed the test), fmt for touched crates, `npm run build` in `website/`
 if `threatModel.ts` changed, and the docs link check the repository's CI runs.
 
-### OI-07 — #561: run-6 numbers · Sonnet 5.5
+### OI-07 — #561: runs 6, 6b and 6c in the comparison documents · Sonnet 5.5
 
-**State found on 2026-11-26.** The seventh draft of
-`benchmarks/PUBLIC_BENCH_ANALYSIS.md` exists (runs 6, 6b, 6c; four targets).
-The three comparison documents still say run 6 "will measure" and carry run-5
-performance rows. That is the open half of T23.10.2(b).
+**State found on 2026-11-26.** The issue text is older than the runs. What
+actually happened differs from it in five ways, and the task follows the runs,
+not the issue:
+
+| The issue says | What was run (seventh draft, §0) |
+|---|---|
+| Run 6 on the G-box (laptop), run-5 caps | Runs **6, 6b and 6c** on one cloud VM (AMD EPYC Genoa, 16 vCPUs, 64 GiB), 2026-11-20 to 2026-11-24 |
+| AXIAM `1.0.0-beta18` | AXIAM **1.3.0** (run 6) and **1.3.1** (runs 6b, 6c) |
+| Keycloak 26.8.0, Zitadel v4.19.4, authentik 2026.8.3 | **Keycloak 26.8.1, Zitadel v4.19.5, authentik 2026.8.5** |
+| One run | Run 6 is the run of record (2 CPU caps, three profiles). Run 6b repeats plaintext at 4 CPUs. Run 6c repeats it on SurrealDB 3.3.5 (unsupported, benchmark-only) to size the SurrealDB 4.0.1 cost |
+| authentik gets a performance statement | **No authentik cell passed the validity gate.** Only its resting footprint is a valid figure |
+
+Already done, by the maintainer: the seventh draft of
+`benchmarks/PUBLIC_BENCH_ANALYSIS.md` (commit `502534d`) and the website's
+benchmark page (`360423e`, `1727af5`, `e85da89`, `9e1df52`). **Still open:** the
+three comparison documents, which cite run-5 figures and say run 6 "will
+measure … on the same G-box"; and one stale sentence on the website.
+
+**The reading rules of the seventh draft are binding on every sentence written:**
+
+1. **Run 6 is not comparable with run 5** (host, engine and release all
+   changed). No run-5 figure stays next to a run-6 one as a trend, and the
+   run-5 multiples (about 8× Keycloak and 6.5× Zitadel on client credentials,
+   2.4× and 4.8× on introspection, RSS "under 8% of Keycloak's") are
+   **replaced**, not kept.
+2. **Head-to-head claims use run 6 (2/2) and run 6b pass B (4/4) only**, both
+   on SurrealDB 4.0.1. Run 6c never enters a head-to-head sentence or table; it
+   may be cited only as what it is, the size of the SurrealDB 4.0.1 regression
+   (13–38% of AXIAM's throughput at 2 CPUs, 8–37% at 4).
+3. Every figure names its run and the versions measured.
+4. Rows that failed the validity gate are never part of a claim: all of
+   authentik's, and Zitadel's login and fallback refresh.
 
 **Do.**
-1. In `claude_dev/competitor-comparison-keycloak.md`, `-zitadel.md` and
-   `-authentik.md`: replace the run-5 performance rows and the "run 6 will
-   re-measure" sentences with the run-6 figures, each cited to its section of
-   the seventh draft, and add a dated change-log line to each document. The
-   authentik comparison gains its first performance statement.
-2. Copy numbers, do not summarise them: every figure written must be findable
-   verbatim in the seventh draft. The draft's own framing is binding, including
-   the unflattering parts (AXIAM is database-bound on data cells; Keycloak wins
-   two head-to-head cells). No rounding in AXIAM's favour.
-3. Check `website/src/data.ts` and `website/src/pages/Benchmarks.tsx`: if they
-   already carry run-6 numbers, verify them against the draft; if they carry
-   run-5 numbers, update them and the versions they name.
-4. Honour the binding notes of #561 (minimal profile only as documented, SCIM
-   targets, any raised rate limit stated).
+1. **`claude_dev/competitor-comparison-keycloak.md`.** Rewrite the header note
+   (lines about run 5 / run 6 / G-box), the summary paragraph, the *Server RSS*
+   row and the "Efficiency is the product" point from the seventh draft:
+   - token issuance 3.8–3.9× at 2 CPUs and 3.5–4.6× at 4 (the range covers
+     Keycloak and Zitadel; take Keycloak's own figure from §1); JWKS 7.9×;
+     login on par (§1, §13);
+   - **Keycloak wins introspection and REST userinfo** head to head, and on
+     whole-stack CPU per request (§1, §7). This goes in the summary, not in a
+     footnote;
+   - server RSS, run 6: AXIAM 54–75 MiB, Keycloak 708–941 MiB (§7); at 4/4,
+     89–133 MiB against 1,082–1,170 MiB;
+   - the memory claim of Keycloak 26.8: **no reduction observed** against run
+     5's 710–853 MiB, stated exactly as §7 states it ("a different host, so a
+     direction, not a measurement of its release-note claim");
+   - AXIAM is database-bound on every data cell (§5).
+2. **`claude_dev/competitor-comparison-zitadel.md`.** Same treatment: the
+   header note, the *Server RSS* row (AXIAM 54–75 MiB, Zitadel 127–137 MiB),
+   the *Whole-stack RSS* row and the "Data-plane performance" point (take
+   Zitadel's multiples from §1; JWKS 21×, gRPC userinfo 12.6–28×). The resting
+   footprint needs care: by resident set AXIAM's stack is smaller (373 MiB
+   against 593 MiB), **by cgroup working set Zitadel's is** (172 MiB against
+   216 MiB). Write both, as §7 does. The minimal-profile figures (207 MiB) were
+   **not** re-measured: keep them labelled as the 2026-10-05 measurement.
+3. **`claude_dev/competitor-comparison-authentik.md`.** Replace the "run 6 will
+   measure it" paragraph. The honest statement is: authentik 2026.8.5 was run as
+   a fourth target; **none of its cells passed the validity gate, so no
+   throughput or latency comparison is made**; the only valid figure is the
+   resting footprint (1,668 MiB whole stack: server 983, worker 347, PostgreSQL
+   338, against AXIAM's 373 MiB). Say what the draft's next round plans for it
+   (§13 item 7). This is weaker than the acceptance text of #561 ("so that the
+   authentik comparison can make a performance statement"); record that gap in
+   the `EXECUTED` block and in the closing comment, do not paper over it.
+4. Each of the three documents gets a **dated change-log line** naming runs 6,
+   6b and 6c, the versions measured and the fact that the run-5 figures were
+   replaced.
+5. **Website.** The page already carries the three runs. Fix the stale sentence
+   near `website/src/pages/Benchmarks.tsx:1782` ("is still the run-5 analysis
+   until its seventh draft is written"): the seventh draft exists. Then
+   spot-check ten figures on the page against the draft (two per section) and
+   list them in the `EXECUTED` block; correct any mismatch in favour of the
+   draft.
+6. **Copy numbers, do not summarise them.** Every figure written must be
+   findable verbatim in the seventh draft, cited to its section. No rounding in
+   AXIAM's favour. Also grep the repository (`README.md`, `docs/`, `website/`)
+   for the run-5 multiples named in rule 1 and correct any that survive outside
+   a context explicitly labelled run 5.
+7. **Close the loop on the issue's binding notes.** The minimal profile, the
+   production rate limits and the new-feature cells were **not** measured in
+   this round (draft §9, §13 item 6). Say so in the closing comment on #561
+   rather than implying the W5 F4 conditions were exercised.
 
 **Verify.** `npm run build` and the website tests in `website/`;
-`docSectionsAreComplete()` still passes. This task closes #561.
+`docSectionsAreComplete()` still passes; the markdown link check the
+repository's CI runs. This task closes #561, with a closing comment that lists
+where the outcome differs from the issue's acceptance text (versions, host, no
+valid authentik cell).
 
 ---
 
@@ -645,7 +712,8 @@ push. Do not claim a test run that did not happen.
   owner cuts server 1.3.2 (or 1.4.0) and SDK 1.4.0 after the merges.
 - **Pull request #893.** Another session owns it.
 - **New review findings beyond §1.6.** The gate is bounded on purpose.
-- **Benchmarks.** No new run. OI-07 only transcribes run 6.
+- **Benchmarks.** No new run. OI-07 only transcribes runs 6, 6b and 6c from the
+  seventh draft; the passes that draft defers (§13) stay deferred.
 
 ---
 

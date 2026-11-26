@@ -1552,6 +1552,68 @@ async fn a_provisioning_collision_is_one_generic_invalid_grant() {
     );
 }
 
+/// #877 audit, pinned: the native grant admits the tenant when it
+/// authenticates the client (`live_tenant`), before the provider ID token is
+/// verified or spent — so a suspended tenant's native sign-in writes no user,
+/// no federation link and no session. This passed before #877; it is kept so
+/// the order cannot drift to "provision first" the way the browser callbacks
+/// had.
+#[actix_web::test]
+async fn a_native_sign_in_to_a_suspended_tenant_provisions_nothing() {
+    use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+
+    let f = setup().await;
+    let app = test_app!(f);
+    let app_client = native_client(&f, "ios-app").await;
+    let count = |table: &'static str| {
+        let db = f.db.clone();
+        let tenant = f.tenant_id.to_string();
+        async move {
+            let mut r = db
+                .query(format!(
+                    "SELECT count() AS total FROM {table} WHERE tenant_id = $tenant GROUP ALL"
+                ))
+                .bind(("tenant", tenant))
+                .await
+                .unwrap();
+            let rows: Vec<axiam_db::CountRow> = r.take(0).unwrap();
+            rows.first().map_or(0, |row| row.total)
+        }
+    };
+    let users_before = count("user").await;
+
+    SurrealTenantRepository::new(f.db.clone())
+        .update(
+            f.tenant_id,
+            UpdateTenant {
+                status: Some(TenantStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let token = id_token(&f, "s1", "suspended-native-user", json!({}));
+    let (status, body) = token_endpoint!(
+        app,
+        f,
+        grant_body(&app_client, SLUG, &token, "s1", "openid")
+    );
+    assert_ne!(status, 200, "{body}");
+    assert_eq!(body["error"], "tenant_suspended", "{body}");
+    assert_eq!(
+        count("user").await,
+        users_before,
+        "no user may be provisioned"
+    );
+    assert_eq!(
+        count("federation_link").await,
+        0,
+        "no federation link may be written"
+    );
+    assert_eq!(session_rows(&f).await, 0, "no session may be written");
+}
+
 // ===========================================================================
 // D-N39 (#839, F4-R12-01) — ending the native session ends its refresh token
 // ===========================================================================

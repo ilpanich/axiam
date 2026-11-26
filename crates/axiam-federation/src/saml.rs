@@ -11,6 +11,7 @@ use std::sync::Arc;
 use axiam_core::error::AxiamError;
 use axiam_core::models::federation::{CreateFederationLink, FederationConfig, FederationProtocol};
 use axiam_core::models::federation_claims::{MappedIdentity, map_identity};
+use axiam_core::models::tenant::SharedTenantAdmission;
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{
     AssertionReplayRepository, FederationConfigRepository, FederationLinkRepository, UserRepository,
@@ -148,6 +149,10 @@ pub struct SamlFederationService<FC, FL, UR, AR> {
     /// then the service holds a semaphore of its own. The wait is bounded
     /// (#654), as every other waiter on the semaphore is.
     crypto_gate: CryptoGate,
+    /// SA-13 / #877 — the requesting tenant's admission, asked once the
+    /// assertion has verified and before the user and the federation link
+    /// are written; see [`crate::oidc::admit_tenant`].
+    tenant_admission: Option<SharedTenantAdmission>,
 }
 
 /// What a signature that does not verify reads as (xmlsec's verdict as samael
@@ -190,7 +195,19 @@ where
             metadata_cache: SamlMetadataCache::new().with_crypto_gate(crypto_gate.clone()),
             metadata_fetcher: guarded_metadata_fetcher(),
             crypto_gate,
+            tenant_admission: None,
         }
+    }
+
+    /// Attach the tenant lifecycle check (SA-13, #877): an ACS for a tenant
+    /// that does not admit its principals is refused
+    /// [`FederationError::TenantSuspended`] once the assertion has verified,
+    /// before any user or federation link is written. The composition root
+    /// always attaches the tenant repository.
+    #[must_use]
+    pub fn with_tenant_admission(mut self, admission: SharedTenantAdmission) -> Self {
+        self.tenant_admission = Some(admission);
+        self
     }
 
     /// Verify XML signatures under `gate` — the deployment's crypto semaphore,
@@ -710,6 +727,10 @@ where
 
         // Apply attribute_map to resolve email and display name.
         let (email, display_name) = apply_attribute_map(&claims, &config.attribute_map);
+
+        // #877 — the assertion has verified (and is spent); nothing has been
+        // written in the requesting tenant yet. See `crate::oidc::admit_tenant`.
+        crate::oidc::admit_tenant(self.tenant_admission.as_ref(), requesting_tenant_id).await?;
 
         // X7.2 — attached where the assertion is still in hand, exactly as the
         // OIDC path attaches `auth_time`.

@@ -262,14 +262,18 @@ fn state_with_gate(
         .build()
         .unwrap();
     state.jwks_cache = jwks_cache;
-    state.federation.oidc_federation_service = Some(OidcFederationService::new(
+    state.federation.oidc_federation_service = Some(
+        OidcFederationService::new(
         state.federation.federation_config_repo.clone(),
         state.federation.federation_link_repo.clone(),
         state.user_repo.clone(),
         state.http_client.clone(),
         Arc::clone(&state.jwks_cache),
         TEST_FED_ENC_KEY,
-    ));
+    )
+    // #877: as the composition root attaches it.
+    .with_tenant_admission(Arc::new(state.tenant_repo.clone())),
+    );
     state.auth_service = state.auth_service.clone().with_reactor_gate(gate.clone());
     state.oauth2.token_service = state
         .oauth2
@@ -627,12 +631,38 @@ mod saml {
 
     struct SamlOutcome {
         status: u16,
+        body: serde_json::Value,
         has_access_cookie: bool,
         sessions: usize,
         payloads: Vec<serde_json::Value>,
+        /// Users and federation links in the tenant after the ACS answered.
+        users: u64,
+        federation_links: u64,
     }
 
     async fn run_saml_acs(outcome: ReactorOutcome) -> SamlOutcome {
+        run_saml_acs_with(outcome, "scd_valid_response.xml", false).await
+    }
+
+    async fn count_in_tenant(db: &Surreal<TestDb>, query: &str, tenant_id: Uuid) -> u64 {
+        let mut result = db
+            .query(query)
+            .bind(("tenant", tenant_id.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let rows: Vec<axiam_db::CountRow> = result.take(0).unwrap();
+        rows.first().map_or(0, |r| r.total)
+    }
+
+    /// [`run_saml_acs`] with `fixture_name` as the posted response, and the
+    /// tenant suspended after the sign-in started when `suspended` (#877).
+    async fn run_saml_acs_with(
+        outcome: ReactorOutcome,
+        fixture_name: &str,
+        suspended: bool,
+    ) -> SamlOutcome {
         let (db, _org_id, tenant_id) = setup_db().await;
         let auth = test_auth_config();
 
@@ -687,6 +717,20 @@ mod saml {
             .await
             .expect("seed federation_login_state");
 
+        if suspended {
+            use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+            SurrealTenantRepository::new(db.clone())
+                .update(
+                    tenant_id,
+                    UpdateTenant {
+                        status: Some(TenantStatus::Suspended),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
         let app = app_for!(auth, state);
         let req = test::TestRequest::post()
             .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
@@ -698,19 +742,37 @@ mod saml {
             .uri("/api/v1/auth/federation/saml/acs")
             .set_json(json!({
                 "relay_state": relay_state,
-                "saml_response_b64": STANDARD.encode(fixture("scd_valid_response.xml")),
+                "saml_response_b64": STANDARD.encode(fixture(fixture_name)),
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        let has_access_cookie = resp
+            .response()
+            .cookies()
+            .any(|c| c.name() == "axiam_access");
+        let body =
+            serde_json::from_slice(&test::read_body(resp).await).unwrap_or(serde_json::Value::Null);
 
         SamlOutcome {
-            status: resp.status().as_u16(),
-            has_access_cookie: resp
-                .response()
-                .cookies()
-                .any(|c| c.name() == "axiam_access"),
+            status,
+            body,
+            has_access_cookie,
             sessions: session_count(&db).await,
             payloads: login_calls(&seen),
+            users: count_in_tenant(
+                &db,
+                "SELECT count() AS total FROM user WHERE tenant_id = $tenant GROUP ALL",
+                tenant_id,
+            )
+            .await,
+            federation_links: count_in_tenant(
+                &db,
+                "SELECT count() AS total FROM federation_link \
+                 WHERE tenant_id = $tenant GROUP ALL",
+                tenant_id,
+            )
+            .await,
         }
     }
 
@@ -831,6 +893,8 @@ mod saml {
         );
         assert!(out.has_access_cookie);
         assert_eq!(out.sessions, 1);
+        // What the #877 tests below count is what a sign-in writes.
+        assert_eq!((out.users, out.federation_links), (1, 1));
         assert_eq!(
             out.payloads.len(),
             1,
@@ -853,5 +917,60 @@ mod saml {
             "a veto must refuse BEFORE create_session_and_tokens"
         );
         assert_eq!(out.payloads.len(), 1);
+    }
+
+    /// #877: a SAML ACS whose (genuinely signed) assertion arrives while the
+    /// tenant is suspended is refused `403 tenant_suspended` before anything
+    /// is written — no user, no federation link — and without asking the
+    /// `login.post_auth` reactor. Before the fix the user and the link were
+    /// provisioned and the reactor asked; only the session step refused.
+    #[actix_rt::test]
+    async fn a_saml_acs_sign_in_to_a_suspended_tenant_provisions_nothing() {
+        let out = run_saml_acs_with(ReactorOutcome::Allow, "scd_valid_response.xml", true).await;
+        let body = &out.body;
+
+        assert!(!out.has_access_cookie, "{body}");
+        assert_eq!(out.status, 403, "{body}");
+        assert_eq!(body["error"], "tenant_suspended", "{body}");
+        assert_eq!(out.sessions, 0);
+        assert_eq!(
+            out.users, 0,
+            "no user may be provisioned in a suspended tenant"
+        );
+        assert_eq!(
+            out.federation_links, 0,
+            "no federation link may be written in a suspended tenant"
+        );
+        assert!(
+            out.payloads.is_empty(),
+            "the post-auth reactor must not be asked about a refused sign-in"
+        );
+    }
+
+    /// SR1-8, kept closed by #877: the admission runs only once the assertion
+    /// has verified. A tampered assertion answers a suspended tenant exactly as
+    /// it answers an active one.
+    #[actix_rt::test]
+    async fn an_unverified_saml_assertion_answers_alike_for_a_suspended_and_an_active_tenant() {
+        let active = run_saml_acs_with(ReactorOutcome::Allow, "tampered_response.xml", false).await;
+        let suspended =
+            run_saml_acs_with(ReactorOutcome::Allow, "tampered_response.xml", true).await;
+
+        assert_ne!(active.status, 200, "{}", active.body);
+        assert_ne!(
+            suspended.body["error"], "tenant_suspended",
+            "{}",
+            suspended.body
+        );
+        assert_eq!(
+            (suspended.status, &suspended.body),
+            (active.status, &active.body),
+            "a tampered assertion must get the same answer whatever the tenant's status"
+        );
+        for out in [&active, &suspended] {
+            assert!(!out.has_access_cookie);
+            assert_eq!((out.users, out.federation_links), (0, 0));
+            assert!(out.payloads.is_empty());
+        }
     }
 }

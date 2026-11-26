@@ -136,6 +136,16 @@ pub enum FederationError {
         "the identity provider tenant that issued this token is not accepted by this configuration"
     )]
     IssuerTenantNotAllowed,
+
+    /// The tenant the sign-in is for does not admit its principals (SA-13):
+    /// the provider's answer verified, but the tenant is suspended.
+    ///
+    /// Raised by the browser callbacks after the upstream token or assertion
+    /// has verified and before any user or federation link is written (#877),
+    /// so only a caller the provider has just authenticated learns it; maps to
+    /// [`axiam_core::error::AxiamError::TenantSuspended`] (`403`).
+    #[error("tenant is suspended")]
+    TenantSuspended,
 }
 
 impl From<FederationError> for axiam_core::error::AxiamError {
@@ -210,6 +220,9 @@ impl From<FederationError> for axiam_core::error::AxiamError {
             | FederationError::JwksFetchFailed(msg) => {
                 axiam_core::error::AxiamError::ServiceUnavailable(msg)
             }
+            // The refusal the session step gives, so the answer does not
+            // depend on which of the two checks saw the suspension first.
+            FederationError::TenantSuspended => axiam_core::error::AxiamError::TenantSuspended,
             other => axiam_core::error::AxiamError::Internal(other.to_string()),
         }
     }

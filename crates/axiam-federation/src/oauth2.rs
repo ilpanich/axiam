@@ -316,6 +316,10 @@ where
             "OAuth2 callback: userinfo resolved an identity"
         );
 
+        // #877 — the provider's answer has verified; nothing has been written
+        // yet. See `crate::oidc::admit_tenant` for why here and not earlier.
+        self.admit_requesting_tenant(requesting_tenant_id).await?;
+
         self.provision_or_link_identity(requesting_tenant_id, config.id, &identity)
             .await
     }

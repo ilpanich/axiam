@@ -933,10 +933,12 @@ where
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<(), OAuth2Error> {
+        // A status check of an already-authenticated grant: through the record
+        // cache, ≤ TTL old (`axiam_db::record_cache`).
         account_may_act_outcome(
             tenant_id,
             user_id,
-            self.user_repo.get_by_id(tenant_id, user_id).await,
+            self.user_repo.get_by_id_cached(tenant_id, user_id).await,
         )
     }
 
@@ -1652,7 +1654,9 @@ where
     /// credential does. Any other error is a datastore fault and stays a
     /// `server_error`, never masquerading as bad client credentials.
     async fn live_tenant(&self, tenant_id: Uuid) -> Result<Tenant, OAuth2Error> {
-        live_tenant_outcome(self.tenant_repo.get_by_id(tenant_id).await)
+        // Through the record cache: liveness ≤ TTL old, dropped at once by a
+        // suspension or deletion through this process (`axiam_db::record_cache`).
+        live_tenant_outcome(self.tenant_repo.get_by_id_cached(tenant_id).await)
     }
 
     /// The credential check proper, split out of

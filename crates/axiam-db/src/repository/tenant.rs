@@ -5,6 +5,7 @@ use axiam_core::id::new_id;
 use axiam_core::models::tenant::{CreateTenant, Tenant, TenantKind, TenantStatus, UpdateTenant};
 use axiam_core::repository::{PaginatedResult, Pagination, TenantRepository};
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use surrealdb::Connection;
 use surrealdb_types::SurrealValue;
 use uuid::Uuid;
@@ -14,6 +15,7 @@ use crate::handle::DbHandle;
 use crate::helpers::{
     CountRow, classify_write_error, paginate, retry_hot_row, take_first_or_not_found,
 };
+use crate::record_cache::RecordCaches;
 
 /// The condition, on a `tenant` row selected by record id (`$id`, `$nil`),
 /// that makes it an orphan purge's claim marker
@@ -169,12 +171,24 @@ impl TenantRowWithId {
 #[derive(Clone)]
 pub struct SurrealTenantRepository<C: Connection> {
     db: DbHandle<C>,
+    /// Serves `get_by_id_cached`; every tenant write here drops its entry.
+    record_caches: Option<Arc<RecordCaches>>,
 }
 
 impl<C: Connection> SurrealTenantRepository<C> {
     pub fn new(db: impl Into<DbHandle<C>>) -> Self {
         let db = db.into();
-        Self { db }
+        Self {
+            db,
+            record_caches: None,
+        }
+    }
+
+    /// Serve `get_by_id_cached` from `caches` (see [`crate::record_cache`]).
+    #[must_use]
+    pub fn with_record_caches(mut self, caches: Arc<RecordCaches>) -> Self {
+        self.record_caches = Some(caches);
+        self
     }
 }
 
@@ -984,6 +998,18 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
         live_tenant_from_rows(rows, id).map_err(Into::into)
     }
 
+    async fn get_by_id_cached(&self, id: Uuid) -> AxiamResult<Tenant> {
+        let Some(caches) = self.record_caches.as_deref() else {
+            return self.get_by_id(id).await;
+        };
+        if let Some(tenant) = caches.tenant(id) {
+            return Ok(tenant);
+        }
+        let tenant = self.get_by_id(id).await?;
+        caches.put_tenant(&tenant);
+        Ok(tenant)
+    }
+
     async fn get_by_slug(&self, organization_id: Uuid, slug: &str) -> AxiamResult<Tenant> {
         let org_id_str = organization_id.to_string();
         let slug_owned = slug.to_string();
@@ -1039,6 +1065,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     }
 
     async fn update(&self, id: Uuid, input: UpdateTenant) -> AxiamResult<Tenant> {
+        let _forget = RecordCaches::tenant_write(self.record_caches.as_deref(), id);
         let id_str = id.to_string();
 
         let mut sets = Vec::new();
@@ -1091,6 +1118,7 @@ impl<C: Connection> TenantRepository for SurrealTenantRepository<C> {
     }
 
     async fn delete(&self, id: Uuid) -> AxiamResult<()> {
+        let _forget = RecordCaches::tenant_write(self.record_caches.as_deref(), id);
         // #523 (P23W2-04, D-4): deleting a tenant TOMBSTONES it. The row keeps
         // its data and gains `deleted_at`, which takes it out of every read in
         // this file (and the settings repository's tenant lookup): sign-in,

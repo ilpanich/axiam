@@ -605,7 +605,40 @@ where
     // handle swap, exactly as the repositories do.
     let db_handle = pool.handle_for_repo();
     let org_repo = SurrealOrganizationRepository::new(pool.handle_for_repo());
-    let tenant_repo = SurrealTenantRepository::new(pool.handle_for_repo());
+    // Record caches (`axiam_db::record_cache`): one set per process, shared by
+    // the tenant, OAuth2 client and user repositories below so a write through
+    // any of them drops what every reader would have served. 5 s by default,
+    // the bound decided for the session-validation and decision caches;
+    // `AXIAM__DB__RECORD_CACHE_TTL_SECS=0` turns them off.
+    let record_caches = match config.db.record_cache_ttl_secs {
+        0 => {
+            tracing::info!(
+                "record caches disabled (tenant, client and user lookups read the \
+                 datastore every time; AXIAM__DB__RECORD_CACHE_TTL_SECS=0)"
+            );
+            None
+        }
+        ttl_secs => {
+            tracing::info!(
+                ttl_secs,
+                max_entries = config.db.record_cache_max_entries,
+                "record caches enabled — a tenant, client or account changed on \
+                 another replica is seen here within ttl_secs; set \
+                 AXIAM__DB__RECORD_CACHE_TTL_SECS=0 to disable"
+            );
+            Some(Arc::new(axiam_db::RecordCaches::new(
+                std::time::Duration::from_secs(ttl_secs),
+                config.db.record_cache_max_entries,
+            )))
+        }
+    };
+    let tenant_repo = {
+        let repo = SurrealTenantRepository::new(pool.handle_for_repo());
+        match &record_caches {
+            Some(c) => repo.with_record_caches(Arc::clone(c)),
+            None => repo,
+        }
+    };
     // G-6 / T23.6.2 (D-57): the one provisioning event source. Every repository
     // that can write a provisioned field (users, groups and their memberships,
     // the GDPR deletion request's status write) reports to this handle after its
@@ -633,6 +666,10 @@ where
     let scope_repo = SurrealScopeRepository::new(pool.handle_for_repo());
     let scim_token_repo = SurrealScimTokenRepository::new(pool.handle_for_repo());
     let service_account_repo = SurrealServiceAccountRepository::new(pool.handle_for_repo());
+    let user_repo = match &record_caches {
+        Some(c) => user_repo.with_record_caches(Arc::clone(c)),
+        None => user_repo,
+    };
 
     // §15.2 / §16.6 — legacy service-account secret hashes.
     //
@@ -1295,7 +1332,13 @@ where
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client");
-    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo());
+    let oauth2_client_repo = {
+        let repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo());
+        match &record_caches {
+            Some(c) => repo.with_record_caches(Arc::clone(c)),
+            None => repo,
+        }
+    };
     // R110W3-02 (#675): once per process, beside boot, counts only — see the module.
     let _ = crate::device_grant_scan::spawn_boot_scan(oauth2_client_repo.clone());
     // T21.4 — RFC 7591 initial access tokens. Read by the unauthenticated

@@ -202,6 +202,18 @@ pub trait OrganizationRepository: Send + Sync {
 pub trait TenantRepository: Send + Sync {
     fn create(&self, input: CreateTenant) -> impl Future<Output = AxiamResult<Tenant>> + Send;
     fn get_by_id(&self, id: Uuid) -> impl Future<Output = AxiamResult<Tenant>> + Send;
+
+    /// [`Self::get_by_id`], possibly served from a short-TTL process cache
+    /// (`axiam_db::record_cache`, 5 s by default).
+    ///
+    /// For **read-only** checks on a hot path — the tenant liveness a client
+    /// authentication confirms — never for a read whose result is written back.
+    /// A tenant suspended or deleted through this process's repository is
+    /// dropped from the cache at once; one changed elsewhere is seen within the
+    /// TTL. The default is the uncached read.
+    fn get_by_id_cached(&self, id: Uuid) -> impl Future<Output = AxiamResult<Tenant>> + Send {
+        self.get_by_id(id)
+    }
     fn get_by_slug(
         &self,
         organization_id: Uuid,
@@ -249,6 +261,26 @@ pub trait UserRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<User>> + Send;
+
+    /// [`Self::get_by_id`], possibly served from a short-TTL process cache
+    /// (`axiam_db::record_cache`, 5 s by default).
+    ///
+    /// For **read-only** checks of a principal that is already authenticated —
+    /// whether its account may still act, the claims UserInfo releases — and
+    /// for nothing else: a cached account never carries credential material
+    /// (its `password_hash` and `mfa_secret` are blank), and its counters
+    /// (failed logins, TOTP step) may be up to the TTL old, so it must never
+    /// feed a credential check or a read-modify-write. An account changed
+    /// through this process's repository is dropped from the cache at once;
+    /// one changed elsewhere is seen within the TTL. The default is the
+    /// uncached read.
+    fn get_by_id_cached(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<User>> + Send {
+        self.get_by_id(tenant_id, id)
+    }
     fn get_by_username(
         &self,
         tenant_id: Uuid,

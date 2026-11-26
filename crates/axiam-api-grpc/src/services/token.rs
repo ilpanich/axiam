@@ -72,7 +72,8 @@ impl<U: UserRepository> TokenServiceImpl<U> {
         else {
             return Ok(true);
         };
-        match self.user_repo.get_by_id(tenant_id, user_id).await {
+        // Through the record cache: a status check, ≤ TTL old (record_cache).
+        match self.user_repo.get_by_id_cached(tenant_id, user_id).await {
             Ok(user) => Ok(axiam_auth::service::account_may_act(&user).is_ok()),
             Err(AxiamError::NotFound { .. }) => Ok(false),
             Err(_) => Err(Status::internal("failed to read the token's subject")),

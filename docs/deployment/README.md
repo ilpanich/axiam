@@ -922,6 +922,38 @@ What the cache stores and does not store:
 > in a multi-replica deployment that needs a logout to reach every replica on
 > the next request, and never set it longer than the decision cache's TTL.
 
+## Record caches (tenant, client, user — v1.4)
+
+The token endpoints, UserInfo and session refresh re-read the same three
+records on every request: the client's tenant (is it still live?), the OAuth2
+client, and the account behind the token (may it still act?). Since v1.4 those
+**read-only** lookups are served from a short-TTL in-process cache.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__DB__RECORD_CACHE_TTL_SECS` | TTL of every record cache, in seconds. Default **`5`**, the same bound as the decision and session-validation caches. `0` disables them. |
+| `AXIAM__DB__RECORD_CACHE_MAX_ENTRIES` | Bound on each cache's entries (default `10000`). |
+
+What it does and does not do:
+
+* Only reads that decide nothing they write back use it — tenant liveness in
+  client authentication, the client lookup of the token endpoints, the account
+  checked by UserInfo, introspection, refresh and the OAuth2 grants. The
+  general `get_by_id` that read-modify-write code relies on (failed-login
+  counters, TOTP replay steps, settings) is **never** cached.
+* A cached account carries **no credential material**: its password hash and
+  MFA secret are blanked before it is stored.
+* Every write through the owning repository — suspending or deleting a tenant,
+  updating, deleting or re-keying a client, changing, locking or deleting an
+  account — drops the entry in the same call, so on a **single replica** it
+  takes effect on the next request.
+
+> **⚠ Multi-replica caveat — the same 5 s as the other caches.** A change made
+> on another replica, or outside the owning repository (a restore, a direct
+> database edit), is seen within `AXIAM__DB__RECORD_CACHE_TTL_SECS`. In
+> particular a rotated client secret keeps working on the other replicas for up
+> to the TTL. Set it to `0` where that window is not acceptable.
+
 ## TCP_NODELAY on the REST listener (I5)
 
 | Key | Purpose |

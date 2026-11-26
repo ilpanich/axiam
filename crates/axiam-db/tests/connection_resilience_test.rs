@@ -173,6 +173,7 @@ async fn recovers_from_token_expiry_without_restart() {
         pool_size: 1,
         pool_max_in_flight: 0,
         pool_acquire_timeout_secs: 5,
+        ..DbConfig::default()
     };
 
     // Short TTL: a 4s token, proactive re-signin at 0.5 * 4s = 2s — well
@@ -233,6 +234,7 @@ async fn reconnect_exhaustion_stays_unhealthy_and_keeps_probing_forever() {
         pool_size: 1,
         pool_max_in_flight: 0,
         pool_acquire_timeout_secs: 5,
+        ..DbConfig::default()
     };
 
     // Connect against the live server first (proves the manager itself is
@@ -289,6 +291,7 @@ async fn successful_reconnect_flips_health_back_to_ok_without_restart() {
         pool_size: 1,
         pool_max_in_flight: 0,
         pool_acquire_timeout_secs: 5,
+        ..DbConfig::default()
     };
 
     let short_ttl = Duration::from_secs(4);
@@ -331,6 +334,7 @@ async fn pooled_handles_survive_token_expiry_without_restart() {
         pool_size: 3,
         pool_max_in_flight: 0,
         pool_acquire_timeout_secs: 5,
+        ..DbConfig::default()
     };
 
     // 4s token, proactive re-signin at 0.5 * 4s = 2s per handle.

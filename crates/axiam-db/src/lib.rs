@@ -24,6 +24,7 @@ pub mod metrics;
 mod pool;
 pub mod rate_limit_counter;
 pub mod read_preference;
+pub mod record_cache;
 pub mod repository;
 mod schema;
 pub mod seeder;
@@ -43,6 +44,9 @@ pub use rate_limit_counter::{
     StoreIncrementFuture, StorePeekFuture, WindowMode,
 };
 pub use read_preference::{DEFAULT_MAX_STALENESS, QueryClass, ReadPreference, ReadReplicaConfig};
+pub use record_cache::{
+    DEFAULT_RECORD_CACHE_MAX_ENTRIES, DEFAULT_RECORD_CACHE_TTL_SECS, RecordCaches,
+};
 pub use repository::{
     LeaseClaim, LeaseRecord, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
     SurrealAssertionReplayRepository, SurrealAuditLogRepository,

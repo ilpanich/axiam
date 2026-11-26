@@ -3939,7 +3939,7 @@ async fn userinfo_claims_for<C: Connection + Clone>(
         None => {
             state
                 .user_repo
-                .get_by_id(user.principal_tenant_id, user.user_id)
+                .get_by_id_cached(user.principal_tenant_id, user.user_id)
                 .await
         }
     };

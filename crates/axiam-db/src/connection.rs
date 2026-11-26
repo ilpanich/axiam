@@ -163,6 +163,16 @@ pub struct DbConfig {
     /// (matches B1's `hash_acquire_timeout_secs` so backpressure feels the same
     /// across the Argon2id gate and the DB pool).
     pub pool_acquire_timeout_secs: u64,
+    /// TTL, in seconds, of the tenant / OAuth2 client / user record caches
+    /// ([`crate::record_cache`]): the hot, read-only lookups of the token
+    /// endpoints, UserInfo and session refresh. Default **5** — the same bound
+    /// as the session-validation and decision caches. `0` disables them; every
+    /// such lookup then reads the datastore. Overridable via
+    /// `AXIAM__DB__RECORD_CACHE_TTL_SECS`.
+    pub record_cache_ttl_secs: u64,
+    /// Bound on the entries of each record cache. Overridable via
+    /// `AXIAM__DB__RECORD_CACHE_MAX_ENTRIES`; default 10 000.
+    pub record_cache_max_entries: usize,
 }
 
 impl std::fmt::Debug for DbConfig {
@@ -178,6 +188,7 @@ impl std::fmt::Debug for DbConfig {
             .field("reconnect_ceiling_ms", &self.reconnect_ceiling_ms)
             .field("reconnect_max_retries", &self.reconnect_max_retries)
             .field("pool_size", &self.pool_size)
+            .field("record_cache_ttl_secs", &self.record_cache_ttl_secs)
             .finish_non_exhaustive()
     }
 }
@@ -199,6 +210,8 @@ impl Default for DbConfig {
             pool_size: 1,
             pool_max_in_flight: 0,
             pool_acquire_timeout_secs: 5,
+            record_cache_ttl_secs: crate::record_cache::DEFAULT_RECORD_CACHE_TTL_SECS,
+            record_cache_max_entries: crate::record_cache::DEFAULT_RECORD_CACHE_MAX_ENTRIES,
         }
     }
 }

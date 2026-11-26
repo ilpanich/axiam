@@ -873,6 +873,55 @@ over the cap is refused without being held in memory. C-R3-3: move the
 narrowing refusal before the nonce is claimed and make it independent of
 `out != NULL`. Run the sanitizer build if the repository's CI has one.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `764557b`; review fixes `5185925`
+> (round 1), `ac3a75d` (round 2).**
+>
+> - **C-R3-1:** the changelog and the `AXIAM_TRANSPORT_ERR_BODY_CAP` comment now
+>   say the management surface does not retry a capped response, while the §16
+>   authz check (idempotent POST) still does. New pin
+>   `test_a_capped_download_export_is_sent_once_and_reported_as_the_size_cap`
+>   (passed on unfixed code; removing the `!= BODY_CAP` condition makes it fail
+>   with "Expected 1 Was 3").
+> - **C-R3-2:** the defect was not the cap (already enforced in `write_cb`) but
+>   buffering and parsing a body nobody receives. New trailing member
+>   `discard_body` in `axiam_http_request_t`, set for `tenants.export_audit` and
+>   `privacy.download_export`: the transport counts the body against
+>   `max_response_bytes`, keeps a 64 KiB prefix for a non-2xx envelope, returns
+>   NULL on 2xx. `tests/test_transport_discard.c` (peak-RSS growth): unfixed, 3
+>   of 4 fail ("a refused discarded body was held in memory", "Expected 65536 Was
+>   41943040"). SOVERSION not bumped (the library allocates the struct; an old
+>   custom transport reads a prefix and is unaffected).
+> - **C-R3-3:** the narrowing check moved into `canonical_event()`, before the
+>   MAC and the nonce claim, independent of `out`; test seam
+>   `axiam_reactor_timeout_limit`. Unfixed: "Expected 1 Was 0" and the nonce was
+>   already recorded.
+> - **#880 and the OI-05 finding:** `find_key`'s one-key fallback removed (the
+>   ID-token and logout paths both go through `verify_core`/`lookup_key`).
+>   `tests/test_logout_kid.c`: the one-key kid-less logout and ID-token tests
+>   failed on unfixed code ("Expected 1 Was 0"); server-shaped two-key, unknown
+>   kid and rules-10/11-off-path tests are pins.
+>   `test_signature_only_path_keeps_kidless_fallback` pinned the old behaviour
+>   and was rewritten to `…_has_no_kidless_fallback`. The access-token path was
+>   unaffected (rule 12 refuses a kid-less token before any lookup). README
+>   conformance line 1.66 → 1.69.
+> - **Verification:** gcc 13 C11 Debug 87/87; ASan+UBSan (CI flags) 87/87;
+>   clang and gcc C23 87/87; valgrind on the five touched test binaries clean;
+>   `gen_management.py --check` current; TLS-bypass grep clean. Not run: the
+>   full valgrind sweep, gcc-16/clang-23 containers, conan/vcpkg, docs and
+>   coverage workflows.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L1 (a kid-less token
+> still forced a JWKS re-fetch and burned the §12.4 window), L2 (writable test
+> seam exported from `libaxiam.so`), L3 (no migration note for
+> `axiam_jwt_verify_ex` with `SIGNATURE_ONLY`), L4 (170 MiB test, 164 s under
+> ASan, made another test time out) — all fixed in `5185925` (NULL-kid early
+> return, seam only under `AXIAM_TESTING`, migration sentence, 3–8 MiB bodies:
+> 3 s under ASan). Round 2: medium-clean; low (no PR-time job compiled the
+> seam-free shipped configuration) and nit (one RSS check masked by the
+> previous test's peak) — fixed in `ac3a75d` (CI step building with
+> `AXIAM_BUILD_TESTS=OFF` and checking `nm -D`; 7 MiB body, mutation-checked).
+> Commit-trailer nit: not changed (session-mandated). Nothing open.
+
 **OI-20 — `axiam-swift-sdk` (#91) · Sonnet 5.5.** SWI-R1-1: rule 11 must refuse
 `purpose: null` (inspect the raw payload for the key, not a decoded optional).
 SWI-R1-4 and SWI-R1-5: the missing pins, and `assertRefused` checks the reason.
@@ -1063,6 +1112,7 @@ obligation 4 (and points to it from protocol rule 4). Every SDK emits it on
 |---|---|
 | rule 1: not JSON; `allowed` missing or not a boolean; `tenant_id`, `nonce` or `correlation_id` missing; the body does not end in the `hmac_signature` member, or it is not 64 hex digits | `malformed` |
 | rule 1: no `hmac_signature` member at all (an unsigned response; A.1) | `unsigned` |
+| rule 1: `hmac_signature` present but not a trailing 64-hex string (`null`, a number, not the last member) | `malformed` — **not** `unsigned`: the member exists, so the body is not an unsigned 1.67 answer, it is a broken one |
 | rule 2: the HMAC does not verify under the requester's own tenant subkey | `signature` |
 | rule 3: `tenant_id` is not the requester's tenant | `tenant` |
 | rule 3: no outstanding request has this `correlation_id` and `nonce` (a second answer to a retired request included) | `unknown_request` |
@@ -1080,7 +1130,17 @@ exactly:
 | `reason` | one of `malformed`, `unsigned`, `signature`, `tenant`, `unknown_request` |
 
 The canonical names are snake_case; an SDK MAY spell them in its language's case
-(`routingKey`, `tenantId` — TypeScript already does). Where the transport seam
+(`routingKey`, `tenantId` — TypeScript already does). **Confirmed (follow-up):** both are
+conformant — Go's snake_case `slog` keys and TypeScript's camelCase context keys are the same
+event. The `reason` values are not renamed: they are the closed vocabulary above, verbatim.
+
+**After `Close` (follow-up decision).** Answers still buffered in, or arriving on, the reply queue
+after the requester was closed have no outstanding request to match. The requester MUST NOT
+decode, accept or dispatch them; it nacks them without requeue (or lets the exclusive,
+auto-delete queue go with its consumer). It does **not** emit the discard event for them: they
+are the expected tail of a shutdown, not evidence of a forgery, and logging them would turn every
+close under load into security noise. Go's behaviour (nack without requeue, no log) is the
+reference; an SDK MAY log them at debug level, without any member of the body. Where the transport seam
 cannot report a delivery's exchange or routing key, the requester supplies the
 values it consumes from (`""` and its reply queue name), which are the same for
 every delivery it can receive.

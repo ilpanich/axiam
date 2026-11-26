@@ -232,7 +232,9 @@ async fn seed() -> Result<()> {
     // Users: Argon2id runs in the repository, so create them in parallel.
     let t0 = Instant::now();
     let user_repo = Arc::new(SurrealUserRepository::new(db.clone()));
-    let mut user_ids = Vec::with_capacity(users_n);
+    // Only the (tenant, user) ids are kept: the created `User` records carry
+    // the password hash and are dropped here.
+    let mut user_ids: Vec<(Uuid, Uuid)> = Vec::with_capacity(users_n);
     for chunk in (0..users_n).collect::<Vec<_>>().chunks(64) {
         let futs = chunk.iter().map(|&i| {
             let repo = Arc::clone(&user_repo);
@@ -249,15 +251,18 @@ async fn seed() -> Result<()> {
             }
         });
         for u in futures::future::join_all(futs).await {
-            user_ids.push(u?);
+            let u = u?;
+            user_ids.push((u.tenant_id, u.id));
         }
     }
-    let bench_users: Vec<_> = user_ids
+    let bench_users: Vec<Uuid> = user_ids
         .iter()
-        .filter(|u| u.tenant_id == tenant_id)
+        .filter(|(t, _)| *t == tenant_id)
+        .map(|(_, u)| *u)
         .collect();
-    let user_id = bench_users[0].id;
-    eprintln!("users: {} in {:?}", user_ids.len(), t0.elapsed());
+    let user_id = bench_users[0];
+    let users_created = user_ids.len();
+    eprintln!("users: {users_created} in {:?}", t0.elapsed());
 
     // Sessions.
     let t0 = Instant::now();
@@ -266,8 +271,8 @@ async fn seed() -> Result<()> {
     for chunk in (0..sessions_n).collect::<Vec<_>>().chunks(256) {
         let futs = chunk.iter().map(|&i| {
             let repo = Arc::clone(&session_repo);
-            let u = &user_ids[i % user_ids.len()];
-            let s = new_session(u.tenant_id, u.id, random_hash());
+            let (t, u) = user_ids[i % user_ids.len()];
+            let s = new_session(t, u, random_hash());
             async move { repo.create(s).await }
         });
         for s in futures::future::join_all(futs).await {
@@ -377,14 +382,14 @@ async fn seed() -> Result<()> {
         roles.push(role.id);
     }
     // Every bench-tenant user: two assignments.
-    for (n, u) in bench_users.iter().enumerate() {
+    for (n, &u) in bench_users.iter().enumerate() {
         role_repo
-            .assign_to_user(tenant_id, u.id, roles[n % 100], AssignmentScope::global())
+            .assign_to_user(tenant_id, u, roles[n % 100], AssignmentScope::global())
             .await?;
         role_repo
             .assign_to_user(
                 tenant_id,
-                u.id,
+                u,
                 roles[(n + 37) % 100],
                 AssignmentScope::resource(resources[(n * 11) % resources.len()]),
             )

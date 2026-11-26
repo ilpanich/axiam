@@ -53,6 +53,26 @@ export const CONFIGURATION_PAGES: DocPage[] = [
           ["AXIAM__DB__NAMESPACE", "SurrealDB namespace.", "axiam"],
           ["AXIAM__DB__DATABASE", "SurrealDB database.", "axiam"],
           [
+            "AXIAM__DB__ENGINE",
+            "SDK protocol to SurrealDB: `http` (default) or `ws`. While the database is down, `http` fails each query immediately. `ws` reuses one connection per pooled handle, so a query costs less database CPU, and it re-sends its namespace and sign-in on reconnect. A query issued during an outage waits for the reconnect instead of failing. Opt-in; see `claude_dev/db-query-optimization.md` §8.4.",
+            "http",
+          ],
+          [
+            "AXIAM__DB__WS_REQUEST_DEADLINE_SECS",
+            "With `AXIAM__DB__ENGINE=ws` only: the longest a REST request may run before it is answered `503` with `Retry-After` (default 60, above the 30 s SSF long poll). This bounds the wait during a database outage. gRPC is bounded by its listener's 30 s timeout. Ignored with `http`.",
+            "60",
+          ],
+          [
+            "AXIAM__DB__RECORD_CACHE_TTL_SECS",
+            "TTL of the tenant, OAuth2-client and user record caches that the token endpoints, UserInfo and session refresh read through (default 5; `0` disables them). Only positive answers are cached, and credential material is blanked in cached accounts. A write through the owning repository evicts the entry on that replica. On other replicas, a suspension, disablement or client change takes effect within the TTL.",
+            "5",
+          ],
+          [
+            "AXIAM__DB__RECORD_CACHE_MAX_ENTRIES",
+            "Bound on the entries of each record cache (default 10000).",
+            "10000",
+          ],
+          [
             "AXIAM__AMQP__ENABLED",
             "Whether the broker is used at all (default `true`). `false` selects the minimal, broker-less profile: nothing connects to RabbitMQ, neither `AXIAM__AMQP__URL` nor the AMQP signing key is required, webhooks, SSF push, outbound SCIM, CIBA ping and transactional mail run on in-process queues (lost on restart), and Reactors, asynchronous authorization over AMQP, external audit ingestion and cross-replica cache invalidation are unavailable. The profile is single-instance by definition: the server refuses to boot beside another live instance, with the decision-cache broadcast switched on, or with an enabled Reactor registration in the datastore.",
             "false",

@@ -442,6 +442,35 @@ that covers the ACS, fmt, clippy, layering script.
 **Verify.** `cargo test -p axiam-core --lib user`, `-p axiam-auth --test
 auth_service_test`, `-p axiam-api-rest --test opaque_login_test`, fmt, clippy.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `e5a2d67`.** #873: new
+> `User::credential_superseded_at(issued_at: DateTime<Utc>, version: Option<i64>)`
+> (the version alone when present, otherwise `credential_changed_since`, ties
+> refused); `opaque_login_finish` calls it instead of its inline `match`.
+> `credential_superseded` keeps its `iat`/`iat_ns` form and does not delegate.
+> #872: tests only, no production change.
+>
+> - **#872 tests:** both `qr2_6_*` tests in `auth_service_test.rs` now also
+>   assert acceptance at the start of the `iat` second; the unit test
+>   `versionless_artefact_uses_the_timestamp_rule` uses `iat_secs =
+>   epoch.timestamp()`, `iat_ns = epoch_ns + 1` for "strictly after", and gains
+>   the same-second `Some(ns)` acceptance case plus the whole-second fallback
+>   (no `iat_ns`, same second → refused). **Teeth:** with the `Some(ns)` arm
+>   temporarily switched to whole seconds, all three fail
+>   (`user.rs:723`; `auth_service_test.rs:3916` "an unversioned challenge issued
+>   after the epoch, in the same second, is accepted"; `:3968` the setup-token
+>   twin); restored.
+> - **#873 test:** `opaque_login_test::qr22_2_a_current_version_login_is_accepted_when_the_epoch_is_ahead_of_issued_at`
+>   (epoch moved to now + 1 h, version unchanged → 200 with session cookie).
+>   **Did not reproduce on the unfixed HEAD:** the handler's inline rule was
+>   already "version alone, else timestamp", not `||`, so the test passes there
+>   and is a pin. With the `||` rule temporarily reintroduced it fails:
+>   `opaque_login_test.rs:1320 … left: 401, right: 200`. The change is the
+>   de-duplication the issue asks for.
+> - **Verification:** `axiam-core --lib user` 22 passed; `auth_service_test`
+>   94; `opaque_login_test` (`--no-default-features`) 29; fmt clean; clippy
+>   `-D warnings` clean for `axiam-core`, `axiam-auth`, `axiam-api-rest`
+>   (`--no-default-features --all-targets`). Full crate suites not run.
+
 ### OI-05 — #880, #881, #883: logout-token `kid`, CONTRACT 1.69, cross-SDK rules · Opus 5.5
 
 **Why Opus.** It amends the normative contract that eleven repositories port,

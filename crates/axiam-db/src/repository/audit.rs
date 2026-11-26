@@ -373,6 +373,7 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
 impl<C: Connection> SurrealAuditLogRepository<C> {
     /// Write one already-minimised entry under `id`.
     async fn create_one(&self, id: Uuid, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
+        let organization_id_str = system_partition_organization(&input);
         let id_str = id.to_string();
 
         let metadata = input
@@ -380,7 +381,6 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
             .unwrap_or(serde_json::Value::Object(Default::default()));
 
         let resource_id_str = input.resource_id.map(|r| r.to_string());
-        let organization_id_str = system_partition_organization(&input);
 
         let result = self
             .db

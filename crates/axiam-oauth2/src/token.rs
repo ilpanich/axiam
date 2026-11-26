@@ -1700,7 +1700,9 @@ where
             .await?;
         match (read_by_tls, prefetched_tenant) {
             (Some(tenant), _) => Ok(tenant),
-            (None, Some(tenant)) if client.tenant_id == tenant_id => live_tenant_outcome(tenant),
+            (None, Some(tenant)) if client.tenant_id == tenant_id => {
+                admitted_tenant_outcome(tenant)
+            }
             (None, _) => self.live_tenant(client.tenant_id).await,
         }
     }
@@ -1721,11 +1723,7 @@ where
     async fn live_tenant(&self, tenant_id: Uuid) -> Result<Tenant, OAuth2Error> {
         // Through the record cache: liveness ≤ TTL old, dropped at once by a
         // suspension or deletion through this process (`axiam_db::record_cache`).
-        let tenant = live_tenant_outcome(self.tenant_repo.get_by_id_cached(tenant_id).await)?;
-        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
-            return Err(OAuth2Error::TenantSuspended);
-        }
-        Ok(tenant)
+        admitted_tenant_outcome(self.tenant_repo.get_by_id_cached(tenant_id).await)
     }
 
     /// The credential check proper, split out of
@@ -4218,11 +4216,30 @@ fn account_may_act_outcome(
 /// (R1W1-03): the tenant, or — tombstoned or purged — the same
 /// `invalid_client` a wrong credential gets; any other failure is a datastore
 /// fault and stays a `server_error`, never masquerading as bad credentials.
+///
+/// Client authentication does not call this directly: it calls
+/// [`admitted_tenant_outcome`], which adds the suspension check.
 fn live_tenant_outcome(read: AxiamResult<Tenant>) -> Result<Tenant, OAuth2Error> {
     read.map_err(|e| match e {
         AxiamError::NotFound { .. } => OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()),
         other => OAuth2Error::ServerError(other.to_string()),
     })
+}
+
+/// [`live_tenant_outcome`], and SA-13: `tenant_suspended` when the tenant no
+/// longer admits its principals.
+///
+/// Every read of a client's tenant during client authentication goes through
+/// this one function, whether the tenant was read on its own
+/// ([`TokenService::live_tenant`]) or in the client lookup's round trip
+/// (`authenticate_client_credential_with`). Keeping the check here, rather than
+/// at each read site, means a new way of reading the tenant cannot skip it.
+fn admitted_tenant_outcome(read: AxiamResult<Tenant>) -> Result<Tenant, OAuth2Error> {
+    let tenant = live_tenant_outcome(read)?;
+    if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+        return Err(OAuth2Error::TenantSuspended);
+    }
+    Ok(tenant)
 }
 
 #[cfg(test)]

@@ -42,8 +42,8 @@ use axiam_core::models::webauthn_credential::{CreateWebauthnCredential, Webauthn
 use axiam_core::provisioning::{ProvisioningEvent, RecordingProvisioningSink};
 use axiam_core::repository::{
     AuditLogFilter, AuditLogRepository, CertificateRepository, FederationLinkRepository,
-    OpaqueCredentialRepository, Pagination, RefreshTokenRepository, SessionRepository,
-    UserRepository, WebauthnCredentialRepository,
+    OpaqueCredentialRepository, PaginatedResult, Pagination, RefreshTokenRepository,
+    SessionRepository, UserRepository, WebauthnCredentialRepository,
 };
 use axiam_db::repository::{
     SurrealAuditLogRepository, SurrealCertificateRepository, SurrealFederationLinkRepository,
@@ -1789,5 +1789,196 @@ async fn qr3_1_a_local_login_on_a_suspended_tenant_runs_no_post_credential_bookk
     assert_eq!(
         after.failed_login_attempts, 1,
         "a refused sign-in on a suspended tenant does not reset the counter"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// QR5-1 / SR5-2 (#878): on a suspended tenant a lock that has committed since
+// the account was read must answer as a wrong password, not `tenant_suspended`
+// (which would confirm the guess). The race is made certain: the lock lands
+// after the account is read and before the credential has verified.
+// ---------------------------------------------------------------------------
+
+/// Lock `id` for five minutes, as a concurrent wrong guess that crossed the
+/// threshold would.
+async fn lock_now(users: &SurrealUserRepository<Db>, tenant_id: Uuid, id: Uuid) {
+    users
+        .update(
+            tenant_id,
+            id,
+            UpdateUser {
+                failed_login_attempts: Some(3),
+                locked_until: Some(Some(Utc::now() + ChronoDuration::minutes(5))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The SurrealDB repository, except that the first by-name read returns the
+/// account as it was and then commits a lock — the interleaving of a wrong
+/// guess that locks the account while the correct one is still verifying.
+#[derive(Clone)]
+struct LockAfterRead {
+    inner: SurrealUserRepository<Db>,
+}
+
+impl UserRepository for LockAfterRead {
+    async fn create(&self, input: CreateUser) -> AxiamResult<User> {
+        self.inner.create(input).await
+    }
+    async fn get_by_id(&self, t: Uuid, id: Uuid) -> AxiamResult<User> {
+        self.inner.get_by_id(t, id).await
+    }
+    async fn get_by_username(&self, t: Uuid, name: &str) -> AxiamResult<User> {
+        let user = self.inner.get_by_username(t, name).await?;
+        lock_now(&self.inner, t, user.id).await;
+        Ok(user)
+    }
+    async fn get_by_email(&self, t: Uuid, email: &str) -> AxiamResult<User> {
+        self.inner.get_by_email(t, email).await
+    }
+    async fn update(&self, t: Uuid, id: Uuid, input: UpdateUser) -> AxiamResult<User> {
+        self.inner.update(t, id, input).await
+    }
+    async fn delete(&self, t: Uuid, id: Uuid) -> AxiamResult<()> {
+        self.inner.delete(t, id).await
+    }
+    async fn update_totp_step(&self, t: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
+        self.inner.update_totp_step(t, id, step).await
+    }
+    async fn list(&self, t: Uuid, p: Pagination) -> AxiamResult<PaginatedResult<User>> {
+        self.inner.list(t, p).await
+    }
+    async fn increment_failed_logins(
+        &self,
+        t: Uuid,
+        id: Uuid,
+        threshold: u32,
+        base: i64,
+        mult: f64,
+        max: i64,
+    ) -> AxiamResult<()> {
+        self.inner
+            .increment_failed_logins(t, id, threshold, base, mult, max)
+            .await
+    }
+    async fn admit_unless_locked(&self, t: Uuid, id: Uuid, clear: bool) -> AxiamResult<bool> {
+        self.inner.admit_unless_locked(t, id, clear).await
+    }
+    async fn anonymize_user(&self, t: Uuid, id: Uuid, hash: &str, p: &str) -> AxiamResult<()> {
+        self.inner.anonymize_user(t, id, hash, p).await
+    }
+}
+
+/// A directory that commits a lock while the bind is in flight, then vouches.
+struct LockingDirectory {
+    users: SurrealUserRepository<Db>,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    inner: Arc<StubDirectory>,
+}
+
+impl DirectoryAuthenticator for LockingDirectory {
+    fn authenticate<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+        presented: &'a str,
+    ) -> DirectoryFuture<'a, Result<DirectoryIdentity, DirectoryAuthError>> {
+        Box::pin(async move {
+            lock_now(&self.users, self.tenant_id, self.user_id).await;
+            self.inner
+                .authenticate(tenant_id, login_name, presented)
+                .await
+        })
+    }
+    fn authenticate_for_provisioning<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+        presented: &'a str,
+    ) -> DirectoryFuture<'a, Result<DirectoryIdentity, DirectoryAuthError>> {
+        self.inner
+            .authenticate_for_provisioning(tenant_id, login_name, presented)
+    }
+    fn lookup_entry<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        login_name: &'a str,
+    ) -> DirectoryFuture<'a, Result<DirectoryIdentity, DirectoryAuthError>> {
+        self.inner.lookup_entry(tenant_id, login_name)
+    }
+}
+
+/// **QR5-1** — password path: the account locks after it was read, the tenant
+/// is suspended, the password is right. The answer is the uniform one.
+#[tokio::test]
+async fn qr5_1_a_locked_account_on_a_suspended_tenant_answers_a_correct_password_uniformly() {
+    let h = harness().await;
+    let svc = AuthService::new(
+        LockAfterRead {
+            inner: h.users.clone(),
+        },
+        h.sessions.clone(),
+        SurrealFederationLinkRepository::new(h.db.clone()),
+        SurrealRefreshTokenRepository::new(h.db.clone()),
+        config(5),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    )
+    .with_tenant_admission(Arc::new(SuspendedTenant));
+
+    let outcome = svc
+        .login(input(&h, "bob", &h.local_credential.clone()))
+        .await;
+    assert!(
+        is_invalid_credentials(&outcome),
+        "a lock in force on a suspended tenant must not be answered tenant_suspended"
+    );
+}
+
+/// **QR5-1** — directory arm: the same, with the directory vouching for the
+/// password while the lock commits.
+#[tokio::test]
+async fn qr5_1_a_locked_directory_account_on_a_suspended_tenant_answers_uniformly() {
+    let h = harness().await;
+    let directory_credential = fresh_credential();
+    let account = h
+        .users
+        .create_directory_account(CreateDirectoryAccount {
+            tenant_id: h.tenant_id,
+            username: "alice".into(),
+            email: "alice@example.com".into(),
+            external_id: ENTRY.into(),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+    activate(&h.users, h.tenant_id, account.id).await;
+    let directory = Arc::new(LockingDirectory {
+        users: h.users.clone(),
+        tenant_id: h.tenant_id,
+        user_id: account.id,
+        inner: StubDirectory::arc(
+            identity(ENTRY, "alice", "alice@example.com"),
+            &directory_credential,
+        ),
+    });
+    let svc = AuthService::new(
+        h.users.clone(),
+        h.sessions.clone(),
+        SurrealFederationLinkRepository::new(h.db.clone()),
+        SurrealRefreshTokenRepository::new(h.db.clone()),
+        config(5),
+        Arc::new(tokio::sync::Semaphore::new(4)),
+    )
+    .with_directory_authenticator(directory)
+    .with_tenant_admission(Arc::new(SuspendedTenant));
+
+    let outcome = svc.login(input(&h, "alice", &directory_credential)).await;
+    assert!(
+        is_invalid_credentials(&outcome),
+        "a lock in force on a suspended tenant must not be answered tenant_suspended"
     );
 }

@@ -148,6 +148,7 @@ fn new_session(tenant_id: Uuid, user_id: Uuid, token_hash: String) -> CreateSess
 fn audit_entry(tenant_id: Uuid, actor: Uuid, i: usize) -> CreateAuditLogEntry {
     CreateAuditLogEntry {
         tenant_id,
+        organization_id: None,
         actor_id: actor,
         actor_type: ActorType::User,
         action: "http.request".into(),

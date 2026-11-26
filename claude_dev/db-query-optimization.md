@@ -510,6 +510,23 @@ is on the request: REST by `AXIAM__DB__WS_REQUEST_DEADLINE_SECS` (default
 60 s, above the 30 s SSF long poll; `503` + `Retry-After`), gRPC by the
 listener's existing 30 s timeout.
 
+#### 8.4.2 C — the same probe through AXIAM's own pool
+
+`db-query-bench pool-probe <ws|http> 75 200` repeats the probe above through
+`axiam_db::DbPool::connect` and `SurrealUserRepository::get_by_id`, which is the
+path a running server takes, rather than through the bare SDK client. The
+schedule of kills and restarts is the same. The figures are from the sandbox
+and are **relative only**.
+
+| engine | reads found | "not found" | errors | behaviour during the outage |
+|---|---:|---:|---:|---|
+| WebSocket | 303 | **0** | 1 | requests wait for the reconnect: one hit the probe's 5 s bound and the next completed on reconnect at ~20 s; the graceful restart at 30 s and the kill-and-restart at 45 s were not visible to callers |
+| HTTP | 312 | 0 | 58 | every request fails fast while the server is down; it recovered ~1 s after each restart |
+
+The pool therefore keeps the namespace and database across reconnects, as the
+bare client does. While the server is down, however, requests hang instead of
+failing. The request deadline of §8.4.1 exists to turn that wait into a `503`.
+
 ### 8.5 D–F — caches: what "revocation latency" means
 
 **Decision (accepted 5 s):** D and E are on by default since this branch, and

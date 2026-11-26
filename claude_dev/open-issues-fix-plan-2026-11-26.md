@@ -242,6 +242,33 @@ review per gate (one for Wave A, eleven for Wave B).
 
 ### OI-01 — #878: lockout race on a suspended tenant · Sonnet 5.5
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `95e3610`.** New private helper
+> `refuse_if_locked_now` in `crates/axiam-auth/src/service.rs` runs the
+> read-only `admit_unless_locked(tenant, user, false)` and answers
+> `InvalidCredentials` on a lock in force; it runs before `admit_tenant` in step
+> 3b of `complete_authenticated_login` and in the directory arm of
+> `login_directory_account`. The writing step 4 stays after `admit_tenant`.
+>
+> - **Regression tests** (`crates/axiam-auth/tests/directory_provisioning_test.rs`,
+>   beside the QR3-1 suspended-tenant tests, not `auth_service_test.rs` as the
+>   plan guessed): `qr5_1_a_locked_account_on_a_suspended_tenant_answers_a_correct_password_uniformly`
+>   (password path, `LockAfterRead` repository wrapper) and
+>   `qr5_1_a_locked_directory_account_on_a_suspended_tenant_answers_uniformly`
+>   (directory arm, `LockingDirectory` stub that commits the lock during the
+>   bind). Unfixed code: both panic with `a lock in force on a suspended tenant
+>   must not be answered tenant_suspended`. Fixed: both pass.
+> - **Neighbours** already pinned, unchanged and passing: `qr3_1_a_local_login_on_a_suspended_tenant_runs_no_post_credential_bookkeeping`,
+>   `qr3_1_a_directory_login_on_a_suspended_tenant_maps_no_groups` (unlocked +
+>   correct password → `tenant_suspended`), `qr3_1_a_first_directory_login_on_a_suspended_tenant_creates_no_account`
+>   (wrong password → uniform 401, failure counted).
+> - **Verification:** `directory_provisioning_test` 27 passed;
+>   `auth_service_test` 94; `lockout_race_test` 3; `directory_account_test` 12;
+>   fmt and `clippy --all-targets -D warnings` clean for `axiam-auth`.
+> - **Not anticipated:** (1) the directory arm already checked the lock before
+>   contacting the directory, so the race reproduces only with a lock committed
+>   mid-bind; (2) `complete_authenticated_login` is shared with OPAQUE,
+>   directory JIT and federation, which therefore get the same ordering.
+
 **Why Sonnet.** One function, and the issue gives the exact reordering.
 
 **Where.** `crates/axiam-auth/src/service.rs`: the password path (step 3b

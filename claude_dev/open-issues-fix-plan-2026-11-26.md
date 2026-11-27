@@ -906,6 +906,52 @@ check their ports against it. TYP-R3-2 and the "Nits" section as written. #883
 was fixed here in round 2: verify it against Appendix A.2 and align the field
 names if they differ.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `74bc13d`; review fixes `5569edd`
+> (round 1), `15ac1d9` (round 2); §8 alignment `6045581` + `dc65d9e` +
+> `6c2470d`.**
+>
+> - **TYP-R3-1:** the Fastify redirect percent-encodes `Location`
+>   (`encodeRedirectLocation`); the rule is recorded as **Decision 7** in
+>   `docs/login-glue-binding.md` and became normative after review: well-formed
+>   `%XX` kept, any other `%` → `%25`, `\` kept, ill-formed input → U+FFFD per
+>   maximal ill-formed subpart or per unpaired surrogate, the encoder never
+>   throws, output pure ASCII; the Express adapter pre-encodes too, because
+>   `encodeurl` breaks rules 2 and 3 on edge cases. Unfixed: 7 Fastify cases
+>   failed (`'/a b'` vs `'/a%20b'`, 500 on `€`). **TYP-R3-2:**
+>   `oidcBindingClearCookie` public. **Nits** as written.
+> - **#880:** kid-less / unknown-kid logout tokens are `AuthError` reason
+>   `unknown_kid` (unfixed: no `reason`, raw `JWKSNoMatchingKey`).
+>   **#881:** opt-out and `AuthzDecision.unsigned` removed per A.1. **#882:**
+>   the "pin only" assumption did not hold — the review showed genuine bodies
+>   (`1.0`, integer-like keys, integers above 2^53) nacked by the
+>   re-serializing consumer; fixed to received-bytes verification (round 1),
+>   non-trailing signatures nacked (round 2), layout check and removal of the
+>   lenient `strict` option (alignment; a breaking TypeScript change with a
+>   migration line). **#883:** the A.2 event with all five members.
+> - **§8 alignment:** fatal UTF-8 decode, 64-hex trailing signature, layout
+>   check, no lenient mode; requester reason order (unfixed: five "malformed
+>   before signature" cases failed) and after-Close; producer emits `wire_json`
+>   byte for byte (pin). **Alignment review medium (fixed in `dc65d9e`):** a
+>   BOM-prefixed body made `TextDecoder` strip the mark while the cut bytes
+>   kept it, so an unguarded `JSON.parse` threw, `consume()` rejected
+>   unhandled and Node exited — a crash loop for anyone able to publish; now
+>   `ignoreBOM`, a guarded parse and a `.catch()` nack. `6c2470d`: nack before
+>   logging, so a throwing logger cannot strand a delivery.
+> - **Verification:** typecheck; vitest 138 files, 2092 passed, 1 pre-existing
+>   skip (proxy vars unset — the sandbox proxy otherwise breaks msw mocks);
+>   build, docs, bundle-grep, `npm audit`, `gen-management --check`, publish
+>   dry-run passed at the earlier rounds. **Not run:** `buf generate` as CI
+>   runs it (remote plugins blocked), the Node 26 leg, the publish job.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; three lows (consumer
+> still re-serializing; encoder edge cases against its own rules; the `\`
+> "may") and two nits — fixed in `5569edd`. Round 2: medium-clean; two lows
+> (re-serialization fallback for a non-trailing signature; Decision 7 rule 3
+> silent on byte strings) — fixed in `15ac1d9`. Alignment review: **not
+> medium-clean** (the BOM crash) → fixed and re-reviewed: medium-clean; two
+> lows (log before nack; the safety net untested) fixed in `6c2470d`. Nothing
+> open.
+
 **OI-11 — `axiam-python-sdk` (#110) · Sonnet 5.5.** PYT-R1-2 is the one with
 weight: an unexpected exception in `_handle` must fail the pending request and
 keep the requester alive (or close it loudly and fail every later call), never
@@ -1139,6 +1185,45 @@ the event consumer follows the requester's pattern. #881 and #883: Go is the
 reference the other six read, so apply Appendix A literally and report any place
 where A does not fit the code back to the orchestrator before the others port
 it.
+
+> **EXECUTED (2026-11-27, Opus 5.5), commit `ed8fb6d`; review fixes `a755444`
+> (round 1); §8 alignment `20b3be2`.**
+>
+> - **GO-R1-1:** keys folded exactly as `encoding/json` (`foldName`/`foldRune`,
+>   checked rune for rune against go1.26 `fold.go`); unfixed:
+>   `rejectAmbiguousKeys({"subject_id":…,"ſubject_id":…}) = false` (the Kelvin
+>   case already failed closed: pin). **GO-R1-2 (D-4):** one forced re-fetch
+>   per 60 s on both paths, window opened before the fetch; unfixed: "50
+>   unknown kids … caused 50 JWKS fetches". **GO-R1-3:** `["admin", null]` is
+>   not an array of strings (and, round 1, the same for `aud`). **GO-R1-4:**
+>   `Close` cancels the consumer by tag; in-flight and buffered deliveries are
+>   nacked; goroutine-leak test (round 1 added the drain test, mutation-checked).
+>   **GO-R1-5/6/9:** README rows 10–12, the `roles` snapshot, snippet and
+>   changelog. **GO-R1-7:** the assertion is now unconditional and expects
+>   *nacked* (`calls == 0`), not the issue's `calls == 1`, because under D-5 an
+>   unsigned extra member no longer verifies — accepted by the reviewer.
+>   **GO-R1-8:** single-space split.
+> - **#880:** pins. **#881:** opt-out removed (A.1). **#882 (D-5):**
+>   received-bytes verification (`cutTrailingSignature`) plus the declaration-
+>   order layout check `signedLayoutOf`, which became the contract's §8 step 2c.
+>   **#883:** the A.2 event with routing key from the delivery. Go's report of
+>   where 1.69 did not fit led to the OI-05 follow-up `df06a8b`.
+> - **§8 alignment:** the normative reason order (no signature member →
+>   `unsigned`, required members before the HMAC; unfixed: three "(2)" and four
+>   "(3)" cases failed) and the after-Close rule; `wire_json` and producer
+>   byte-for-byte tests (pins).
+> - **Verification:** gofmt, go vet, `go test ./...`, `go test -race` (the
+>   pre-existing UMA test race fixed with an atomic counter in round 1),
+>   genmanagement check, coverage 94.7 % (floor 94.4). **Not run:**
+>   govulncheck (`vuln.go.dev` blocked), the OPAQUE interop job, buf drift.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; three lows (layout
+> check untested; drain branch untested; wire-form docs) and four nits — fixed
+> in `a755444`. Round 2: medium-clean, nothing new. Alignment review:
+> medium-clean; **one low left open**: the event consumer's security event on a
+> failed verification carries no timestamp, exchange, routing key or tenant,
+> which §8 protocol rule 4 requires — pre-existing, outside #883 (requester
+> only); handled cross-SDK in OI-30.
 
 **OI-17 — `axiam-rust-sdk` (#152) · Sonnet 5.5.** RUS-R1-1 and RUS-R1-2 together:
 `AxiamUser` keeps an absent `roles` claim distinct from `[]` (an `Option`), and

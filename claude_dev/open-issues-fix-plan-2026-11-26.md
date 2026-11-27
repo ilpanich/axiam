@@ -1556,6 +1556,46 @@ before OI-30.
   SDKs, D-10 JWKS in all eleven (Java and Swift: pin only). One signed commit
   each; one Opus 5.5 review gate each (§1.6).
 
+Task ↔ SDK: OI-32 TypeScript, OI-33 Python, OI-34 PHP, OI-35 C#, OI-36 Java,
+OI-37 Kotlin, OI-38 Go (Opus 5.5), OI-39 Rust, OI-40 C++, OI-41 C, OI-42 Swift.
+
+> **OI-31 — EXECUTED (2026-11-27)** · Opus 5.5 · `2e1572b`, round 1 `ae9ab5b`,
+> round 2 `3cb1c14` (`sdks/CONTRACT.md`, still 1.69;
+> `crates/axiam-amqp/tests/reference_vectors.rs`). No server code change.
+> - **D-8:** §8 rule 4 bound only the requester and had no `reason`; it now
+>   binds every SDK consumer to one warning event of exactly `timestamp`,
+>   `exchange`, `routing_key`, `tenant_id` (the consumer's own configured
+>   tenant, never read from the body) and `reason` (`malformed`, `unsigned`,
+>   `signature`, `key_version`, `stale`, `replay`), in a normative order:
+>   malformed · unsigned · layout/typed (malformed) · HMAC · decode (malformed)
+>   · key_version · stale · replay; the nonce is recorded only after every gate.
+>   An event-consumer API that took the key alone takes the tenant beside it.
+> - **D-9:** §8 step 2c "Typed: one configured type" (MUST). The three signed
+>   layouts are mutually exclusive by required members (`subject_id`;
+>   `actor_id`/`actor_type`/`outcome`; `allowed`). No new fixture vector: the
+>   two genuine vectors are the cross-type pair, pinned by
+>   `test_vectors_are_the_cross_type_negative_pair`, and the struct-level
+>   premise by `test_distinguishing_members_are_disjoint_across_the_three_types`
+>   (exact member lists, cross-deserialization fails in six directions).
+> - **D-10:** step 2a — first byte must be `{` (BOM refused, never stripped);
+>   "No body escapes the consumer" (no crash, no escaping error; event consumer
+>   ends in step g, the requester as obligation 4 prescribes). §12.4 rule 2 —
+>   TTL configured or from `max-age`, default and maximum 300 s (a clamped
+>   configured TTL emits §19 `config_clamped`); anchor = last successful fetch
+>   (200 with ≥ 1 key, or 304); an empty set is a failed refresh; held keys
+>   verify until exactly TTL + 300 s, never extended by a failed unknown-`kid`
+>   refresh; conformance test with an injected clock. C#'s `JwksCacheTtl`
+>   (clamped to 10 min today) and Java's adoption of an empty set must change.
+> - **Gate:** round 1 not medium-clean (requester "ends in step g" contradicted
+>   obligation 4 after `Close` and on direct reply-to; a "0 conforms" sentence
+>   contradicted the required test); both fixed with four low and four nits.
+>   Round 2 medium-clean; one low (`config_clamped`) and three nits fixed
+>   locally in `3cb1c14`. `cargo test -p axiam-amqp --test reference_vectors`
+>   5 passed (implementer and reviewer, separately); fmt, clippy, contract
+>   anchors (288 sections, unchanged) and conflict markers clean.
+> - **Re-vendored** into the eleven SDKs at `3cb1c14` (one chore commit each,
+>   pushed) before OI-32 … OI-42 started.
+
 ---
 
 ## 6. Wave C — close-out

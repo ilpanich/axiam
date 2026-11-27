@@ -1497,6 +1497,28 @@ push. Do not claim a test run that did not happen.
 
 ---
 
+## 5.3 Wave B2 — cross-SDK alignment decided by the owner (added 2026-11-27)
+
+The Wave B review gates left three cross-SDK questions open. The owner decided
+them on 2026-11-27; they are recorded here as decisions D-8 to D-10 and run
+before OI-30.
+
+| ID | Question | Decision |
+|---|---|---|
+| D-8 | The event consumer's discard/security event omits `exchange`, `routing_key` and `tenant_id` (§8 rule 4) — confirmed in Go and Rust | **Align every AMQP SDK** that omits them. |
+| D-9 | `AuthzRequest` and `AuditEventMessage` share the signing scheme and the tenant key, so a generic consumer verifies either on any queue (a signed audit event replayed onto an authz queue passes the signature check) | **Typed check in the SDKs:** the consumer is told the type it expects and refuses the other layout before decoding (discard event, reason `malformed`). One added MUST in CONTRACT §8, inside 1.69; no server change. |
+| D-10 | BOM body and JWKS stale-if-error, checked only in TS (BOM) and Java/Swift (JWKS) | **Check and align:** every AMQP consumer refuses a BOM-prefixed body cleanly (no crash, discard event `malformed`); every SDK's JWKS cache keeps cached keys after a failed refresh for at most 300 s beyond the TTL, then refuses (the Java/Swift bound). The bound becomes a §12.4 rule in CONTRACT 1.69. |
+
+- **OI-31 (Opus 5.5, `axiam`)** — the contract text for D-9 and D-10 (and a
+  check that §8 rule 4 already states D-8's fields normatively); re-vendor into
+  the eleven SDKs.
+- **OI-32 … OI-42 (one per SDK, the model of its Wave B task)** — test-first
+  alignment: D-8 and D-9 in the seven AMQP SDKs, D-10 BOM in the seven AMQP
+  SDKs, D-10 JWKS in all eleven (Java and Swift: pin only). One signed commit
+  each; one Opus 5.5 review gate each (§1.6).
+
+---
+
 ## 6. Wave C — close-out
 
 ### OI-30 — consistency, regression, pull requests · Sonnet 5.5

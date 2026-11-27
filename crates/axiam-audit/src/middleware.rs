@@ -937,25 +937,64 @@ pub fn redacted_path(path: &str, pattern: Option<&str>) -> String {
         .join("/")
 }
 
+/// Percent-decode `segment` leniently and fold it to ASCII lower case.
+///
+/// Lenient is the fail-closed direction: a `%` that is not followed by two hex
+/// digits is kept as the literal character, so a malformed escape can neither
+/// abort the comparison nor hide a prefix. Bytes that are not UTF-8 decode
+/// lossily; the result is only ever compared, never recorded.
+fn decoded_folded(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).to_ascii_lowercase()
+}
+
 /// [`redacted_path`] for a request with no usable route pattern.
 ///
 /// Empty segments (`//`, a trailing `/`) are skipped when matching a prefix, so
 /// `/account/export//<token>` is recognised like `/account/export/<token>`.
+/// Segments are compared percent-decoded and ASCII-case-folded, so
+/// `/Account/expor%74//<token>` is recognised too. A segment whose decoded form
+/// contains `/` (`%2F`) counts as several; if any of them follows the prefix
+/// the whole raw segment is redacted.
 fn redacted_unmatched_path(segments: &[&str]) -> String {
-    let mut previous: Vec<&str> = Vec::new();
+    let prefixes: Vec<Vec<&str>> = BEARER_ROUTE_PATTERNS
+        .iter()
+        .map(|pattern| bearer_prefix(pattern))
+        .collect();
+    let mut previous: Vec<String> = Vec::new();
     segments
         .iter()
         .map(|segment| {
             if segment.is_empty() {
                 return *segment;
             }
-            let follows_prefix = BEARER_ROUTE_PATTERNS.iter().any(|pattern| {
-                let prefix = bearer_prefix(pattern);
-                previous.len() >= prefix.len()
-                    && previous[previous.len() - prefix.len()..] == prefix[..]
-            });
-            previous.push(segment);
-            if follows_prefix {
+            let mut redact = false;
+            for piece in decoded_folded(segment).split('/').filter(|p| !p.is_empty()) {
+                redact |= prefixes.iter().any(|prefix| {
+                    previous.len() >= prefix.len()
+                        && previous[previous.len() - prefix.len()..]
+                            .iter()
+                            .map(String::as_str)
+                            .eq(prefix.iter().copied())
+                });
+                previous.push(piece.to_owned());
+            }
+            if redact {
                 REDACTED_PATH_SEGMENT
             } else {
                 segment
@@ -1094,5 +1133,36 @@ mod redaction_tests {
             assert!(!out.split('/').any(|s| s == "H"), "{path} -> {out}");
         }
         assert_eq!(redacted_path("/api/v1/users/H", None), "/api/v1/users/H");
+    }
+
+    /// #889 review gate: the prefix is matched on the decoded, case-folded
+    /// segments, so an encoded or differently-cased spelling of a bearer route
+    /// that matches no route still has its handle redacted.
+    #[test]
+    fn encoded_and_case_folded_spellings_are_redacted() {
+        for path in [
+            "/api/v1/account/expor%74//H",
+            "/api/v1/Account/export//H",
+            "/api/v1/ACCOUNT/EXPORT/H",
+            "/api/v1/%61ccount/%45xport//H",
+            "/api/v1/account//expor%74//H",
+            "/api/v1/account/export%2F/H",
+            "/api/v1/account%2fexport%2fH",
+            "/api/v1/account/export/%48",
+            "/api/v1/account/export//%zzH",
+            "/api/v1/account/export//H%",
+        ] {
+            let out = redacted_path(path, None);
+            assert!(
+                !out.contains('H') && !out.contains("%48"),
+                "{path} -> {out}"
+            );
+            assert!(out.contains(REDACTED_PATH_SEGMENT), "{path} -> {out}");
+        }
+        assert_eq!(redacted_path("/api/v1/users/H", None), "/api/v1/users/H");
+        assert_eq!(
+            redacted_path("/api/v1/Users/%48", None),
+            "/api/v1/Users/%48"
+        );
     }
 }

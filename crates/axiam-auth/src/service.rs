@@ -745,6 +745,11 @@ impl<
             Ok(identity) if identity.external_id.eq_ignore_ascii_case(marker) => {
                 // QR3-1 (SA-13, N16): the credential has verified; a suspended
                 // tenant is refused now, before its memberships are rewritten.
+                //
+                // Deliberately repeated by `complete_authenticated_login`
+                // below: this pair must run before `apply_directory_group_mapping`
+                // writes, which that later call cannot guard. The cost is one
+                // lock read and one tenant read per directory sign-in.
                 self.refuse_if_locked_now(input.tenant_id, user.id).await?;
                 self.admit_tenant(input.tenant_id).await?;
                 // G-3 (T23.3.4): the directory's groups become AXIAM memberships

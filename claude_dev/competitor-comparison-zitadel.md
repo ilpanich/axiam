@@ -21,7 +21,9 @@
 > every figure below names its run. **Run 6 is not comparable with run 5** (host,
 > datastore and release all changed), so the run-5 multiples (about 6.5×
 > client credentials, 4.8× introspection) are replaced, not kept. Run 6c
-> (SurrealDB 3.3.5, unsupported, benchmark-only) is not used here. Rows of the
+> (SurrealDB 3.3.5, unsupported, benchmark-only) enters this document only as
+> the size of the SurrealDB 4.0.1 regression (§4 of the draft, cited in §4 item
+> 4 of this document), never in a comparison with Zitadel. Rows of the
 > draft that failed its validity gate, which for Zitadel are password login and
 > the fallback refresh operation, support no claim in this document.
 

@@ -254,10 +254,9 @@ impl User {
         iat_ns: Option<i64>,
         version: Option<i64>,
     ) -> bool {
-        match version {
-            Some(_) => self.credential_version_stale(version),
-            None => self.credential_changed_since_claims(iat_secs, iat_ns),
-        }
+        self.superseded_by_version_or(version, || {
+            self.credential_changed_since_claims(iat_secs, iat_ns)
+        })
     }
 
     /// As [`Self::credential_superseded`], for an artefact whose issue time is
@@ -266,9 +265,20 @@ impl User {
     /// timestamp with ties refused ([`Self::credential_changed_since`]).
     #[must_use]
     pub fn credential_superseded_at(&self, issued_at: DateTime<Utc>, version: Option<i64>) -> bool {
+        self.superseded_by_version_or(version, || self.credential_changed_since(issued_at))
+    }
+
+    /// The one rule behind [`Self::credential_superseded`] and
+    /// [`Self::credential_superseded_at`]: a present `version` decides alone;
+    /// only an unversioned artefact runs `by_timestamp`.
+    fn superseded_by_version_or(
+        &self,
+        version: Option<i64>,
+        by_timestamp: impl FnOnce() -> bool,
+    ) -> bool {
         match version {
             Some(_) => self.credential_version_stale(version),
-            None => self.credential_changed_since(issued_at),
+            None => by_timestamp(),
         }
     }
 

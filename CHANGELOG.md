@@ -102,6 +102,11 @@ for the changes that need an action are in `docs/deployment/README.md`.
   RUSTSEC-2026-0592, and `actix-http` and `lettre` for two further advisories;
   the advisories for `cookie 0.16.2`, `chrono` and `humantime` are accepted with
   a recorded reason.
+- The token endpoints' combined client-and-tenant read applies the tenant
+  suspension check (SA-13) through the same `admitted_tenant_outcome` as the
+  separate tenant read, so `client_credentials` mints nothing for a suspended
+  tenant's clients on the prefetched client-authentication path either (found
+  and fixed before release, in the database-cost work below; ea6efa599).
 
 ### Added
 
@@ -112,6 +117,18 @@ for the changes that need an action are in `docs/deployment/README.md`.
   service accounts may request `scope=roles` and nothing else (SA-18, N15).
 - New permission `users:validate_credentials` for the gRPC `ValidateCredentials`
   call (see Security).
+- Opt-in WebSocket datastore engine, `AXIAM__DB__ENGINE=ws` (default `http`).
+  The SurrealDB SDK has no per-query timeout on remote engines, so REST requests
+  are bounded by a request deadline, `AXIAM__DB__WS_REQUEST_DEADLINE_SECS`
+  (default 60 s), after which the request is answered `503` with `Retry-After`;
+  gRPC requests keep the listener's 30 s timeout. Across a database restart the
+  WebSocket engine makes requests wait for the reconnect instead of failing
+  (0fab6a065).
+- Record caches for the tenant, OAuth2 client and user records read by the
+  read-only hot lookups: 5 s TTL (`AXIAM__DB__RECORD_CACHE_TTL_SECS`, `0` turns
+  them off), positive answers only, credential material blanked in cached
+  accounts, invalidated on every write through the owning repository. On
+  another replica a change is visible within the TTL (e519a7bef).
 
 ### Changed
 
@@ -140,6 +157,22 @@ for the changes that need an action are in `docs/deployment/README.md`.
   (OI-04, #872, #873).
 - The OpenAPI document and the management registry describe `JobStatus.last_error`
   as a fixed error category.
+- **The session-validation cache and the authorization decision cache are on
+  by default, with a 5 s TTL** (they were off). A revoked session or a changed
+  grant is seen at once on the replica that handles the write, and within the
+  TTL on the others; the decision-cache broadcast stays opt-in. To restore the
+  previous behaviour set `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=0` and
+  `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false`; a multi-replica deployment that
+  needs revocation to reach every replica on the next request should do so.
+  Start-up logs are `info` and name the switch. CONTRACT.md states the new
+  session-validation default, so the SDKs need a re-sync (d89e1d192).
+- Fewer database round trips per request, with no change in behaviour: an
+  uncached authorization check takes one instead of three; token endpoints read
+  the client, its tenant and the account in one; REST userinfo reads the session
+  and the account in one; the session and user reads check the tenant in the
+  repository rather than in the query; the request-audit worker writes queued
+  rows in batches of up to 64 and no longer drops rows under load (5bd3b363d,
+  3107b0c, 007602af9, a2d6de9ed, 025aea26d, 8a143491f, eb6a32c45).
 
 ### Fixed
 
@@ -165,6 +198,12 @@ for the changes that need an action are in `docs/deployment/README.md`.
   and the SurrealDB 3.3.5 comparison) in the public analysis, the website
   Benchmarks page and the three competitor comparison documents (OI-07, #561).
 - CONTRACT 1.69 §8 and §12.4 text and its conformance vectors (OI-31).
+- Database cost per request (`claude_dev/db-query-optimization.md`, measurements,
+  decisions A-F), the datastore engine, request deadline and record-cache
+  settings on the website configuration page, the new cache defaults in the
+  deployment guide, admin README, security profiles and CONTRACT.md, and the
+  benchmark page's declared read-cache posture (56bc712c0, 726ca641a, 21d05550d,
+  b638fa0de).
 
 ## [1.3.1] - 2026-11-11
 

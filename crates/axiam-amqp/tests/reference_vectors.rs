@@ -89,6 +89,10 @@ fn build_fixture() -> serde_json::Value {
     let authz_sig = sign(&authz_canonical);
     authz.hmac_signature = Some(authz_sig.clone());
     let authz_full: serde_json::Value = serde_json::to_value(&authz).unwrap();
+    // The exact bytes a producer puts on the wire: declaration order, compact,
+    // the signature member last. `message` above is the same value as a JSON
+    // object, which this fixture's writer key-sorts, so it is NOT wire bytes.
+    let authz_wire = String::from_utf8(serde_json::to_vec(&authz).unwrap()).unwrap();
 
     // --- AuditEventMessage ---
     let mut audit = sample_audit_event();
@@ -97,6 +101,7 @@ fn build_fixture() -> serde_json::Value {
     let audit_sig = sign(&audit_canonical);
     audit.hmac_signature = Some(audit_sig.clone());
     let audit_full: serde_json::Value = serde_json::to_value(&audit).unwrap();
+    let audit_wire = String::from_utf8(serde_json::to_vec(&audit).unwrap()).unwrap();
 
     let subkey = derive_tenant_key(&master_key(), tenant_id(), KEY_VERSION);
 
@@ -105,7 +110,10 @@ fn build_fixture() -> serde_json::Value {
             (axiam-amqp::messages). The 7 SDKs MUST reproduce `canonical_signed_json` byte-for-byte \
             (serialize the message in the exact declared field order with hmac_signature ABSENT) and \
             recompute the same `hmac_signature_hex` = HMAC-SHA256(derived_subkey, canonical_signed_json_bytes). \
-            The subkey is HKDF-SHA256(salt=APP_SALT, ikm=master_key, info=DOMAIN_TAG || key_version(1 byte) || tenant_id(16 raw bytes)).",
+            The subkey is HKDF-SHA256(salt=APP_SALT, ikm=master_key, info=DOMAIN_TAG || key_version(1 byte) || tenant_id(16 raw bytes)). \
+            `wire_json` is the exact delivered body (canonical_signed_json with `,\"hmac_signature\":\"<hex>\"` \
+            as its last member): an SDK consumer verifies over it as received (CONTRACT 1.69 §8). \
+            `message` is the same value as a key-sorted JSON object, for reading only; it is not wire bytes.",
         "hkdf": {
             "app_salt_utf8": "axiam-amqp-hkdf-salt-v1",
             "domain_tag_utf8": "axiam-amqp-v1",
@@ -129,11 +137,13 @@ fn build_fixture() -> serde_json::Value {
         },
         "authz_request": {
             "message": authz_full,
+            "wire_json": authz_wire,
             "canonical_signed_json": authz_canonical_str,
             "hmac_signature_hex": authz_sig,
         },
         "audit_event": {
             "message": audit_full,
+            "wire_json": audit_wire,
             "canonical_signed_json": audit_canonical_str,
             "hmac_signature_hex": audit_sig,
         }
@@ -175,6 +185,10 @@ fn test_reference_vectors_match() {
         assert_eq!(
             fixture[kind]["message"], computed[kind]["message"],
             "{kind}: full example message drifted"
+        );
+        assert_eq!(
+            fixture[kind]["wire_json"], computed[kind]["wire_json"],
+            "{kind}: wire bytes drifted"
         );
     }
     assert_eq!(
@@ -229,4 +243,39 @@ fn test_authz_round_trip_reproduces_canonical_bytes() {
             .as_str()
             .unwrap()
     );
+}
+
+/// CONTRACT 1.69 §8 (D-5, #882): an SDK consumer verifies over the RECEIVED
+/// bytes. `wire_json` is what the producer sends; cutting its trailing
+/// signature member must give back exactly `canonical_signed_json` and the
+/// signature, and the cut bytes must verify. `message` (key-sorted, signature
+/// in the middle) must NOT pass the cut: it is not wire bytes.
+#[test]
+fn test_wire_bytes_cut_to_the_canonical_bytes() {
+    use axiam_amqp::messages::split_trailing_signature;
+    let raw = std::fs::read_to_string(fixture_path()).expect("fixture exists");
+    let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for kind in ["authz_request", "audit_event"] {
+        let wire = fixture[kind]["wire_json"].as_str().unwrap();
+        let (canonical, sig) =
+            split_trailing_signature(wire.as_bytes()).expect("wire ends in the signature");
+        assert_eq!(
+            std::str::from_utf8(&canonical).unwrap(),
+            fixture[kind]["canonical_signed_json"].as_str().unwrap(),
+            "{kind}"
+        );
+        assert_eq!(sig, fixture[kind]["hmac_signature_hex"].as_str().unwrap());
+        assert!(verify_tenant_signature(
+            &master_key(),
+            tenant_id(),
+            KEY_VERSION,
+            &canonical,
+            Some(sig),
+        ));
+        let sorted = serde_json::to_vec(&fixture[kind]["message"]).unwrap();
+        assert!(
+            split_trailing_signature(&sorted).is_none(),
+            "{kind}: the key-sorted `message` must not pass for wire bytes"
+        );
+    }
 }

@@ -14,8 +14,8 @@
 //! then review and commit `tests/fixtures/v2_reference_vectors.json`.
 
 use axiam_amqp::messages::{
-    AuditEventMessage, AuthzRequest, CURRENT_KEY_VERSION, derive_tenant_key, sign_payload,
-    verify_tenant_signature,
+    AuditEventMessage, AuthzRequest, AuthzResponse, CURRENT_KEY_VERSION, derive_tenant_key,
+    sign_payload, verify_tenant_signature,
 };
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
@@ -318,5 +318,99 @@ fn test_vectors_are_the_cross_type_negative_pair() {
     }
     for name in ["subject_id", "allowed"] {
         assert!(!has(&audit, name), "audit_event must not carry {name}");
+    }
+}
+
+/// CONTRACT 1.69 §8 step 2c, typed consume (D-9), at the struct level: each of
+/// the three tenant-subkey-signed types, serialized with EVERY optional member
+/// populated (the widest layout it can have), carries its distinguishing
+/// members, and none of them appears in either other type's full member set.
+/// A body of one type also never deserializes as another.
+#[test]
+fn test_distinguishing_members_are_disjoint_across_the_three_types() {
+    let mut request = sample_authz_request();
+    request.hmac_signature = Some("00".repeat(32));
+    let mut audit = sample_audit_event();
+    audit.hmac_signature = Some("00".repeat(32));
+    let mut response = AuthzResponse {
+        correlation_id: request.correlation_id,
+        allowed: true,
+        reason: Some("r".to_string()),
+        reason_code: Some("allowed".to_string()),
+        tenant_id: tenant_id(),
+        nonce: request.nonce,
+        hmac_signature: None,
+    };
+    response.sign(&master_key(), KEY_VERSION);
+    assert!(request.scope.is_some() && audit.resource_id.is_some());
+    assert!(audit.ip_address.is_some() && audit.metadata.is_some());
+
+    let members = |value: serde_json::Value| -> Vec<String> {
+        value.as_object().unwrap().keys().cloned().collect()
+    };
+    let request_json = serde_json::to_value(&request).unwrap();
+    let audit_json = serde_json::to_value(&audit).unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+    let types: [(&str, Vec<String>, &[&str]); 3] = [
+        (
+            "AuthzRequest",
+            members(request_json.clone()),
+            &["subject_id"],
+        ),
+        (
+            "AuditEventMessage",
+            members(audit_json.clone()),
+            &["actor_id", "actor_type", "outcome"],
+        ),
+        (
+            "AuthzResponse",
+            members(response_json.clone()),
+            &["allowed"],
+        ),
+    ];
+    for (name, own, distinguishing) in &types {
+        for member in *distinguishing {
+            assert!(
+                own.iter().any(|m| m == member),
+                "{name} must carry {member}"
+            );
+            for (other, other_members, _) in &types {
+                if other != name {
+                    assert!(
+                        !other_members.iter().any(|m| m == member),
+                        "{other} must not carry {name}'s distinguishing member {member}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Cross-deserialization fails in every direction.
+    for (name, json) in [
+        ("AuditEventMessage", &audit_json),
+        ("AuthzResponse", &response_json),
+    ] {
+        assert!(
+            serde_json::from_value::<AuthzRequest>(json.clone()).is_err(),
+            "{name} must not decode as AuthzRequest"
+        );
+    }
+    for (name, json) in [
+        ("AuthzRequest", &request_json),
+        ("AuthzResponse", &response_json),
+    ] {
+        assert!(
+            serde_json::from_value::<AuditEventMessage>(json.clone()).is_err(),
+            "{name} must not decode as AuditEventMessage"
+        );
+    }
+    for (name, json) in [
+        ("AuthzRequest", &request_json),
+        ("AuditEventMessage", &audit_json),
+    ] {
+        assert!(
+            serde_json::from_value::<AuthzResponse>(json.clone()).is_err(),
+            "{name} must not decode as AuthzResponse"
+        );
     }
 }

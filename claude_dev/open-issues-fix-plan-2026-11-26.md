@@ -1111,8 +1111,15 @@ push. Do not claim a test run that did not happen.
 > 60 s after one failed refresh, even with keys cached)**, N-5 (11(e)/(f)
 > labels swapped), N-6 (bare `catch`) — all fixed in `359a4aa` (stale keys
 > served while a failure is throttled; gated-transport test; changelog
-> Security bullet). Round 2 was the last low/nit round; the round-2 fixes were
-> not re-reviewed. Nothing open.
+> Security bullet). Round 2 was the last low/nit round. **Round 3 (medium,
+> found cross-SDK in the Java review):** the round-2 stale fallback had no age
+> bound — while every refresh failed, a key removed upstream kept verifying
+> indefinitely. Fixed in `3f91017` (`maxStale` 300 s: held keys served only
+> while younger than TTL + `maxStale` = 600 s; test
+> `testTheStaleFallbackIsBoundedToTtlPlusMaxStale`); re-reviewed: medium
+> resolved on every path, medium-clean; two nits (re-check the bound after the
+> awaited fetch; README sentence) fixed in `9c71d8b`. Nothing open. All of it
+> still uncompiled until the PR's CI.
 
 ---
 
@@ -1269,6 +1276,16 @@ The canonical names are snake_case; an SDK MAY spell them in its language's case
 (`routingKey`, `tenantId` — TypeScript already does). **Confirmed (follow-up):** both are
 conformant — Go's snake_case `slog` keys and TypeScript's camelCase context keys are the same
 event. The `reason` values are not renamed: they are the closed vocabulary above, verbatim.
+
+**Classification order (follow-up decision, normative in CONTRACT 1.69 §8 obligation 4).** The
+reason is the first that applies: (1) not one JSON object → `malformed`; (2) no `hmac_signature`
+member → `unsigned`, whatever else is missing — so a body with neither `hmac_signature` nor
+`allowed` is `unsigned` (TypeScript, Python, PHP and Rust already do this; **Go changes**, it
+reports `malformed` today); (3) `hmac_signature` present but not a trailing 64-hex string, or
+`allowed` / `tenant_id` / `nonce` / `correlation_id` missing or ill-typed → `malformed`;
+(4) `signature`; (5) `tenant`; (6) `unknown_request`. Chosen because the presence of the
+signature member is the one test that needs no trust in the rest of the body, and four of the
+five ports already order it so.
 
 **After `Close` (follow-up decision).** Answers still buffered in, or arriving on, the reply queue
 after the requester was closed have no outstanding request to match. The requester MUST NOT

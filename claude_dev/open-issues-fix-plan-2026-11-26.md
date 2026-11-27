@@ -1813,6 +1813,97 @@ later version is listed in OI-30.
 
 ### OI-30 — consistency, regression, pull requests · Sonnet 5.5
 
+> **OI-30 part 1 — EXECUTED (2026-11-27)** · Sonnet 5.5 · items 1 to 5 of this
+> section except the pull requests (6) and the #513 comment (7), and except the
+> status line, which the orchestrator changes after the PRs. Changelog commit
+> `22de309` (its `Claude-Session` trailer names a wrong session id; the
+> orchestrator rewords it). This block's commit follows it.
+>
+> **1. Vendored files.** All eleven SDK working trees (each at its last Wave B2
+> commit) were compared with `cmp` against `sdks/` and `diff -r` against
+> `proto/`: `CONTRACT.md`, `openapi.json` and `management-registry.json` are
+> byte-identical in all eleven; `proto/` is identical in the nine SDKs that
+> vendor it. **Zero differences.** The C and C++ SDKs have no `proto/`
+> directory (REST surface only, they vendor the three files alone).
+>
+> **2. Cross-SDK consistency.** The table below was built by reading each SDK
+> read-only (`git ls-files`, `git log`, grep), and every test identifier in it
+> was then grepped in its repository. **No cell is empty.** `n/a` means the SDK
+> has no §8 AMQP event consumer or authorization requester: Kotlin, Swift, C
+> and C++ have only the §22 reactor runtime, which Wave B2 did not touch
+> (D-8 to D-10 are stated for the §8 transport). "(pin)" marks a check that
+> passed on the code as it was. Paths are relative to the SDK's `src`/`Sources`
+> root unless they start with `tests/`, `test/` or name a test project. Java and
+> Swift JWKS were pinned rather than reimplemented (Java: empty set and fetch
+> path changed; Swift: TTL clamp added).
+>
+> | Item | Rust | TypeScript | Python | PHP | C# | Java | Kotlin | Go | Swift | C | C++ |
+> |---|---|---|---|---|---|---|---|---|---|---|---|
+> | #880 logout `kid` | `src/oidc/logout.rs` · `tests/logout_test.rs::a_server_shaped_logout_token_verifies_against_a_two_key_jwks` | `src/node/oidc.ts` (`verifyLogoutToken`) · `test/node/logoutServerShaped.test.ts` | `_oidc.py` (`_verify_logout_token_impl`) · `tests/test_logout_token_kid.py::test_a_server_shaped_logout_token_verifies_against_a_two_key_jwks` | `src/Oidc/OidcClient.php` · `tests/Contract169/LogoutTokenKidTest.php::testAServerShapedLogoutTokenVerifiesAgainstATwoKeyJwksWithTheSigningKeyNotFirst` | `AxiamClient.OidcDeviceExchangeLogout.cs` · `OidcLogoutTests.cs::AServerShapedLogoutToken_VerifiesAgainstATwoKeyJwks_…` | `AxiamClient.java` / `oidc/OidcOperations.java` · `AxiamClientLogoutServerShapedTest::aServerShapedLogoutTokenVerifiesAgainstATwoKeyJwks…` | `oidc/OidcSupport.kt` · `oidc/OidcLogoutServerShapedTest.kt` | `oidc_logout.go` · `oi16_logout_test.go::TestVerifyLogoutToken_880_ServerShapedTokenAgainstATwoKeyJWKS` | `Oidc/Logout.swift` · `TokenExchangeAndLogoutTests::testServerShapedLogoutTokenVerifiesAgainstATwoKeyJwks` | `src/oidc_logout.c` · `tests/test_logout_kid.c::test_a_server_shaped_logout_token_verifies_against_a_two_key_jwks` | `src/oidc.cpp` (`Client::verify_logout_token`) · `tests/test_oidc_grants.cpp` ("§12.7.3 rule 1 (1.69): a server-shaped logout token…") |
+> | #881 no unsigned opt-out | `src/amqp/authz_requester.rs` · `an_unsigned_response_is_discarded_and_the_check_keeps_waiting` | `src/amqp/authzRequester.ts` · `test/amqp/authzRequester.test.ts`, `authzResponse.test.ts` ("the opt-out no longer exists") | `amqp/_authz_requester.py` · `tests/test_amqp_authz_requester.py::test_unsigned_is_discarded_with_reason_unsigned…`, `test_the_requester_has_no_unsigned_response_option` | `src/Amqp/AuthzRequester.php` · `tests/Contract168/AuthzRequesterTest.php::testThereIsNoOptOutForUnsignedResponses` | `Amqp/AxiamAuthzRequester.cs` · `AxiamAuthzRequesterTests.cs::AnUnsignedResponse_IsDiscardedAsUnsigned_…` | `amqp/AuthzRequester.java` · `AuthzRequesterTest::theOptionsHaveNoUnsignedResponseSwitch` | n/a (no §8 AMQP transport) | `amqp/authz_requester.go` · `amqp/oi16_test.go::TestAuthzRequester_UnsignedResponseIsDiscardedAndTheCheckKeepsWaiting` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | #882 verify received bytes | `src/amqp/consumer.rs` · `genuine_message_with_characters_encoders_disagree_on_verifies`, `duplicate_key_or_trailing_content_is_nacked_and_the_handler_never_runs` (pin) | `src/amqp/consumer.ts` · `test/amqp/consumerReceivedBytes.test.ts` (pin) | `amqp/_consumer.py` · `tests/test_amqp_received_bytes.py::test_a_body_with_a_duplicate_key_or_trailing_content_is_nacked_and_never_dispatched` | `src/Amqp/Consumer.php`, `StrictJson.php` · `tests/Contract169/ConsumerReceivedBytesTest.php` | `Amqp/AxiamAmqpConsumer.cs`, `SignedJson.cs` · `AmqpConsumerTests.cs::ADuplicateKeyOrTrailingContent_IsNackedWithoutRequeue_…` | `amqp/AmqpConsumer.java` · `AmqpConsumerC2Test::pin882_*` (pin) | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/c2_forged_body_test.go::TestVerifyAndDispatch_C2_ForgedCaseVariantBodyIsNackedAndHandlerNeverRuns` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | #883 requester discard event | `src/amqp/authz_requester.rs` · `every_discard_path_logs_the_a2_event_without_secrets` | `src/amqp/authzRequester.ts` · `test/amqp/authzDiscardEvent.test.ts` | `amqp/_authz_requester.py` · `tests/test_amqp_authz_requester.py::test_the_discard_event_carries_exactly_the_a2_members_and_no_secret` | `src/Amqp/AuthzRequester.php` · `tests/Contract168/AuthzRequesterTest.php::testEveryDiscardPathLogsOneEventWithTheRoutingKeyTheOwnTenant…` | `Amqp/AxiamAuthzRequester.cs` · `AxiamAuthzRequesterTests.cs::EveryDiscard_LogsOneWarningWithTheRoutingKeyAndTheOwnTenant_…` | `amqp/AuthzRequester.java` · `AuthzRequesterTest::everyDiscardPathLogsTheEventWithRoutingKeyAndOwnTenant` | n/a (no §8 AMQP transport) | `amqp/authz_requester.go` · `amqp/oi16_test.go::TestAuthzRequester_A2_DiscardEventPerReason` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-8 consumer discard event fields | `src/amqp/consumer.rs` · `the_discard_event_carries_exchange_routing_key_and_the_configured_tenant_only` | `src/amqp/consumer.ts` · `test/amqp/consumerTyped.test.ts` ("malformed, unsigned and signature carry exactly the five members…") | `amqp/_consumer.py` · `tests/test_amqp_typed_consume.py::test_the_event_carries_exchange_routing_key_and_the_configured_tenant` | `src/Amqp/Consumer.php` · `tests/Contract169/TypedConsumerTest.php::testTheDiscardEventCarriesExactlyTheFixedFieldsAndNoSecret` | `Amqp/AxiamAmqpConsumer.cs` · `AmqpConsumerTests.cs::EveryDiscard_LogsOneEventWithTheFirstReasonThatApplies` | `amqp/AmqpConsumer.java` · `AmqpDiscardEventTest::theEventCarriesExchangeRoutingKeyAndTheConfiguredTenantAndNoSignatureOrNonce` | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/oi38_test.go::TestConsumer_D8_DiscardEventCarriesDeliveryAndConfiguredTenant` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-9 typed consume | `src/amqp/consumer.rs` (`ConsumerTarget`) · `each_vectors_wire_json_is_malformed_for_the_other_types_consumer` | `src/amqp/consumer.ts` (`EVENT_SPECS`) · `test/amqp/consumerTyped.test.ts` ("the handler is never given a body chosen by its layout…") | `amqp/_consumer.py` · `tests/test_amqp_typed_consume.py::test_the_other_types_vector_is_malformed_and_never_dispatched` | `src/Amqp/Consumer.php`, `SignedEventType.php` · `tests/Contract169/TypedConsumerTest.php::testAnotherTypesWireJsonIsMalformedAndNeverReachesTheHandler` | `Amqp/AxiamAmqpConsumer.cs`, `AmqpEventType.cs` · `AmqpConsumerTests.cs::TheOtherTypesGenuineSignedWireJson_IsRefusedAsMalformed_BeforeTheHmac_…` | `amqp/AmqpConsumer.java`, `EventType.java` · `AmqpDiscardEventTest::anotherTypesGenuineWireJsonIsMalformedAtTheTypedCheck_…` | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/oi38_test.go::TestTypedConsume_D9_OtherTypesVectorIsMalformedBeforeTheHMAC` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-10 BOM refused | `src/amqp/consumer.rs`, `authz_requester.rs` · `a_byte_order_mark_or_any_prefix_is_malformed_and_the_next_delivery_is_processed` | `src/amqp/consumer.ts`, `authzRequester.ts` · `test/amqp/consumerTyped.test.ts` ("BOM + a valid vector is malformed…") | `amqp/_consumer.py` · `tests/test_amqp_typed_consume.py::test_a_bom_prefixed_vector_is_malformed_and_the_next_delivery_is_served` | `src/Amqp/Consumer.php`, `StrictJson.php` · `tests/Contract169/TypedConsumerTest.php::testAByteOrderMarkedBodyIsMalformedAndTheNextDeliveryIsStillProcessed` | `Amqp/AxiamAmqpConsumer.cs` · `AmqpConsumerTests.cs::ABomPrefixedVector_IsRefusedAsMalformed_NeverStripped_…` | `amqp/AmqpConsumer.java` · `AmqpDiscardEventTest::aBomPrefixedValidVectorIsMalformedWithoutExceptionAndTheNextDeliveryIsProcessed` | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/oi38_test.go::TestConsume_D10_BOMThenNextDeliveryIsProcessed` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-10 JWKS bounded stale-if-error | `src/token/jwks.rs` · `a_failed_refresh_keeps_the_held_keys_until_exactly_ttl_plus_300s` | `src/node/jwks.ts` · `test/node/jwksStaleIfError.test.ts` | `_jwks.py` · `tests/test_jwks_stale_if_error.py::test_conformance_failing_refresh_keeps_held_keys_until_ttl_plus_300` | `src/Auth/JwksVerifier.php` · `tests/Contract169/JwksStaleIfErrorTest.php::testTheBoundedStaleWindowConformanceSequence` | `Auth/JwksVerifier.cs` · `JwksStaleIfErrorTests.cs::ConformanceTest_HeldKeysRideOutAFailingEndpointForExactlyTtlPlus300Seconds` | `internal/JwksVerifier.java` · `JwksVerifierStaleBoundTest::conformance_failingRefresh_heldKidVerifiesUntilTtlPlus300ThenIsRefused_…` | `internal/JwksVerifier.kt` · `JwksStaleIfErrorTest.kt::conformance - failing refresh, bound at TTL plus 300 s, recovery after one fetch` | `internal/jwks/verifier.go` · `internal/jwks/oi38_stale_test.go::TestJWKS_StaleIfError_BoundedConformance` | `JWKS/JwksVerifier.swift` · `JwksStaleIfErrorTests::testHeldKeysServeUntilTtlPlus300ThenRefuseUntilAFetchSucceeds` (pin, plus the TTL clamp) | `src/jwks.c` · `tests/test_jwks_stale_bound.c::test_stale_bound_transport_error` (conformance run per failure mode) | `src/jwks.cpp` · `tests/test_jwks_stale.cpp` ("§12.4 rule 2 conformance: failing refresh serves held keys until TTL + 300 s, then refuses") |
+>
+> **3. Server regression** (sandbox, 4 CPUs; `cargo clean` first, swagger-ui
+> placeholder exported, `protoc` present, libxml2 present so default features
+> were used; every cargo run `-j 2`, exit code read from its log). Test files
+> touched by Wave A (`git diff --name-only 88fa1fa..HEAD`) and the lib tests of
+> the touched crates:
+>
+> | Command | Result |
+> |---|---|
+> | `-p axiam-amqp --test reference_vectors` | 5 passed |
+> | `-p axiam-api-grpc --test grpc_server_test` / `--test grpc_units` | 9 / 60 passed |
+> | `-p axiam-api-rest --test` `bearer_route_patterns_test` / `federation_first_time_sso_test` / `mcp_authorization_test` / `middleware_test` / `oauth2_flow_test` / `opaque_login_test` / `provider_id_token_test` / `resource_indicators_test` / `sec095_federated_login_gate_test` | 1 / 11 / 14 / 9 / 49 / 29 / 25 / 20 / 9 passed |
+> | `-p axiam-api-rest --lib` | 342 passed |
+> | `-p axiam-audit --test service_and_middleware` / `--lib` | 45 / 26 passed |
+> | `-p axiam-auth --test auth_service_test` / `--test directory_provisioning_test` / `--lib` | 94 / 27 / 296 passed (1 pre-existing ignored) |
+> | `-p axiam-core --lib` | 580 passed |
+> | `-p axiam-federation --lib` | 418 passed |
+> | `-p axiam-oauth2 --lib` | 678 passed |
+> | `-p axiam-server --lib` | 178 passed |
+>
+> All 23 invocations exited 0. Not run: the other integration tests of those
+> crates, `axiam-db`, `axiam-pki` and the rest of the workspace (not touched by
+> Wave A, and the disk does not hold a workspace test build). To stay inside the
+> disk quota the executables of finished test targets and `target/debug/incremental`
+> were deleted between invocations (never during one).
+>
+> `cargo clippy -j 2 --workspace --all-targets -- -D warnings` (default
+> features, the whole workspace in one run after a second `cargo clean`): exit 0,
+> 17 min.
+>
+> Other checks, all exit 0: `cargo fmt --all -- --check`;
+> `python3 scripts/check-crate-layering.py` (19 crates, 62 production edges, 4
+> declared test-only inversions); `python3 scripts/gen-management-registry.py
+> --check` (202 operations, in sync with openapi.json 1.3.1);
+> `python3 scripts/check-spec-digest.py`; `python3 scripts/check-conflict-markers.py`;
+> `bash scripts/check-doc-links.sh` (586 links). Website: `npm run
+> gen:contract-anchors` (288 sections at contract 1.69), `gen:threat-model` (529
+> threats) and `gen:api-index` each left the tree unchanged (`git status` clean);
+> `npm run build` and `npm run lint` pass (one pre-existing oxlint warning,
+> `src/lib/render.tsx`). `cargo clean` was run again at the end.
+>
+> **4. Server `CHANGELOG.md`.** One `## [Unreleased]` on top (Security, Added,
+> Changed, Fixed, Documentation) covering the 128 commits since `v1.3.1`:
+> the 2026-11-14 audit fixes (the Wave 1 code commits were squashed into the
+> review commit, so those entries come from the audit plan's EXECUTED blocks),
+> OI-01 to OI-07, the logout-token `kid`, contract 1.69 and OI-31. No version
+> bump, no tag, no date.
+>
+> **Open for the orchestrator (found, not changed here).** (a) The Wave A gate's
+> open point, the `docs/deployment/README.md` claim that an SDK-based relying
+> party verifies a `logout+jwt` token on the release it already runs, was checked
+> statically only: in every SDK at `v1.3.1`, `typ` is read on the DPoP and SSF
+> paths and not on the logout path (a grep of the tag, nothing was run for the
+> ten SDKs beyond Rust, which the gate covered). (b) Readings 8 to 10 for Swift
+> and PHP: the table shows the tests exist; their behaviour under readings 8 to
+> 10 was not re-judged here.
+
 1. **Vendored files.** In all eleven SDKs, `cmp` `CONTRACT.md`, `openapi.json`,
    `management-registry.json` and `diff -r proto/` against `axiam`. Zero
    differences.

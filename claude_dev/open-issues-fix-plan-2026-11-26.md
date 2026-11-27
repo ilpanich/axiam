@@ -925,6 +925,53 @@ build has one; correct the migration note either way. KOT-R1-4 with the GLUE
 items: cookie clearing covers the paths where the hook throws or responds.
 KOT-R1-5 (D-4). KOT-R1-7: enforce the store bound under the lock. No AMQP work.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `a89bda6`; review fixes `e146f0f`
+> (round 1), `069343b` (round 2).**
+>
+> - **KOT-R1-1:** repeatable `@AxiamRequireScope(vararg scopes)` (any scope
+>   within one annotation, every annotation must pass; the
+>   `AxiamRequireScopes` container is unwrapped in `enforce` — without the
+>   unwrap the repeated test answered 200, i.e. fail-open). **KOT-R1-2:**
+>   `verifyAccessTokenSignature`, `setClockForTesting` now `internal`.
+>   **KOT-R1-3:** 1.3.1 binary compatibility restored by `@JvmOverloads`
+>   (`AxiamUser`), secondary constructors (`OidcStateEntry` — incl. the 1.3.1
+>   default-argument bridge descriptor, `MemoryOidcStateStore(Long)`) and a
+>   HIDDEN-deprecated `axiamOidcLogin` overload; reflection tests pin the 1.3.1
+>   descriptors (no apiCheck plugin exists). Not restorable and documented:
+>   data-class `copy`/`copy$default`; Java *source* must pass `bindingDigest`.
+>   **KOT-R1-4 / GLUE:** the clearing `Set-Cookie` is appended before
+>   `completeOidcLogin`; a responding hook skips `respondOutcome`.
+>   **KOT-R1-5 (D-4):** `JwksVerifier` fetches and caches the set itself (nimbus
+>   `DefaultResourceRetriever`, honouring the nimbus timeout/size system
+>   properties): at most one fetch per 60 s window counted from the last
+>   attempt, a held set served up to 300 s when a refresh fails, then refused.
+>   **KOT-R1-6:** README rule table and KDoc. **KOT-R1-7:** one lock and an
+>   insertion-ordered map. GLUE-R1-4: pinned, not a defect. N4: a throwing
+>   predicate accepts nothing (`VirtualMachineError` rethrown).
+> - **Decision 7:** was not conformant (raw `Location`; CR/LF → 500); new
+>   `encodeRedirectLocation` at the header.
+> - **#880:** pins only (`verifyLogoutToken` already selected by `kid`);
+>   server-shaped two-key test, kid-less/unknown `unknown_kid`, rules 10/11 off.
+> - **Regression failures on unfixed code:** hook-throws "the 500 must carry the
+>   clearing Set-Cookie"; Decision 7 `/a b/café` and 500 on CR/LF; KOT-R1-7
+>   "held 51 entries, bound is 50"; cooldown "2 fetches" (cold) and "50
+>   fetches" (failing endpoint); repeated scope "403 expected, 200"; four
+>   `NoSuchMethodException`s for the 1.3.1 signatures.
+> - **Verification:** `./gradlew build test koverXmlReport koverVerify
+>   dokkaJavadocJar` green at `e146f0f` (1445 tests); at `069343b` one known
+>   load-sensitive flake (`OidcRefreshTest` "the refresh response's scope
+>   replaces the grant's") failed in the full run and passes alone;
+>   `gen_management.py --check` current. Not run: the Kotlin/JDK matrix legs.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L1 (nimbus timeout
+> system properties ignored), L2 (stale-if-error untested), L3 (lock taken on
+> every verification past 60 s), L4 (1.3.1 default-argument constructor
+> missing), N1, N2 — fixed in `e146f0f` (bytecode descriptor confirmed by the
+> reviewer with `javap`). Round 2: medium-clean; R2-N1 (Java-source note) fixed;
+> R2-N2 (pin the `isCommitted` guard) — test strengthened, but **the guard
+> cannot be pinned through the Ktor test host** (a second respond after commit
+> is silently ignored there); left open, not security-relevant.
+
 **OI-16 — `axiam-go-sdk` (#111) · Opus 5.5.** GO-R1-1: fold keys exactly as
 `encoding/json` does (the minimum of the `unicode.SimpleFold` orbit); test with
 `ſubject_id` and a Kelvin-sign key; the same check serves `authz_requester.go`.

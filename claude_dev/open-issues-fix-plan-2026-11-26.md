@@ -977,6 +977,45 @@ take the same catch (clear the cookie, write the 500); test with a hook that
 throws it while `RequestAborted` is not cancelled. #882: `Amqp/Hmac.cs`. #883:
 check the discard log against Appendix A.2.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `47a538f`; review fixes `d002cac`
+> (round 1), `e07887f` (round 2); §8 alignment `e39107a`.**
+>
+> - **CSH-R5-1:** README, changelog and the catch comment say what
+>   `Response.Clear()` guarantees (headers set so far are dropped; state
+>   committed elsewhere or an `OnStarting` cookie is not undone). **CSH-R5-2:**
+>   the catch filter excludes only an `OperationCanceledException` while
+>   `RequestAborted` is cancelled; both branches tested from the server side
+>   (round 2), each mutation-checked.
+> - **#882:** received-bytes HMAC (trailing-signature cut, duplicates at any
+>   depth, case-variant top-level names, trailing content) — unfixed: the
+>   special-characters, case-variant, trailing-`\n` and non-last-signature tests
+>   failed; consumer layout check for `AuthzRequest`/`AuditEventMessage`
+>   (round 1; a signed cache-invalidation message reached the handler before);
+>   shared internal `SignedJson`. **#883:** was missing — the A.2 event on every
+>   discard path, exchange/routing key from the delivery when known.
+>   **#881:** opt-out removed. **#880:** pins. **Decision 7:** was not
+>   conformant (only non-ASCII encoded; CR/LF passed raw — header injection
+>   `"/a\r\nSet-Cookie: pwned=1"` observed on unfixed code); fixed.
+> - **§8 alignment (`e39107a`):** consumer already conformant (pins); exactly
+>   64-hex signature enforced (no behaviour change); requester fixed — no
+>   signature member → `unsigned` whatever else is missing, required members
+>   checked before the HMAC (unfixed: 5 of 9 order cases failed), after-Close
+>   answers nacked without decoding or an event.
+> - **Verification:** .NET 10 only (`-p:TargetFrameworks=net10.0`):
+>   `Axiam.Sdk.Tests` 1690, `Axiam.Sdk.AspNetCore.Tests` 138 passed;
+>   `gen_management.py --check` current. **Not run:** the net11.0 leg (no .NET
+>   11 SDK here), example builds, `dotnet pack`.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; two lows (no layout
+> check — any subkey-signed shape accepted by an event consumer; the abort
+> branch untested) and nits — fixed in `d002cac`. Round 2: medium-clean; the
+> abort test did not fail without its fix — rewritten in `e07887f`. Alignment
+> review: medium-clean; two nits left open, not security-relevant (a
+> no-signature body with a duplicate key, or with only `HMAC_SIGNATURE`, is
+> classified `malformed` rather than `unsigned`; the 64-hex test is a pin).
+> Out of scope, noted: `Reactor/ReactorProtocol.cs` still verifies reactor
+> events over a re-serialization (fails closed on `<`, `>`, `&`, non-ASCII).
+
 **OI-14 — `axiam-java-sdk` (#133) · Sonnet 5.5.** JAV-R1-1 is security-relevant:
 `AxiamUser.roles` must come from the `roles` claim only, never from `scope`;
 rewrite any fixture that expected the old mapping. JAV-R1-2: an unparseable

@@ -925,6 +925,51 @@ lost `\u` escapes so the two tests test what their names say (check they fail if
 the verification is broken). PHP-R1-6 and PHP-R1-7 are documentation. #882:
 `Consumer` / `Hmac::verify()`.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `cebe578`; review fixes `2f14de8`
+> (round 1), `6acf09f` (round 2); §8 alignment `ea870b2`.**
+>
+> - **PHP-R1-1:** `#[RequireScope]` is `IS_REPEATABLE`; Laravel middleware and
+>   Symfony listener enforce every instance. **PHP-R1-2 / GLUE-R1-5:**
+>   `OidcLoginFlow::complete()` turns any exception into `500 login_failed` with
+>   the clearing `Set-Cookie`, logging the class only; a non-Auth
+>   `AxiamException` from the exchange is the uniform 401 (branch reached by a
+>   409 → `AuthzError` test). **PHP-R1-3:** with #883. **PHP-R1-4:** NaN, ±INF,
+>   0, negative timeouts refused at construction and per call. **PHP-R1-5:** the
+>   `\u` escapes restored (mutation-checked). **PHP-R1-6/7:** docs, checked
+>   against `JwksVerifier::resolveJwksUriAsync` and the Laravel cookie setup.
+>   **GLUE-R1-4:** pinned, not a defect (retry with the right cookie also 401,
+>   no token request). **N1:** `MemoryOidcStateStore` bounded at 10 000.
+> - **#880:** pins only (already kid-selected). **#881:** opt-out removed per
+>   A.1. **#882:** received-bytes verification (`Hmac::verifiedCanonical`,
+>   `StrictJson` duplicate keys through escapes, trailing content, non-last /
+>   null signature) and the layout check `Hmac::hasSignedLayout()`.
+>   **#883:** the A.2 event on every discard path. **Decision 7:** was not
+>   conformant (raw `Location`); `OidcLoginOutcome::encodeLocation()` with
+>   maximal-subpart U+FFFD substitution of ill-formed UTF-8 (`scrubUtf8()`,
+>   compared by the reviewer against Python's `errors='replace'` on 200 015
+>   inputs: identical).
+> - **§8 alignment (`ea870b2`):** consumer and producer already conformant
+>   (pins: `wire_json` cut/verify/dispatch, producer emits `wire_json` byte for
+>   byte); requester fixed — required-member checks moved before the HMAC
+>   (unfixed: four rows "expected malformed, got signature") and after-Close
+>   answers nacked without decoding or an event (unfixed: "no discard event
+>   after close" failed).
+> - **Verification:** phpunit 2400 tests / 12 176 assertions OK (proxy vars
+>   unset); `composer validate --strict`; `gen_management.py --check` current;
+>   docblock coverage 2153/2153; TLS-bypass grep clean. **Not run:** phpstan
+>   (not installable here: composer's dist download is blocked; a newer phar
+>   reported 3 errors in the untouched `src/AxiamClient.php`), the PHP 8.6 leg,
+>   `composer audit`.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; four lows (an
+> exchange-error test that never reached the new branch; GLUE-R1-4 not
+> addressed in writing; the AuthzResponse layout case refused by the replay
+> gate, not the layout check; a stale vectors test) and five nits — all fixed in
+> `2f14de8`. Round 2: medium-clean; one nit (three more ill-formed UTF-8 rows)
+> fixed in `6acf09f`. Alignment review: medium-clean, nothing found (no
+> oracle: the reason stays in the local event; a forged body cannot complete
+> or fail a check). Nothing open.
+
 **OI-13 — `axiam-csharp-sdk` (#125) · Sonnet 5.5.** CSH-R5-1: correct the "a
 throw aborts the sign-in" wording to what `Response.Clear()` guarantees.
 CSH-R5-2: an `OperationCanceledException` that is not the client's abort must

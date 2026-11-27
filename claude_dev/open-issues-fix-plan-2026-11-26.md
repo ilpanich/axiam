@@ -1235,6 +1235,54 @@ documentation and the migration note (the new public field on `token::Claims`).
 RUS-R1-9: the stray blank lines. Style: clear and concise Rust, no new
 dependencies. #882: pin only.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `b4db904`; review fixes `f6ce39d`
+> (round 1), `396fa8f` (round 2); §8 alignment `8546bfd` + `f515220`.**
+>
+> - **RUS-R1-1/2:** `AxiamUser::roles: Option<Vec<String>>`; a malformed
+>   `roles` claim reads as `None` (lenient deserializer, other claims still
+>   strict) and `require_role` answers 403 — unfixed: `invalid type: string
+>   "admin", expected a sequence` (401). Round 1 did the same for `scope`
+>   (unfixed: `invalid type: integer 7`). **RUS-R1-3:** stacked guards share one
+>   injected parameter (unfixed: E0415). **RUS-R1-5/6:** docs and migration
+>   note. **RUS-R1-7:** single-space split. **RUS-R1-8:** a broker Nack fails
+>   `check` at once on a confirm-enabled channel (`connect` now calls
+>   `confirm_select`); the error-kind half **rejected in writing**: CONTRACT §2
+>   allows exactly three error types and the SDK has no configuration variant.
+>   **RUS-R1-9:** done.
+> - **#880:** pins; logout fixture signer server-shaped. **#881:** opt-out
+>   removed. **#882:** the pin with a duplicate key signed over the
+>   de-duplicated form **failed** (the handler ran), so it was a finding: the
+>   consumer now uses the strict parse; the alignment then ported it to
+>   received-bytes verification with the §8 2c layout check (unfixed:
+>   trailing whitespace, a non-last signature and reordered members reached the
+>   handler). **#883:** the A.2 event, closed-requester rule (`biased` select).
+> - **JWKS (D-4 class, beyond the issue, security-relevant):** a failed forced
+>   unknown-kid refetch now opens the window (unfixed: 51 fetches for 50 tokens);
+>   a failing endpoint on a cold or expired cache costs one fetch per 10 s
+>   window (unfixed: every lookup fetched). No stale-if-error.
+> - **§8 alignment:** `AuditEventMessage.metadata` serialized with sorted keys
+>   at every depth (byte-identical to the server's serde_json without
+>   `preserve_order`); requester reason order (required members before the
+>   HMAC); the contract-required escaped/non-ASCII consumer test (`f515220`).
+> - **Verification:** `cargo fmt --check`; clippy `-D warnings` (all features
+>   and amqp-only); `cargo test --all-features` (1269+ passed, 0 failed);
+>   `cargo doc -D warnings`. Lean profile, `-j 2`, `cargo clean` after each run
+>   (the target dir reached 32 GB once). **Not run:** wasm32 check, cargo
+>   audit, publish dry-run, the MSRV 1.89 job, coverage, `cargo build
+>   --examples` (passed once before later edits).
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; five lows (the
+> rules-10/11 guard test passing for the wrong reason; RUS-R1-8 rejection not
+> written down; the Nack fast-fail needing confirms; a non-string `scope`
+> giving 401; a reply buffered at close logged) plus the orchestrator-added
+> JWKS window — fixed in `f6ce39d`. Round 2: medium-clean; the cold-cache
+> outage fetches and a doc nit — fixed in `396fa8f`. Alignment review:
+> medium-clean (hostile inputs — BOM, invalid UTF-8, deep nesting — refused
+> without panics); L-1 and a comment nit fixed in `f515220`. **Open, low:** the
+> consumer's refusal event lacks exchange/routing key/tenant (§8 rule 4,
+> pre-existing; handled cross-SDK in OI-30); a correctly signed `null`
+> optional member passes the layout check (nit).
+
 **OI-18 — `axiam-cplusplus-sdk` (#89) · Sonnet 5.5.** D-3: implement §11.2 rule
 11(b) (`require_role` refuses a `roles` claim that is not an array of strings,
 `["admin", 7]` and `["admin", null]` included; `AxiamUser` keeps absent distinct

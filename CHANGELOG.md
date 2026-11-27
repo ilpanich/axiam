@@ -146,10 +146,10 @@ for the changes that need an action are in `docs/deployment/README.md`.
   keys survive a failed refresh for at most 300 s beyond the cache TTL, then are
   refused; the TTL is the configured value or `max-age`, clamped to 300 s; an
   empty key set is a failed refresh (OI-31). §9: the `oidc_refresh`
-  single-flight is per refresh token, keyed by a digest of the token (never the
-  raw token, never logged), so a caller with a different refresh token never
-  joins another token's flight or receives its token set, and a vacated slot is
-  removed (axiam-kotlin-sdk#109, axiam-rust-sdk#161, axiam-typescript-sdk#177,
+  single-flight is per refresh token, keyed by a digest of the resolved tenant
+  and the token (never the raw token, never logged), so a caller with a
+  different refresh token or tenant never joins another key's flight or
+  receives its token set, and a vacated slot is removed (axiam-kotlin-sdk#109, axiam-rust-sdk#161, axiam-typescript-sdk#177,
   axiam-python-sdk#115, axiam-java-sdk#142, axiam-csharp-sdk#130,
   axiam-php-sdk#96, axiam-go-sdk#117).
 - Back-channel logout tokens are signed through the access-token signer, so

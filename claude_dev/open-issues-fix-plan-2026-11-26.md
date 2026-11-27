@@ -916,6 +916,49 @@ the cookie clear wins, and the README states the deviation. PYT-R1-5: exclude
 `binding_digest` from the repr. GLUE-R1-4 and GLUE-R1-5 as listed at the end of
 the issue. #882: `verify_hmac` must stop re-serializing.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `2806e8d`; review fixes `8f89e65`
+> (round 1), `f9267d0` (round 2); §8 alignment `6525c30` + `b1d3bc3`.**
+>
+> - **PYT-R1-1 / #883:** the A.2 event on every requester discard path.
+>   **PYT-R1-2:** an unexpected fault in `_consume` is logged by type, the
+>   delivery nacked, the requester keeps serving (a forged delivery cannot be
+>   attributed to a pending request, so none is failed); the surrogate-nonce
+>   crash fixed. **PYT-R1-3:** the mislabelled case renamed, a real
+>   "signature moved before nonce" case added. **PYT-R1-4:** cookie clear wins,
+>   README states the deviation. **PYT-R1-5:** `binding_digest` out of the
+>   repr. **PYT-R1-6:** stronger hook tests. **GLUE-R1-4:** pinned, not a
+>   defect. **GLUE-R1-5:** Django and FastAPI answer a generic 500 with the
+>   clearing cookie on any callback fault.
+> - **#880:** `reason` codes on the logout path (`unknown_kid`, `invalid_alg`,
+>   `token_expired`, `invalid_signature`; never `None` after round 1).
+>   **#881:** opt-out removed. **#882 (D-5):** received-bytes verification
+>   (`verify_and_decode`), plus the consumer layout check (round 1).
+>   **Decision 7:** was only partly conformant; shared
+>   `encode_redirect_location`; Django's scheme allow-list still applied (round
+>   1: a predicate-admitted `javascript:` target is refused).
+> - **JWKS (round 1, the review's medium F-1):** the forced re-fetch set
+>   `jwk_set_cache = None`, disabling PyJWT's cache for good — 50 unknown kids
+>   cost 200 fetches and every later token fetched; now a by-hand kid lookup
+>   with one forced refill per 60 s window (50 unknown kids → ≤1 fetch, valid
+>   tokens afterwards → 0); round 2 adds a cold-cache outage window (51 → 1
+>   fetch).
+> - **§8 alignment:** strict UTF-8 and no trailing whitespace in
+>   `strict_json_object`; required members checked before the HMAC; after-Close
+>   answers not decoded and not logged; `wire_json` and producer byte-for-byte
+>   tests (pins); a BOM-prefixed and a raw-surrogate signed body are refused
+>   (pinned in `b1d3bc3`).
+> - **Verification:** pytest 2562 passed (venv, proxy vars unset); ruff check,
+>   ruff format --check, `mypy --strict src`, interrogate 100%. **Not run:**
+>   pip-audit, build/twine, grpc-drift, the 3.11/3.15 matrix legs (local 3.13
+>   only).
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: **not medium-clean** — F-1 (medium,
+> the JWKS cache disabled after one unknown kid) plus F-2..F-7; all fixed in
+> `8f89e65`, together with the cross-SDK consumer layout check. Round 2
+> (re-review of the medium): medium-clean; F-4 and four new low/nit items
+> fixed in `f9267d0`. Alignment review: medium-clean; two nits fixed in
+> `b1d3bc3`. Nothing open.
+
 **OI-12 — `axiam-php-sdk` (#92) · Sonnet 5.5.** PHP-R1-1: make `#[RequireScope]`
 repeatable (`Attribute::IS_REPEATABLE`) with all-must-pass semantics and a test
 with two scopes. PHP-R1-2 with GLUE-R1-5: clear the binding cookie on every exit

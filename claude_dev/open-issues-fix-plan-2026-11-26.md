@@ -1114,6 +1114,47 @@ endpoint fails. JAV-R1-6: complete decisions off the RabbitMQ consumer thread
 (an executor the caller may supply) and document it. JAV-R1-8 with PYT-R1-5's
 approach: keep the digest out of `toString()`. #882: pin only (fixed in SA-24).
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `3f033c2`; review fixes `bf1c445`
+> (round 1), `fd5c1bb` (round 2), `d3e0380` (round 3); §8 alignment `325edbc`
+> + `53d8c91`.**
+>
+> - **JAV-R1-1 (security):** `roles` from the `roles` claim only — unfixed:
+>   `expected <[editor, auditor]> but was <[read, write, admin]>`.
+>   **JAV-R1-2 / GLUE-R1-1:** `encodeRedirectLocation` per Decision 7 (an
+>   unparseable `returnTo` such as `/a b` is followed encoded, never a 500 —
+>   unfixed: `IllegalArgumentException … index 2: /a b`). **JAV-R1-3 (D-4):**
+>   one fetch per 60 s window, failed attempts included (unfixed: 2 fetches cold,
+>   20 on a failing endpoint). **JAV-R1-4 / #883, JAV-R1-5 / #881 (A.1),
+>   JAV-R1-6** (decisions completed on a caller-supplied executor or an owned
+>   daemon pool; unfixed: the consumer thread stalled), **JAV-R1-7, JAV-R1-8**
+>   (digest out of `toString()`), GLUE-R1-4 (pinned), GLUE-R1-5 / N1 / N4.
+>   **#880:** pins.
+> - **#882:** the "pin only" assumption did not hold — server-shaped bodies
+>   (lower-case `\u001f`, non-ASCII, `1e21`) failed on the re-serializing
+>   `Hmac.verifiedCanonical`; fixed to received-bytes verification; the §8
+>   alignment added the layout check (unfixed: reordered, extra-member and
+>   cache-invalidation bodies reached the handler), the reason order, the
+>   after-Close rule, and (`53d8c91`) a leading-BOM refusal.
+> - **JWKS, from the gate:** round 1 replaced nimbus `RemoteJWKSet` by a
+>   self-managed cache with stale-if-error; **round 2 found it unbounded
+>   (medium)** — a rotated-out key kept verifying through an outage — now
+>   bounded at 600 s (TTL 300 + `JWKS_MAX_STALE` 300; unfixed: no refusal at
+>   t=601), lock-free fast path; round 3 publishes set and load time as one
+>   immutable holder.
+> - **Verification:** `/opt/maven/bin/mvn` (the wrapper cannot download),
+>   sequential: `mvn test` 1682 tests, 0 failures; javadoc; `gen_management.py
+>   --check`; TLS-bypass gate. **Not run:** `mvn verify` (gpg plugin not
+>   cached offline), signing/sigstore/central jobs, the Spring Boot example.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L-1 (one failed refresh
+> near TTL refused every token for 60 s), L-2, L-3, N-1..N-3 — fixed in
+> `bf1c445`. Round 2: **not medium-clean** — R2-1 (unbounded stale set), plus
+> R2-2, R2-3 — fixed in `fd5c1bb`. Round 3 (medium re-review): resolved;
+> R3-1 (two volatiles could pair an old set with a new timestamp) and R3-2
+> fixed in `d3e0380`. Alignment review: medium-clean; F-2, F-3 fixed in
+> `53d8c91`. **Open, low (cross-SDK, OI-30):** the generic event consumer
+> accepts either signed layout.
+
 **OI-15 — `axiam-kotlin-sdk` (#99) · Sonnet 5.5.** KOT-R1-1: add
 `@AxiamRequireScope` and its `enforce` support, repeatable. KOT-R1-2: narrow the
 two new public `JwksVerifier` members to what the contract allows (internal, or

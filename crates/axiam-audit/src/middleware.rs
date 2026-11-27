@@ -963,20 +963,64 @@ fn decoded_folded(segment: &str) -> String {
     String::from_utf8_lossy(&out).to_ascii_lowercase()
 }
 
+/// Decode `segment` repeatedly until it stops changing, at most
+/// [`MAX_DECODE_PASSES`] times, folding to ASCII lower case.
+///
+/// actix keeps `%25` encoded, so `expor%2574` reaches a handler as the literal
+/// `expor%74` and matches nothing; it is still the spelling of a bearer route
+/// that a lenient downstream could resolve, so on an unmatched path it is
+/// treated as `export`. Over-redaction there is acceptable.
+fn decoded_to_fixpoint(segment: &str) -> String {
+    let mut current = decoded_folded(segment);
+    for _ in 1..MAX_DECODE_PASSES {
+        let next = decoded_folded(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+/// Bound on [`decoded_to_fixpoint`] passes (original + two re-decodes).
+const MAX_DECODE_PASSES: usize = 3;
+
+/// Whether the tail of `stack` equals one of `prefixes`.
+fn ends_with_prefix(stack: &[String], prefixes: &[Vec<String>]) -> bool {
+    prefixes.iter().any(|prefix| {
+        stack.len() >= prefix.len() && stack[stack.len() - prefix.len()..].iter().eq(prefix.iter())
+    })
+}
+
 /// [`redacted_path`] for a request with no usable route pattern.
 ///
 /// Empty segments (`//`, a trailing `/`) are skipped when matching a prefix, so
 /// `/account/export//<token>` is recognised like `/account/export/<token>`.
-/// Segments are compared percent-decoded and ASCII-case-folded, so
-/// `/Account/expor%74//<token>` is recognised too. A segment whose decoded form
+/// Segments are compared percent-decoded (repeatedly, up to
+/// [`MAX_DECODE_PASSES`] times, so `expor%2574` counts as `export`) and
+/// ASCII-case-folded, so `/Account/expor%74//<token>` is recognised too; the
+/// pattern prefixes are folded the same way. A segment whose decoded form
 /// contains `/` (`%2F`) counts as several; if any of them follows the prefix
-/// the whole raw segment is redacted.
-fn redacted_unmatched_path(segments: &[&str]) -> String {
-    let prefixes: Vec<Vec<&str>> = BEARER_ROUTE_PATTERNS
+/// the whole raw segment is redacted. `.` segments are skipped, and `..` is
+/// matched under both readings (it pops the previous segment, and it is kept
+/// as a literal segment), so `account/./export/<token>` and
+/// `account/x/../export/<token>` are redacted. None of these spellings routes
+/// (actix does not normalise dot segments), so the handle is unconsumed and
+/// would otherwise be logged verbatim. Over-redaction is acceptable here;
+/// matched routes never come through this function.
+fn redacted_unmatched_path_for(segments: &[&str], patterns: &[&str]) -> String {
+    let prefixes: Vec<Vec<String>> = patterns
         .iter()
-        .map(|pattern| bearer_prefix(pattern))
+        .map(|pattern| {
+            bearer_prefix(pattern)
+                .into_iter()
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
         .collect();
-    let mut previous: Vec<String> = Vec::new();
+    // `popped` resolves `..`; `literal` keeps it as an ordinary segment.
+    let mut popped: Vec<String> = Vec::new();
+    let mut literal: Vec<String> = Vec::new();
     segments
         .iter()
         .map(|segment| {
@@ -984,15 +1028,18 @@ fn redacted_unmatched_path(segments: &[&str]) -> String {
                 return *segment;
             }
             let mut redact = false;
-            for piece in decoded_folded(segment).split('/').filter(|p| !p.is_empty()) {
-                redact |= prefixes.iter().any(|prefix| {
-                    previous.len() >= prefix.len()
-                        && previous[previous.len() - prefix.len()..]
-                            .iter()
-                            .map(String::as_str)
-                            .eq(prefix.iter().copied())
-                });
-                previous.push(piece.to_owned());
+            for piece in decoded_to_fixpoint(segment)
+                .split('/')
+                .filter(|p| !p.is_empty() && *p != ".")
+            {
+                redact |=
+                    ends_with_prefix(&popped, &prefixes) || ends_with_prefix(&literal, &prefixes);
+                if piece == ".." {
+                    popped.pop();
+                } else {
+                    popped.push(piece.to_owned());
+                }
+                literal.push(piece.to_owned());
             }
             if redact {
                 REDACTED_PATH_SEGMENT
@@ -1002,6 +1049,11 @@ fn redacted_unmatched_path(segments: &[&str]) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// [`redacted_unmatched_path_for`] over [`BEARER_ROUTE_PATTERNS`].
+fn redacted_unmatched_path(segments: &[&str]) -> String {
+    redacted_unmatched_path_for(segments, BEARER_ROUTE_PATTERNS)
 }
 
 /// Extract `(subject_id, tenant_id, org_id, actor_type)` from cached
@@ -1118,6 +1170,23 @@ mod redaction_tests {
         assert!(bearer_parameter_names().any(|n| n == "token"));
     }
 
+    /// Round 2: the prefixes are folded like the path pieces, so a pattern
+    /// written with an upper-case literal still redacts.
+    #[test]
+    fn mixed_case_pattern_literals_are_still_redacted() {
+        let patterns = ["/oauth2/deviceCode/{token}"];
+        for path in [
+            "/oauth2/deviceCode//H",
+            "/oauth2/devicecode//H",
+            "/OAUTH2/DEVICECODE//H",
+        ] {
+            let segments: Vec<&str> = path.split('/').collect();
+            let out = redacted_unmatched_path_for(&segments, &patterns);
+            assert!(!out.split('/').any(|s| s == "H"), "{path} -> {out}");
+            assert!(out.contains(REDACTED_PATH_SEGMENT), "{path} -> {out}");
+        }
+    }
+
     #[test]
     fn unmatched_spellings_are_redacted() {
         for path in [
@@ -1151,6 +1220,17 @@ mod redaction_tests {
             "/api/v1/account/export/%48",
             "/api/v1/account/export//%zzH",
             "/api/v1/account/export//H%",
+            // Round 2: double encoding and dot segments.
+            "/api/v1/account/expor%2574//H",
+            "/api/v1/account/%2565xport//H",
+            "/api/v1/account%252fexport%252fH",
+            "/api/v1/account/./export/H",
+            "/api/v1/account/export/./H",
+            "/api/v1/account/%2e/export/H",
+            "/api/v1/account/%252e/export/H",
+            "/api/v1/account/x/../export/H",
+            "/api/v1/./account/export/H",
+            "/api/v1/account/export/../export/H",
         ] {
             let out = redacted_path(path, None);
             assert!(
@@ -1164,5 +1244,22 @@ mod redaction_tests {
             redacted_path("/api/v1/Users/%48", None),
             "/api/v1/Users/%48"
         );
+        assert_eq!(
+            redacted_path("/api/v1/users/./%2548", None),
+            "/api/v1/users/./%2548"
+        );
+        // Degenerate input must not panic.
+        for path in [
+            "",
+            "/",
+            "..",
+            "/../../..",
+            "%",
+            "%%25%2",
+            "/./.",
+            "%252e%252e",
+        ] {
+            let _ = redacted_path(path, None);
+        }
     }
 }

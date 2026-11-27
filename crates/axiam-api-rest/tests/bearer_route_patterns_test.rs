@@ -8,11 +8,51 @@
 //! registrations by utoipa, CI's OpenAPI drift check keeps the committed file
 //! equal to them, and walking the router would need the whole application
 //! (database, state) built just to enumerate patterns. A path parameter is a
-//! bearer value when its name says so (`token`, `handle`, `secret`, `ticket`).
+//! bearer value when one of its `_`-separated words says so (see
+//! [`BEARER_WORDS`]); matching is on whole words, so `client_id` does not trip
+//! `key` and `stream_id` does not trip `state`.
+//!
+//! The committed spec is generated with `--no-default-features`, so
+//! feature-gated (SAML) routes are not walked. None of them has a bearer
+//! placeholder today (checked 2026-11-27 against the `#[cfg(feature = "saml")]`
+//! routes under `/tenants/{tenant_id}/saml/…`: only `tenant_id`, `sp_id` and
+//! `credential_id`); one added later must be listed by hand.
 
 use axiam_audit::middleware::BEARER_ROUTE_PATTERNS;
 
-const BEARER_WORDS: &[&str] = &["token", "handle", "secret", "ticket"];
+/// Words that make a path parameter a bearer value when they are a whole
+/// `_`-separated component of its name.
+const BEARER_WORDS: &[&str] = &[
+    "token",
+    "handle",
+    "secret",
+    "ticket",
+    "code",
+    "key",
+    "nonce",
+    "otp",
+    "invite",
+    "state",
+    "assertion",
+];
+
+/// Path parameters that contain a bearer word but are not bearer values. Each
+/// entry is a full `path` (as in the spec) plus the parameter name, with the
+/// reason. Empty today: every parameter in the committed spec was checked
+/// (`ca_id`, `client_id`, `credential_id`, `group_id`, `id`, `method_id`,
+/// `org_id`, `permission_id`, `request_id`, `resource_id`, `role_id`, `sa_id`,
+/// `scope_id`, `segment_id`, `service_account_id`, `sp_id`, `stream_id`,
+/// `tenant_id`, `user_id`, and `token` for the export route); none has a
+/// bearer word as a component other than `token`.
+const NOT_BEARER: &[(&str, &str)] = &[];
+
+fn is_bearer_parameter(path: &str, name: &str) -> bool {
+    !NOT_BEARER.contains(&(path, name))
+        && name
+            .to_ascii_lowercase()
+            .split('_')
+            .any(|word| BEARER_WORDS.contains(&word))
+}
 
 fn placeholders(path: &str) -> Vec<&str> {
     path.split('/')
@@ -32,19 +72,19 @@ fn every_bearer_path_parameter_in_the_api_is_listed_for_redaction() {
 
     let mut bearer_paths = 0;
     for path in paths.keys() {
-        let bearer = placeholders(path).into_iter().any(|name| {
-            BEARER_WORDS
-                .iter()
-                .any(|w| name.to_ascii_lowercase().contains(w))
-        });
+        let bearer = placeholders(path)
+            .into_iter()
+            .any(|name| is_bearer_parameter(path, name));
         if !bearer {
             continue;
         }
         bearer_paths += 1;
-        // The list holds patterns relative to the API scope (`/api/v1`).
+        // The list holds patterns relative to the API scope (`/api/v1`), or
+        // the full path for a route outside it (`/oauth2`, `/ssf`).
         let relative = path.strip_prefix("/api/v1").unwrap_or(path);
         assert!(
-            BEARER_ROUTE_PATTERNS.contains(&relative),
+            BEARER_ROUTE_PATTERNS.contains(&relative)
+                || BEARER_ROUTE_PATTERNS.contains(&path.as_str()),
             "{path} carries a bearer path parameter but is not in \
              axiam_audit::middleware::BEARER_ROUTE_PATTERNS; its token would be \
              written to the audit action on an unmatched spelling"
@@ -56,8 +96,8 @@ fn every_bearer_path_parameter_in_the_api_is_listed_for_redaction() {
     for pattern in BEARER_ROUTE_PATTERNS {
         let full = format!("/api/v1{pattern}");
         assert!(
-            paths.contains_key(&full),
-            "{full} is not in the OpenAPI spec"
+            paths.contains_key(&full) || paths.contains_key(*pattern),
+            "neither {full} nor {pattern} is in the OpenAPI spec"
         );
     }
 }

@@ -279,3 +279,44 @@ fn test_wire_bytes_cut_to_the_canonical_bytes() {
         );
     }
 }
+
+/// CONTRACT 1.69 §8 step 2c, typed consume (D-9): the two vectors are the
+/// cross-type negative pair the SDKs test against. Both verify under the SAME
+/// tenant subkey — which is the threat: a genuine signed message of one type
+/// replayed onto the other type's queue passes the signature check — and each
+/// carries the required members that tell its layout apart (the contract's
+/// table), none of the other's, and no `allowed` (the `AuthzResponse` one).
+#[test]
+fn test_vectors_are_the_cross_type_negative_pair() {
+    use axiam_amqp::messages::split_trailing_signature;
+    let raw = std::fs::read_to_string(fixture_path()).expect("fixture exists");
+    let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    let subkey = derive_tenant_key(&master_key(), tenant_id(), KEY_VERSION);
+    let top_level = |kind: &str| -> Vec<String> {
+        let wire = fixture[kind]["wire_json"].as_str().unwrap();
+        let (canonical, sig) =
+            split_trailing_signature(wire.as_bytes()).expect("wire ends in the signature");
+        assert_eq!(
+            sign_payload(&subkey, &canonical),
+            sig,
+            "{kind}: signed under the one tenant subkey both vectors share"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        value.as_object().unwrap().keys().cloned().collect()
+    };
+    let request = top_level("authz_request");
+    let audit = top_level("audit_event");
+    let has = |keys: &[String], name: &str| keys.iter().any(|k| k == name);
+
+    assert!(has(&request, "subject_id"));
+    for name in ["actor_id", "actor_type", "outcome", "allowed"] {
+        assert!(!has(&request, name), "authz_request must not carry {name}");
+    }
+    for name in ["actor_id", "actor_type", "outcome"] {
+        assert!(has(&audit, name), "audit_event must carry {name}");
+    }
+    for name in ["subject_id", "allowed"] {
+        assert!(!has(&audit, name), "audit_event must not carry {name}");
+    }
+}

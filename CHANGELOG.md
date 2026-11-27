@@ -7,6 +7,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+This section collects the fixes of the 2026-11-14 security audit
+(`claude_dev/security-audit-2026-11-14-fix-plan.md`) and of the open-issues plan
+of 2026-11-26 (`claude_dev/open-issues-fix-plan-2026-11-26.md`). Upgrade notes
+for the changes that need an action are in `docs/deployment/README.md`.
+
+- Bootstrap always requires the setup token. `AXIAM_BOOTSTRAP_ADMIN_EMAIL` is
+  now only an additional restriction (a mismatch is refused with 403) and no
+  longer replaces the token (SA-01, C1).
+- System audit, organization settings and organization email configuration, and
+  the tenant audit export are organization-level actions. A tenant admin of a
+  Standard tenant can no longer read the system audit partition, read or rewrite
+  the organization baseline, or export a sibling tenant's audit trail; the four
+  actions are revoked from existing Standard tenants' default roles at the next
+  boot (SA-02, N1, N8, N9).
+- Typed access tokens. Every access token is signed with `typ: at+jwt` and a
+  `kid`; MFA challenge, MFA setup and WebAuthn state tokens use purpose-specific
+  types and are refused wherever an access token is expected, on REST, gRPC and
+  introspection. `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP` defaults to `true` and
+  `allow_missing_aud_as_user` to `false` (SA-03, N10).
+- `/oauth2/authorize` no longer treats a token minted for another client as the
+  signed-in user; the request falls through to the login page (SA-04, N6).
+- mTLS device login checks that the bound service account is active and writes
+  its audit row under the proven tenant (SA-05, N5).
+- Resetting or changing a password, and a SCIM password patch, delete the
+  user's stale OPAQUE credential in the same transaction (SA-06, N7).
+- The dummy Argon2 hash that equalises login timing uses the production
+  parameters (SA-07, C3).
+- Group member counts carry the tenant predicate, so a count no longer reveals
+  another tenant's membership (SA-08, N20).
+- Cancelling an erasure request restores the account's prior status instead of
+  setting it active, so an administrator's suspension or lock survives. The
+  request records `account_deletion.prior_status` (schema v120, additive;
+  requests written before v120 restore active as before) (SA-09, N11).
+- The SSRF-pinned HTTP client never uses an environment proxy; the validated IP
+  pin decides the destination (SA-10, N13). The guard also refuses metadata
+  addresses in every position, handles non-ASCII hosts in the dynamic client
+  registration host glob without panicking, and treats `::ffff:0:0/96` as
+  special-purpose (SA-42).
+- SAML assertions are bound to this service provider: the audience is mandatory
+  and must name the SP entity ID, and the form ACS compares `Destination` and
+  `Recipient` with the ACS URL stored at sign-in start (SA-11, N21).
+- gRPC `UserService`: `GetUser` requires `users:get` unless the caller reads
+  itself, and `ValidateCredentials` is restricted to service accounts holding
+  the new `users:validate_credentials` permission (seeded to no role) and
+  audits every answer as `auth.credentials_validated` (SA-12, N4).
+- A suspended tenant no longer issues or accepts credentials on REST, OAuth2,
+  SCIM, gRPC or AMQP, and suspension revokes sessions and refresh tokens
+  atomically. The organization's own tenant cannot be suspended (SA-13, N16).
+- Messages on the server-internal mail, webhook and outbound queues are sealed
+  in an HMAC envelope under a server-only HKDF key; consumers refuse unsigned,
+  stale and replayed messages and audit the refusal. Mail no longer falls back
+  to the message's address (SA-14, N3).
+- AMQP authorization responses carry the tenant, echo the request nonce and are
+  signed with HMAC-SHA256 under the tenant subkey; they are published to the
+  request's `reply_to` when it is set. The change is additive on the wire
+  (SA-15, N2).
+- Release workflow actions are pinned, the dev image is fixed and SurrealDB
+  passwords are kept off command lines (SA-16, N17, N18, N19).
+- REST edge matchers are exact: a segment that percent-decodes to `.` or `..`
+  (decoded up to three rounds, failing closed) is never public, the CSRF
+  exemption matches whole paths, and a percent-encoded `tenant_id` selector is
+  recognised (SA-40).
+- OAuth2 authorization server: a `code_verifier` is refused for a code with no
+  stored challenge (RFC 9700 §2.1.1); a pushed request's `request_uri` cannot
+  be spent by another client; REST and gRPC introspection report `active:
+  false` for a user token whose session (`sid`, else `jti`) is missing or
+  expired (SA-41).
+- TOTP enrolment stages the secret in `user.mfa_pending_secret` (schema v121,
+  additive) and promotes it on confirmation, so re-enrolment cannot invalidate
+  a confirmed authenticator; setup tokens are single-use and refused for an
+  account that already holds a factor; the WebAuthn second-factor finish
+  enforces the sign-in gate; wrong MFA codes feed the per-account lockout
+  (SA-43).
+- Audit records redact the bearer segment of `/api/v1/account/export/{token}`
+  on matched routes and, failing closed, on unmatched ones (case-folded,
+  decoded to a fixpoint, tolerant of empty segments), in the audit action and in
+  the request span (SA-44, OI-03, #889).
+- All gRPC services set an explicit 4 MiB decoding limit; `/health/jobs`
+  reports an error category instead of the error text (SA-44).
+- Kubernetes manifests no longer automount service-account tokens, the ingress
+  policy admits only the ingress controller pods, and the dev and e2e Compose
+  files bind SurrealDB, RabbitMQ and Vault to `127.0.0.1` (SA-45).
+- A suspended tenant refuses federated sign-in (OIDC, OAuth2 social and SAML)
+  before any user, federation link or session is provisioned; the refusal is
+  `403 tenant_suspended` (OI-02, #877).
+- A locked account on a suspended tenant is answered with the uniform invalid
+  credentials result for a correct password, on both the password and the
+  directory path, instead of confirming the password through
+  `tenant_suspended` (OI-01, #878).
+- Dependencies: `ammonia` raised for RUSTSEC-2026-0533, `url` for
+  RUSTSEC-2026-0592, and `actix-http` and `lettre` for two further advisories;
+  the advisories for `cookie 0.16.2`, `chrono` and `humantime` are accepted with
+  a recorded reason.
+
+### Added
+
+- Access tokens carry a `roles` claim (the subject's global role names in the
+  token's tenant, direct or through groups, sorted and de-duplicated) when the
+  grant carries the `roles` scope, on every grant that mints an access token.
+  It is advertised in discovery and documented in `docs/api/roles-claim.md`;
+  service accounts may request `scope=roles` and nothing else (SA-18, N15).
+- New permission `users:validate_credentials` for the gRPC `ValidateCredentials`
+  call (see Security).
+
+### Changed
+
+- **CONTRACT 1.69** (`sdks/CONTRACT.md`, re-vendored into the eleven SDKs; 1.68
+  was the signed AMQP authorization response and the login-glue rules). The
+  back-channel logout token carries the JWKS `kid` of its signing key, and
+  verifiers select the key by `kid` (a kid-less token is `unknown_kid`) (OI-05,
+  #880). AMQP: the requester requires a 1.68 server and offers no
+  unsigned-response option (#881); every consumer binds its discard event to
+  `timestamp`, `exchange`, `routing_key`, the consumer's own `tenant_id` and
+  `reason`, in a normative order (#883); a consumer is told the one message type
+  it expects and refuses another layout before decoding (typed consume); a body
+  whose first byte is not `{`, a byte order mark included, is refused as
+  `malformed` and never stripped; no body escapes the consumer. §12.4: held JWKS
+  keys survive a failed refresh for at most 300 s beyond the cache TTL, then are
+  refused; the TTL is the configured value or `max-age`, clamped to 300 s; an
+  empty key set is a failed refresh (OI-31).
+- Back-channel logout tokens are signed through the access-token signer, so
+  their header is exactly `{alg: EdDSA, typ: logout+jwt, kid}`. They remain
+  refused as access tokens by their `typ`, their `aud` and the missing
+  `tenant_id`/`org_id` claims (OI-05, #880).
+- OPAQUE `login/finish` applies the credential-superseded rule through the same
+  `User::credential_superseded_at` as the other doors: the credential version
+  decides when the artefact carries one, the timestamp only when it does not.
+  No behaviour change; the same-second and epoch-ahead cases are pinned by tests
+  (OI-04, #872, #873).
+- The OpenAPI document and the management registry describe `JobStatus.last_error`
+  as a fixed error category.
+
+### Fixed
+
+- The lost migration lease is parked on `pending::<()>()`, which behaves as
+  before but builds under Rust 1.100 with `-D warnings`.
+- Admin UI: the organization settings "Saved" notice timer is cleared on unmount.
+- Tests and CI: tests that minted a user token without a session now create a
+  live one; CI finds test executables in Cargo 1.100's build layout; two
+  CodeQL alerts raised in test code are cleared.
+
+### Documentation
+
+- Threat model 2.47.0 (T-496 to T-529, each with its control and pinning tests;
+  T-500 and T-510 updated for OI-01, OI-02 and OI-05) and the website summary
+  regenerated from it.
+- Upgrade notes for the 2026-11 security-audit fixes in
+  `docs/deployment/README.md`, admin pages for tenant suspension and internal
+  queue signing, and the SA-01 bootstrap note.
+- Corrections to the deployment guide, the auth handler, `reset_mfa`, gRPC cap
+  test and CSRF comments, and the documentation of the logout token `typ` upgrade
+  path (OI-06, #874, #879, #890, #891).
+- Benchmark runs 6, 6b and 6c (cloud VM, AXIAM 1.3.0 and 1.3.1, SurrealDB 4.0.1,
+  and the SurrealDB 3.3.5 comparison) in the public analysis, the website
+  Benchmarks page and the three competitor comparison documents (OI-07, #561).
+- CONTRACT 1.69 §8 and §12.4 text and its conformance vectors (OI-31).
+
 ## [1.3.1] - 2026-11-11
 
 ### Changed

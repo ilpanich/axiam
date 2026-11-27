@@ -1,10 +1,9 @@
 # Fix plan — open issues in all twelve repositories (2026-11-26)
 
-> **Status: PLANNED.** Nothing in this document has been executed. As each task
-> lands, add an `EXECUTED` block at the head of its section (what shipped, which
-> tests went in, what the plan did not anticipate), in the form
-> [`security-audit-2026-11-14-fix-plan.md`](security-audit-2026-11-14-fix-plan.md)
-> uses.
+> **Status: EXECUTED (2026-11-27).** Every task OI-01 to OI-42 carries an
+> `EXECUTED` block and every review gate its record. The twelve pull requests are
+> open (OI-30 part 2, below); nothing is merged, tagged or released. The SDK
+> pull requests merge first, the server pull request last.
 
 This plan covers every issue that was open on 2026-11-26 in `ilpanich/axiam` and
 in the eleven `ilpanich/axiam-<lang>-sdk` repositories: **26 issues**, 15 on the
@@ -1903,6 +1902,69 @@ later version is listed in OI-30.
 > ten SDKs beyond Rust, which the gate covered). (b) Readings 8 to 10 for Swift
 > and PHP: the table shows the tests exist; their behaviour under readings 8 to
 > 10 was not re-judged here.
+
+> **OI-30 part 2 — EXECUTED (2026-11-27)** · orchestrator, with three Sonnet 5.5
+> agents for the SDK changelogs and one for the #893 changelog entries.
+>
+> **#893 merged into `main` during execution.** Per §0, `origin/main` was merged
+> into the branch (merge commit `2b517efb0`, no rebase, no conflicts).
+> `cargo clippy --workspace --all-targets -- -D warnings` on the merged tree:
+> exit 0 (whole workspace, `-j 2`). The fast scripts (`check-crate-layering.py`,
+> `gen-management-registry.py --check`, `check-spec-digest.py`,
+> `check-conflict-markers.py`) pass on the merged tree. #893 changed one
+> informative line of `sdks/CONTRACT.md` (the session-validation cache default,
+> now 5 s); `openapi.json`, `management-registry.json` and `proto/` are unchanged.
+> All eleven SDKs were re-vendored (`chore(contract): re-vendor CONTRACT.md after
+> the server merged ilpanich/axiam#893`), so item 1 holds again: zero differences.
+> Server `CHANGELOG.md` gained the #893 entries (`f8afc9ee5`).
+>
+> **Changelogs (owner's instruction: the top section is the unreleased one, with
+> everything the next tag will release).** Server: `d3ae7f117` (OI-30 part 1;
+> its first push carried a mistyped `Claude-Session` trailer and was rebuilt on
+> this branch with `--force-with-lease`, contents unchanged) and `f8afc9ee5`.
+> SDKs, one `docs(changelog): consolidate unreleased changes since v1.3.1` commit
+> each, every section above `[1.3.1]` merged into one `## [Unreleased]`, no
+> `## [1.4.0]` left, no version bump: rust `be96af1`, typescript `1518a425`,
+> python `a73c376`, java `07ed936`, kotlin `d033b1c`, csharp `0ef3d57a`, php
+> `1071ada`, go `6e4b096`, swift `e22c1a3`, c `211ba33`, cplusplus `8eebafe`.
+> Entries added for commits that had none: Rust (contract 1.69 re-sync;
+> `jsonwebtoken` 11 → 12), Python and Swift (contract 1.69 re-sync), Kotlin
+> (build-tool dependency floors for the Dependabot alerts). Rust, Python, PHP and
+> Swift made "in 1.4.0" phrases version-neutral; the other seven kept them, as
+> their manifests name 1.4.0 as the next version.
+>
+> **Follow-ups after the last gate records.** OI-42 (Swift) `c96fb83` and OI-34
+> (PHP) `7fd683a`, `a9373f0`, `667b81c` (`ext-curl` now required; JWKS requests
+> force `stream => false`; a stream handler handed directly is refused) were each
+> re-reviewed to medium-clean. On the OI-30 part 1 notes: the Swift and PHP tests
+> for readings 8–10 exist and were judged by those re-reviews, not by OI-30; the
+> `logout+jwt` claim holds (at v1.3.1 no SDK reads `typ` on the logout path, so
+> the `typ`-bearing token is accepted — checked by reading the code, not by
+> running it).
+>
+> **CI on the SDK pull requests** (opened as drafts so CI could start early,
+> then marked ready). Fixes, all test-only: C# `1af4f48` (the abort test raced
+> the server-side middleware: 15 failures in 40 local runs before, 0 in 40
+> after) and `ad7bddd` (CodeQL: the simulated application cookie now carries
+> `HttpOnly`/`Secure`); Rust `632e47a` (CodeQL: two no-leak assertions printed
+> the fixture secret in their failure message). The 15 CodeQL "hard-coded
+> cryptographic value" alerts on the Rust test fixtures (pre-existing on `main`,
+> re-reported because the lines moved) were left to the owner; the check later
+> went green.
+>
+> **Pull requests.** SDKs: rust #158, typescript #174, python #113, java #139,
+> kotlin #106, csharp #129, php #95, go #116, swift #94, c #90, cplusplus #92
+> (each closes its issue). The server pull request is the one that carries this
+> commit; it closes the fourteen server issues and states the merge order.
+> Subscribed to all twelve. Comments posted on #561 and #513 (left open).
+>
+> **Follow-up issues (low, security-relevant; owner's rule that low findings after
+> a medium-clean round become issues).** Each re-verified against the current
+> code before filing: rust #159 (no SDK timeout on the wasm32 JWKS fetch),
+> typescript #175, python #114, java #140, kotlin #107 (JWKS fetch ignores the
+> configured custom CA; Java's client is also static), kotlin #108 (suspend OIDC
+> APIs block a thread on the JWKS fetch), c #91 (vendored cJSON's process-global
+> error pointer races under concurrent parses). None for C#, PHP, Go, Swift, C++.
 
 1. **Vendored files.** In all eleven SDKs, `cmp` `CONTRACT.md`, `openapi.json`,
    `management-registry.json` and `diff -r proto/` against `axiam`. Zero

@@ -5432,7 +5432,8 @@ recorded here until one exists.
   its TTL to at most 300 s, which breaks a configuration that set a longer TTL (C#'s
   `JwksCacheTtl`, clamped to 10 minutes today; a clamped configured TTL emits `config_clamped`)
   (§12.4 rule 2; all eleven). *Added 2026-11-27 (same version):* the `oidc_refresh` single-flight
-  is keyed by a digest of the resolved tenant and the refresh token, so a caller with a different
+  is keyed by a digest of the resolved tenant (lower-case hyphenated UUID form) and the refresh
+  token, so a caller with a different
   token or tenant never joins another key's flight or receives its token set, and a vacated slot
   is removed (§9 rule 7 and its 1.69 tests; Kotlin, Rust, TypeScript, Python, Java, C#, PHP and Go
   change code; C and C++ add the tenant to the key and add the tests; Swift normalises the tenant
@@ -15754,13 +15755,15 @@ code changes for (e)–(h).
   while token A's refresh was in flight, or in its publish-before-vacate window, joined A's flight
   and received A's rotated token set, and B was never refreshed. From 1.69 the guard behaves as a
   map of slots keyed by a digest of the resolved `tenant_id` UUID (§12.3 rule 4), normalised to
-  the lower-case hyphenated UUID form in both cases so that the default tenant passed explicitly,
-  in any letter case, and omitted give the same key, together with the refresh token; the raw
+  the lower-case hyphenated UUID form whether passed or defaulted, so that the default tenant
+  passed explicitly, in any letter case, and omitted give the same key, together with the
+  refresh token; the raw
   token is never a key and never logged; a differing `scope` does not form a separate burst; rule
   2 and invariants 6a–6d hold per key; a different key never joins another key's flight or
   receives its outcome; and a vacated slot is removed. Swift already keyed by tenant and token,
-  but on the tenant string as given, so one tenant spelled in two letter cases made two wire calls
-  with one token, which from 1.65 ends the session; it normalises the tenant in the key and adds
+  but on the tenant string as given, so one tenant spelled in two letter cases could make two
+  wire calls with one token, the second of which is, from 1.65, a replay that ends the session;
+  it normalises the tenant in the key and adds
   the tests. C and C++ keyed by a SHA-256 digest of the token alone, and add the tenant to the key
   and add the tests. C++'s separate rule-6a defect is tracked in ilpanich/axiam-cplusplus-sdk#93
   and is not closed by (h). Issues: ilpanich/axiam-kotlin-sdk#109, ilpanich/axiam-rust-sdk#161,

@@ -262,17 +262,17 @@ fn state_with_gate(
         .build()
         .unwrap();
     state.jwks_cache = jwks_cache;
+    // #877: the tenant admission is attached as the composition root attaches it.
     state.federation.oidc_federation_service = Some(
         OidcFederationService::new(
-        state.federation.federation_config_repo.clone(),
-        state.federation.federation_link_repo.clone(),
-        state.user_repo.clone(),
-        state.http_client.clone(),
-        Arc::clone(&state.jwks_cache),
-        TEST_FED_ENC_KEY,
-    )
-    // #877: as the composition root attaches it.
-    .with_tenant_admission(Arc::new(state.tenant_repo.clone())),
+            state.federation.federation_config_repo.clone(),
+            state.federation.federation_link_repo.clone(),
+            state.user_repo.clone(),
+            state.http_client.clone(),
+            Arc::clone(&state.jwks_cache),
+            TEST_FED_ENC_KEY,
+        )
+        .with_tenant_admission(Arc::new(state.tenant_repo.clone())),
     );
     state.auth_service = state.auth_service.clone().with_reactor_gate(gate.clone());
     state.oauth2.token_service = state

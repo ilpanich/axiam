@@ -1153,14 +1153,16 @@ All SDKs that consume AXIAM AMQP messages (currently: Rust, TypeScript/Node, Go,
    order, optional members omitted rather than `null`, strings escaped as serde_json escapes
    them, a `metadata` object with its keys in sorted (code point) order, the HMAC computed over
    those bytes with `hmac_signature` absent, and `,"hmac_signature":"<hex>"` appended as the last
-   member. That is the only form the server's own verifier accepts the signature of, so every
-   producer the server accepts already sends it (`crates/axiam-amqp/src/messages.rs`;
-   `wire_json` in the reference vectors below). *(Informative: the server's own consumers in
+   member. That is what the server's message types write when serialized
+   (`crates/axiam-amqp/src/messages.rs`), so it is what a producer built on them sends, and it is
+   the `wire_json` of the reference vectors below. Producers MUST send this wire form.
+   *(Informative: the server's own consumers in
    `crates/axiam-amqp` are more permissive about the wire — they decode into the struct, which
    ignores member order and unknown members and refuses a duplicate field, re-serialize, and
    verify that. The server is therefore not a conformance oracle for the wire form: a message
    whose members are reordered but whose signature covers the canonical form passes the server
-   and is refused by a conforming SDK consumer. Producers MUST send the wire form above.)*
+   and is refused by a conforming SDK consumer. Acceptance by the server is therefore no
+   evidence that a producer sends the wire form.)*
 
    **Required tests (contract 1.69), per SDK with an AMQP consumer:** a genuine signed message
    whose `action` and `metadata` contain `<`, `>`, `&`, a non-ASCII character and a `\u` escape
@@ -15462,8 +15464,8 @@ token ((a)); the rest are SDK rules, plus one added member in a test-vector file
   exactly the type's declared layout (a MUST: it is what stops another tenant-signed shape from
   passing for an event), and dispatches the value decoded from those bytes. An unsigned message
   is refused, with no lenient mode. The server's own consumers still re-serialize, which accepts
-  any member order; producers MUST nevertheless send the server's wire form, which is what every
-  producer whose messages the server accepts already sends. `v2_reference_vectors.json` gains a
+  any member order; producers MUST nevertheless send the server's wire form, which is what the
+  server's own message types write when serialized. `v2_reference_vectors.json` gains a
   `wire_json` member per vector — the exact delivered body — and SDK tests use it; the existing
   members are unchanged.
 

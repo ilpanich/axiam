@@ -1242,13 +1242,14 @@ which one a given image was built with.
 
 ## Authorization decision cache (optional, D7)
 
-An optional per-tenant cache of authorization decisions that skips the 3–4
-SurrealDB round-trips per check. **Off by default**; enabling it changes
-performance only, never the decision an endpoint returns.
+A per-tenant cache of authorization decisions that skips the SurrealDB work of a
+repeated check. **On by default since v1.4** (5 s TTL; it was off before);
+it changes performance only, never the decision an endpoint returns — except
+for the bounded revocation window described below.
 
 | Key | Purpose |
 |---|---|
-| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | Master switch. Default `false` — the authorization path is then byte-for-byte identical to a build without the cache. Set `true` to enable. |
+| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | Master switch. Default `true`. Set `false` and the authorization path is byte-for-byte identical to a build without the cache. |
 | `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | Cached-decision TTL in seconds (default `5`). Also the upper bound on revocation latency if an invalidation event is ever missed — keep it short. |
 | `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | Max cached decisions **per tenant** before FIFO eviction (default `10000`). Memory bound. |
 | `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` | Cross-replica invalidation over RabbitMQ. Default `false`. See [below](#cross-replica-invalidation-42). Requires the cache to be enabled. |
@@ -1265,7 +1266,7 @@ self-heals within `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`. Full rationale and
 the per-mutation invalidation table are in the
 [Admin Guide](../admin/README.md#authorization-decision-cache-optional-d7).
 
-> **⚠ Multi-replica caveat — read before enabling, unless you also enable the
+> **⚠ Multi-replica caveat — applies by default, unless you also enable the
 > broadcast channel below.** On its own the cache and its invalidation are
 > **process-local**. "Revocation is immediate" is then a **single-process**
 > property. Run two or more replicas and a revocation handled by one replica
@@ -1274,10 +1275,10 @@ the per-mutation invalidation table are in the
 > `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` (default 5 s)** — on every read path,
 > including the `RequirePermission` guard on the admin endpoints, and with no
 > audit signal distinguishing a cached allow from a fresh one. In the
-> Kubernetes manifests under `k8s/` (multi-replica by default) either set
-> `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` or leave
-> `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false`, unless a ≤ TTL revocation
-> window is an accepted risk.
+> Kubernetes manifests under `k8s/` (multi-replica by default) the default
+> accepts a ≤ 5 s revocation window across replicas; set
+> `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED=true` to bring it back to
+> milliseconds, or `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false` to remove it.
 
 ### Cross-replica invalidation (§4.2)
 
@@ -1350,7 +1351,7 @@ had this one (its interceptor validates the JWT signature and stops).
 
 | Key | Purpose |
 |---|---|
-| `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` | TTL in seconds for a *positive* session-validity answer. Default `0` = **disabled** (every request reads). Suggested starting value when enabling: `5`, matching the decision cache. |
+| `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` | TTL in seconds for a *positive* session-validity answer. Default **`5`** since v1.4 (it was `0`), matching the decision cache. `0` disables it — every request then reads. |
 
 What the cache stores and does not store:
 
@@ -1369,10 +1370,69 @@ What the cache stores and does not store:
 > its invalidation are **process-local**. On a single replica a logout or
 > password change takes effect immediately. With two or more replicas, a
 > session revoked on replica A stays acceptable on replicas B…N for up to
-> `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`. Keep it at `0` in the
-> multi-replica `k8s/` manifests unless that window is an accepted risk — and
-> if you have already accepted the decision cache's window, accept this one at
-> the same value, not a longer one.
+> `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` — 5 s by default. Unlike
+> the decision cache there is no broadcast channel for this one: set it to `0`
+> in a multi-replica deployment that needs a logout to reach every replica on
+> the next request, and never set it longer than the decision cache's TTL.
+
+## Record caches (tenant, client, user — v1.4)
+
+The token endpoints, UserInfo and session refresh re-read the same three
+records on every request: the client's tenant (is it still live?), the OAuth2
+client, and the account behind the token (may it still act?). Since v1.4 those
+**read-only** lookups are served from a short-TTL in-process cache.
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__DB__RECORD_CACHE_TTL_SECS` | TTL of every record cache, in seconds. Default **`5`**, the same bound as the decision and session-validation caches. `0` disables them. |
+| `AXIAM__DB__RECORD_CACHE_MAX_ENTRIES` | Bound on each cache's entries (default `10000`). |
+
+What it does and does not do:
+
+* Only reads that decide nothing they write back use it — tenant liveness in
+  client authentication, the client lookup of the token endpoints, the account
+  checked by UserInfo, introspection, refresh and the OAuth2 grants. The
+  general `get_by_id` that read-modify-write code relies on (failed-login
+  counters, TOTP replay steps, settings) is **never** cached.
+* A cached account carries **no credential material**: its password hash and
+  MFA secret are blanked before it is stored.
+* Every write through the owning repository — suspending or deleting a tenant,
+  updating, deleting or re-keying a client, changing, locking or deleting an
+  account — drops the entry in the same call, so on a **single replica** it
+  takes effect on the next request.
+
+> **⚠ Multi-replica caveat — the same 5 s as the other caches.** A change made
+> on another replica, or outside the owning repository (a restore, a direct
+> database edit), is seen within `AXIAM__DB__RECORD_CACHE_TTL_SECS`. In
+> particular a rotated client secret keeps working on the other replicas for up
+> to the TTL. Set it to `0` where that window is not acceptable.
+
+## Datastore engine: HTTP or WebSocket (v1.4)
+
+| Key | Purpose |
+|---|---|
+| `AXIAM__DB__ENGINE` | `http` (default) or `ws`. |
+| `AXIAM__DB__WS_REQUEST_DEADLINE_SECS` | With `ws`: the longest a REST request may take before it is answered `503` with `Retry-After` (default `60`; `0` = none). Ignored with `http`. |
+
+AXIAM moved to the HTTP engine because the WebSocket engine of older
+SurrealDB SDKs lost its namespace and database after a reconnect and answered
+"not found" for records that existed (SDK issue #5750). The 4.0 SDK replays the
+connection's `use` and `signin` on every reconnect, and a restart probe found
+no lost namespace (`claude_dev/db-query-optimization.md` §8.4), so WebSocket is
+offered again, **opt-in**:
+
+* It saves the per-request authentication and parsing the HTTP engine costs
+  the database — about 240–290 µs of SurrealDB CPU per round trip on 4.0.1.
+* While the connection is down a query **waits** for it to come back instead of
+  failing. The SDK has no per-query timeout on its remote engines, so AXIAM
+  bounds the request instead: REST requests by
+  `AXIAM__DB__WS_REQUEST_DEADLINE_SECS` (above the 30 s an SSF long poll may
+  wait), gRPC requests by the listener's existing 30 s timeout.
+* A URL with a scheme (`ws://`, `wss://`, `http://`, `https://`) is used as
+  given; a bare `host:port` gets the scheme of the chosen engine.
+
+Soak it in your environment — idle periods, database restarts, a proxy that
+drops idle connections — before relying on it.
 
 ## TCP_NODELAY on the REST listener (I5)
 

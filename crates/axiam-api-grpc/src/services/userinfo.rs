@@ -68,9 +68,10 @@ impl<U: UserRepository + 'static> UserInfoService for UserInfoServiceImpl<U> {
         // A locked, inactive, anonymized or deleted account, or a subject that
         // no longer exists, is UNAUTHENTICATED with one message, so the answer
         // does not say which. Any other repo error is INTERNAL, without
-        // leaking backend detail. One indexed read per call: identity reads
-        // are not the authorization hot path (`CheckAccess` is).
-        let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
+        // leaking backend detail. Read through the record cache (≤ 5 s old by
+        // default; dropped at once by a status change through this process —
+        // `axiam_db::record_cache`), the bound decided for every hot read.
+        let user = match self.user_repo.get_by_id_cached(tenant_id, user_id).await {
             Ok(u) => u,
             Err(AxiamError::NotFound { .. }) => {
                 return Err(Status::unauthenticated(ACCOUNT_MAY_NOT_ACT));

@@ -521,11 +521,37 @@ where
         //    an organization-level principal reaching into one of its
         //    organization's tenants: its grants are in the organization tenant
         //    and the resource is not.
-        let assignments = self
+        //
+        //    When the role repository offers it, the three reads of this
+        //    method (assignments, ancestors, grants) come back from ONE round
+        //    trip (`RoleRepository::authorization_inputs`), and every step
+        //    below takes its input from that answer instead of reading. Each
+        //    part carries its own outcome, so a step raises exactly the error
+        //    its read would have raised, at the same point, and a step this
+        //    method never reaches raises nothing.
+        let prefetched = self
             .role_repo
-            .get_user_role_assignments(request.assignment_tenant_id(), request.subject_id)
-            .instrument(tracing::debug_span!("db.get_user_role_assignments"))
+            .authorization_inputs(
+                request.assignment_tenant_id(),
+                request.subject_id,
+                request.tenant_id,
+                request.resource_id,
+            )
+            .instrument(tracing::debug_span!("db.authorization_inputs"))
             .await?;
+        let (assignments, mut prefetched) = match prefetched {
+            Some(inputs) => (
+                inputs.assignments,
+                Some((inputs.ancestors, inputs.grants_by_role)),
+            ),
+            None => (
+                self.role_repo
+                    .get_user_role_assignments(request.assignment_tenant_id(), request.subject_id)
+                    .instrument(tracing::debug_span!("db.get_user_role_assignments"))
+                    .await?,
+                None,
+            ),
+        };
 
         if assignments.is_empty() {
             return Ok(AccessDecision::Deny("no roles assigned".into()));
@@ -568,11 +594,15 @@ where
         // 2. Build the set of ancestor resource IDs for hierarchy inheritance.
         //    Always from the *target* tenant: the resource being reached for
         //    lives there, and so does its hierarchy.
-        let ancestors = self
-            .resource_repo
-            .get_ancestors(request.tenant_id, request.resource_id)
-            .instrument(tracing::debug_span!("db.get_ancestors"))
-            .await?;
+        let ancestors = match prefetched.as_mut() {
+            Some((ancestors, _)) => std::mem::replace(ancestors, Ok(Vec::new()))?,
+            None => {
+                self.resource_repo
+                    .get_ancestors(request.tenant_id, request.resource_id)
+                    .instrument(tracing::debug_span!("db.get_ancestors"))
+                    .await?
+            }
+        };
         let ancestor_ids: HashSet<Uuid> = ancestors.iter().map(|r| r.id).collect();
 
         // 3. Filter applicable roles (global / target-scoped / ancestor-scoped),
@@ -608,13 +638,31 @@ where
 
         // 5. Fetch every applicable role's grants in a SINGLE batched query
         //    (CQ-B13 N+1 fix), then evaluate action + scope constraints.
-        let grants_by_role = self
-            .permission_repo
-            .get_role_permission_grants_for_roles(request.assignment_tenant_id(), &unique_role_ids)
-            .instrument(tracing::debug_span!(
-                "db.get_role_permission_grants_for_roles"
-            ))
-            .await?;
+        let grants_by_role = match prefetched {
+            // Every assigned role's grants were read; keep the applicable
+            // ones — the set the three-read path asks for — and surface a
+            // role's read error only if that role is one of them.
+            Some((_, mut by_role)) => {
+                let mut grants_by_role = HashMap::with_capacity(unique_role_ids.len());
+                for role_id in &unique_role_ids {
+                    if let Some(grants) = by_role.remove(role_id) {
+                        grants_by_role.insert(*role_id, grants?);
+                    }
+                }
+                grants_by_role
+            }
+            None => {
+                self.permission_repo
+                    .get_role_permission_grants_for_roles(
+                        request.assignment_tenant_id(),
+                        &unique_role_ids,
+                    )
+                    .instrument(tracing::debug_span!(
+                        "db.get_role_permission_grants_for_roles"
+                    ))
+                    .await?
+            }
+        };
 
         Ok(decision_for(
             evaluate_grants(&unique_role_ids, &grants_by_role, &request.action, &scopes),

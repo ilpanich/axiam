@@ -16,8 +16,9 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
     AUD_M2M, AUD_USER, CachedUserIdentity, ValidatedClaims, validate_access_token,
 };
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::role::{TenantReach, tenant_reach_of};
+use axiam_core::models::user::User;
 use axiam_db::SurrealSessionRepository;
 use surrealdb::Connection;
 use uuid::Uuid;
@@ -43,6 +44,63 @@ pub trait SessionValidator: Send + Sync {
         tenant_id: Uuid,
         session_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+    /// [`Self::is_session_active`] — the same check, the same answer — and,
+    /// when the implementation can read it in the same round trip, the account
+    /// `user_id` names in `tenant_id`, as `UserRepository::get_by_id` would
+    /// return it.
+    ///
+    /// Asked only on a route that will read that account anyway
+    /// ([`PrefetchAccount`]), so no other route pays for the read. The
+    /// default makes the session check alone and returns no account; the
+    /// handler then reads it itself, as before.
+    fn is_session_active_with_account<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        user_id: Uuid,
+    ) -> SessionAndAccount<'a> {
+        let _ = user_id;
+        Box::pin(async move { (self.is_session_active(tenant_id, session_id).await, None) })
+    }
+}
+
+/// What [`SessionValidator::is_session_active_with_account`] resolves to: the
+/// session verdict, and the account when it was read.
+pub type SessionAndAccount<'a> =
+    Pin<Box<dyn Future<Output = (bool, Option<AxiamResult<User>>)> + Send + 'a>>;
+
+/// Route marker (`.app_data(PrefetchAccount)`): this route reads the
+/// authenticated principal's own account, so the session check may read it in
+/// the same round trip ([`SessionValidator::is_session_active_with_account`]).
+///
+/// It changes **what is read with** the session check, never the check: the
+/// session is verified in the same place, by the same validator, with the same
+/// answer, and an account is handed on only for a request that check admitted.
+/// The handler takes it with [`take_prefetched_account`] and falls back to its
+/// own read when there is none.
+#[derive(Debug, Clone, Copy)]
+pub struct PrefetchAccount;
+
+/// The account read alongside an admitted request's session check, waiting in
+/// the request's extensions for the handler.
+struct PrefetchedAccount {
+    tenant_id: Uuid,
+    user_id: Uuid,
+    read: AxiamResult<User>,
+}
+
+/// The account the session check read for this request
+/// ([`PrefetchAccount`]), if it is the one asked for: `user_id` in
+/// `tenant_id`. `None` — read it yourself — otherwise. Takes it, so it is used
+/// at most once.
+pub fn take_prefetched_account(
+    req: &HttpRequest,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) -> Option<AxiamResult<User>> {
+    let prefetched = req.extensions_mut().remove::<PrefetchedAccount>()?;
+    (prefetched.tenant_id == tenant_id && prefetched.user_id == user_id).then_some(prefetched.read)
 }
 
 /// Left in a request's extensions when the session extractor refused the
@@ -224,6 +282,15 @@ impl<C: Connection> SessionValidator for SurrealSessionRepository<C> {
         // guarantees the cache is invalidated by the same methods that delete
         // the rows — see `axiam_db::session_validation_cache`.
         Box::pin(self.is_session_active_checked(tenant_id, session_id))
+    }
+
+    fn is_session_active_with_account<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        user_id: Uuid,
+    ) -> SessionAndAccount<'a> {
+        Box::pin(self.is_session_active_checked_with_account(tenant_id, session_id, user_id))
     }
 }
 
@@ -583,12 +650,15 @@ struct RequestScopeHandles {
     /// The request itself (a reference-counted handle), so a refusal of the
     /// credential can be recorded on it ([`SessionCredentialRefused`], #754).
     request: HttpRequest,
+    /// The route reads the principal's account ([`PrefetchAccount`]).
+    prefetch_account: bool,
 }
 
 impl RequestScopeHandles {
     fn read(req: &HttpRequest) -> Self {
         Self {
             request: req.clone(),
+            prefetch_account: req.app_data::<PrefetchAccount>().is_some(),
             validator: req
                 .app_data::<web::Data<Arc<dyn SessionValidator>>>()
                 .map(|d| d.get_ref().clone()),
@@ -631,27 +701,38 @@ impl RequestScopeHandles {
             dpop,
             replay_guard,
             request,
+            prefetch_account,
         } = self;
 
         // #754: every check up to and including the session refuses the
         // credential itself, so its refusal is recorded on the request for the
         // shared rate-limit counter's refund. The active-tenant decision below
         // is about a principal already admitted, and is not.
-        if let Err(refusal) = admit_credential(
+        let account = match admit_credential(
             &user,
             admit,
             dpop,
             replay_guard,
             validator,
+            prefetch_account,
             tenants.as_ref(),
         )
         .await
         {
-            return Err(refused(&request, refusal));
-        }
+            Ok(account) => account,
+            Err(refusal) => return Err(refused(&request, refusal)),
+        };
         request
             .extensions_mut()
             .insert(axiam_auth::carrier::AuthVerdict::Admitted);
+        // Handed on only now, for a request the credential checks admitted.
+        if let Some(read) = account {
+            request.extensions_mut().insert(PrefetchedAccount {
+                tenant_id: user.principal_tenant_id,
+                user_id: user.user_id,
+                read,
+            });
+        }
 
         if let Some(target) = act_on_requested_tenant(
             user.principal_tenant_id,
@@ -681,8 +762,9 @@ async fn admit_credential(
     dpop: Option<PendingDpopProof>,
     replay_guard: Option<Arc<dyn DpopReplayGuard>>,
     validator: Option<Arc<dyn SessionValidator>>,
+    prefetch_account: bool,
     tenants: Option<&Arc<dyn TenantScopeResolver>>,
-) -> Result<(), AxiamApiError> {
+) -> Result<Option<AxiamResult<User>>, AxiamApiError> {
     // RFC 9449 §11.1, first: it is the credential check, and a replayed
     // proof should be refused before the session store is consulted on its
     // behalf. Reached only when a proof actually verified — see
@@ -707,15 +789,33 @@ async fn admit_credential(
     // — the header is applied after this — but ordering matters: resolving
     // the active tenant first would look the session up in whichever
     // tenant the request asked to act on, and find none.
-    if let Some(validator) = validator
-        && !validator
-            .is_session_active(user.principal_tenant_id, user.session_id)
-            .await
-    {
-        return Err(AxiamError::AuthenticationFailed {
-            reason: "session revoked or expired".into(),
+    //
+    // On a [`PrefetchAccount`] route the same check also reads the
+    // principal's account in its round trip; the verdict is the same either
+    // way, and the account is returned only when the session is active.
+    let mut account = None;
+    if let Some(validator) = validator {
+        let active = if prefetch_account {
+            let (active, read) = validator
+                .is_session_active_with_account(
+                    user.principal_tenant_id,
+                    user.session_id,
+                    user.user_id,
+                )
+                .await;
+            account = read;
+            active
+        } else {
+            validator
+                .is_session_active(user.principal_tenant_id, user.session_id)
+                .await
+        };
+        if !active {
+            return Err(AxiamError::AuthenticationFailed {
+                reason: "session revoked or expired".into(),
+            }
+            .into());
         }
-        .into());
     }
 
     // SA-13 (N16, D-3): and the principal's tenant still admits it — a session
@@ -723,7 +823,7 @@ async fn admit_credential(
     // check is not registered, is refused here.
     admit_principal_tenant(tenants, user.principal_tenant_id).await?;
 
-    Ok(())
+    Ok(account)
 }
 
 /// The active-tenant half of authentication, for every kind of principal.
@@ -2711,5 +2811,135 @@ MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n\
                 .is_ok()
         );
         assert_eq!(verdict_of(&ok), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // PrefetchAccount: the session check reads the account in its round trip
+    // -----------------------------------------------------------------------
+
+    use actix_web::FromRequest as _;
+
+    /// Counts which of the two session checks it was asked, and answers both
+    /// with `active`; the combined one hands back an account.
+    #[derive(Default)]
+    struct CountingValidator {
+        active: bool,
+        plain: std::sync::atomic::AtomicUsize,
+        with_account: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SessionValidator for CountingValidator {
+        fn is_session_active<'a>(
+            &'a self,
+            _tenant_id: Uuid,
+            _session_id: Uuid,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            self.plain.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { self.active })
+        }
+
+        fn is_session_active_with_account<'a>(
+            &'a self,
+            _tenant_id: Uuid,
+            _session_id: Uuid,
+            _user_id: Uuid,
+        ) -> SessionAndAccount<'a> {
+            self.with_account
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // The account itself does not matter here, only that one is handed
+            // on; a NotFound stands in for it.
+            let account = self.active.then(|| {
+                Err(AxiamError::NotFound {
+                    entity: "user".into(),
+                    id: "stand-in".into(),
+                })
+            });
+            Box::pin(async move { (self.active, account) })
+        }
+    }
+
+    fn counting(active: bool) -> Arc<CountingValidator> {
+        Arc::new(CountingValidator {
+            active,
+            ..Default::default()
+        })
+    }
+
+    fn counts(v: &CountingValidator) -> (usize, usize) {
+        (
+            v.plain.load(std::sync::atomic::Ordering::SeqCst),
+            v.with_account.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    /// On a `PrefetchAccount` route the session is checked once, by the
+    /// combined call, and the account is left for the handler — for this
+    /// principal only.
+    #[actix_web::test]
+    async fn a_prefetch_route_checks_the_session_once_and_hands_on_the_account() {
+        let config = test_auth_config();
+        let token = make_user_token(&config, None);
+        let validator = counting(true);
+        let as_dyn: Arc<dyn SessionValidator> = validator.clone();
+        let req = bearer_request(&config, &token)
+            .app_data(web::Data::new(as_dyn))
+            .app_data(PrefetchAccount)
+            .to_http_request();
+
+        let user = AuthenticatedUser::extract(&req).await.unwrap();
+        assert_eq!(counts(&validator), (0, 1), "one combined check, no other");
+
+        // Not for another principal…
+        assert!(take_prefetched_account(&req, user.principal_tenant_id, Uuid::new_v4()).is_none());
+        // …which also consumed it: it is handed on at most once.
+        assert!(take_prefetched_account(&req, user.principal_tenant_id, user.user_id).is_none());
+
+        let req = bearer_request(&config, &token)
+            .app_data(web::Data::new(
+                validator.clone() as Arc<dyn SessionValidator>
+            ))
+            .app_data(PrefetchAccount)
+            .to_http_request();
+        let user = AuthenticatedUser::extract(&req).await.unwrap();
+        assert!(
+            take_prefetched_account(&req, user.principal_tenant_id, user.user_id).is_some(),
+            "this principal's account is waiting"
+        );
+    }
+
+    /// A revoked session is refused on a prefetch route exactly as anywhere
+    /// else, and nothing is handed on.
+    #[actix_web::test]
+    async fn a_prefetch_route_refuses_a_revoked_session_and_hands_on_nothing() {
+        let config = test_auth_config();
+        let token = make_user_token(&config, None);
+        let validator = counting(false);
+        let req = bearer_request(&config, &token)
+            .app_data(web::Data::new(
+                validator.clone() as Arc<dyn SessionValidator>
+            ))
+            .app_data(PrefetchAccount)
+            .to_http_request();
+
+        assert!(AuthenticatedUser::extract(&req).await.is_err());
+        assert_eq!(counts(&validator), (0, 1));
+        assert!(req.extensions().get::<PrefetchedAccount>().is_none());
+    }
+
+    /// Every other route makes the plain session check and reads no account.
+    #[actix_web::test]
+    async fn other_routes_make_the_plain_session_check() {
+        let config = test_auth_config();
+        let token = make_user_token(&config, None);
+        let validator = counting(true);
+        let req = bearer_request(&config, &token)
+            .app_data(web::Data::new(
+                validator.clone() as Arc<dyn SessionValidator>
+            ))
+            .to_http_request();
+
+        let user = AuthenticatedUser::extract(&req).await.unwrap();
+        assert_eq!(counts(&validator), (1, 0));
+        assert!(take_prefetched_account(&req, user.principal_tenant_id, user.user_id).is_none());
     }
 }

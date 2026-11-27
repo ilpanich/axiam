@@ -92,12 +92,13 @@ pub struct AuthzConfig {
     pub batch_strategy: BatchStrategy,
 
     /// Enable the per-tenant authorization **decision cache** (D7). When
-    /// `false` (the default) the engine issues its usual DB round-trips on
-    /// every check — behaviour is byte-for-byte identical to a build without
-    /// the cache. Only when `true` does `axiam-server` attach a
-    /// [`DecisionCache`] to the authorization engines.
+    /// `true` (the default since the database-cost review,
+    /// `claude_dev/db-query-optimization.md` §8.5): `axiam-server` attaches a
+    /// [`DecisionCache`] to the authorization engines. `false` makes the engine
+    /// issue its usual DB round-trips on every check — byte-for-byte the
+    /// behaviour of a build without the cache.
     ///
-    /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` (default `false`).
+    /// Configure via `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` (default `true`).
     ///
     /// SECURITY: the cache is safe under AXIAM's default-deny /
     /// **deny-override** model *only because* every access-narrowing mutation
@@ -224,7 +225,7 @@ impl Default for AuthzConfig {
         Self {
             batch_max_concurrency: 16,
             batch_strategy: BatchStrategy::Coalesced,
-            decision_cache_enabled: false,
+            decision_cache_enabled: true,
             decision_cache_broadcast_enabled: false,
             decision_cache_broadcast_skew_secs: DEFAULT_BROADCAST_SKEW_SECS,
             decision_cache_broadcast_heartbeat_secs: DEFAULT_BROADCAST_HEARTBEAT_SECS,
@@ -380,16 +381,19 @@ mod tests {
     }
 
     #[test]
-    fn decision_cache_defaults_are_off_and_conservative() {
+    fn decision_cache_defaults_are_on_and_conservative() {
         let cfg = AuthzConfig::default();
-        assert!(!cfg.decision_cache_enabled, "cache must default OFF");
+        assert!(cfg.decision_cache_enabled, "cache defaults ON (§8.5)");
         assert_eq!(cfg.decision_cache_ttl_secs, 5);
         assert_eq!(cfg.decision_cache_max_entries, 10_000);
     }
 
     #[test]
     fn build_decision_cache_none_when_disabled() {
-        let cfg = AuthzConfig::default();
+        let cfg = AuthzConfig {
+            decision_cache_enabled: false,
+            ..AuthzConfig::default()
+        };
         assert!(cfg.build_decision_cache().is_none());
     }
 

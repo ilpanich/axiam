@@ -501,12 +501,31 @@ impl wiremock::Match for AudienceIs {
 
 /// The MCP server the tenant fronts.
 struct McpStub {
-    _server: MockServer,
+    /// Always `Some` until [`Drop`] takes it.
+    server: Option<MockServer>,
     /// `{base}/mcp` — the RFC 9728 `resource`, and the `aud` a usable token must
     /// carry.
     resource: String,
     /// Where the `401`'s `resource_metadata` points.
     metadata_url: String,
+}
+
+/// `MockServer::drop` verifies its mocks with a nested
+/// `futures::executor::block_on` over a `tokio::sync::RwLock`. Dropped on the
+/// test's actix (tokio) task, that acquisition is subject to the task's
+/// cooperative budget: once a long stretch of request handling has spent it,
+/// tokio defers the wake-up to a scheduler the blocked thread will never
+/// return to, and the test hangs after its last assertion. A plain thread has
+/// no tokio context and no budget, so the server is dropped (and verified)
+/// there.
+impl Drop for McpStub {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            std::thread::spawn(move || drop(server))
+                .join()
+                .expect("the stub MCP server's verification did not panic");
+        }
+    }
 }
 
 /// Start a stub MCP server that behaves the way RFC 9728 and the MCP
@@ -567,7 +586,7 @@ async fn mcp_stub(issuer: &str) -> McpStub {
         .await;
 
     McpStub {
-        _server: server,
+        server: Some(server),
         resource,
         metadata_url,
     }

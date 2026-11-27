@@ -4,6 +4,7 @@ use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::id::new_id;
 use axiam_core::models::session::{Amr, CreateSession, Session, SessionLineage};
 use axiam_core::models::ssf::SessionRevocationSink;
+use axiam_core::models::user::User;
 use axiam_core::repository::SessionRepository;
 use chrono::{DateTime, Utc};
 use surrealdb::Connection;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 use crate::error::DbError;
 use crate::handle::DbHandle;
 use crate::helpers::{CountRow, take_first_or_not_found, thrown};
+use crate::repository::user::{UserRow, user_by_id_sql, user_in_tenant_from_rows};
 use crate::session_validation_cache::SessionValidationCache;
 
 #[derive(Debug, SurrealValue)]
@@ -592,6 +594,81 @@ impl<C: Connection> SurrealSessionRepository<C> {
             _ => false,
         }
     }
+
+    /// [`Self::is_session_active_checked`] — the same verdict, the same cache
+    /// use — and, in the same round trip, the account `user_id` names in
+    /// `tenant_id`, as `UserRepository::get_by_id` would return it.
+    ///
+    /// For a route that reads the principal's own account right after the
+    /// session check (`/oauth2/userinfo`): one request instead of two. The
+    /// account is returned only when the session is active. A cached "active"
+    /// answers without the database, and then there is no account to hand on —
+    /// the caller reads it as before.
+    pub async fn is_session_active_checked_with_account(
+        &self,
+        tenant_id: Uuid,
+        session_id: Uuid,
+        user_id: Uuid,
+    ) -> (bool, Option<AxiamResult<User>>) {
+        if let Some(cache) = &self.validation_cache
+            && cache.get(tenant_id, session_id) == Some(true)
+        {
+            return (true, None);
+        }
+
+        let read = self
+            .db
+            .current()
+            .query(format!(
+                "{SESSION_BY_ID_SQL}; {};",
+                user_by_id_sql("$user_id")
+            ))
+            .bind(("id", session_id.to_string()))
+            .bind(("user_id", user_id.to_string()))
+            .await;
+        let mut result = match read {
+            Ok(result) => result,
+            Err(_) => return (false, None),
+        };
+        let session = result
+            .take::<Vec<SessionRow>>(0)
+            .map_err(DbError::from)
+            .and_then(|rows| session_in_tenant_from_rows(rows, &tenant_id.to_string(), session_id));
+        match session {
+            Ok(session) if session.expires_at > Utc::now() => {
+                if let Some(cache) = &self.validation_cache {
+                    cache.insert_valid(tenant_id, session_id, session.user_id, session.expires_at);
+                }
+                let account = result
+                    .take::<Vec<UserRow>>(1)
+                    .map_err(DbError::from)
+                    .and_then(|rows| user_in_tenant_from_rows(rows, tenant_id, user_id))
+                    .map_err(Into::into);
+                (true, Some(account))
+            }
+            _ => (false, None),
+        }
+    }
+}
+
+/// `get_by_id`'s statement: the bare record fetch; the tenant is checked on
+/// the row ([`session_in_tenant_from_rows`]).
+const SESSION_BY_ID_SQL: &str = "SELECT * FROM type::record('session', $id)";
+
+/// `get_by_id`'s answer from that statement's rows: the session if it lives in
+/// `tenant_id` (the exact string comparison a `WHERE` would make), `NotFound`
+/// otherwise.
+fn session_in_tenant_from_rows(
+    rows: Vec<SessionRow>,
+    tenant_id: &str,
+    id: Uuid,
+) -> Result<Session, DbError> {
+    let rows: Vec<SessionRow> = rows
+        .into_iter()
+        .filter(|row| row.tenant_id == tenant_id)
+        .collect();
+    let row = take_first_or_not_found(rows, "session", &id.to_string())?;
+    row_to_session(row, id)
 }
 
 /// Marker the version-checked session write throws with; matched on the
@@ -726,23 +803,26 @@ impl<C: Connection> SessionRepository for SurrealSessionRepository<C> {
 
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<Session> {
         let id_str = id.to_string();
+        let tenant_id_str = tenant_id.to_string();
 
+        // The tenant predicate is applied here, to the fetched row, rather than
+        // as `WHERE tenant_id = $tenant_id` on the fetch. The two answer alike —
+        // the same exact string comparison, a row of another tenant is the same
+        // NotFound — but on SurrealDB 4.0.1 a predicate that references a bound
+        // parameter is planned afresh on every execution, which made this
+        // single-record read cost about 2.7× the CPU of the bare fetch
+        // (claude_dev/db-query-optimization.md §4). This read is on the path of
+        // every authenticated request, so the difference is paid everywhere.
         let mut result = self
             .db
             .current()
-            .query(
-                "SELECT * FROM type::record('session', $id) \
-                 WHERE tenant_id = $tenant_id",
-            )
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id.to_string()))
+            .query(SESSION_BY_ID_SQL)
+            .bind(("id", id_str))
             .await
             .map_err(DbError::from)?;
 
         let rows: Vec<SessionRow> = result.take(0).map_err(DbError::from)?;
-        let row = take_first_or_not_found(rows, "session", &id_str)?;
-
-        row_to_session(row, id).map_err(Into::into)
+        session_in_tenant_from_rows(rows, &tenant_id_str, id).map_err(Into::into)
     }
 
     async fn get_by_token_hash(&self, tenant_id: Uuid, token_hash: &str) -> AxiamResult<Session> {

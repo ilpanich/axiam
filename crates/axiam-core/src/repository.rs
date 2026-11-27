@@ -202,6 +202,18 @@ pub trait OrganizationRepository: Send + Sync {
 pub trait TenantRepository: Send + Sync {
     fn create(&self, input: CreateTenant) -> impl Future<Output = AxiamResult<Tenant>> + Send;
     fn get_by_id(&self, id: Uuid) -> impl Future<Output = AxiamResult<Tenant>> + Send;
+
+    /// [`Self::get_by_id`], possibly served from a short-TTL process cache
+    /// (`axiam_db::record_cache`, 5 s by default).
+    ///
+    /// For **read-only** checks on a hot path — the tenant liveness a client
+    /// authentication confirms — never for a read whose result is written back.
+    /// A tenant suspended or deleted through this process's repository is
+    /// dropped from the cache at once; one changed elsewhere is seen within the
+    /// TTL. The default is the uncached read.
+    fn get_by_id_cached(&self, id: Uuid) -> impl Future<Output = AxiamResult<Tenant>> + Send {
+        self.get_by_id(id)
+    }
     fn get_by_slug(
         &self,
         organization_id: Uuid,
@@ -249,6 +261,26 @@ pub trait UserRepository: Send + Sync {
         tenant_id: Uuid,
         id: Uuid,
     ) -> impl Future<Output = AxiamResult<User>> + Send;
+
+    /// [`Self::get_by_id`], possibly served from a short-TTL process cache
+    /// (`axiam_db::record_cache`, 5 s by default).
+    ///
+    /// For **read-only** checks of a principal that is already authenticated —
+    /// whether its account may still act, the claims UserInfo releases — and
+    /// for nothing else: a cached account never carries credential material
+    /// (its `password_hash` and `mfa_secret` are blank), and its counters
+    /// (failed logins, TOTP step) may be up to the TTL old, so it must never
+    /// feed a credential check or a read-modify-write. An account changed
+    /// through this process's repository is dropped from the cache at once;
+    /// one changed elsewhere is seen within the TTL. The default is the
+    /// uncached read.
+    fn get_by_id_cached(
+        &self,
+        tenant_id: Uuid,
+        id: Uuid,
+    ) -> impl Future<Output = AxiamResult<User>> + Send {
+        self.get_by_id(tenant_id, id)
+    }
     fn get_by_username(
         &self,
         tenant_id: Uuid,
@@ -799,6 +831,26 @@ pub trait UserRepository: Send + Sync {
     }
 }
 
+/// What [`RoleRepository::authorization_inputs`] reads for one check.
+///
+/// Each part keeps the outcome its own read would have had, so the engine can
+/// raise an error at exactly the step the three-read path would have raised it
+/// — and not at all when that path would have stopped earlier (no assignment
+/// reaches the tenant, no role applies) and never made the read.
+#[derive(Debug)]
+pub struct AuthorizationInputs {
+    /// As [`RoleRepository::get_user_role_assignments`] returns them.
+    pub assignments: Vec<RoleAssignment>,
+    /// As [`ResourceRepository::get_ancestors`] returns them, error included
+    /// (a hierarchy deeper than the cap is refused as a possible cycle).
+    pub ancestors: AxiamResult<Vec<Resource>>,
+    /// The grants of every assigned role, by role. A role with no grant is
+    /// absent, as from
+    /// [`PermissionRepository::get_role_permission_grants_for_roles`]; a role
+    /// one of whose grant rows could not be read maps to that read's error.
+    pub grants_by_role: HashMap<Uuid, AxiamResult<Vec<PermissionGrant>>>,
+}
+
 pub trait RoleRepository: Send + Sync {
     fn create(&self, input: CreateRole) -> impl Future<Output = AxiamResult<Role>> + Send;
     fn get_by_id(
@@ -862,6 +914,32 @@ pub trait RoleRepository: Send + Sync {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> impl Future<Output = AxiamResult<Vec<RoleAssignment>>> + Send;
+
+    /// Everything one uncached authorization check reads, in one round trip.
+    ///
+    /// The same three reads the engine otherwise makes in sequence —
+    /// [`Self::get_user_role_assignments`] in `assignment_tenant_id`,
+    /// [`ResourceRepository::get_ancestors`] of `resource_id` in `tenant_id`,
+    /// and [`PermissionRepository::get_role_permission_grants_for_roles`] in
+    /// `assignment_tenant_id` — answered by one request to the datastore. The
+    /// grants are read for **every** role assigned to the subject, a superset
+    /// of the roles that apply to the resource; the engine picks the applicable
+    /// ones exactly as it does on the three-read path, so the decision cannot
+    /// differ (see [`AuthorizationInputs`]).
+    ///
+    /// `Ok(None)` means the repository does not offer this, and the engine
+    /// makes the three reads. That is the default, so a test double or a
+    /// wrapper that does not forward this method keeps today's behaviour.
+    fn authorization_inputs(
+        &self,
+        assignment_tenant_id: Uuid,
+        subject_id: Uuid,
+        tenant_id: Uuid,
+        resource_id: Uuid,
+    ) -> impl Future<Output = AxiamResult<Option<AuthorizationInputs>>> + Send {
+        let _ = (assignment_tenant_id, subject_id, tenant_id, resource_id);
+        async { Ok(None) }
+    }
 
     /// Assign a role to a **service account**, optionally scoped to a resource.
     ///
@@ -1819,6 +1897,29 @@ pub trait AuditLogRepository: Send + Sync {
         &self,
         input: CreateAuditLogEntry,
     ) -> impl Future<Output = AxiamResult<AuditLogEntry>> + Send;
+    /// Append several entries, in order, and report each one's outcome.
+    ///
+    /// The result has one element per input, in input order, so a caller can
+    /// account for every row it handed over exactly as it would have with one
+    /// [`Self::append`] per row: a row whose result is `Err` was not written.
+    ///
+    /// The default appends one row at a time, which is what every wrapper and
+    /// test double gets unless it says otherwise. The SurrealDB repository
+    /// writes the whole slice in one statement and one round trip, which is
+    /// what lets the request-audit worker keep up with the request rate
+    /// (see `claude_dev/db-query-optimization.md`).
+    fn append_many(
+        &self,
+        inputs: Vec<CreateAuditLogEntry>,
+    ) -> impl Future<Output = Vec<AxiamResult<()>>> + Send {
+        async move {
+            let mut results = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                results.push(self.append(input).await.map(|_| ()));
+            }
+            results
+        }
+    }
     /// List audit logs scoped to a specific tenant.
     fn list(
         &self,
@@ -1902,6 +2003,19 @@ pub trait AuditLogRepository: Send + Sync {
 // OAuth2 & Federation (tenant-scoped)
 // ---------------------------------------------------------------------------
 
+/// What [`OAuth2ClientRepository::get_by_client_id_with_context`] read.
+#[derive(Debug)]
+pub struct ClientLookup {
+    /// The client.
+    pub client: OAuth2Client,
+    /// The client lookup's tenant, as `TenantRepository::get_by_id` answers
+    /// (a tombstoned tenant is `NotFound`); `None` when it was not read.
+    pub tenant: Option<AxiamResult<Tenant>>,
+    /// The requested account, as `UserRepository::get_by_id` answers in the
+    /// same tenant; `None` when none was asked for or it was not read.
+    pub user: Option<AxiamResult<User>>,
+}
+
 pub trait OAuth2ClientRepository: Send + Sync {
     /// Create a client, returning it and the **plaintext secret** the caller
     /// must show the operator once and never again.
@@ -1925,6 +2039,37 @@ pub trait OAuth2ClientRepository: Send + Sync {
         tenant_id: Uuid,
         client_id: &str,
     ) -> impl Future<Output = AxiamResult<OAuth2Client>> + Send;
+
+    /// [`Self::get_by_client_id`], with the reads a token endpoint makes right
+    /// after it — the tenant's liveness and, when the caller names one, the
+    /// account behind the token — in the same round trip.
+    ///
+    /// The client's own outcome is the method's: an unknown client is the same
+    /// `NotFound`, a datastore fault the same error. The other two ride along
+    /// as [`ClientLookup::tenant`] and [`ClientLookup::user`], each with the
+    /// outcome its own read would have had (`TenantRepository::get_by_id`,
+    /// `UserRepository::get_by_id`), for the caller to use *after* it has
+    /// authenticated the client exactly as before. Reading them first changes
+    /// what a failed authentication costs the datastore — one round trip of
+    /// three statements instead of one of one — never what it answers.
+    ///
+    /// The default reads the client alone and leaves both `None`, so a caller
+    /// falls back to its own reads; every test double keeps today's behaviour.
+    fn get_by_client_id_with_context(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        user_id: Option<Uuid>,
+    ) -> impl Future<Output = AxiamResult<ClientLookup>> + Send {
+        let _ = user_id;
+        async move {
+            Ok(ClientLookup {
+                client: self.get_by_client_id(tenant_id, client_id).await?,
+                tenant: None,
+                user: None,
+            })
+        }
+    }
     fn update(
         &self,
         tenant_id: Uuid,

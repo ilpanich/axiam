@@ -83,6 +83,16 @@ services:
       # here) — verify the cost actually lands in newly-created users'
       # stored hashes before trusting the resulting latency number.
       ZITADEL_SYSTEMDEFAULTS_PASSWORDHASHER_HASHER_COST: "${BENCH_ZITADEL_HASHER_COST:-14}"
+      # Object caches (instance, milestones, organization). Zitadel ships them
+      # OFF (beta; an empty connector caches nothing), so the head-to-head
+      # matrix leaves them off. `just caches=on …` turns them on with the
+      # in-process memory connector — the comparable posture to AXIAM's and
+      # Keycloak's in-process caches — for the labelled "caches on" cells.
+      # See benchmarks/README.md "Caches and fairness".
+      ZITADEL_CACHES_CONNECTORS_MEMORY_ENABLED: "${BENCH_ZITADEL_CACHE_MEMORY:-false}"
+      ZITADEL_CACHES_INSTANCE_CONNECTOR: "${BENCH_ZITADEL_CACHE_CONNECTOR:-}"
+      ZITADEL_CACHES_MILESTONES_CONNECTOR: "${BENCH_ZITADEL_CACHE_CONNECTOR:-}"
+      ZITADEL_CACHES_ORGANIZATION_CONNECTOR: "${BENCH_ZITADEL_CACHE_CONNECTOR:-}"
     volumes:
       - machinekey:/machinekey
       # Throwaway TLS certs (shared with the other targets). Read-only; ignored

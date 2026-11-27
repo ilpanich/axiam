@@ -493,6 +493,18 @@ async fn main() -> std::io::Result<()> {
         );
     }
 
+    match config.db.engine {
+        axiam_db::DbEngine::Http => tracing::info!(
+            endpoint = %config.db.endpoint(),
+            "datastore engine: HTTP (the default; AXIAM__DB__ENGINE=ws for WebSocket)"
+        ),
+        axiam_db::DbEngine::Ws => tracing::info!(
+            endpoint = %config.db.endpoint(),
+            request_deadline_secs = config.db.ws_request_deadline_secs,
+            "datastore engine: WebSocket (opt-in) — a query waits while the connection \
+             reconnects; REST requests are bounded by AXIAM__DB__WS_REQUEST_DEADLINE_SECS"
+        ),
+    }
     let pool = Arc::new(
         axiam_db::DbPool::connect(&config.db)
             .await

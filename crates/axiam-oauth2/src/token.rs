@@ -7,7 +7,7 @@ use axiam_auth::config::AuthConfig;
 use axiam_auth::token::{
     AccessTokenSpec, IdTokenEvidence, generate_refresh_token, hash_refresh_token, issue_id_token,
 };
-use axiam_core::error::AxiamError;
+use axiam_core::error::{AxiamError, AxiamResult};
 use axiam_core::models::audit::{ActorType, AuditOutcome, CreateAuditLogEntry};
 use axiam_core::models::oauth2_client::{ClientAuthMethod, CreateRefreshToken, OAuth2Client};
 use axiam_core::models::reactor::{
@@ -16,9 +16,9 @@ use axiam_core::models::reactor::{
 use axiam_core::models::service_account::{SERVICE_ACCOUNT_CLIENT_ID_PREFIX, ServiceAccount};
 use axiam_core::models::tenant::Tenant;
 use axiam_core::models::uma::RptPermission;
-use axiam_core::models::user::UserStatus;
+use axiam_core::models::user::{User, UserStatus};
 use axiam_core::repository::{
-    AuditLogRepository, AuthorizationCodeRepository, OAuth2ClientRepository,
+    AuditLogRepository, AuthorizationCodeRepository, ClientLookup, OAuth2ClientRepository,
     RefreshTokenRepository, ServiceAccountRepository, TenantRepository, UserRepository,
 };
 use chrono::Utc;
@@ -965,36 +965,37 @@ where
     /// after that instant (SA-06, SR17-1; a tie refuses: see
     /// [`crate::credential_epoch`] and `User::credential_changed_since`). One
     /// read answers both questions.
+    ///
+    /// A status check of an already-authenticated grant: through the record
+    /// cache, ≤ TTL old (`axiam_db::record_cache`). A credential change made
+    /// through this process drops the cached account at once; one made on
+    /// another replica is seen within the TTL.
     async fn ensure_account_may_act_since(
         &self,
         tenant_id: Uuid,
         user_id: Uuid,
         issued_at: Option<chrono::DateTime<Utc>>,
     ) -> Result<(), OAuth2Error> {
-        let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
-        let user = match self.user_repo.get_by_id(tenant_id, user_id).await {
-            Ok(user) => user,
-            Err(AxiamError::NotFound { .. }) => return Err(refused()),
-            Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
-        };
-        if issued_at.is_some_and(|at| crate::credential_epoch::changed_since(&user, at)) {
-            tracing::info!(
-                %tenant_id,
-                %user_id,
-                "refusing an OAuth2 grant: the user's credential changed at or after it was issued"
-            );
-            return Err(refused());
+        account_may_act_outcome(
+            tenant_id,
+            user_id,
+            issued_at,
+            self.user_repo.get_by_id_cached(tenant_id, user_id).await,
+        )
+    }
+
+    /// [`Self::introspected_account_may_act`] over an account already read —
+    /// in introspection's client-lookup round trip — instead of reading it.
+    fn introspected_account_may_act_read(
+        tenant_id: Uuid,
+        user_id: Uuid,
+        read: AxiamResult<User>,
+    ) -> Result<bool, OAuth2Error> {
+        match account_may_act_outcome(tenant_id, user_id, None, read) {
+            Ok(()) => Ok(true),
+            Err(OAuth2Error::InvalidGrant(_)) => Ok(false),
+            Err(e) => Err(e),
         }
-        axiam_auth::service::account_may_act(&user).map_err(|reason| {
-            tracing::info!(
-                %tenant_id,
-                %user_id,
-                reason = %reason,
-                "refusing an OAuth2 grant (or reporting its token inactive): its account may \
-                 no longer sign in"
-            );
-            refused()
-        })
     }
 
     /// SA-41 — whether the session a token's `sid` names is still live: a
@@ -1672,12 +1673,37 @@ where
         //
         // The tenant is returned so the grants, which need it for `org_id`,
         // do not read it a second time.
+        self.authenticate_client_credential_with(tenant_id, client, presented_secret, ctx, None)
+            .await
+    }
+
+    /// [`Self::authenticate_client_credential`], with the tenant already read
+    /// in the client lookup's round trip
+    /// (`OAuth2ClientRepository::get_by_client_id_with_context`).
+    ///
+    /// The prefetched tenant is consulted at exactly the point the read used to
+    /// happen — after the credential has been verified — and answers exactly as
+    /// that read would: a tombstoned tenant is the same `invalid_client`, a
+    /// datastore fault the same `server_error`. It is used only when it is the
+    /// client's own tenant (the lookup is tenant-scoped, so it always is);
+    /// otherwise, and when there is none, the tenant is read as before.
+    async fn authenticate_client_credential_with(
+        &self,
+        tenant_id: Uuid,
+        client: &OAuth2Client,
+        presented_secret: Option<&str>,
+        ctx: &TokenRequestContext,
+        prefetched_tenant: Option<AxiamResult<Tenant>>,
+    ) -> Result<Tenant, OAuth2Error> {
         let read_by_tls = self
             .verify_client_credential(tenant_id, client, presented_secret, ctx)
             .await?;
-        match read_by_tls {
-            Some(tenant) => Ok(tenant),
-            None => self.live_tenant(client.tenant_id).await,
+        match (read_by_tls, prefetched_tenant) {
+            (Some(tenant), _) => Ok(tenant),
+            (None, Some(tenant)) if client.tenant_id == tenant_id => {
+                admitted_tenant_outcome(tenant)
+            }
+            (None, _) => self.live_tenant(client.tenant_id).await,
         }
     }
 
@@ -1695,20 +1721,9 @@ where
     /// provider ID token — after the credential, so no grant of a suspended
     /// tenant mints a token.
     async fn live_tenant(&self, tenant_id: Uuid) -> Result<Tenant, OAuth2Error> {
-        let tenant = self
-            .tenant_repo
-            .get_by_id(tenant_id)
-            .await
-            .map_err(|e| match e {
-                AxiamError::NotFound { .. } => {
-                    OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into())
-                }
-                other => OAuth2Error::ServerError(other.to_string()),
-            })?;
-        if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
-            return Err(OAuth2Error::TenantSuspended);
-        }
-        Ok(tenant)
+        // Through the record cache: liveness ≤ TTL old, dropped at once by a
+        // suspension or deletion through this process (`axiam_db::record_cache`).
+        admitted_tenant_outcome(self.tenant_repo.get_by_id_cached(tenant_id).await)
     }
 
     /// The credential check proper, split out of
@@ -2995,9 +3010,13 @@ where
 
         // Stage 1 — client lookup (DB round-trip #1).
         let t_client_lookup = std::time::Instant::now();
-        let client = self
+        let ClientLookup {
+            client,
+            tenant: prefetched_tenant,
+            ..
+        } = self
             .client_repo
-            .get_by_client_id(tenant_id, client_id)
+            .get_by_client_id_with_context(tenant_id, client_id, None)
             .await
             .map_err(|e| match e {
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
@@ -3048,7 +3067,13 @@ where
         // `bench-quick` measures.
         let t_secret_verify = std::time::Instant::now();
         let secret_result = self
-            .authenticate_client_credential(tenant_id, &client, client_secret, ctx)
+            .authenticate_client_credential_with(
+                tenant_id,
+                &client,
+                client_secret,
+                ctx,
+                prefetched_tenant,
+            )
             .await;
         let secret_verify_us = t_secret_verify.elapsed().as_micros() as u64;
         let tenant = secret_result?;
@@ -3213,9 +3238,13 @@ where
         let no_credential_error =
             || OAuth2Error::InvalidClient("client authentication is required".into());
 
-        let client = self
+        let ClientLookup {
+            client,
+            tenant: prefetched_tenant,
+            ..
+        } = self
             .client_repo
-            .get_by_client_id(tenant_id, client_id)
+            .get_by_client_id_with_context(tenant_id, client_id, None)
             .await
             .map_err(|e| match e {
                 // T21.2, as above: unchanged for a caller with no credential.
@@ -3241,7 +3270,13 @@ where
         }
 
         let tenant = self
-            .authenticate_client_credential(tenant_id, &client, client_secret_val, ctx)
+            .authenticate_client_credential_with(
+                tenant_id,
+                &client,
+                client_secret_val,
+                ctx,
+                prefetched_tenant,
+            )
             .await?;
         crate::fapi::enforce_token_request(&client, ctx.evidence())?;
 
@@ -3790,8 +3825,28 @@ where
             req.client_assertion_type.as_deref(),
         );
         let client_id = resolve_client_id(req.client_id.as_deref(), &ctx)?.to_owned();
-        let client = self
-            .authenticate_client(tenant_id, &client_id, req.client_secret.as_deref(), &ctx)
+        // The account a user access token names, so the client lookup can read
+        // it in the same round trip. Only a hint: the token is decoded again,
+        // in its place below, and the account read is used only for the user
+        // that decode names; a token that does not decode here reads nothing
+        // extra. Nothing about the account reaches the caller before the client
+        // has authenticated.
+        let token_user =
+            axiam_auth::token::decode_access_token_any_audience(&req.token, &self.auth_config)
+                .ok()
+                .filter(|claims| {
+                    claims.sub_kind == axiam_auth::token::SubjectKind::User
+                        && claims.tenant_id.parse::<Uuid>().ok() == Some(tenant_id)
+                })
+                .and_then(|claims| claims.sub.parse::<Uuid>().ok());
+        let (client, mut prefetched_user) = self
+            .authenticate_client_with_context(
+                tenant_id,
+                &client_id,
+                req.client_secret.as_deref(),
+                &ctx,
+                token_user,
+            )
             .await?;
 
         // D-17 (T23.1.5) — as at revoke: the profile's client-authentication
@@ -3893,9 +3948,15 @@ where
             // (that is local verification or `CheckAccess`).
             if claims.sub_kind == axiam_auth::token::SubjectKind::User
                 && let Ok(user_id) = claims.sub.parse::<Uuid>()
-                && !self
-                    .introspected_account_may_act(tenant_id, user_id)
-                    .await?
+                && !match prefetched_user.take() {
+                    Some(read) if token_user == Some(user_id) => {
+                        Self::introspected_account_may_act_read(tenant_id, user_id, read)?
+                    }
+                    _ => {
+                        self.introspected_account_may_act(tenant_id, user_id)
+                            .await?
+                    }
+                }
             {
                 return Ok(IntrospectionResponse {
                     active: false,
@@ -4046,9 +4107,34 @@ where
         client_secret: Option<&str>,
         ctx: &TokenRequestContext,
     ) -> Result<OAuth2Client, OAuth2Error> {
-        let client = self
+        self.authenticate_client_with_context(tenant_id, client_id, client_secret, ctx, None)
+            .await
+            .map(|(client, _)| client)
+    }
+
+    /// [`Self::authenticate_client`], reading the client's tenant — and the
+    /// account `user_id` names, when there is one — in the client lookup's
+    /// round trip (`OAuth2ClientRepository::get_by_client_id_with_context`).
+    ///
+    /// Authentication is unchanged and comes first: the tenant is consulted
+    /// where it always was, after the credential, and the account is handed
+    /// back only to a caller whose client authenticated. A refused client is
+    /// told exactly what it was told before.
+    async fn authenticate_client_with_context(
+        &self,
+        tenant_id: Uuid,
+        client_id: &str,
+        client_secret: Option<&str>,
+        ctx: &TokenRequestContext,
+        user_id: Option<Uuid>,
+    ) -> Result<(OAuth2Client, Option<AxiamResult<User>>), OAuth2Error> {
+        let ClientLookup {
+            client,
+            tenant: prefetched_tenant,
+            user: prefetched_user,
+        } = self
             .client_repo
-            .get_by_client_id(tenant_id, client_id)
+            .get_by_client_id_with_context(tenant_id, client_id, user_id)
             .await
             .map_err(|e| match e {
                 // QUAL-03/D-11: only a genuinely-unknown client maps to
@@ -4077,11 +4163,83 @@ where
             return Err(OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()));
         }
 
-        self.authenticate_client_credential(tenant_id, &client, client_secret, ctx)
-            .await?;
+        self.authenticate_client_credential_with(
+            tenant_id,
+            &client,
+            client_secret,
+            ctx,
+            prefetched_tenant,
+        )
+        .await?;
 
-        Ok(client)
+        Ok((client, prefetched_user))
     }
+}
+
+/// What a read of the account behind a grant means for that grant (#519,
+/// #520; SA-06 with `issued_at`): the account may act, or `invalid_grant` — a
+/// removed account, or one whose credential changed at or after `issued_at`,
+/// reads as one — or, for any other failure of the read, a `server_error`.
+fn account_may_act_outcome(
+    tenant_id: Uuid,
+    user_id: Uuid,
+    issued_at: Option<chrono::DateTime<Utc>>,
+    read: AxiamResult<User>,
+) -> Result<(), OAuth2Error> {
+    let refused = || OAuth2Error::InvalidGrant(crate::credential_epoch::REFUSED.into());
+    let user = match read {
+        Ok(user) => user,
+        Err(AxiamError::NotFound { .. }) => return Err(refused()),
+        Err(e) => return Err(OAuth2Error::ServerError(e.to_string())),
+    };
+    if issued_at.is_some_and(|at| crate::credential_epoch::changed_since(&user, at)) {
+        tracing::info!(
+            %tenant_id,
+            %user_id,
+            "refusing an OAuth2 grant: the user's credential changed at or after it was issued"
+        );
+        return Err(refused());
+    }
+    axiam_auth::service::account_may_act(&user).map_err(|reason| {
+        tracing::info!(
+            %tenant_id,
+            %user_id,
+            reason = %reason,
+            "refusing an OAuth2 grant (or reporting its token inactive): its account may \
+             no longer sign in"
+        );
+        refused()
+    })
+}
+
+/// What a read of the client's tenant means for client authentication
+/// (R1W1-03): the tenant, or — tombstoned or purged — the same
+/// `invalid_client` a wrong credential gets; any other failure is a datastore
+/// fault and stays a `server_error`, never masquerading as bad credentials.
+///
+/// Client authentication does not call this directly: it calls
+/// [`admitted_tenant_outcome`], which adds the suspension check.
+fn live_tenant_outcome(read: AxiamResult<Tenant>) -> Result<Tenant, OAuth2Error> {
+    read.map_err(|e| match e {
+        AxiamError::NotFound { .. } => OAuth2Error::InvalidClient(CLIENT_AUTH_FAILED.into()),
+        other => OAuth2Error::ServerError(other.to_string()),
+    })
+}
+
+/// [`live_tenant_outcome`], and SA-13: `tenant_suspended` when the tenant no
+/// longer admits its principals.
+///
+/// Every read of a client's tenant during client authentication goes through
+/// this one function, whether the tenant was read on its own
+/// ([`TokenService::live_tenant`]) or in the client lookup's round trip
+/// (`authenticate_client_credential_with`). Keeping the check here, rather than
+/// at each read site, means a new way of reading the tenant cannot skip it.
+fn admitted_tenant_outcome(read: AxiamResult<Tenant>) -> Result<Tenant, OAuth2Error> {
+    let tenant = live_tenant_outcome(read)?;
+    if !axiam_core::models::tenant::tenant_accepts_principals(&tenant) {
+        return Err(OAuth2Error::TenantSuspended);
+    }
+    Ok(tenant)
 }
 
 #[cfg(test)]

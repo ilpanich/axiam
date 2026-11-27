@@ -1,0 +1,30 @@
+[package]
+name = "db-query-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Per-query SurrealDB server CPU and latency for AXIAM's hot paths (see claude_dev/db-query-optimization.md)"
+
+# Outside the workspace on purpose (like tools/surreal-race-probe): it is a
+# measurement tool, not product code, and it talks to a running SurrealDB
+# server whose PID it samples. The Cargo.lock is a copy of the workspace's so
+# the repositories under test are built against the same resolved crates.
+
+[dependencies]
+axiam-core = { path = "../../crates/axiam-core" }
+axiam-db = { path = "../../crates/axiam-db" }
+axiam-audit = { path = "../../crates/axiam-audit" }
+axiam-auth = { path = "../../crates/axiam-auth" }
+secrecy = "0.10"
+surrealdb = { version = "4", default-features = false, features = ["protocol-http", "protocol-ws"] }
+surrealdb-types = "4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+chrono = "0.4"
+serde_json = "1"
+futures = "0.3"
+actix-web = "4"
+anyhow = "1"
+
+[profile.release]
+debug = false

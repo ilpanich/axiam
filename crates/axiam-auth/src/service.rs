@@ -1628,7 +1628,10 @@ impl<
         let t_user = std::time::Instant::now();
         let user = self
             .user_repo
-            .get_by_id(input.tenant_id, session.user_id)
+            // A status check on rotation: through the record cache, ≤ TTL old
+            // (`axiam_db::record_cache`); the new session is built from the
+            // consumed one, never from credential material.
+            .get_by_id_cached(input.tenant_id, session.user_id)
             .await?;
         account_may_act(&user)?;
         // SA-13 (N16, D-3): and its tenant still admits it. The consumed row

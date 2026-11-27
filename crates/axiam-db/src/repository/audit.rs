@@ -29,7 +29,7 @@ use axiam_core::repository::{AuditLogFilter, AuditLogRepository, PaginatedResult
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use surrealdb::Connection;
-use surrealdb_types::SurrealValue;
+use surrealdb_types::{RecordId, SurrealValue};
 use uuid::Uuid;
 
 use crate::error::DbError;
@@ -94,6 +94,64 @@ struct AuditLogRowWithId {
     /// SA-02 (N1): absent on every row written before v116.
     #[surreal(default)]
     organization_id: Option<String>,
+}
+
+/// [`AuditLogRepository::append_many`]'s statement: every row of the batch,
+/// in order, in one `INSERT`. `RETURN NONE` because the worker that calls it
+/// needs to know only that the rows were written, and returning them would
+/// serialise every row back over the wire for nothing.
+///
+/// `timestamp` is left to the field's `DEFAULT time::now()`, exactly as the
+/// single-row `CREATE` leaves it: the datastore stamps audit rows, never the
+/// application.
+const INSERT_MANY_SQL: &str = "INSERT INTO audit_log $rows RETURN NONE";
+
+/// One row of [`INSERT_MANY_SQL`]: the fields `append`'s `CREATE` sets, with
+/// the same types. `None` options are sent as NONE, as the bound parameters
+/// of the `CREATE` are, because the schema's `option<string>` refuses NULL.
+#[derive(Debug, SurrealValue)]
+struct AuditInsertRow {
+    id: RecordId,
+    tenant_id: String,
+    actor_id: String,
+    actor_type: String,
+    action: String,
+    resource_id: Option<String>,
+    outcome: String,
+    ip_address: Option<String>,
+    metadata: serde_json::Value,
+    organization_id: Option<String>,
+}
+
+impl AuditInsertRow {
+    fn new(id: Uuid, input: CreateAuditLogEntry) -> Self {
+        let organization_id = system_partition_organization(&input);
+        Self {
+            id: RecordId::new("audit_log", id.to_string()),
+            tenant_id: input.tenant_id.to_string(),
+            actor_id: input.actor_id.to_string(),
+            actor_type: actor_type_str(&input.actor_type).to_string(),
+            action: input.action,
+            resource_id: input.resource_id.map(|r| r.to_string()),
+            outcome: outcome_str(&input.outcome).to_string(),
+            ip_address: input.ip_address,
+            metadata: input
+                .metadata
+                .unwrap_or(serde_json::Value::Object(Default::default())),
+            organization_id,
+        }
+    }
+}
+
+/// SA-02 (N1): the organization of a system-partition row only. A tenant's row
+/// belongs to its tenant's organization, and a second copy of that would be one
+/// that can disagree. Shared by the single-row `CREATE` and the batched
+/// `INSERT`, so both write the same column.
+fn system_partition_organization(input: &CreateAuditLogEntry) -> Option<String> {
+    input
+        .organization_id
+        .filter(|_| input.tenant_id.is_nil())
+        .map(|o| o.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +371,55 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
 }
 
 impl<C: Connection> SurrealAuditLogRepository<C> {
+    /// Write one already-minimised entry under `id`.
+    async fn create_one(&self, id: Uuid, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
+        let organization_id_str = system_partition_organization(&input);
+        let id_str = id.to_string();
+
+        let metadata = input
+            .metadata
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        let resource_id_str = input.resource_id.map(|r| r.to_string());
+
+        let result = self
+            .db
+            .current()
+            .query(
+                "CREATE type::record('audit_log', $id) SET \
+                 tenant_id = $tenant_id, \
+                 actor_id = $actor_id, \
+                 actor_type = $actor_type, \
+                 action = $action, \
+                 resource_id = $resource_id, \
+                 outcome = $outcome, \
+                 ip_address = $ip_address, \
+                 metadata = $metadata, \
+                 organization_id = $organization_id",
+            )
+            .bind(("id", id_str.clone()))
+            .bind(("tenant_id", input.tenant_id.to_string()))
+            .bind(("actor_id", input.actor_id.to_string()))
+            .bind(("actor_type", actor_type_str(&input.actor_type).to_string()))
+            .bind(("action", input.action))
+            .bind(("resource_id", resource_id_str))
+            .bind(("outcome", outcome_str(&input.outcome).to_string()))
+            .bind(("ip_address", input.ip_address))
+            .bind(("metadata", metadata))
+            .bind(("organization_id", organization_id_str))
+            .await
+            .map_err(DbError::from)?;
+
+        let mut result = result
+            .check()
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+
+        let rows: Vec<AuditLogRow> = result.take(0).map_err(DbError::from)?;
+        let row = take_first_or_not_found(rows, "audit_log", &id_str)?;
+
+        Ok(row.into_entry(id)?)
+    }
+
     /// The rows of `tenant_id` matching `filter` and, with `organization_id`,
     /// recording that organization (SA-02, N1: the system partition's read).
     async fn list_where(
@@ -342,10 +449,21 @@ impl<C: Connection> SurrealAuditLogRepository<C> {
         let count_rows: Vec<CountRow> = count_result.take(0).map_err(DbError::from)?;
 
         // Data query.
+        //
+        // `id DESC` breaks ties. A batched append (`append_many`) is one
+        // statement, and SurrealDB 4.x evaluates `time::now()` once per
+        // statement, so every row of a batch carries the same `timestamp`.
+        // Without a tiebreak those rows would come back in no defined order and
+        // a page boundary falling among them could repeat or skip a row. Ids
+        // are UUIDv7 minted in append order by one worker, so `id` restores
+        // exactly the order the rows were written in. The index
+        // `idx_audit_tenant_time` (tenant_id, timestamp) still serves the scan:
+        // its entries are keyed by record id after the columns, so a backward
+        // scan already yields this order (pinned by `audit_repository_test`).
         let data_sql = format!(
             "SELECT meta::id(id) AS record_id, * FROM audit_log \
              WHERE {where_clause} \
-             ORDER BY timestamp DESC \
+             ORDER BY timestamp DESC, id DESC \
              LIMIT $limit START $offset"
         );
         let db = self.db.current();
@@ -386,63 +504,66 @@ impl<C: Connection> AuditLogRepository for SurrealAuditLogRepository<C> {
     }
 
     async fn append(&self, input: CreateAuditLogEntry) -> AxiamResult<AuditLogEntry> {
-        let id = new_id();
-        let id_str = id.to_string();
-
         // T-110: the last thing before the write, because the table is
         // append-only and there is no second chance by construction.
         let mut input = input;
         self.minimisation.apply(&mut input);
+        self.create_one(new_id(), input).await
+    }
 
-        let metadata = input
-            .metadata
-            .unwrap_or(serde_json::Value::Object(Default::default()));
+    async fn append_many(&self, inputs: Vec<CreateAuditLogEntry>) -> Vec<AxiamResult<()>> {
+        if inputs.len() <= 1 {
+            let mut out = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                out.push(self.append(input).await.map(|_| ()));
+            }
+            return out;
+        }
 
-        let resource_id_str = input.resource_id.map(|r| r.to_string());
-        // SA-02 (N1): the organization of a system-partition row only. A
-        // tenant's row belongs to its tenant's organization, and a second copy
-        // of that would be one that can disagree.
-        let organization_id_str = input
-            .organization_id
-            .filter(|_| input.tenant_id.is_nil())
-            .map(|o| o.to_string());
+        // T-110, as in `append`: minimised once, here, before either write
+        // path below sees the row.
+        let rows: Vec<(Uuid, CreateAuditLogEntry)> = inputs
+            .into_iter()
+            .map(|mut input| {
+                self.minimisation.apply(&mut input);
+                (new_id(), input)
+            })
+            .collect();
 
-        let result = self
+        // One statement, one round trip, every row. A statement is one
+        // transaction on SurrealDB 3.x and 4.x, so it either writes every row
+        // or none (pinned by `audit_repository_test`): there is no
+        // partly-written batch to reconcile.
+        let batch: Vec<AuditInsertRow> = rows
+            .iter()
+            .map(|(id, input)| AuditInsertRow::new(*id, input.clone()))
+            .collect();
+        let written = match self
             .db
             .current()
-            .query(
-                "CREATE type::record('audit_log', $id) SET \
-                 tenant_id = $tenant_id, \
-                 actor_id = $actor_id, \
-                 actor_type = $actor_type, \
-                 action = $action, \
-                 resource_id = $resource_id, \
-                 outcome = $outcome, \
-                 ip_address = $ip_address, \
-                 metadata = $metadata, \
-                 organization_id = $organization_id",
-            )
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", input.tenant_id.to_string()))
-            .bind(("actor_id", input.actor_id.to_string()))
-            .bind(("actor_type", actor_type_str(&input.actor_type).to_string()))
-            .bind(("action", input.action))
-            .bind(("resource_id", resource_id_str))
-            .bind(("outcome", outcome_str(&input.outcome).to_string()))
-            .bind(("ip_address", input.ip_address))
-            .bind(("metadata", metadata))
-            .bind(("organization_id", organization_id_str))
+            .query(INSERT_MANY_SQL)
+            .bind(("rows", batch))
             .await
-            .map_err(DbError::from)?;
+        {
+            Ok(response) => response.check().is_ok(),
+            Err(_) => false,
+        };
+        if written {
+            return rows.iter().map(|_| Ok(())).collect();
+        }
 
-        let mut result = result
-            .check()
-            .map_err(|e| DbError::Migration(e.to_string()))?;
-
-        let rows: Vec<AuditLogRow> = result.take(0).map_err(DbError::from)?;
-        let row = take_first_or_not_found(rows, "audit_log", &id_str)?;
-
-        Ok(row.into_entry(id)?)
+        // The batch was refused as a whole. Write the rows one at a time, so
+        // one row the schema refuses costs that row alone, and every row
+        // reports the error its own write met: the caller dead-letters exactly
+        // the rows `append` would have failed. The same ids are reused, so a
+        // batch that was in fact committed before its response was lost is
+        // not written a second time here: its rows are refused as existing and
+        // reported failed — the answer a lost response to `append` gives.
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, input) in rows {
+            out.push(self.create_one(id, input).await.map(|_| ()));
+        }
+        out
     }
 
     async fn list(

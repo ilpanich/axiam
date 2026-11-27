@@ -47,11 +47,11 @@
 //! cache — and for the same reason (no cross-replica invalidation channel
 //! exists).
 //!
-//! This is why the cache is **opt-in and disabled by default**
-//! (`AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`, default `0` = off). A
-//! deployment that has already accepted the decision cache's ≤TTL revocation
-//! window loses nothing by enabling it; a deployment that has not must decide
-//! deliberately.
+//! The cache is **on by default** with a 5 s TTL
+//! (`AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`; `0` = off), the same
+//! window as the decision cache, decided in the database-cost review
+//! (`claude_dev/db-query-optimization.md` §8.5). A multi-replica deployment that
+//! needs revocation to reach every replica on the next request sets it to `0`.
 //!
 //! # Structure
 //!

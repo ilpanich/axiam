@@ -371,6 +371,9 @@ pub struct AppDeps<C: Connection + Clone + 'static> {
     pub rate_limit: RateLimitConfig,
     /// Which optional route groups are mounted.
     pub route_options: RouteOptions,
+    /// The REST request deadline of the WebSocket database engine
+    /// (`AXIAM__DB__WS_REQUEST_DEADLINE_SECS`); `None` with the HTTP engine.
+    pub request_deadline: Option<std::time::Duration>,
 }
 
 /// The `App` the REST listener serves, factored out of [`serve`] unchanged so
@@ -390,6 +393,11 @@ where
     C: Connection + Clone + 'static,
 {
     App::new()
+        // Innermost, so everything outside it — audit, CORS, tracing — sees a
+        // request that outlived it as an ordinary 503.
+        .wrap(axiam_api_rest::middleware::request_deadline::RequestDeadline::new(
+            deps.request_deadline,
+        ))
         .wrap(SecurityHeadersMiddleware)
         // F4 P23W3-03 (T-325): the default builder's field set, with query
         // values (a SAML handle, `RelayState`, `state`, a reset token) and
@@ -605,7 +613,40 @@ where
     // handle swap, exactly as the repositories do.
     let db_handle = pool.handle_for_repo();
     let org_repo = SurrealOrganizationRepository::new(pool.handle_for_repo());
-    let tenant_repo = SurrealTenantRepository::new(pool.handle_for_repo());
+    // Record caches (`axiam_db::record_cache`): one set per process, shared by
+    // the tenant, OAuth2 client and user repositories below so a write through
+    // any of them drops what every reader would have served. 5 s by default,
+    // the bound decided for the session-validation and decision caches;
+    // `AXIAM__DB__RECORD_CACHE_TTL_SECS=0` turns them off.
+    let record_caches = match config.db.record_cache_ttl_secs {
+        0 => {
+            tracing::info!(
+                "record caches disabled (tenant, client and user lookups read the \
+                 datastore every time; AXIAM__DB__RECORD_CACHE_TTL_SECS=0)"
+            );
+            None
+        }
+        ttl_secs => {
+            tracing::info!(
+                ttl_secs,
+                max_entries = config.db.record_cache_max_entries,
+                "record caches enabled — a tenant, client or account changed on \
+                 another replica is seen here within ttl_secs; set \
+                 AXIAM__DB__RECORD_CACHE_TTL_SECS=0 to disable"
+            );
+            Some(Arc::new(axiam_db::RecordCaches::new(
+                std::time::Duration::from_secs(ttl_secs),
+                config.db.record_cache_max_entries,
+            )))
+        }
+    };
+    let tenant_repo = {
+        let repo = SurrealTenantRepository::new(pool.handle_for_repo());
+        match &record_caches {
+            Some(c) => repo.with_record_caches(Arc::clone(c)),
+            None => repo,
+        }
+    };
     // G-6 / T23.6.2 (D-57): the one provisioning event source. Every repository
     // that can write a provisioned field (users, groups and their memberships,
     // the GDPR deletion request's status write) reports to this handle after its
@@ -625,6 +666,10 @@ where
             .unwrap_or_default(),
     )
     .with_provisioning_sink(provisioning_sink.clone());
+    let user_repo = match &record_caches {
+        Some(c) => user_repo.with_record_caches(Arc::clone(c)),
+        None => user_repo,
+    };
     let group_repo = SurrealGroupRepository::new(pool.handle_for_repo())
         .with_provisioning_sink(provisioning_sink.clone());
     let role_repo = SurrealRoleRepository::new(pool.handle_for_repo());
@@ -723,8 +768,8 @@ where
             pool.handle_for_repo(),
         ))
     });
-    // I6: optional short-TTL session-validation cache. Opt-in via
-    // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (0 = off, the default);
+    // I6: short-TTL session-validation cache, on by default (5 s;
+    // `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS`, 0 = off);
     // every session-deleting path in the repository invalidates it, so on a
     // single replica revocation stays immediate and the TTL only bounds
     // cross-replica staleness — the same contract as the D7 decision cache.
@@ -732,8 +777,8 @@ where
         0 => {
             tracing::info!(
                 "session-validation cache disabled (every authenticated request \
-                 re-reads its session row); enable with \
-                 AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS"
+                 re-reads its session row; \
+                 AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=0)"
             );
             session_repo
         }
@@ -741,10 +786,11 @@ where
             let cache = Arc::new(axiam_db::SessionValidationCache::new(
                 std::time::Duration::from_secs(ttl_secs),
             ));
-            tracing::warn!(
+            tracing::info!(
                 ttl_secs,
-                "session-validation cache ENABLED (I6) — a session revoked on \
-                 another replica may remain acceptable here for up to ttl_secs"
+                "session-validation cache enabled (I6) — a session revoked on \
+                 another replica may remain acceptable here for up to ttl_secs; \
+                 set AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=0 to disable"
             );
             session_repo.with_validation_cache(cache)
         }
@@ -1331,7 +1377,13 @@ where
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client");
-    let oauth2_client_repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo());
+    let oauth2_client_repo = {
+        let repo = SurrealOAuth2ClientRepository::new(pool.handle_for_repo());
+        match &record_caches {
+            Some(c) => repo.with_record_caches(Arc::clone(c)),
+            None => repo,
+        }
+    };
     // R110W3-02 (#675): once per process, beside boot, counts only — see the module.
     let _ = crate::device_grant_scan::spawn_boot_scan(oauth2_client_repo.clone());
     // T21.4 — RFC 7591 initial access tokens. Read by the unauthenticated
@@ -1900,13 +1952,13 @@ where
 
     tracing::info!(bind = %bind_addr, "Starting REST API server");
 
-    // D7: build the shared authorization decision cache. `None` unless
-    // `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=true` — when `None`, every engine
-    // below is constructed exactly as before (no cache, zero behaviour
-    // change). The SAME `Arc<DecisionCache>` is cloned into the REST, gRPC and
-    // AMQP engines so an invalidation triggered from a REST mutation handler is
-    // observed on every read path (all role/permission/resource mutations are
-    // REST endpoints).
+    // D7: build the shared authorization decision cache — on by default;
+    // `None` when `AXIAM__AUTHZ__DECISION_CACHE_ENABLED=false`, and then every
+    // engine below is constructed without a cache. The SAME
+    // `Arc<DecisionCache>` is cloned into the REST, gRPC and AMQP engines so
+    // an invalidation triggered from a REST mutation handler is observed on
+    // every read path (all role/permission/resource mutations are REST
+    // endpoints).
     let decision_cache = config.authz.build_decision_cache();
     if let Some(cache) = decision_cache.as_ref() {
         tracing::info!(
@@ -3398,6 +3450,8 @@ where
         app_state,
         rate_limit: rate_limit_cfg,
         route_options,
+        request_deadline: (config.db.engine == axiam_db::DbEngine::Ws)
+            .then(|| std::time::Duration::from_secs(config.db.ws_request_deadline_secs)),
     };
     let http_server = HttpServer::new(move || {
         compose_app(deps.clone())

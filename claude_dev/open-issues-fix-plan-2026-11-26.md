@@ -552,6 +552,32 @@ changes a signed token's header, and needs a short security argument (below).
 >   `website/src/docs/reference.ts` prose ("twenty-three amendments since
 >   1.39") is stale: both go to OI-06.
 >
+> **Follow-up (2026-11-27, Opus 5.5), commit `df06a8b`, after the Go reference
+> port (OI-16) showed where 1.69 did not fit:** §8 "Required tests" no longer
+> mentions the withdrawn opt-out; §8 protocol step 2 rewritten for SDK
+> consumers of `AuthzRequest`/`AuditEventMessage` (2a ambiguous bodies refused;
+> 2b the received body must end in the trailing 64-hex `hmac_signature`, the
+> canonical bytes are everything before it — never re-serialized; **2c a
+> declaration-order layout check, MUST**; 2d–2g HMAC, decode from the verified
+> bytes); producers MUST send serde's wire form (compact, declaration order,
+> `metadata` keys sorted, signature last); the server's own consumers
+> re-serialize and are documented as "not a conformance oracle" for the wire
+> form; rule 3: no lenient mode for the signed types; obligation 4: normative
+> reason order (no `hmac_signature` member → `unsigned` whatever else is
+> missing), `hmac_signature: null` → `malformed`, after-Close answers nacked
+> without an event; §34.13 clause (d) for #882. Fixture
+> `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json` gains
+> `wire_json` (additive; regenerated from the server sign path) and
+> `reference_vectors.rs` the test `test_wire_bytes_cut_to_the_canonical_bytes`.
+> Verification: `axiam-amqp` reference-vector tests (3+2+7) and `--lib` (217)
+> pass; clippy, fmt clean; anchors unchanged; spec digest matches; doc links OK.
+> Its Appendix A edits were swept into the orchestrator's plan commits
+> `a1dfc90`/`4d4d96e` (same text). Not settled: whether
+> `reactor_v2_reference_vectors.json` has the same `message`-is-not-wire-bytes
+> issue for SDK reactor consumers (outside #882's scope). The corrected
+> `CONTRACT.md` and fixture were re-vendored into the SDK trees on 2026-11-27
+> and each AMQP SDK received an alignment step (see the Wave B records).
+>
 > **§5.0 re-vendoring (orchestrator, 2026-11-26).** `sdks/CONTRACT.md` at
 > `c4c4e44` copied into all eleven SDK trees; `cmp` identical in each.
 > `openapi.json` and `management-registry.json` were already identical,

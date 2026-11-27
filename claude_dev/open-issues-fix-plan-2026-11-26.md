@@ -867,6 +867,45 @@ valid authentik cell).
 >   `check-doc-links.sh` OK (586 links). The closing comment for #561 is
 >   prepared and is posted with the pull request (issues close on merge).
 
+### Wave A review gate — record (2026-11-27)
+
+> **Round 1** — one independent Opus 5.5 reviewer over `88fa1fa..cb2e719`
+> (diff, plan sections and issues; no implementer summary). **Medium-clean**;
+> four low and four nit findings. Mutation checks run by the reviewer: OI-01
+> (both `qr5_1_*` fail with the two calls removed) and OI-03 (the empty-segment
+> test fails with `middleware.rs` reverted). OI-02 was not mutation-tested (the
+> `axiam-api-rest` build is too heavy for the sandbox); reasoned instead.
+> Fixes: `7321318` (Opus — CONTRACT §8 "The wire form this relies on" and
+> §34.13 (d) no longer claim the server enforces the wire form, since its
+> consumers re-serialize; sec095 test indentation) and `4f7177d` (Sonnet —
+> unmatched-path redaction decodes segments and compares case-folded;
+> `bearer_route_patterns_test` ties `BEARER_ROUTE_PATTERNS` to the spec's
+> paths; T-528 closing sentence in md, `Axiam.json`, `threatModel.ts`; one
+> helper `superseded_by_version_or` for the credential-superseded rule; Zitadel
+> header on run 6c; comment on the intentional repeat of the lock and tenant
+> checks in the directory arm). Every finding fixed, none rejected. The
+> CONTRACT change was re-vendored into the eleven SDKs (one chore commit each).
+> `4f7177d` also carries §5.3 of this document (swept in; said in its message).
+>
+> **Round 2** — same scope over `cb2e719..4f7177d`. **Medium-clean**; one low
+> (prefixes not case-folded, fail-open for a future mixed-case literal) and
+> three nits (bearer-word list, routes outside `/api/v1`, double encoding and
+> dot segments). Fixed locally in `1e697b18` (last permitted round, no third
+> review): folded prefixes with an injected-pattern test; whole-component
+> bearer words (`code`, `key`, `nonce`, `otp`, `invite`, `state`, `assertion`
+> added; allow-list empty after checking every spec path parameter); either
+> spelling accepted; decode to a fixpoint (≤ 3 passes), `.` skipped, `..` read
+> both ways. Each new test failed first (quoted in the commit). Not covered by
+> design: `account/export/../H`, which normalises to a non-bearer route.
+> `bearer_route_patterns_test` was run by the implementer (1 passed); the
+> round-2 reviewer could not build `axiam-api-rest` (OOM) and replicated its
+> logic in Python instead.
+>
+> **Not verified by the gate:** the `docs/deployment/README.md` claim that a
+> relying party keeps working on the SDK release it already runs once logout
+> tokens carry `typ` `logout+jwt` — checked for the Rust SDK v1.3.1 only; the
+> other ten go to OI-30.
+
 ---
 
 ## 5. Wave B — SDKs

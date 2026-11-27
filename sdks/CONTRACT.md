@@ -1801,7 +1801,7 @@ debug build, absent from the shipped artifact, and loud when used.
 
 All SDKs that manage token state (access + refresh tokens) MUST implement a single-flight refresh guard to prevent thundering-herd token refresh calls:
 
-1. **Exactly one in-flight refresh at any time** (for `oidc_refresh`, one per refresh token: rule 7). When a 401 (or gRPC `UNAUTHENTICATED`) response arrives and the client has a valid refresh token, the SDK attempts a token refresh. If a refresh (for `oidc_refresh`, of the same refresh token and tenant: rule 7) is already in progress, all concurrent 401-triggering requests MUST wait for the existing refresh to complete.
+1. **Exactly one in-flight refresh at any time** (for `oidc_refresh`, one per refresh token and tenant: rule 7). When a 401 (or gRPC `UNAUTHENTICATED`) response arrives and the client has a valid refresh token, the SDK attempts a token refresh. If a refresh (for `oidc_refresh`, of the same refresh token and tenant: rule 7) is already in progress, all concurrent 401-triggering requests MUST wait for the existing refresh to complete.
 2. **Result sharing.** After the single in-flight refresh resolves (success or failure), all waiting requesters receive the outcome simultaneously:
    - On success: all waiting requests are retried with the new tokens.
    - On failure: all waiting requests fail with `AuthError`.
@@ -1879,11 +1879,11 @@ All SDKs that manage token state (access + refresh tokens) MUST implement a sing
    **resolved `tenant_id` UUID** together with the **refresh token**. `oidc_refresh` is always
    tenant-scoped ([§12.3](#§123-cross-cutting-rules-normative-identical-in-all-sdks) rule 4): the
    resolved tenant is the explicit argument or, when it is omitted, the client's default tenant,
-   normalised identically in both cases, so passing the default tenant explicitly and omitting it
-   give the same key. The raw refresh token MUST NOT be a key and MUST NOT be logged, here or in
-   any diagnostic of the guard. The key is the tenant and token only; a differing optional `scope`
-   does not form a separate burst, and every caller takes the response's scope
-   ([§12.1](#§121-canonical-operation-set-and-endpoint-map)).
+   normalised to the lower-case hyphenated UUID form in both cases, so passing the default tenant
+   explicitly, in any letter case, and omitting it give the same key. The raw refresh token MUST
+   NOT be a key and MUST NOT be logged, here or in any diagnostic of the guard. The key is the
+   tenant and token only; a differing optional `scope` does not form a separate burst, and every
+   caller takes the response's scope ([§12.1](#§121-canonical-operation-set-and-endpoint-map)).
    - **Same token and tenant, one burst.** Callers presenting the same token for the same
      resolved tenant form one burst: rule 2's observable requirement and invariants 6a–6d hold
      **per key** — one wire call, its one outcome to every caller of that key,
@@ -1905,8 +1905,9 @@ All SDKs that manage token state (access + refresh tokens) MUST implement a sing
    while token A's refresh is in flight, or in its bookkeeping window, joins A's flight and is
    handed A's rotated token set — another session's tokens, while B is never refreshed. (Found in
    the shipped SDKs as: Kotlin, Rust, TypeScript, Python, Java, C#, PHP and Go each with one
-   unkeyed flight; Swift already keyed by tenant and token and adds the tests only; C and C++
-   keyed by a SHA-256 digest of the token alone and add the tenant to the key and add the tests.)
+   unkeyed flight; Swift already keyed by tenant and token but on the tenant string as given, and
+   normalises the tenant in the key and adds the tests; C and C++ keyed by a SHA-256 digest of the
+   token alone and add the tenant to the key and add the tests.)
    This rule is about `oidc_refresh`; it does not change the §1 cookie-session `refresh`.
 
 Per-language implementation guidance:
@@ -1959,16 +1960,18 @@ a production bug survived the pre-1.6 test requirement under):
   in the same window still joins A's outcome with no second call. Where the mechanism publishes
   and vacates in one atomic step under the guard's lock, so that no such window exists, the test
   says so, names that step, and instead presents B at the earliest instant after A's outcome is
-  published that the test can reach.
-- **Same token, different tenant.** Two callers present the same token for two different tenants.
-  Assert two separate flights: two wire calls, each with its own tenant, each caller receiving its
-  own call's outcome.
-- **Default tenant explicit vs omitted.** Callers present the same token, some passing the
-  client's default tenant explicitly and some omitting it. Assert one flight: one wire call, its
-  outcome to every caller.
-- **Slots are removed.** After both bursts settle, assert the guard holds no slot for A or B
+  published that the test can reach; the same-window A assertion is then omitted (that case is the
+  1.6 after-vacate test).
+- **Same token, different tenant.** Two callers present the same token for two different tenants,
+  the second while the first's call is held on the wire. Assert two separate flights: two wire
+  calls, each with its own tenant, each caller receiving its own call's outcome.
+- **Default tenant explicit vs omitted.** Callers present the same token concurrently, while the
+  first's call is held on the wire, some passing the client's default tenant explicitly, some
+  passing it in upper case, and some omitting it. Assert one flight: one wire call, its outcome to
+  every caller.
+- **Slots are removed.** After every burst settles, assert the guard holds no slot for any key used
   (through a test hook or an observable count), and that no log line or error the guard emits
-  contains either raw token.
+  contains any raw token.
 
 **A replayed refresh token ends the session (contract 1.65; informative; #818, D-N2).** The OAuth2
 `refresh_token` grant (`oidc_refresh`) used to refuse a rotated token that was presented again and
@@ -5432,8 +5435,8 @@ recorded here until one exists.
   is keyed by a digest of the resolved tenant and the refresh token, so a caller with a different
   token or tenant never joins another key's flight or receives its token set, and a vacated slot
   is removed (§9 rule 7 and its 1.69 tests; Kotlin, Rust, TypeScript, Python, Java, C#, PHP and Go
-  change code; C and C++ add the tenant to the key and add the tests; Swift adds the tests only;
-  §34.13 (h)).
+  change code; C and C++ add the tenant to the key and add the tests; Swift normalises the tenant
+  in the key and adds the tests; §34.13 (h)).
 - **2026-11-21 (security audit 2026-11-14, Wave 2; contract 1.68)** — **no new operation and no
   REST or gRPC schema change; one AMQP message gains three members and a signature; one new
   optional access-token claim; new verifier, helper and glue rules that break integrations
@@ -15647,7 +15650,7 @@ code changes for (e)–(h).
 | (e) Typed consume: a consumer checks the one type it is configured for (#883, D-9) | §8 protocol step 2c; rule 4 order; step 2 "Required tests" | normative | the seven |
 | (f) A byte-order mark or any prefix is `malformed`; no body escapes the consumer (D-10) | §8 protocol step 2a, "No body escapes the consumer"; consumer obligation 4 order (1) | normative | the seven |
 | (g) JWKS stale-if-error, bounded at TTL + 300 s (D-10) | [§12.4](#§124-id-token-validation-checklist-normative-for-oidc_exchange) rule 2 | normative | all eleven; Swift already conforms (pin test only), Java except for the empty set |
-| (h) The `oidc_refresh` single-flight is keyed per refresh token | [§9](#§9-single-flight-refresh-guard) rule 7; "Extended in contract 1.69" | normative | every SDK that ships `oidc_refresh`; Kotlin, Rust, TypeScript, Python, Java, C#, PHP and Go change code; C and C++ add the tenant to the key and add the tests; Swift adds the tests only |
+| (h) The `oidc_refresh` single-flight is keyed per refresh token | [§9](#§9-single-flight-refresh-guard) rule 7; "Extended in contract 1.69" | normative | every SDK that ships `oidc_refresh`; Kotlin, Rust, TypeScript, Python, Java, C#, PHP and Go change code; C and C++ add the tenant to the key and add the tests; Swift normalises the tenant in the key and adds the tests |
 
 - **(a) The logout token's `kid` (#880).** Through 1.68 the server signed the logout token with
   no `kid` (§34.11 (e)), while §12.7.3 rule 1 sent it through the §12.4 verifier, which requires
@@ -15750,20 +15753,24 @@ code changes for (e)–(h).
   Java, C#, PHP, Go) kept a single unkeyed flight: a caller holding refresh token B that arrived
   while token A's refresh was in flight, or in its publish-before-vacate window, joined A's flight
   and received A's rotated token set, and B was never refreshed. From 1.69 the guard behaves as a
-  map of slots keyed by a digest of the resolved `tenant_id` UUID (§12.3 rule 4; the default
-  tenant passed explicitly and omitted give the same key) together with the refresh token; the raw
-  token is never a key and never logged; a differing `scope` does not form a separate burst; rule 2
-  and invariants 6a–6d hold per key; a different key never joins another key's flight or receives
-  its outcome; and a vacated slot is removed. Swift already keyed by tenant and token and adds the
-  tests only; C and C++ keyed by a SHA-256 digest of the token alone, and add the tenant to the key
+  map of slots keyed by a digest of the resolved `tenant_id` UUID (§12.3 rule 4), normalised to
+  the lower-case hyphenated UUID form in both cases so that the default tenant passed explicitly,
+  in any letter case, and omitted give the same key, together with the refresh token; the raw
+  token is never a key and never logged; a differing `scope` does not form a separate burst; rule
+  2 and invariants 6a–6d hold per key; a different key never joins another key's flight or
+  receives its outcome; and a vacated slot is removed. Swift already keyed by tenant and token,
+  but on the tenant string as given, so one tenant spelled in two letter cases made two wire calls
+  with one token, which from 1.65 ends the session; it normalises the tenant in the key and adds
+  the tests. C and C++ keyed by a SHA-256 digest of the token alone, and add the tenant to the key
   and add the tests. C++'s separate rule-6a defect is tracked in ilpanich/axiam-cplusplus-sdk#93
-  and is not closed by (h). Issues:
-  ilpanich/axiam-kotlin-sdk#109, ilpanich/axiam-rust-sdk#161, ilpanich/axiam-typescript-sdk#177,
-  ilpanich/axiam-python-sdk#115, ilpanich/axiam-java-sdk#142, ilpanich/axiam-csharp-sdk#130,
-  ilpanich/axiam-php-sdk#96, ilpanich/axiam-go-sdk#117.
+  and is not closed by (h). Issues: ilpanich/axiam-kotlin-sdk#109, ilpanich/axiam-rust-sdk#161,
+  ilpanich/axiam-typescript-sdk#177, ilpanich/axiam-python-sdk#115, ilpanich/axiam-java-sdk#142,
+  ilpanich/axiam-csharp-sdk#130, ilpanich/axiam-php-sdk#96, ilpanich/axiam-go-sdk#117,
+  ilpanich/axiam-c-sdk#94, ilpanich/axiam-cplusplus-sdk#94, ilpanich/axiam-swift-sdk#95.
 
 **Conformance statements.** An SDK states conformance to contract 1.69 once (a) and (g), (h)
-where it ships `oidc_refresh`, and, for the seven AMQP SDKs, (b) to (f) are in place; nothing else in its conformance line changes.
+where it ships `oidc_refresh`, and, for the seven AMQP SDKs, (b) to (f) are in place; nothing
+else in its conformance line changes.
 
 ## §35 Certificate revocation lists (informative)
 

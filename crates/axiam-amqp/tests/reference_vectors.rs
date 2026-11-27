@@ -351,6 +351,72 @@ fn test_distinguishing_members_are_disjoint_across_the_three_types() {
     let request_json = serde_json::to_value(&request).unwrap();
     let audit_json = serde_json::to_value(&audit).unwrap();
     let response_json = serde_json::to_value(&response).unwrap();
+    // The full member set of each type, every optional member included, listed
+    // explicitly. A member added to one of the structs fails this assertion
+    // until it is listed here — and classified against CONTRACT §8 step 2c's
+    // table (is it a distinguishing member? does it collide with another
+    // type's?) — so a new field left `None` above cannot slip past the
+    // disjointness check below.
+    let expected: [(&str, &serde_json::Value, &[&str]); 3] = [
+        (
+            "AuthzRequest",
+            &request_json,
+            &[
+                "correlation_id",
+                "tenant_id",
+                "subject_id",
+                "action",
+                "resource_id",
+                "scope",
+                "key_version",
+                "nonce",
+                "issued_at",
+                "hmac_signature",
+            ],
+        ),
+        (
+            "AuditEventMessage",
+            &audit_json,
+            &[
+                "tenant_id",
+                "actor_id",
+                "actor_type",
+                "action",
+                "resource_id",
+                "outcome",
+                "ip_address",
+                "metadata",
+                "key_version",
+                "nonce",
+                "issued_at",
+                "hmac_signature",
+            ],
+        ),
+        (
+            "AuthzResponse",
+            &response_json,
+            &[
+                "correlation_id",
+                "allowed",
+                "reason",
+                "reason_code",
+                "tenant_id",
+                "nonce",
+                "hmac_signature",
+            ],
+        ),
+    ];
+    for (name, json, list) in &expected {
+        let mut actual = members((*json).clone());
+        actual.sort();
+        let mut want: Vec<String> = list.iter().map(|m| (*m).to_string()).collect();
+        want.sort();
+        assert_eq!(
+            actual, want,
+            "{name}: member set changed — list and classify the new member"
+        );
+    }
+
     let types: [(&str, Vec<String>, &[&str]); 3] = [
         (
             "AuthzRequest",

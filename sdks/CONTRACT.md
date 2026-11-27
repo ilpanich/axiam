@@ -1263,8 +1263,11 @@ All SDKs that consume AXIAM AMQP messages (currently: Rust, TypeScript/Node, Go,
 
    Where the transport cannot report a delivery's exchange or routing key, the consumer supplies
    the values it consumes from (`""` and the queue name, for a queue read through the default
-   exchange). **The reason is the first that applies, in this order (normative)**, which is the
-   requester's order with the v2 gates in place of its binding checks: (1) the body is not one
+   exchange). **The reason is the first that applies, in this order (normative)**. Positions (1)
+   and (2) are the requester's; after them the two orders differ — the requester refuses an
+   ill-typed member as `malformed` at its (3), before the HMAC, while the event consumer refuses
+   a body that does not decode at (5), after the HMAC (step 2f decodes the verified bytes), and
+   has the v2 gates where the requester has its binding checks: (1) the body is not one
    JSON object — its first byte is not `{` (a byte-order mark, whitespace or any other prefix),
    or it does not parse as JSON (trailing content included) → `malformed`; (2) it has no
    top-level `hmac_signature` member → `unsigned`, whatever else it lacks; (3) anything else steps 2a–2c
@@ -3456,7 +3459,11 @@ requirement:
    from the last **successful** fetch that filled it; its TTL is the lifetime the SDK gives a
    fetched set — configured, or derived from the response's `Cache-Control: max-age`; **300 s**
    by default and **at most 300 s**: a larger configured or advertised value is clamped down to
-   300 s, never honoured, and a smaller one is honoured. (The server's `/oauth2/jwks` advertises
+   300 s, never honoured, and a smaller one is honoured. A clamped **configured** TTL is a
+   caller-supplied value the contract clamps, so the SDK emits one `config_clamped` event for it
+   at construction ([§19](#§19-telemetry-hooks-d5) rule 6: the setting's name, the value asked for,
+   300 s in force, and this rule as the limit); clamping an advertised `max-age` is not a caller
+   setting and emits nothing. (The server's `/oauth2/jwks` advertises
    `max-age=300` by default, and the clamp keeps the stale bound below within the ten minutes
    §32.7 allows the SSF key cache.) Within the TTL the held set answers with no fetch. Past it a
    refresh is due, subject to the window above.
@@ -5356,7 +5363,11 @@ recorded here until one exists.
   reason, and checks only the one type it is configured for, which breaks an integration that
   fed both types to one consumer (§8 rule 4, step 2c; the seven); a byte-order-mark prefix is
   refused and no body may escape a consumer (§8 step 2; the seven); and a JWKS cache keeps its
-  keys through a failed refresh until TTL + 300 s after the last success, then refuses (§12.4 rule 2; all eleven).
+  keys through a failed refresh until TTL + 300 s after the last success, then refuses, counts a
+  `304` to a conditional refresh as a success and an empty `{"keys":[]}` as a failure, and clamps
+  its TTL to at most 300 s, which breaks a configuration that set a longer TTL (C#'s
+  `JwksCacheTtl`, clamped to 10 minutes today; a clamped configured TTL emits `config_clamped`)
+  (§12.4 rule 2; all eleven).
 - **2026-11-21 (security audit 2026-11-14, Wave 2; contract 1.68)** — **no new operation and no
   REST or gRPC schema change; one AMQP message gains three members and a signature; one new
   optional access-token claim; new verifier, helper and glue rules that break integrations
@@ -15620,8 +15631,9 @@ code changes for (e)–(g).
   and two event consumers (Go, Rust) logged no exchange, routing key or tenant. From 1.69 every
   SDK consumer logs the same five members, the event consumer with its own configured tenant and
   the closed reasons `malformed`, `unsigned`, `signature`, `key_version`, `stale`, `replay`, in a
-  normative order that is the requester's with the v2 gates in place of its binding checks. A
-  §22 reactor runtime is unchanged.
+  normative order that shares the requester's first two positions (`malformed`, then
+  `unsigned`) and then puts the layout and typed check, the HMAC, the decode of the verified
+  bytes and the v2 gates in that order. A §22 reactor runtime is unchanged.
 - **(d) Received-bytes verification for event consumers (#882, D-5).** Through 1.68 §8 protocol
   steps 2b–2c told a consumer of `AuthzRequest` and `AuditEventMessage` to re-serialize the
   message without its signature; that fails a genuine message whenever the SDK's encoder escapes
@@ -15660,8 +15672,11 @@ code changes for (e)–(g).
   outage does not refuse every token) until exactly TTL + 300 s after the last successful fetch
   (600 s at the default TTL), then refuses; a failed refresh, an unknown-`kid` one included, never
   moves that anchor; a `304` to a conditional refresh is a success, an empty `{"keys":[]}` a
-  failure, and the TTL is clamped to at most 300 s. Java and Swift implemented the bound (Java
-  changes only for the empty set); every SDK gains the rule's conformance test.
+  failure, and the TTL is clamped to at most 300 s (a clamped configured TTL emits one §19
+  `config_clamped` event; an advertised `max-age` clamps silently). Java and Swift implemented
+  the bound (Java changes only for the empty set); C#'s configurable `JwksCacheTtl`, which
+  `JwksVerifier.MaxCacheTtl` clamps to 10 minutes today, changes to the 300 s clamp; every SDK
+  gains the rule's conformance test.
 
 **Conformance statements.** An SDK states conformance to contract 1.69 once (a) and (g), and for
 the seven AMQP SDKs (b) to (f), are in place; nothing else in its conformance line changes.

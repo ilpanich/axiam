@@ -3937,11 +3937,28 @@ async fn userinfo_claims_for<C: Connection + Clone>(
     // The two differ only for an organization-level principal whose request
     // carried `X-Axiam-Tenant`; reading the acting tenant there found no
     // account and answered with `sub` alone.
-    let account = match state
-        .user_repo
-        .get_by_id(user.principal_tenant_id, user.user_id)
-        .await
-    {
+    //
+    // On this route the session check reads the account in its own round trip
+    // (`PrefetchAccount`, set on the `/userinfo` resource) and leaves it on the
+    // request; it is the same read, one round trip earlier. Without it — a
+    // validator that cannot, a cached session check — the account is read here.
+    let prefetched = http_req.and_then(|req| {
+        crate::extractors::auth::take_prefetched_account(
+            req,
+            user.principal_tenant_id,
+            user.user_id,
+        )
+    });
+    let read = match prefetched {
+        Some(read) => read,
+        None => {
+            state
+                .user_repo
+                .get_by_id_cached(user.principal_tenant_id, user.user_id)
+                .await
+        }
+    };
+    let account = match read {
         Ok(u) => u,
         Err(AxiamError::NotFound { .. }) => return userinfo_account_may_not_act(),
         Err(e) => {

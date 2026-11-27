@@ -41,7 +41,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use surrealdb::engine::remote::http::Client;
+use surrealdb::engine::any::Any as Client;
 use surrealdb::{Connection, Surreal};
 
 use crate::read_preference::ReadPreference;

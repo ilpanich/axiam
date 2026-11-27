@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axiam_core::error::AxiamError;
-use surrealdb::engine::remote::http::Client;
+use surrealdb::engine::any::Any as Client;
 use surrealdb::{Connection, Surreal};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;

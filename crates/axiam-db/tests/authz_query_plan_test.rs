@@ -467,3 +467,59 @@ async fn lineage_scope_lookup_is_index_satisfied() {
     assert_no_table_scan(&plan, "lineage scope lookup");
     assert_uses_index(&plan, "idx_scope_resource_name", "lineage scope lookup");
 }
+
+// ---------------------------------------------------------------------------
+// The one-round-trip read (RoleRepository::authorization_inputs)
+// ---------------------------------------------------------------------------
+
+/// `authorization_inputs` binds the assignment rows to variables and derives
+/// the role records for the grants read from them in SurrealQL, instead of
+/// receiving them as a bound parameter. The grants read must still see a set
+/// of record ids on the right of `IN` — an `IndexScan` over
+/// `idx_grants_unique`, never the table scan the I7(a) note warns of — and the
+/// assignment reads keep their plans inside the `LET`s.
+#[tokio::test]
+async fn one_round_trip_grant_lookup_is_index_satisfied() {
+    let (db, tenant_id, user_id) = seeded_db().await;
+
+    let mut res = db
+        .query(
+            "LET $subject_records = [type::record('user', $user_id), \
+                 type::record('service_account', $user_id)]; \
+             LET $direct = (SELECT meta::id(out.id) AS record_id FROM has_role \
+                 WHERE in IN $subject_records AND out.tenant_id = $tenant_id); \
+             LET $group_records = (SELECT VALUE out FROM member_of \
+                 WHERE in IN $subject_records AND out.tenant_id = $tenant_id); \
+             LET $inherited = (SELECT meta::id(out.id) AS record_id FROM has_role \
+                 WHERE in IN $group_records AND out.tenant_id = $tenant_id); \
+             LET $role_records = array::distinct(array::concat(\
+                 (SELECT VALUE type::record('role', record_id) FROM $direct), \
+                 (SELECT VALUE type::record('role', record_id) FROM $inherited))); \
+             SELECT meta::id(in) AS role_id, out.action AS action, scope_ids FROM grants \
+                 WHERE in IN $role_records AND out.tenant_id = $tenant_id EXPLAIN; \
+             SELECT meta::id(out.id) AS record_id FROM has_role \
+                 WHERE in IN $group_records AND out.tenant_id = $tenant_id EXPLAIN; \
+             RETURN $role_records;",
+        )
+        .bind(("user_id", user_id.to_string()))
+        .bind(("tenant_id", tenant_id.to_string()))
+        .await
+        .unwrap();
+
+    // The seeded user holds one role, through its group, so the derived set is
+    // not empty and the plan below is the one a real check gets.
+    let roles: Vec<RecordId> = res.take(7).unwrap();
+    assert_eq!(roles.len(), 1, "the group's role");
+
+    let grants: Vec<Json> = res.take(5).unwrap();
+    assert_no_table_scan(&grants, "one-round-trip grants lookup");
+    assert_uses_index(&grants, "idx_grants_unique", "one-round-trip grants lookup");
+
+    let inherited: Vec<Json> = res.take(6).unwrap();
+    assert_no_table_scan(&inherited, "one-round-trip inherited has_role lookup");
+    assert_uses_index(
+        &inherited,
+        "idx_has_role_unique",
+        "one-round-trip inherited has_role lookup",
+    );
+}

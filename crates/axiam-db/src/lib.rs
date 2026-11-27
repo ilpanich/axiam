@@ -24,12 +24,13 @@ pub mod metrics;
 mod pool;
 pub mod rate_limit_counter;
 pub mod read_preference;
+pub mod record_cache;
 pub mod repository;
 mod schema;
 pub mod seeder;
 pub mod session_validation_cache;
 
-pub use connection::{DbConfig, DbManager};
+pub use connection::{DbConfig, DbEngine, DbManager};
 pub use engine_attestation::{
     ALLOW_MEMORY_ENGINE_ENV, Attestation, MemoryEngineRefused, attest_storage_engine,
     memory_engine_override_enabled,
@@ -43,6 +44,9 @@ pub use rate_limit_counter::{
     StoreIncrementFuture, StorePeekFuture, WindowMode,
 };
 pub use read_preference::{DEFAULT_MAX_STALENESS, QueryClass, ReadPreference, ReadReplicaConfig};
+pub use record_cache::{
+    DEFAULT_RECORD_CACHE_MAX_ENTRIES, DEFAULT_RECORD_CACHE_TTL_SECS, RecordCaches,
+};
 pub use repository::{
     LeaseClaim, LeaseRecord, SurrealAccountDeletionRepository, SurrealAmqpNonceRepository,
     SurrealAssertionReplayRepository, SurrealAuditLogRepository,
@@ -94,4 +98,7 @@ pub use surrealdb::Connection;
 /// Production SurrealDB client type — the stateless HTTP engine (see `connection.rs`
 /// for why HTTP over WebSocket). Named `DbClient` (engine-neutral) since it is no
 /// longer the WebSocket client.
-pub use surrealdb::engine::remote::http::Client as DbClient;
+/// The connection type of every server-side handle: the SDK's protocol-agnostic
+/// engine, so `AXIAM__DB__ENGINE` picks HTTP (the default) or WebSocket at
+/// start-up behind one type.
+pub use surrealdb::engine::any::Any as DbClient;

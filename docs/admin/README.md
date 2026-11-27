@@ -691,12 +691,13 @@ request row is not covered by that and can still be lost with the connection.
 
 AXIAM can cache effective-permission decisions per tenant to cut the 3–4
 SurrealDB round-trips each authorization check would otherwise make. It is
-**off by default** and controlled entirely by configuration — enabling it
-changes performance, never the decision an endpoint returns.
+**on by default since v1.4** (it was off before) and controlled entirely by
+configuration — it changes performance, never the decision an endpoint
+returns, within the bounded revocation window described below.
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | `false` | Master switch. When `false`, the authorization path is byte-for-byte identical to a build without the cache. |
+| `AXIAM__AUTHZ__DECISION_CACHE_ENABLED` | `true` | Master switch. When `false`, the authorization path is byte-for-byte identical to a build without the cache. |
 | `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS` | `5` | Time-to-live for a cached decision, in seconds. Also the **bound on worst-case revocation latency** if an invalidation event is ever missed (see below). Keep it short. |
 | `AXIAM__AUTHZ__DECISION_CACHE_MAX_ENTRIES` | `10000` | Maximum cached decisions retained **per tenant** before FIFO eviction (memory bound). |
 | `AXIAM__AUTHZ__DECISION_CACHE_BROADCAST_ENABLED` | `false` | Fan invalidations out to **every replica** over RabbitMQ (§4.2). Requires the master switch above. See [below](#cross-replica-invalidation-optional-42). |

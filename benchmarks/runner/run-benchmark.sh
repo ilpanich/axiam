@@ -896,6 +896,43 @@ axiam_deploy_profile() {
   esac
 }
 
+# Read-cache posture of the running target, from its container env (see
+# README "Caches and fairness" and `just caches=…`). Recorded per cell so a
+# report can never median an uncached reference cell with a shipped-default one.
+#   axiam:    default (all on) | strict (all off) | mixed
+#   zitadel:  default (object caches off, as shipped) | on (memory connector)
+#   keycloak, authentik: default (their caches are always on)
+cache_profile() {
+  command -v docker >/dev/null 2>&1 || { echo -n "unknown"; return; }
+  local env_dump
+  case "$TARGET" in
+    axiam)
+      env_dump="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-axiam-server" 2>/dev/null)" \
+        || { echo -n "unknown"; return; }
+      local dec ses rec
+      dec="$(sed -n 's/^AXIAM__AUTHZ__DECISION_CACHE_ENABLED=//p' <<<"$env_dump" | head -1)"
+      ses="$(sed -n 's/^AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS=//p' <<<"$env_dump" | head -1)"
+      rec="$(sed -n 's/^AXIAM__DB__RECORD_CACHE_TTL_SECS=//p' <<<"$env_dump" | head -1)"
+      # Unset means the product default, which is on.
+      if [ "${dec:-true}" != "false" ] && [ "${ses:-5}" != "0" ] && [ "${rec:-5}" != "0" ]; then
+        echo -n "default"
+      elif [ "${dec:-true}" = "false" ] && [ "${ses:-5}" = "0" ] && [ "${rec:-5}" = "0" ]; then
+        echo -n "strict"
+      else
+        echo -n "mixed"
+      fi ;;
+    zitadel)
+      env_dump="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "bench-zitadel" 2>/dev/null)" \
+        || { echo -n "unknown"; return; }
+      if grep -q '^ZITADEL_CACHES_INSTANCE_CONNECTOR=memory$' <<<"$env_dump"; then
+        echo -n "on"
+      else
+        echo -n "default"
+      fi ;;
+    *) echo -n "default" ;;
+  esac
+}
+
 # --- J9/E1: required-env preflight ------------------------------------------
 # BENCH_REQUIRE_ENV is a space-separated list of environment variable NAMES a
 # runbook pass declares it depends on (e.g. `BENCH_REQUIRE_ENV="RUST_LOG"` for
@@ -1386,6 +1423,7 @@ run_one() {
   "dry_run": $([ "$DRY_RUN" = "1" ] && echo true || echo false),
   "axiam_env": $(axiam_env_json),
   "axiam_deploy_profile": "$(axiam_deploy_profile)",
+  "cache_profile": "$(cache_profile)",
   "connection_model": "$([ "${BENCH_NO_CONN_REUSE:-false}" = "true" ] && echo no-reuse || { [ "${BENCH_NO_VU_CONN_REUSE:-false}" = "true" ] && echo per-iteration-vu-pool || echo pooled-per-vu; })",
   "no_connection_reuse": ${BENCH_NO_CONN_REUSE:-false},
   "no_vu_connection_reuse": ${BENCH_NO_VU_CONN_REUSE:-false},

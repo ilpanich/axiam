@@ -25,6 +25,7 @@ use crate::handle::DbHandle;
 use crate::helpers::{
     CountRow, TxFail, classify_write_error, parse_uuid, search_bind, search_filter, thrown,
 };
+use crate::record_cache::RecordCaches;
 
 /// What both erasure paths remove besides the user row: the SAML single-logout
 /// state that names the person (T23.2.4, schema v76, D-37, T-381) — the
@@ -46,7 +47,7 @@ const SAML_ERASURE_STATEMENTS: &str = "\
 /// `totp_last_used_step` (SEC-043 — AES-256-GCM ciphertext must not leak into
 /// logs or debug output).
 #[derive(SurrealValue)]
-struct UserRow {
+pub(crate) struct UserRow {
     tenant_id: String,
     username: String,
     email: String,
@@ -448,6 +449,8 @@ pub struct SurrealUserRepository<C: Connection> {
     /// `None` is a repository nobody provisions from; an unbound `Late` handle
     /// is the same thing until the composition root binds it.
     provisioning_sink: Option<Arc<dyn ProvisioningSink>>,
+    /// Serves `get_by_id_cached`; every user write here drops its entry.
+    record_caches: Option<Arc<RecordCaches>>,
 }
 
 impl<C: Connection> Clone for SurrealUserRepository<C> {
@@ -456,6 +459,7 @@ impl<C: Connection> Clone for SurrealUserRepository<C> {
             db: self.db.clone(),
             pepper: self.pepper.clone(),
             provisioning_sink: self.provisioning_sink.clone(),
+            record_caches: self.record_caches.clone(),
         }
     }
 }
@@ -467,6 +471,7 @@ impl<C: Connection> SurrealUserRepository<C> {
             db,
             pepper: None,
             provisioning_sink: None,
+            record_caches: None,
         }
     }
 
@@ -476,6 +481,7 @@ impl<C: Connection> SurrealUserRepository<C> {
             db,
             pepper: Some(pepper),
             provisioning_sink: None,
+            record_caches: None,
         }
     }
 
@@ -492,6 +498,13 @@ impl<C: Connection> SurrealUserRepository<C> {
     #[must_use]
     pub fn with_provisioning_sink(mut self, sink: Arc<dyn ProvisioningSink>) -> Self {
         self.provisioning_sink = Some(sink);
+        self
+    }
+
+    /// Serve `get_by_id_cached` from `caches` (see [`crate::record_cache`]).
+    #[must_use]
+    pub fn with_record_caches(mut self, caches: Arc<RecordCaches>) -> Self {
+        self.record_caches = Some(caches);
         self
     }
 
@@ -574,6 +587,33 @@ impl<C: Connection> SurrealUserRepository<C> {
     }
 }
 
+/// `get_by_id`'s statement over the user id in `id_param` — the bare record
+/// fetch; the tenant is checked on the row ([`user_in_tenant_from_rows`]).
+/// Shared with the one-round-trip client lookup
+/// (`SurrealOAuth2ClientRepository::get_by_client_id_with_context`).
+pub(crate) fn user_by_id_sql(id_param: &str) -> String {
+    format!("SELECT * FROM type::record('user', {id_param})")
+}
+
+/// `get_by_id`'s answer from that statement's rows: the user if it lives in
+/// `tenant_id` — the same exact string comparison a `WHERE` would make — and
+/// `NotFound` otherwise.
+pub(crate) fn user_in_tenant_from_rows(
+    rows: Vec<UserRow>,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<User, DbError> {
+    let tenant_id = tenant_id.to_string();
+    let row = rows
+        .into_iter()
+        .find(|row| row.tenant_id == tenant_id)
+        .ok_or_else(|| DbError::NotFound {
+            entity: "user".into(),
+            id: id.to_string(),
+        })?;
+    row.into_user(id)
+}
+
 impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     async fn create(&self, input: CreateUser) -> AxiamResult<User> {
         let id = new_id();
@@ -629,28 +669,39 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn get_by_id(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
-        let id_str = id.to_string();
-        let tenant_id_str = tenant_id.to_string();
-
+        // The tenant predicate is applied here, to the fetched row, rather than
+        // as `WHERE tenant_id = $tenant_id` on the fetch. The two answer alike —
+        // the same exact string comparison, a row of another tenant is the same
+        // NotFound — but on SurrealDB 4.0.1 a predicate that references a bound
+        // parameter is planned afresh on every execution, which made this
+        // single-record read cost about 2.7× the CPU of the bare fetch
+        // (claude_dev/db-query-optimization.md §4). This read is on the path of
+        // every authenticated request, so the difference is paid everywhere.
         let mut result = self
             .db
             .current()
-            .query(
-                "SELECT * FROM type::record('user', $id) \
-                 WHERE tenant_id = $tenant_id",
-            )
-            .bind(("id", id_str.clone()))
-            .bind(("tenant_id", tenant_id_str))
+            .query(user_by_id_sql("$id"))
+            .bind(("id", id.to_string()))
             .await
             .map_err(DbError::from)?;
 
         let rows: Vec<UserRow> = result.take(0).map_err(DbError::from)?;
-        let row = rows.into_iter().next().ok_or_else(|| DbError::NotFound {
-            entity: "user".into(),
-            id: id_str,
-        })?;
+        user_in_tenant_from_rows(rows, tenant_id, id).map_err(Into::into)
+    }
 
-        Ok(row.into_user(id)?)
+    async fn get_by_id_cached(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<User> {
+        let Some(caches) = self.record_caches.as_deref() else {
+            return self.get_by_id(tenant_id, id).await;
+        };
+        if let Some(user) = caches.user(tenant_id, id) {
+            return Ok(user);
+        }
+        let mut user = self.get_by_id(tenant_id, id).await?;
+        caches.put_user(&user);
+        // The same answer a hit gives: no credential material either way.
+        user.password_hash.clear();
+        user.mfa_secret = None;
+        Ok(user)
     }
 
     async fn get_by_username(&self, tenant_id: Uuid, username: &str) -> AxiamResult<User> {
@@ -704,6 +755,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn update(&self, tenant_id: Uuid, id: Uuid, input: UpdateUser) -> AxiamResult<User> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, id);
         // Retried on an optimistic-concurrency loss, for the same reason
         // `increment_failed_logins` below is: this statement targets ONE row, so
         // two concurrent writers to the same user race by construction and the
@@ -1066,6 +1118,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn delete(&self, tenant_id: Uuid, id: Uuid) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, id);
         // Anonymise the row in place, then mark it `Deleted`.
         //
         // This used to set `status = 'Inactive'` and stop there — the same value
@@ -1179,6 +1232,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         user_id: Uuid,
         external_id: &str,
     ) -> AxiamResult<User> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         if external_id.trim().is_empty() {
             return Err(
                 DbError::Migration("a directory external id must not be empty".into()).into(),
@@ -1374,6 +1428,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> AxiamResult<Option<User>> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         // One compare-and-set: the `WHERE` is the whole rule. A row that is
         // already `Inactive`, was tombstoned (marker cleared) or anonymised
         // meanwhile matches nothing, so the job can never overwrite a state an
@@ -1440,6 +1495,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn update_totp_step(&self, tenant_id: Uuid, id: Uuid, step: u64) -> AxiamResult<bool> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, id);
         // Atomic compare-and-set (SEC-008/SECHRD-01): the UPDATE only matches
         // when the stored step is unset (NONE, first-ever verification —
         // mirrors `increment_failed_logins`'s NONE-handling) or strictly less
@@ -1477,6 +1533,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         user_id: Uuid,
         encrypted_secret: String,
     ) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         // SA-43: the pending column only — `mfa_secret` and `mfa_enabled` are
         // untouched until `promote_pending_mfa_secret`.
         let result = self
@@ -1539,6 +1596,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         user_id: Uuid,
         expected: &str,
     ) -> AxiamResult<bool> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         // SA-43: compare-and-swap on the pending secret the caller verified the
         // code against, so a re-enrolment racing the confirmation cannot have
         // its (unverified) secret promoted. The value written is the bound one,
@@ -1570,6 +1628,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
     }
 
     async fn clear_pending_mfa_secret(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         let result = self
             .db
             .current()
@@ -1643,6 +1702,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         user_id: Uuid,
         clear_failures: bool,
     ) -> AxiamResult<bool> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         // Item 5 of the 1.1.0 atomicity audit: the lock is compared inside the
         // write. With `clear_failures` the reset is an UPDATE of the user row,
         // which is the row `increment_failed_logins` writes the lock to — so
@@ -1688,6 +1748,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         tenant_id: Uuid,
         token_hash: &str,
     ) -> AxiamResult<EmailVerificationRedemption> {
+        let _forget = RecordCaches::users_of_tenant_write(self.record_caches.as_deref(), tenant_id);
         // One transaction (item A of the 1.1.0 atomicity audit). The token is
         // consumed and the address verified together, and the verification
         // matches only while the account's `email` is the address the token
@@ -1862,6 +1923,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         backoff_multiplier: f64,
         max_lockout_secs: i64,
     ) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         let user_id_str = user_id.to_string();
         let tenant_id_str = tenant_id.to_string();
         // Retried on an optimistic-concurrency loss — see
@@ -1958,6 +2020,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         email_hash: &str,
         pseudonym: &str,
     ) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         self.anonymize(tenant_id, user_id, email_hash, pseudonym, Utc::now(), false)
             .await
             .map(|_| ())
@@ -1981,6 +2044,7 @@ impl<C: Connection> UserRepository for SurrealUserRepository<C> {
         pseudonym: &str,
         record_stamp: DateTime<Utc>,
     ) -> AxiamResult<bool> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         self.anonymize(
             tenant_id,
             user_id,
@@ -2192,6 +2256,7 @@ impl<C: Connection> SurrealUserRepository<C> {
         user_id: Uuid,
         scheduled_purge_at: DateTime<Utc>,
     ) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         self.db
             .current()
             .query(
@@ -2220,6 +2285,7 @@ impl<C: Connection> SurrealUserRepository<C> {
     /// window.  Resets `deletion_pending`, `scheduled_purge_at`, and sets
     /// status back to `Active`.
     pub async fn clear_deletion_pending(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        let _forget = RecordCaches::user_write(self.record_caches.as_deref(), tenant_id, user_id);
         self.db
             .current()
             .query(

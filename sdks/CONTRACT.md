@@ -4722,7 +4722,7 @@ exception: an explicitly opt-in, TTL-bounded memo that a caller must switch on, 
 what it costs them.
 
 The server already ships the same trade with the same shape — `AXIAM__AUTHZ__DECISION_CACHE_TTL_SECS`
-(default 5 s) and `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (default `0`, off) — where
+(default 5 s) and `AXIAM__AUTH__SESSION_VALIDATION_CACHE_TTL_SECS` (default 5 s since v1.4; `0` disables it) — where
 the documented bound is that a revoked grant can still be served for up to the TTL. The SDK
 memo mirrors that bound rather than inventing a second staleness story.
 

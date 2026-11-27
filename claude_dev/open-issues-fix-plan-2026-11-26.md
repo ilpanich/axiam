@@ -1615,6 +1615,197 @@ OI-37 Kotlin, OI-38 Go (Opus 5.5), OI-39 Rust, OI-40 C++, OI-41 C, OI-42 Swift.
 >   medium-clean, two cosmetic nits left (a long CHANGELOG line, re-wrapped in
 >   the OI-30 changelog pass; a commit-subject template deviation, not
 >   rewritten because pushed).
+> - **Not checked against readings 8–10 below** (settled after this gate
+>   closed): left to OI-30's cross-SDK check, with PHP.
+
+#### Settled cross-SDK readings (orchestrator, from the Wave B2 gates)
+
+The first gates showed the SDKs reading §12.4 rule 2 and §8 differently. Each
+reading below was settled once, sent to every running implementer and reviewer,
+and judged in every later gate. They interpret CONTRACT 1.69; they add no new
+obligation to the contract text. A candidate contract clarification for a
+later version is listed in OI-30.
+
+1. A `keys` array none of whose entries is a JWK object with a string `kty`
+   (`[{}]`, `[0]`, `[null]`) is not a JWKS document: a failed refresh. A set
+   of valid JWKs with no usable key (RSA-only) is a success, as the contract
+   says.
+2. The failed-refresh cooldown also applies after a failed *first* fetch: a
+   failing endpoint costs one fetch per window, cold cache included.
+3. Only a `200`, or a `304` answering a conditional request, is a success; a
+   `304` re-reads its `max-age`; the real transport, not only the test mock,
+   must expose `ETag`/`Cache-Control`; an `ETag` with control characters or
+   over 256 bytes is never stored or echoed.
+4. Commit trailer as §1.3.
+5. A configured TTL, when set, wins over an advertised `max-age` (both clamped
+   to 300 s); JWKS entries are parsed one by one, an unusable entry skipped.
+6. `exchange` and `routing_key` in the discard event exactly as the broker
+   reported them (`""` is a routing key).
+7. Negative age (clock stepped back): a refresh is due, and held keys are not
+   trusted while the age is negative; `keys` must be an array.
+8. No state lock held across network I/O; a usable held set never waits for
+   an in-flight fetch; single-flight fetch bounded by the SDK's own total
+   deadline on a scope detached from the caller; a caller's cancellation is
+   never recorded as a failed refresh and never opens a window.
+9. With a wall-clock time base, a window start more than one window in the
+   future means the clock stepped back: the window is over.
+10. Every TTL-driven refresh, successful or not, respects the 60 s window: an
+    advertised `max-age=0` never means one fetch per verification.
+
+> **OI-32 (TypeScript) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `034a08a`,
+> round 1 `7a387de`. Items A–D.
+> - `ConsumeOptions` requires `tenantId` and `eventType` (break inside the
+>   unreleased 1.4.0); one `refuse()` path logs exactly the five members; typed
+>   `EVENT_SPECS` replaces match-any layouts; step (5) decode of the verified
+>   bytes; first byte `{` in consumer and requester (the requester accepted a
+>   whitespace prefix signed over it; a throwing logger or `nack` escaped).
+> - JWKS: `jose`'s remote set (10 min, no stale-if-error) replaced by an own
+>   cache over `createLocalJWKSet`; background refresh while a held set is
+>   usable; own 5 s fetch timeout, no caller signal.
+> - **Gate:** round 1 not medium-clean (negative age trusted held keys); also
+>   a vacuous RSA-only pin, handler-error message on the security channel, an
+>   unguarded `ack` reported as `malformed`. Round 2 medium-clean; readings
+>   9 and 10 probed and met. Open nit: tests wait 40 ms of real time for
+>   background refreshes. 2131–2133 tests pass; `npm run build` not run (no
+>   `buf`), `npx tsup` used instead.
+
+> **OI-33 (Python) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `3bb4fbd`,
+> round 1 `3393478`, round 2 `31f7b5d`, round 3 `df15860`. Items A–D.
+> - `consume(..., *, tenant_id, message_type)`; shared `strict_json_object`
+>   requires first byte `{` (a validly signed whitespace-prefixed body was
+>   accepted); strict decode (required strings, canonical UUIDs, RFC 3339 with
+>   offset, `u8`), `NaN`/`Infinity` refused; routing key logged with `%r`.
+> - JWKS: own cache, fetch on a detached thread outside the lock; 10 s overall
+>   deadline from before `open()` with a socket-closing timer (covers TLS
+>   handshake and tunnel), 1 MiB cap; FastAPI, Django `__acall__` and the async
+>   client run the verifier off the event loop; redirects no longer followed
+>   (documented).
+> - **Gate:** round 1 not medium-clean (lock across I/O, `max-age=0`
+>   amplification, loose decode); round 2 not medium-clean (async adapters
+>   blocked the event loop); round 3 medium-clean, its lows fixed locally plus
+>   an HTTPS/proxy check (local TLS server: hostname verification, wrong-host
+>   refusal, header drip over TLS, CONNECT tunnel). 2665 tests pass. Not
+>   tested: a stall inside the TLS handshake or tunnel (fixed by reading). One
+>   unexplained single failure in an early full run never reproduced (three
+>   reviewers' runs clean).
+
+> **OI-34 (PHP) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `6275a61`, round 1
+> `bf2822b`, round 2 `5223087`. Items A–D.
+> - Typed `Consumer` (`SignedEventType`, `$tenantId`), `verifyAndDispatch()`
+>   takes exchange and routing key (required); `StrictJson` accepted a leading
+>   space signed over it (fixed); stricter decode.
+> - JWKS: TTL from configuration or `max-age` (configured wins), 300 s clamp
+>   with `ConfigClampedEvent`; conditional requests; per-entry parsing (an RSA
+>   key without `alg` no longer refuses the whole set); `keys` must be a list.
+> - **Gate:** round 1 not medium-clean (cold-cache cooldown missing, negative
+>   age read as fresh, ETag unvalidated); round 2 medium-clean, lows fixed
+>   locally in `5223087`. 2456 tests pass. **PHPStan level 6 not run**
+>   (`composer install` cannot reach github.com); reviewers read for it.
+>   Not checked against readings 8–10 (closed earlier): OI-30.
+
+> **OI-35 (C#) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `8c5af23`, round 1
+> `f07c9ae`, round 2 `7aab5b5`. Items A–D.
+> - `StartAsync` requires `AmqpEventType` and `tenantId`; one warning per
+>   discard; `ReplayGuard.Evaluate`; ordinal `hmac_signature` match; offset
+>   required on `issued_at`, `"D"` UUIDs.
+> - JWKS: `JwksCacheTtl` clamp 10 min → 300 s with `config_clamped` at
+>   construction (zero/negative = use `max-age`); single-flight `Task` replaces
+>   `_fetchLock`; detached fetch with a 30 s timeout; negative age refused;
+>   readings 9 and 10 (wall clock).
+> - **Gate:** round 1 not medium-clean (held key waited for the fetch; caller
+>   cancellation opened the unknown-`kid` window; negative age); round 2
+>   medium-clean, its low (a sub-60 s backward step locked out refresh) fixed
+>   locally. 1753 + 138 tests pass on net10.0; **net11.0 not built** (no SDK
+>   in the sandbox).
+
+> **OI-36 (Java) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `f739081`,
+> round 1 `90e8c9f`, round 2 `e17ef72`. Items A–D.
+> - `AmqpConsumer.consume(channel, queue, EventType, tenantId, …)`; the
+>   untyped overloads, released in 1.3.0/1.3.1, are removed (documented under
+>   Changed as a source-incompatible change forced by contract 1.69 D-9);
+>   `Hmac.verify(key, body)` deprecated, typed `verify(key, body, EventType)`.
+> - JWKS: empty set is a failed refresh; fetch moved to `java.net.http`
+>   (`Redirect.NEVER`, 2 s connect, 4 s total deadline on a copied future so
+>   cancellation reaches the exchange, bounded body subscriber enforcing
+>   50 KiB while reading); every failure counts; single-flight, held set never
+>   waits.
+> - **Gate:** round 1 not medium-clean (socket timeouts treated as caller
+>   cancellation → one fetch per token; no total deadline); round 2 not
+>   medium-clean (deadline did not cancel the exchange; cap applied after
+>   buffering — 400 MB probe peaked at 1.2 GB heap); round 3 medium-clean.
+>   Open nit: the static client captures `ProxySelector`/`Authenticator` at
+>   class load. 1708 tests pass.
+
+> **OI-37 (Kotlin) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `2e22a36`,
+> round 1 `7244486`, round 2 `1ab0fef`. Item D only.
+> - Nimbus retriever replaced by `HttpURLConnection` (no redirects, TLS
+>   unchanged, streamed size limit); TTL + 300 s bound, `max-age` clamp, 304,
+>   empty set, per-entry parsing; the 60 s refresh of known kids removed;
+>   detached single-flight `CompletableFuture` with a watchdog that disconnects
+>   at a 5 s total deadline (covers headers; DNS abandoned, not aborted).
+> - **Gate:** round 1 not medium-clean (fetch under the lock, no total
+>   deadline, interrupt opened the cooldown); round 2 not medium-clean (header
+>   phase unbounded — 12 s probe); round 3 medium-clean. Open lows (round
+>   limit): the shared watchdog disconnects before settling; slow DNS then a
+>   header drip leaves one orphan thread; an interrupt test relies on timing.
+>   Pre-existing: JWKS ignores `Builder.customCa`; `OidcRefreshTest` flake
+>   (C164-33).
+
+> **OI-38 (Go) — EXECUTED (2026-11-27)** · Opus 5.5 · `307650c`, round 1
+> `3728b6f`, round 2 `b59d9b7`. Items A–D.
+> - `Consume(ctx, ch, queue, msgType, tenantID, signingKey, handler, opts...)`
+>   (UUID tenant); `verifyEvent` checks the typed layout before the HMAC;
+>   requester refused a whitespace prefix it used to allow.
+> - JWKS: httprc cache replaced by an SDK-owned one; state lock never across
+>   I/O; single-flight fetch on `context.WithoutCancel` with a 10 s timeout;
+>   background refresh for a usable held set; separate TTL and forced windows.
+> - **Gate:** round 1 not medium-clean (lock across the fetch, caller
+>   cancellation recorded as failure, negative age); round 2 not medium-clean
+>   (reading 10: `max-age=0` gave 20 fetches); round 3 medium-clean, no
+>   findings. `-race` ×10 clean; coverage 94.7 % (floor 94.4 %). govulncheck
+>   not run (proxy).
+
+> **OI-39 (Rust) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `335347a`,
+> `4669a9d`, round 1 `28f4504`, round 2 `56f33b4`. Items A–D.
+> - `consume`/`consume_with_tls` take `ConsumerTarget{tenant_id, event_type}`;
+>   step (5) decode; first byte `{` in consumer and requester.
+> - JWKS: detached single-flight fetch (`tokio::spawn` + `watch` on native,
+>   `spawn_local` on wasm32), forced window opened at fetch start, SDK 10 s
+>   timeout on native, 60 s window after every failure, held set never waits.
+> - **Gate:** round 1 not medium-clean (fetch tied to the caller — 20 cancelled
+>   callers, 20 fetches; 10 s cold window; no SDK timeout with a caller-built
+>   client); round 2 not medium-clean (wasm32 build broken); round 3
+>   medium-clean. Open low: on wasm32 the fetch has no SDK timeout although
+>   reqwest's wasm `.timeout()` exists (follow-up issue at OI-30). The base
+>   commit came from a first agent that stalled repeatedly; a second agent
+>   added the addendum work on top. wasm-pack steps not run.
+
+> **OI-40 (C++) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `f2087f9`, round 1
+> `835b1ef`, round 2 `ef61260`. Item D only.
+> - TTL from `std::optional` configuration (wins) or `max-age`, 300 s clamp
+>   with an optional `TelemetryHook` emitting `config_clamped`; conditional
+>   304 only; fetch outside the state mutex, single-flight with a condition
+>   variable and an RAII in-flight guard.
+> - **Gate:** round 1 not medium-clean (`max-age` overrode the configured TTL;
+>   lock across the transport); round 2 medium-clean, mutation-verified (7 of
+>   8 mutations killed; the eighth explained the low fixed locally). 1713
+>   tests pass incl. ASan/UBSan; other compilers/standards not run. The
+>   constructor change is source- but not ABI-compatible (CHANGELOG).
+
+> **OI-41 (C) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `d696f3f`, round 1
+> `7b551c8`, round 2 `e9baa28`, round 3 `d1c93e6`. Item D only.
+> - New `axiam_client_config_set_jwks_cache_ttl()` with `config_clamped`;
+>   libcurl transport now captures `ETag` and `Cache-Control`; conditional
+>   requests; `keys` must contain a JWK object; 200-only success; negative
+>   age refused; cooldown normalised after a backward step; single-flight
+>   flag + condition variable.
+> - **Gate:** four rounds (mediums in rounds 1–3: transport dropped the
+>   caching headers, `[{}]` adopted; negative age trusted, 2xx success;
+>   backward step stranded the cooldown, no in-flight guard); round 4
+>   medium-clean. 88/88 ctest incl. ASan/UBSan and a TSan run of the JWKS
+>   tests. Open nits: `CLOCK_REALTIME` timed wait, a cold-cache timeout
+>   message. Pre-existing, outside the diff: TSan reports a write-write race
+>   on cJSON's global error pointer, which nothing reads.
 
 ---
 

@@ -1596,6 +1596,26 @@ OI-37 Kotlin, OI-38 Go (Opus 5.5), OI-39 Rust, OI-40 C++, OI-41 C, OI-42 Swift.
 > - **Re-vendored** into the eleven SDKs at `3cb1c14` (one chore commit each,
 >   pushed) before OI-32 … OI-42 started.
 
+> **OI-42 (Swift) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `c9aa412`, round 1
+> `0c355e1`. Item D only (no AMQP transport). **Nothing compiled or run: no
+> Swift toolchain in the sandbox; CI on the pull request is the first build.**
+> - `JwksVerifier` clamps `cacheTTL` to `maxCacheTTL` = 300 s (smaller values
+>   honoured); the stale margin is a fixed `static let maxStale = 300` (the
+>   internal parameter is gone); only a `200` is a successful fetch (any 2xx
+>   was, pre-existing; no conditional requests, so no `304`). No
+>   `config_clamped`: no caller can configure the TTL (`AxiamConfig` has no JWKS
+>   TTL; `AxiamClient` passes the default) — confirmed by the reviewer.
+> - Tests (`JwksStaleIfErrorTests`, injected clock): the §12.4 sequence, empty
+>   set, TTL clamp (fails on the unclamped code), TTL below 300 honoured,
+>   failed unknown-`kid` refresh never moves the anchor, 203/206 are failed
+>   refreshes (fails on the 2xx check). Failures on unfixed code are by
+>   reasoning only, traced by implementer and reviewer.
+> - **Gate:** round 1 medium-clean (three low: `maxStale` unclamped, missing
+>   unknown-`kid`-failure test, 2xx success) — fixed in `0c355e1`; round 2
+>   medium-clean, two cosmetic nits left (a long CHANGELOG line, re-wrapped in
+>   the OI-30 changelog pass; a commit-subject template deviation, not
+>   rewritten because pushed).
+
 ---
 
 ## 6. Wave C — close-out

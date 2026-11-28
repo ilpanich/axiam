@@ -1024,13 +1024,6 @@ async fn count_in_tenant(db: &Surreal<TestDb>, query: &str, tenant_id: Uuid) -> 
 }
 
 /// What a federated callback answered, and what it left behind in the tenant.
-/// What a failed assertion may print about a callback answer: its status and
-/// `error` code only. A response body can carry tokens or a session, and a
-/// failure message is a log too, so the body itself is never printed.
-fn printable(status: u16, body: &serde_json::Value) -> String {
-    format!("status {status}, error {}", body["error"])
-}
-
 struct CallbackOutcome {
     status: u16,
     body: serde_json::Value,
@@ -1346,7 +1339,7 @@ async fn run_oauth2_callback(suspended: bool, provider_accepts_code: bool) -> Ca
 #[actix_rt::test]
 async fn an_active_tenants_federated_sign_in_writes_what_the_counts_measure() {
     let out = run_oidc_callback(false, IdTokenSigner::Idp).await;
-    assert_eq!(out.status, 200, "{}", printable(out.status, &out.body));
+    assert!(out.status == 200, "expected status 200");
     assert!(out.sets_session);
     assert_eq!(
         (out.users, out.federation_links, out.post_auth_calls),
@@ -1354,7 +1347,7 @@ async fn an_active_tenants_federated_sign_in_writes_what_the_counts_measure() {
     );
 
     let out = run_oauth2_callback(false, true).await;
-    assert_eq!(out.status, 200, "{}", printable(out.status, &out.body));
+    assert!(out.status == 200, "expected status 200");
     assert!(out.sets_session);
     assert_eq!(
         (out.users, out.federation_links, out.post_auth_calls),
@@ -1376,15 +1369,12 @@ async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
     let body = &out.body;
     assert!(
         !out.sets_session,
-        "no session cookie for a suspended tenant: {}",
-        printable(out.status, body)
+        "no session cookie for a suspended tenant"
     );
-    assert_eq!(out.status, 403, "{}", printable(out.status, body));
-    assert_eq!(
-        body["error"],
-        "tenant_suspended",
-        "{}",
-        printable(out.status, body)
+    assert!(out.status == 403, "expected status 403");
+    assert!(
+        body["error"] == "tenant_suspended",
+        "expected error tenant_suspended"
     );
     assert_eq!(
         out.users, 0,
@@ -1409,15 +1399,12 @@ async fn a_social_sign_in_to_a_suspended_tenant_provisions_nothing() {
     let body = &out.body;
     assert!(
         !out.sets_session,
-        "no session cookie for a suspended tenant: {}",
-        printable(out.status, body)
+        "no session cookie for a suspended tenant"
     );
-    assert_eq!(out.status, 403, "{}", printable(out.status, body));
-    assert_eq!(
-        body["error"],
-        "tenant_suspended",
-        "{}",
-        printable(out.status, body)
+    assert!(out.status == 403, "expected status 403");
+    assert!(
+        body["error"] == "tenant_suspended",
+        "expected error tenant_suspended"
     );
     assert_eq!(
         out.users, 0,
@@ -1442,23 +1429,14 @@ async fn an_unverified_oidc_callback_answers_alike_for_a_suspended_and_an_active
     let active = run_oidc_callback(false, IdTokenSigner::Forger).await;
     let suspended = run_oidc_callback(true, IdTokenSigner::Forger).await;
 
-    assert_eq!(
-        active.status,
-        401,
-        "{}",
-        printable(active.status, &active.body)
-    );
-    assert_ne!(
-        suspended.body["error"],
-        "tenant_suspended",
-        "{}",
-        printable(suspended.status, &suspended.body)
+    assert!(active.status == 401, "expected status 401");
+    assert!(
+        suspended.body["error"] != "tenant_suspended",
+        "an unverified callback must not reveal the suspension"
     );
     assert!(
         (suspended.status, &suspended.body) == (active.status, &active.body),
-        "a forged ID token must get the same answer whatever the tenant's status: {} vs {}",
-        printable(suspended.status, &suspended.body),
-        printable(active.status, &active.body)
+        "a forged ID token must get the same answer whatever the tenant's status"
     );
     for out in [&active, &suspended] {
         assert!(!out.sets_session);
@@ -1477,23 +1455,14 @@ async fn an_unverified_social_callback_answers_alike_for_a_suspended_and_an_acti
     let active = run_oauth2_callback(false, false).await;
     let suspended = run_oauth2_callback(true, false).await;
 
-    assert_ne!(
-        active.status,
-        200,
-        "{}",
-        printable(active.status, &active.body)
-    );
-    assert_ne!(
-        suspended.body["error"],
-        "tenant_suspended",
-        "{}",
-        printable(suspended.status, &suspended.body)
+    assert!(active.status != 200, "a refused code must not succeed");
+    assert!(
+        suspended.body["error"] != "tenant_suspended",
+        "an unverified callback must not reveal the suspension"
     );
     assert!(
         (suspended.status, &suspended.body) == (active.status, &active.body),
-        "a refused code must get the same answer whatever the tenant's status: {} vs {}",
-        printable(suspended.status, &suspended.body),
-        printable(active.status, &active.body)
+        "a refused code must get the same answer whatever the tenant's status"
     );
     for out in [&active, &suspended] {
         assert!(!out.sets_session);

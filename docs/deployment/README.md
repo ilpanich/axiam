@@ -484,13 +484,16 @@ user's password hash, and every write or deletion of the user's OPAQUE record, s
 `user.credential_changed_at` in the same transaction (schema v117: one optional column, no
 backfill). An MFA challenge token, an MFA setup token or an in-flight OPAQUE login
 (`login/start` already answered, `login/finish` not yet sent) issued before that instant is
-refused with the response an invalid or expired one gets, so a reset also stops a login the
+refused (by its credential version, below; the timestamp comparison described here applies only to
+artefacts minted without one) with the response an invalid or expired one gets, so a reset also stops a login the
 holder of the old password had in flight. A user whose credential has not changed since the
-upgrade has no stamp and is refused nothing. The two MFA tokens (and the WebAuthn
+upgrade has no stamp and is refused nothing. For a current token only a version mismatch can cause
+the refusal, so clock skew is never the cause. For an artefact minted without a version (by the
+previous release, during a rolling upgrade), the two MFA tokens (and the WebAuthn
 second-factor state token, which carries the challenge's issue time and is checked again when the
 ceremony finishes) carry a sub-second issue time, `iat_ns`, and are compared with the stamp at full
 precision, as the OPAQUE exchange is: a token minted after the change, even in the same second, is
-accepted. A token minted without the claim (during a rolling upgrade) is compared by its
+accepted. A token minted without the claim is compared by its
 whole-second `iat`, and one minted in the same second as a later change is refused.
 
 **The credential version (schema v118).** Next to the stamp, every user carries a counter,
@@ -819,6 +822,7 @@ operator step before or during the rollout, the others only need to be known.
 | SA-11 | SAML SP requires an `AudienceRestriction` | **act** if an IdP omits it |
 | SA-14 | Internal AMQP queues are signed | **act**: drain the queues |
 | SA-15 | Authz responses are signed and routed by `reply_to` | none; additive |
+| #880 | Back-channel logout tokens carry a `kid` (contract 1.69) | none; see [Back-channel logout tokens name their key](#back-channel-logout-tokens-name-their-key-880-contract-169) |
 | SA-10 | Guarded fetches ignore environment proxies | **act** if egress is proxy-only |
 | SA-16 | SurrealDB credentials move out of argv; dev image tag | **act** if you customised the SurrealDB command |
 | SA-09 | Erasure cancel restores the prior account status | none |
@@ -831,7 +835,9 @@ operator step before or during the rollout, the others only need to be known.
 producers and consumers together (SA-14), keep
 `AXIAM__AUTH__REQUIRE_ACCESS_TOKEN_TYP=false` for the length of a mixed-version
 rollout only (SA-03), and re-sync the SDKs afterwards: the SDK contract is
-1.68 and every SDK ships it as 1.4.0.
+1.69 (1.68 plus the logout-token `kid` and the AMQP requester rules of
+[§34.13](../../sdks/CONTRACT.md#§3413-contract-169--the-logout-token-kid-and-the-authz-requester-rules))
+and every SDK ships it as 1.4.0.
 
 ### SA-01 — bootstrap needs the setup token on every path
 
@@ -937,10 +943,14 @@ the status write. Do this:
    first. Its principals are the only ones that can lift a suspension, and the
    new checks refuse them with `tenant_suspended` while it is suspended; only a
    direct datastore write recovers that.
-3. After the upgrade, send `{"status":"Suspended"}` again for every tenant that
+3. Once the upgrade is complete (no replica of the previous release is still
+   serving), send `{"status":"Suspended"}` again for every tenant that
    should stay suspended
    (`PUT /api/v1/organizations/{org_id}/tenants/{tenant_id}`). Any write with
-   that status runs the revocation. Until you do, such a tenant is refused at
+   that status runs the revocation, but only on a replica of this release: an
+   old replica's status write revokes nothing and it still mints sessions for a
+   suspended tenant, so a re-suspend sent mid-rollout can leave sessions that
+   return when the suspension is lifted. Until you do, such a tenant is refused at
    every door, but still holds its pre-upgrade sessions and refresh tokens, and
    lifting the suspension would bring them back.
 
@@ -963,20 +973,25 @@ See [Tenant suspension](../admin/tenant-suspension.md).
 
 **SA-04.** An access token AXIAM minted for an OAuth2 client (one carrying a
 `client_id` claim, as a relying party holds for its user) is now refused `403`
-(`authorization_denied`) on the user's own-account acts: the `/oauth2/authorize`
-consent step, account deletion and export, the credential-management routes
-(passwords, MFA, passkeys), self-updates, the own-account SCIM `PUT`, `PATCH`
-and `DELETE`, and `DELETE /api/v1/users/{id}` for oneself. A console sign-in
+(`authorization_denied`) on the user's own-account acts: the consent step
+(`/api/v1/account/consents/oidc-scopes`), account deletion and export, the
+credential-management routes (passwords, MFA, passkeys), self-updates, the
+own-account SCIM `PUT`, `PATCH` and `DELETE`, and `DELETE /api/v1/users/{id}`
+for oneself. `/oauth2/authorize` is different: there a client-minted token is
+treated as no credential at all, so a browser is sent to sign in, and a client
+without `browser_sso` gets `401` rather than `403`. A console sign-in
 (the first-party sign-ins) is unaffected. A relying party that called such a
 route with its user's access token worked before the upgrade and gets `403`
 now: send the user to the AXIAM console for the act instead. See
 [`sdks/CONTRACT.md`](../../sdks/CONTRACT.md) (contract 1.67) and
 [SCIM provisioning](../api/scim-provisioning.md).
 
-**SA-06.** A SCIM `PUT` or `PATCH` that carries a `password` is answered `400`
-with `scimType: "mutability"` in a tenant whose effective OPAQUE mode is
+**SA-06.** A SCIM `POST`, `PUT` or `PATCH` that carries a `password` is answered
+`400` with `scimType: "mutability"` in a tenant whose effective OPAQUE mode is
 `required`; the user sets a password through the self-service change or reset
-flow. The credential-version behaviour is described under "A credential change
+flow. A SCIM `POST /Users` is refused the same way, so an identity provider that
+sends an initial password cannot provision users in such a tenant until it stops
+sending one. The credential-version behaviour is described under "A credential change
 ends the artefacts of the old credential (SA-06)" earlier in this guide.
 
 ### SA-11 — the SAML SP requires an audience
@@ -1008,6 +1023,28 @@ fields are unaffected. A requester that sets `reply_to` now receives its answer
 on that queue instead of the shared `axiam.authz.response`, except a queue
 named `axiam.…`, which is reserved: such a request is answered on the shared
 queue.
+
+### Back-channel logout tokens name their key (#880, contract 1.69)
+
+A back-channel logout token is now signed with the `kid` that `/oauth2/jwks`
+publishes for the signing key, as access and ID tokens already were; its
+header is `{"alg":"EdDSA","typ":"logout+jwt","kid":"…"}`. Nothing else in the
+token changes, and nothing needs configuring.
+
+- **Relying parties that verify logout tokens need nothing.** A standard OIDC
+  library that selects the JWKS key by `kid` now finds it; one that tried every
+  key keeps working.
+- **An SDK-based relying party could not verify a genuine logout token before
+  this release** (except with the C SDK against a one-key JWKS): the AXIAM SDKs
+  select the key by `kid`, and the token carried none, so every back-channel
+  logout was refused at the RP. It works as soon as the server is upgraded,
+  with the SDK release the RP already runs; SDK 1.4.0 (contract 1.69) adds the
+  tests that keep it working. A logout token minted by a replica of the
+  previous release still carries no `kid` and is refused, as every logout token
+  was before.
+- The `kid` does not make a logout token usable as an access token: every
+  access-token door refuses it by its `typ` and, independently, because it has
+  no `tenant_id` (CONTRACT §34.13 (a)).
 
 ### SA-10 — no egress proxy for guarded fetches
 
@@ -2114,8 +2151,8 @@ signature survives that hop. **Run both.**
 ### The server-internal queues are signed too (SA-14)
 
 `axiam.mail.outbound` and the outbound kinds' queues (`axiam.webhook`,
-`axiam.ssf_push`, `axiam.scim_push`, `axiam.ciba_ping`, and each one's `.retry`
-queue) have no SDK producer: AXIAM writes them and AXIAM reads them. What it
+`axiam.ssf_push`, `axiam.scim_push`, `axiam.ciba_ping`, and each of those four's
+`.retry` queue; the mail queue has none) have no SDK producer: AXIAM writes them and AXIAM reads them. What it
 does with a message there is its most trusted output — tenant-branded mail
 through the tenant's provider, webhook POSTs signed with the webhook's secret,
 Security Event Tokens signed with the deployment key — so a message on them is
@@ -2179,7 +2216,8 @@ A copy *published* again is never marked so, and is refused as a replay. The
 delivery is at-least-once as before (a consumer killed after it sent a mail
 but before the ack sends it again); a principal that can both publish to and
 consume from these queues can replay through a requeue, which is one more
-reason the broker must not grant SDK principals either on them.
+reason the broker must not grant SDK principals consume (read) access on them. (Publish
+cannot be denied per queue; see the note below.)
 
 Note what the broker can and cannot deny here. RabbitMQ authorizes
 `basic.publish` as *write on the exchange*, not on the destination queue
@@ -2206,7 +2244,8 @@ only one that loses nothing and opens nothing:
 
 1. **Drain (recommended).** Stop the old replicas' producers (or wait for a quiet period),
    let `axiam.mail.outbound`, `axiam.webhook`, `axiam.ssf_push`,
-   `axiam.scim_push`, `axiam.ciba_ping` **and their `.retry` queues** empty,
+   `axiam.scim_push`, `axiam.ciba_ping` **and the four outbound kinds' `.retry`
+   queues** (mail has none) empty,
    then deploy. Nothing is rejected.
 2. **Relax for one deployment** — only where no other principal can publish
    to the default exchange. **While the flag is `false`, the N3 hole is open

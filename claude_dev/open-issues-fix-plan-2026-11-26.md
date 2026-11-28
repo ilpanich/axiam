@@ -1,10 +1,9 @@
 # Fix plan — open issues in all twelve repositories (2026-11-26)
 
-> **Status: PLANNED.** Nothing in this document has been executed. As each task
-> lands, add an `EXECUTED` block at the head of its section (what shipped, which
-> tests went in, what the plan did not anticipate), in the form
-> [`security-audit-2026-11-14-fix-plan.md`](security-audit-2026-11-14-fix-plan.md)
-> uses.
+> **Status: EXECUTED (2026-11-27).** Every task OI-01 to OI-42 carries an
+> `EXECUTED` block and every review gate its record. The twelve pull requests are
+> open (OI-30 part 2, below); nothing is merged, tagged or released. The SDK
+> pull requests merge first, the server pull request last.
 
 This plan covers every issue that was open on 2026-11-26 in `ilpanich/axiam` and
 in the eleven `ilpanich/axiam-<lang>-sdk` repositories: **26 issues**, 15 on the
@@ -242,6 +241,33 @@ review per gate (one for Wave A, eleven for Wave B).
 
 ### OI-01 — #878: lockout race on a suspended tenant · Sonnet 5.5
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `95e3610`.** New private helper
+> `refuse_if_locked_now` in `crates/axiam-auth/src/service.rs` runs the
+> read-only `admit_unless_locked(tenant, user, false)` and answers
+> `InvalidCredentials` on a lock in force; it runs before `admit_tenant` in step
+> 3b of `complete_authenticated_login` and in the directory arm of
+> `login_directory_account`. The writing step 4 stays after `admit_tenant`.
+>
+> - **Regression tests** (`crates/axiam-auth/tests/directory_provisioning_test.rs`,
+>   beside the QR3-1 suspended-tenant tests, not `auth_service_test.rs` as the
+>   plan guessed): `qr5_1_a_locked_account_on_a_suspended_tenant_answers_a_correct_password_uniformly`
+>   (password path, `LockAfterRead` repository wrapper) and
+>   `qr5_1_a_locked_directory_account_on_a_suspended_tenant_answers_uniformly`
+>   (directory arm, `LockingDirectory` stub that commits the lock during the
+>   bind). Unfixed code: both panic with `a lock in force on a suspended tenant
+>   must not be answered tenant_suspended`. Fixed: both pass.
+> - **Neighbours** already pinned, unchanged and passing: `qr3_1_a_local_login_on_a_suspended_tenant_runs_no_post_credential_bookkeeping`,
+>   `qr3_1_a_directory_login_on_a_suspended_tenant_maps_no_groups` (unlocked +
+>   correct password → `tenant_suspended`), `qr3_1_a_first_directory_login_on_a_suspended_tenant_creates_no_account`
+>   (wrong password → uniform 401, failure counted).
+> - **Verification:** `directory_provisioning_test` 27 passed;
+>   `auth_service_test` 94; `lockout_race_test` 3; `directory_account_test` 12;
+>   fmt and `clippy --all-targets -D warnings` clean for `axiam-auth`.
+> - **Not anticipated:** (1) the directory arm already checked the lock before
+>   contacting the directory, so the race reproduces only with a lock committed
+>   mid-bind; (2) `complete_authenticated_login` is shared with OPAQUE,
+>   directory JIT and federation, which therefore get the same ordering.
+
 **Why Sonnet.** One function, and the issue gives the exact reordering.
 
 **Where.** `crates/axiam-auth/src/service.rs`: the password path (step 3b
@@ -269,6 +295,51 @@ for `axiam-auth`.
 callbacks (OIDC, OAuth2 social, SAML), and has a constraint that a local fix
 violates easily: the check must not move to `consume_login_state`, which would
 reopen the anonymous suspension oracle closed by SR1-8.
+
+> **EXECUTED (2026-11-26, Opus 5.5), commit `c6ede3d`.** `OidcFederationService`
+> and `SamlFederationService` take an optional `SharedTenantAdmission`
+> (`with_tenant_admission`, the `AuthService` pattern; `axiam-federation` uses
+> only the `axiam-core` port, no `Cargo.toml` changed, layering script OK). The
+> shared helper `oidc::admit_tenant` runs after the upstream answer verified and
+> before provisioning: in `handle_callback_for` (after signature, nonce, claim
+> mapping), `handle_oauth2_callback` (after userinfo and the verified-email
+> rule) and `handle_saml_response_for` (after signature, profile and replay
+> checks). New `FederationError::TenantSuspended` → `AxiamError::TenantSuspended`
+> (403 `tenant_suspended`). The `create_session_and_tokens` check stays as a
+> backstop; nothing moved into `consume_login_state`. Wired in
+> `axiam-server/src/boot.rs` for both services.
+>
+> - **Regression tests** (each also asserts 403, no session cookie, no
+>   federation link, zero `login.post_auth` reactor calls). Unfixed code, each:
+>   `no user may be provisioned in a suspended tenant  left: 1 right: 0`.
+>   `federation_first_time_sso_test::an_oidc_sign_in_to_a_suspended_tenant_is_refused`
+>   (extended), `…::a_social_sign_in_to_a_suspended_tenant_provisions_nothing`,
+>   `sec095_federated_login_gate_test::saml::a_saml_acs_sign_in_to_a_suspended_tenant_provisions_nothing`
+>   (the SAML harness lives there, not in the first-time-SSO file).
+> - **Oracle pins (step 4)**, pass before and after: unverified OIDC callback,
+>   social callback and SAML assertion answer identically for a suspended and an
+>   active tenant. Positive controls prove the count queries see real rows.
+> - **Step 5, other paths:** native provider-ID-token grant — not vulnerable
+>   (`live_tenant` refuses before the token is verified), pinned by
+>   `provider_id_token_test::a_native_sign_in_to_a_suspended_tenant_provisions_nothing`;
+>   X4 token exchange JIT — not vulnerable (`authenticate_client` first, covered
+>   by `tenant_suspension_test`); directory JIT — not vulnerable (QR3-1);
+>   Apple form callback, SAML form ACS, admin `oidc/callback` and `saml/acs` —
+>   fixed by the same service change; every other `CreateUser` in production
+>   source is `#[cfg(test)]`; WebAuthn, OPAQUE, password, mTLS do not provision.
+> - **Verification:** libxml2/xmlsec1/protoc installed with apt, so SAML ran
+>   with default features. `federation_first_time_sso_test` 11,
+>   `sec095_federated_login_gate_test` 58, `provider_id_token_test` 25,
+>   `federation_login_providers_test` 9 passed; `--no-default-features`: 11 and
+>   4 passed; `axiam-federation --lib` 418 passed; fmt and clippy
+>   (`--all-targets -D warnings`, both feature sets) clean for
+>   `axiam-federation`, `axiam-api-rest`, `axiam-server`. **Not run:** the
+>   `axiam-server` integration tests; `boot.rs` was compiled and linted only.
+> - **Not anticipated:** (1) the admission is optional, like `AuthService`'s:
+>   a service built without it admits (test harnesses), and no test exercises
+>   the `boot.rs` wiring itself; (2) the SAML refusal spends the assertion (the
+>   replay row is written first), so it cannot be replayed after the suspension
+>   lifts; (3) the T-510 residual line is left for OI-06, as this plan says.
 
 **Where.** `crates/axiam-api-rest/src/handlers/federation_login.rs` and its
 sibling callbacks; `crates/axiam-federation/src/oidc.rs`, `saml.rs`; the
@@ -317,6 +388,30 @@ that covers the ACS, fmt, clippy, layering script.
 
 **Verify.** `cargo test -p axiam-audit --lib`, fmt, clippy.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `ca02a9a`.** SR2-1:
+> `redacted_unmatched_path` compares against the previous **non-empty**
+> segments. QR2-4: fixed by derivation — `BEARER_PATH_PREFIXES` and
+> `REDACTED_PATH_PARAMETERS` are replaced by one
+> `BEARER_ROUTE_PATTERNS = &["/account/export/{token}"]`; matched routes redact
+> the placeholders named there, unmatched routes the segment after each
+> pattern's literal prefix. The "Fails closed" doc now says it covers only the
+> listed routes. The tracing span (`axiam-api-rest/src/middleware/request_span.rs`)
+> calls the same `redacted_path`, so the fix reaches both.
+>
+> - **Regression test:** `service_and_middleware::a_token_path_segment_is_redacted_even_when_no_route_matches`
+>   gains `export//…`, `export///…` and `account//export/…`. Unfixed code:
+>   `token leaked into audit action of an unmatched request: [… "GET /api/v1/account/export//super-secret-handle", …]`.
+>   Fixed: passes. New unit tests `redaction_tests::unmatched_spellings_are_redacted`
+>   (six spellings; `/users/H` untouched) and
+>   `redaction_tests::every_bearer_pattern_has_a_prefix_and_one_trailing_placeholder`
+>   (a shape check: it cannot detect a `{token}` route registered in
+>   `axiam-api-rest` but absent from the list).
+> - **Verification:** `axiam-audit --lib` 24 passed; `--test service_and_middleware`
+>   45 passed; whole crate green (one pre-existing ignored test); fmt and clippy
+>   `--all-targets -D warnings` clean; `cargo check -p axiam-api-rest --no-default-features` OK.
+> - **Not anticipated:** the plan's verify line names `--lib` only, but the
+>   regression test is an integration test.
+
 ### OI-04 — #872 and #873: the credential-superseded rule · Sonnet 5.5
 
 **Where.** `crates/axiam-core/src/models/user.rs`
@@ -346,11 +441,152 @@ that covers the ACS, fmt, clippy, layering script.
 **Verify.** `cargo test -p axiam-core --lib user`, `-p axiam-auth --test
 auth_service_test`, `-p axiam-api-rest --test opaque_login_test`, fmt, clippy.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `e5a2d67`.** #873: new
+> `User::credential_superseded_at(issued_at: DateTime<Utc>, version: Option<i64>)`
+> (the version alone when present, otherwise `credential_changed_since`, ties
+> refused); `opaque_login_finish` calls it instead of its inline `match`.
+> `credential_superseded` keeps its `iat`/`iat_ns` form and does not delegate.
+> #872: tests only, no production change.
+>
+> - **#872 tests:** both `qr2_6_*` tests in `auth_service_test.rs` now also
+>   assert acceptance at the start of the `iat` second; the unit test
+>   `versionless_artefact_uses_the_timestamp_rule` uses `iat_secs =
+>   epoch.timestamp()`, `iat_ns = epoch_ns + 1` for "strictly after", and gains
+>   the same-second `Some(ns)` acceptance case plus the whole-second fallback
+>   (no `iat_ns`, same second → refused). **Teeth:** with the `Some(ns)` arm
+>   temporarily switched to whole seconds, all three fail
+>   (`user.rs:723`; `auth_service_test.rs:3916` "an unversioned challenge issued
+>   after the epoch, in the same second, is accepted"; `:3968` the setup-token
+>   twin); restored.
+> - **#873 test:** `opaque_login_test::qr22_2_a_current_version_login_is_accepted_when_the_epoch_is_ahead_of_issued_at`
+>   (epoch moved to now + 1 h, version unchanged → 200 with session cookie).
+>   **Did not reproduce on the unfixed HEAD:** the handler's inline rule was
+>   already "version alone, else timestamp", not `||`, so the test passes there
+>   and is a pin. With the `||` rule temporarily reintroduced it fails:
+>   `opaque_login_test.rs:1320 … left: 401, right: 200`. The change is the
+>   de-duplication the issue asks for.
+> - **Verification:** `axiam-core --lib user` 22 passed; `auth_service_test`
+>   94; `opaque_login_test` (`--no-default-features`) 29; fmt clean; clippy
+>   `-D warnings` clean for `axiam-core`, `axiam-auth`, `axiam-api-rest`
+>   (`--no-default-features --all-targets`). Full crate suites not run.
+
 ### OI-05 — #880, #881, #883: logout-token `kid`, CONTRACT 1.69, cross-SDK rules · Opus 5.5
 
 **Why Opus.** It amends the normative contract that eleven repositories port,
 changes a signed token's header, and needs a short security argument (below).
 **Confirm D-1 with the owner before starting.**
+
+> **EXECUTED (2026-11-26, Opus 5.5), commit `c4c4e44`. D-1 confirmed by the
+> owner before the task started.** New `axiam_auth::token::sign_logout_token`
+> goes through `sign_claims`, the access/ID-token signer; `issue_logout_token`
+> (`axiam-oauth2/src/logout.rs`) calls it, so the header is exactly
+> `{alg: EdDSA, typ: logout+jwt, kid}` with the `ed25519_jwk_kid` kid.
+> `sign_purpose_token` still adds no `kid`
+> (`a_purpose_token_names_no_key_and_still_verifies` passes).
+>
+> - **Regression tests** (`logout.rs`): `logout_token_header_names_its_jwks_key`
+>   — unfixed: `left: None, right: Some("2f3403f5b7be848d")`;
+>   `a_relying_party_selects_the_logout_key_by_kid` (two-key JWKS, signing key
+>   not first) — unfixed: panic `a logout token must carry a kid`. Both pass.
+> - **Pins** (pass before and after): `a_logout_token_is_refused_as_an_access_token_by_its_claims_alone`
+>   (re-signed as `at+jwt`, `JWT`, untyped, with `aud=axiam:user` and the root
+>   issuer: refused by `decode_access_token` and `…_any_audience`, strict and
+>   relaxed); REST `middleware_test::a_logout_token_is_not_a_bearer_access_token`
+>   (401 on `AuthenticatedUser` and `TenantContext`; control access token 200);
+>   gRPC `grpc_units::a_logout_token_is_not_a_bearer_access_token` (interceptor
+>   `UNAUTHENTICATED`, `ValidateToken` `valid=false`, `IntrospectToken`
+>   `active=false`). The gRPC pin uses the new signer, so it cannot run on
+>   unfixed code; the REST pin was not run there.
+> - **Security argument (Part 1 step 3).** With a `kid`, the logout token is
+>   the one AXIAM token besides the access, ID and SSF tokens that a
+>   strictly-by-`kid` verifier finds a key for (purpose tokens still carry
+>   none). It is refused on every access-token path by its header and,
+>   independently, by its claims. *Server:* every door that admits an access
+>   token (REST extractors `validate_access_token`, audit middleware, gRPC
+>   `AuthInterceptor`, `ValidateToken`, `IntrospectToken`, `/oauth2/introspect`,
+>   RFC 8693 subject/actor tokens) verifies with the configured deployment key,
+>   never by `kid`, so the `kid` changes nothing server-side; three independent
+>   checks refuse the token: (1) `check_access_token_type` (`logout+jwt` is
+>   neither `at+jwt` nor untyped, whatever `REQUIRE_ACCESS_TOKEN_TYP` says);
+>   (2) `aud` is a client id, not `axiam:user`/`axiam:m2m`; (3)
+>   `AccessTokenClaims` requires `tenant_id` and `org_id`, which a logout token
+>   lacks — (3) alone refuses it even re-signed as `at+jwt`. AMQP admits no
+>   bearer token. *SDKs at 1.68:* rule 10 refuses `typ`; rule 4 independently
+>   refuses it (`tenant_id` REQUIRED and equal to the configured tenant, fail
+>   closed without one). *SDKs before 1.68 (no rule 10):* rule 4 alone refuses
+>   it, and it is enforced on the guard path of every release of all eleven
+>   SDKs, checked at the parent of each SDK's 1.68 commit and at the oldest
+>   commit of each clone (2026-08-30 … 2026-09-24, before 1.0.0), with
+>   `git log -S` showing no removal: Go `ValidateClaims`, Rust
+>   `Claims.tenant_id: String` (no default), TypeScript `assertTenantClaim`,
+>   Python `_verify_claims`, Java/Kotlin/Swift `assertTenant`, C#/PHP
+>   `ApplyClaimPolicy`/`applyClaimPolicy`, C++ `TokenAuthenticator`, C
+>   `AXIAM_JWT_VERIFY_TENANT` in `AXIAM_JWT_VERIFY_STRICT`. *Other SDK paths:*
+>   the SSF receiver refuses it by `typ` and `exp`/`sub`; the ID-token check by
+>   the missing `nonce`. **No SDK version accepts a logout token as an access
+>   token; the stop condition did not apply.**
+> - **Contract 1.69** (`sdks/CONTRACT.md`): §8 protocol rule 4 (pointer to the
+>   requester event), §8 consumer obligation 4 (discard-event table), §8
+>   "Against a server older than 1.68" rewritten (requester needs 1.68+; an SDK
+>   MUST NOT offer an unsigned-response opt-out; the withdrawn 1.68 MAY is
+>   recorded), §10.1 rule 12 and "Scope", §12.7.3 rule 1 (select by `kid`;
+>   kid-less → `unknown_kid`; unknown → §12.4 rule 2; rules 10/11 off),
+>   §12.7.6 (the 1.69 tests), §34.11 (e) table (1.69 row added), new §34.13,
+>   Breaking Changes Log, §27, footer. `website/src/contractAnchors.ts`
+>   regenerated (it was stale at 1.64, so the diff also adds §12.8 and §37
+>   anchors); second run identical. Upgrade note in `docs/deployment/README.md`.
+> - **Appendix A:** A.1 verdict **remove the opt-out** (D-2, second branch),
+>   evidence below; A.2 the canonical discard event.
+> - **Verification:** `axiam-oauth2 --lib` 678 passed; `axiam-auth --lib` 296
+>   (1 pre-existing ignored); `grpc_units` 60; `middleware_test`
+>   (`--no-default-features`) 9; clippy `-D warnings` and fmt clean for the four
+>   crates (one `needless_borrow` in the new test fixed); `check-spec-digest.py`
+>   unaffected; `gen-management-registry.py --check` OK;
+>   `check-doc-links.sh` OK (586 links). Not run: website build.
+> - **Not anticipated:** (1) **the C SDK's `find_key` falls back to the only
+>   key of a one-key JWKS** on the ID-token and logout paths — a §12.4 rule 2
+>   defect; the contract says so and OI-19 removes it. (2) The A.1 verdict made
+>   §8 normative (MUST NOT offer the opt-out). (3) `website/src/threatModel.ts`
+>   (SA-03 text) still says the logout token has no `kid`, and
+>   `website/src/docs/reference.ts` prose ("twenty-three amendments since
+>   1.39") is stale: both go to OI-06.
+>
+> **Follow-up (2026-11-27, Opus 5.5), commit `df06a8b`, after the Go reference
+> port (OI-16) showed where 1.69 did not fit:** §8 "Required tests" no longer
+> mentions the withdrawn opt-out; §8 protocol step 2 rewritten for SDK
+> consumers of `AuthzRequest`/`AuditEventMessage` (2a ambiguous bodies refused;
+> 2b the received body must end in the trailing 64-hex `hmac_signature`, the
+> canonical bytes are everything before it — never re-serialized; **2c a
+> declaration-order layout check, MUST**; 2d–2g HMAC, decode from the verified
+> bytes); producers MUST send serde's wire form (compact, declaration order,
+> `metadata` keys sorted, signature last); the server's own consumers
+> re-serialize and are documented as "not a conformance oracle" for the wire
+> form; rule 3: no lenient mode for the signed types; obligation 4: normative
+> reason order (no `hmac_signature` member → `unsigned` whatever else is
+> missing), `hmac_signature: null` → `malformed`, after-Close answers nacked
+> without an event; §34.13 clause (d) for #882. Fixture
+> `crates/axiam-amqp/tests/fixtures/v2_reference_vectors.json` gains
+> `wire_json` (additive; regenerated from the server sign path) and
+> `reference_vectors.rs` the test `test_wire_bytes_cut_to_the_canonical_bytes`.
+> Verification: `axiam-amqp` reference-vector tests (3+2+7) and `--lib` (217)
+> pass; clippy, fmt clean; anchors unchanged; spec digest matches; doc links OK.
+> Its Appendix A edits were swept into the orchestrator's plan commits
+> `a1dfc90`/`4d4d96e` (same text). Not settled: whether
+> `reactor_v2_reference_vectors.json` has the same `message`-is-not-wire-bytes
+> issue for SDK reactor consumers (outside #882's scope). The corrected
+> `CONTRACT.md` and fixture were re-vendored into the SDK trees on 2026-11-27
+> and each AMQP SDK received an alignment step (see the Wave B records).
+>
+> **§5.0 re-vendoring (orchestrator, 2026-11-26).** `sdks/CONTRACT.md` at
+> `c4c4e44` copied into all eleven SDK trees; `cmp` identical in each.
+> `openapi.json` and `management-registry.json` were already identical,
+> `proto/` identical in the nine SDKs that vendor it. **Found:** every SDK's
+> previous copy differed from the server's pre-1.69 contract in one line
+> (§ session-validation cache, "default 5 s since v1.4"), which exists only on
+> the branch of open PR #893; the SDKs had vendored that branch's text. The
+> re-vendoring restores the server's main text ("default `0`, off", matching
+> `AuthConfig` default `session_validation_cache_ttl_secs: 0`). When #893 merges,
+> that line must be re-synced downstream.
 
 **Part 1 — the server emits `kid` on logout tokens (#880, D-1).**
 1. Test first, in the `axiam-oauth2` logout tests: decode the header of a minted
@@ -442,6 +678,51 @@ the code (§1.2) and the `EXECUTED` block lists the symbol it was checked agains
 **Verify.** `cargo test -p axiam-api-grpc --test grpc_server_test` (only if item
 #890-2 changed the test), fmt for touched crates, `npm run build` in `website/`
 if `threatModel.ts` changed, and the docs link check the repository's CI runs.
+
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `688566b`.** Documentation and
+> comments only; every item fixed, none rejected. Each statement was checked
+> against the code:
+>
+> - **#874** (README SA-06): `User::credential_superseded` /
+>   `credential_superseded_at` (`axiam-core/src/models/user.rs`) — the version
+>   decides when present, the timestamp only without one.
+> - **#879-1** (README SA-14): "must not grant SDK principals consume (read)
+>   access" — publish is authorised on the exchange, not per queue.
+>   **#879-2** (`handlers/auth.rs`): the service refuses first —
+>   `complete_authenticated_login` step 3b and `admit_tenant`; `boot.rs` wires
+>   `with_tenant_admission`, so the handler check is a backstop.
+> - **#890-1** (`mfa_methods.rs` `reset_mfa`): checked against
+>   `confirm_mfa_with_setup_token`. **#890-2** (`grpc_server_test.rs`): wording
+>   fixed; the bound-listener change was **not** made — `start_grpc_server`
+>   takes a `SocketAddr`, so it would need a production signature change, which
+>   the plan excludes. **#890-3**: the CSRF banner names `CSRF_EXEMPT_PATHS`
+>   (exact) and `CSRF_EXEMPT_PREFIXES`; four test comments say `jti`, checked
+>   against `issue_access_token` (no `sid`).
+> - **#891-1** (README SA-13, `tenant-suspension.md`, T-510 in the threat model
+>   and `ThreatDragonModels/Axiam/Axiam.json`): "once no replica of the previous
+>   release is still serving" — `SurrealTenantRepository::update`. **#891-2**:
+>   `POST`/`PUT`/`PATCH` and SCIM `POST /Users` —
+>   `refuse_password_write_under_opaque_required`. **#891-3**:
+>   `/api/v1/account/consents/oidc-scopes` among the 403 routes, `/oauth2/authorize`
+>   described separately — `minted_for_client` handling in `oauth2.rs`.
+>   **#891-4** (`internal-queue-signing.md`). **#891-5**: the executed audit
+>   plan's counts corrected to `token_exchange_test` 31,
+>   `resource_indicators_test` 20 (counted `#[actix_web::test]`). **#891-6**:
+>   SA-44's gRPC lead added to the 2.47.0 non-reproduced list. **#891-7**: mail
+>   has no `.retry` queues — `axiam-amqp/src/connection.rs`.
+> - **Threat model (orchestrator additions):** T-510 residual (3) records #877
+>   closed by OI-02 and, beyond the brief, #878 closed by OI-01; T-500 (SA-03)
+>   now says the logout token carries the JWKS `kid` since 1.69 and carries the
+>   condensed OI-05 argument (deployment-key verification; `typ`, `aud`,
+>   missing `tenant_id`/`org_id`; SDK rules 10 and 4; the three pins).
+>   `website/src/threatModel.ts` regenerated (529 threats, counts unchanged).
+>   `website/src/docs/reference.ts`: the amendment count is now computed from
+>   `CONTRACT_VERSION` (30 since 1.39) instead of the stale "twenty-three".
+> - **Verification:** fmt (`axiam-auth`, `axiam-api-rest`, `axiam-api-grpc`)
+>   clean; clippy `--all-targets --no-default-features -D warnings` clean;
+>   website `npm ci` + `npm run build` OK (no website test script exists);
+>   `check-doc-links.sh` OK (586 links). `grpc_server_test` not run (comment
+>   only).
 
 ### OI-07 — #561: runs 6, 6b and 6c in the comparison documents · Sonnet 5.5
 
@@ -536,6 +817,94 @@ repository's CI runs. This task closes #561, with a closing comment that lists
 where the outcome differs from the issue's acceptance text (versions, host, no
 valid authentik cell).
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `b05ce81`.** Every figure copied
+> verbatim from the seventh draft and cited to its section.
+>
+> - **Keycloak document:** header and sourcing note (Keycloak 26.8.1, AXIAM
+>   1.3.0/1.3.1, SurrealDB 4.0.1, cloud VM; run 6 and 6b pass B only; run 6c only
+>   as the regression size). Summary: token issuance 3.9× at 2 CPUs (1,610 vs
+>   411 req/s) and 3.5× at 4 (3,234 vs 934); JWKS 7.9×; login on par (§1).
+>   **Keycloak wins introspection (1,940 vs 1,582; 3,952 vs 3,272) and REST
+>   userinfo (3,862 vs 1,411; 7,807 vs 2,963), and whole-stack CPU per request
+>   (1.30 vs 1.86; 0.52 vs 2.01 cpu·ms, §7) — in the summary.** Database-bound
+>   (§3, §5); SurrealDB 4.0.1 regression 13–38% / 8–37% (§4); server RSS 54–75
+>   vs 708–941 MiB, 89–133 vs 1,082–1,170 at 4/4 (§7); no memory reduction
+>   observed for Keycloak 26.8, "a different host, so a direction, not a
+>   measurement of its release-note claim" (§7). Also replaced: the run-5
+>   "12 000+/s gRPC userinfo" (now 3,078 and 6,369 req/s, §1).
+> - **Zitadel document:** server RSS 54–75 vs 127–137 MiB; resting footprint by
+>   resident set AXIAM 373 vs 593 MiB, by cgroup working set Zitadel 172 vs
+>   AXIAM 216 MiB (§7); under-load rows (§10.1); the 207.3 MiB minimal profile
+>   kept, labelled as the 2026-10-05 measurement. Data plane: 3.8× and 4.6×
+>   token issuance, introspection in req/s (the draft prints no multiple), JWKS
+>   21×, gRPC userinfo 12.6× and 28× (§1). Zitadel's login and fallback refresh
+>   named as failing the validity gate.
+> - **authentik document:** run as a fourth target; **no cell passed the
+>   validity gate, so no throughput or latency comparison**; only the resting
+>   footprint (1,668 MiB: server 983, worker 347, PostgreSQL 338, against
+>   AXIAM's 373; §7); next round per §13 item 7. **Gap against #561's
+>   acceptance text** ("so that the authentik comparison can make a performance
+>   statement"): not met, recorded in the document's change log and in the
+>   closing comment.
+> - Dated change-log line (2026-11-26) in each of the three documents.
+> - **Website:** the stale `Benchmarks.tsx` sentence now names the seventh
+>   draft; the obsolete `NEXT` roadmap item removed. **Spot-check of ten
+>   figures** (two per section): client-credentials takeaway, introspection
+>   takeaway (§1); run 6b refresh and Zitadel gRPC userinfo (§3); run 6c client
+>   credentials and refresh at 4 CPUs (§4); TLS 1.3/mTLS JWKS and client
+>   credentials (§6) — all matched; whole-stack memory under load (§10.1) —
+>   **two mismatches corrected in `website/src/data.ts`**: AXIAM 288–415 →
+>   287–415, Keycloak 853–1,105 → 853–1,107. Not verifiable verbatim (derived
+>   per-core figures and three core-usage values) and left as they are; to be
+>   checked against `provenance/` by the maintainer.
+> - **Grep for run-5 multiples:** only the three comparison documents had
+>   unlabelled ones (all replaced). Outside them, `README.md` "the run-6 report
+>   is pending (#561)" and `docs/security-profiles.md` "a run-6 deliverable"
+>   were stale and corrected. Website mentions of run 5 are explicitly labelled.
+> - **Verification:** website `npm run build` OK (no test script exists);
+>   `docSectionsAreComplete()` called through Vite `ssrLoadModule` → `[]`;
+>   `check-doc-links.sh` OK (586 links). The closing comment for #561 is
+>   prepared and is posted with the pull request (issues close on merge).
+
+### Wave A review gate — record (2026-11-27)
+
+> **Round 1** — one independent Opus 5.5 reviewer over `88fa1fa..cb2e719`
+> (diff, plan sections and issues; no implementer summary). **Medium-clean**;
+> four low and four nit findings. Mutation checks run by the reviewer: OI-01
+> (both `qr5_1_*` fail with the two calls removed) and OI-03 (the empty-segment
+> test fails with `middleware.rs` reverted). OI-02 was not mutation-tested (the
+> `axiam-api-rest` build is too heavy for the sandbox); reasoned instead.
+> Fixes: `7321318` (Opus — CONTRACT §8 "The wire form this relies on" and
+> §34.13 (d) no longer claim the server enforces the wire form, since its
+> consumers re-serialize; sec095 test indentation) and `4f7177d` (Sonnet —
+> unmatched-path redaction decodes segments and compares case-folded;
+> `bearer_route_patterns_test` ties `BEARER_ROUTE_PATTERNS` to the spec's
+> paths; T-528 closing sentence in md, `Axiam.json`, `threatModel.ts`; one
+> helper `superseded_by_version_or` for the credential-superseded rule; Zitadel
+> header on run 6c; comment on the intentional repeat of the lock and tenant
+> checks in the directory arm). Every finding fixed, none rejected. The
+> CONTRACT change was re-vendored into the eleven SDKs (one chore commit each).
+> `4f7177d` also carries §5.3 of this document (swept in; said in its message).
+>
+> **Round 2** — same scope over `cb2e719..4f7177d`. **Medium-clean**; one low
+> (prefixes not case-folded, fail-open for a future mixed-case literal) and
+> three nits (bearer-word list, routes outside `/api/v1`, double encoding and
+> dot segments). Fixed locally in `1e697b18` (last permitted round, no third
+> review): folded prefixes with an injected-pattern test; whole-component
+> bearer words (`code`, `key`, `nonce`, `otp`, `invite`, `state`, `assertion`
+> added; allow-list empty after checking every spec path parameter); either
+> spelling accepted; decode to a fixpoint (≤ 3 passes), `.` skipped, `..` read
+> both ways. Each new test failed first (quoted in the commit). Not covered by
+> design: `account/export/../H`, which normalises to a non-bearer route.
+> `bearer_route_patterns_test` was run by the implementer (1 passed); the
+> round-2 reviewer could not build `axiam-api-rest` (OOM) and replicated its
+> logic in Python instead.
+>
+> **Not verified by the gate:** the `docs/deployment/README.md` claim that a
+> relying party keeps working on the SDK release it already runs once logout
+> tokens carry `typ` `logout+jwt` — checked for the Rust SDK v1.3.1 only; the
+> other ten go to OI-30.
+
 ---
 
 ## 5. Wave B — SDKs
@@ -575,6 +944,52 @@ check their ports against it. TYP-R3-2 and the "Nits" section as written. #883
 was fixed here in round 2: verify it against Appendix A.2 and align the field
 names if they differ.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `74bc13d`; review fixes `5569edd`
+> (round 1), `15ac1d9` (round 2); §8 alignment `6045581` + `dc65d9e` +
+> `6c2470d`.**
+>
+> - **TYP-R3-1:** the Fastify redirect percent-encodes `Location`
+>   (`encodeRedirectLocation`); the rule is recorded as **Decision 7** in
+>   `docs/login-glue-binding.md` and became normative after review: well-formed
+>   `%XX` kept, any other `%` → `%25`, `\` kept, ill-formed input → U+FFFD per
+>   maximal ill-formed subpart or per unpaired surrogate, the encoder never
+>   throws, output pure ASCII; the Express adapter pre-encodes too, because
+>   `encodeurl` breaks rules 2 and 3 on edge cases. Unfixed: 7 Fastify cases
+>   failed (`'/a b'` vs `'/a%20b'`, 500 on `€`). **TYP-R3-2:**
+>   `oidcBindingClearCookie` public. **Nits** as written.
+> - **#880:** kid-less / unknown-kid logout tokens are `AuthError` reason
+>   `unknown_kid` (unfixed: no `reason`, raw `JWKSNoMatchingKey`).
+>   **#881:** opt-out and `AuthzDecision.unsigned` removed per A.1. **#882:**
+>   the "pin only" assumption did not hold — the review showed genuine bodies
+>   (`1.0`, integer-like keys, integers above 2^53) nacked by the
+>   re-serializing consumer; fixed to received-bytes verification (round 1),
+>   non-trailing signatures nacked (round 2), layout check and removal of the
+>   lenient `strict` option (alignment; a breaking TypeScript change with a
+>   migration line). **#883:** the A.2 event with all five members.
+> - **§8 alignment:** fatal UTF-8 decode, 64-hex trailing signature, layout
+>   check, no lenient mode; requester reason order (unfixed: five "malformed
+>   before signature" cases failed) and after-Close; producer emits `wire_json`
+>   byte for byte (pin). **Alignment review medium (fixed in `dc65d9e`):** a
+>   BOM-prefixed body made `TextDecoder` strip the mark while the cut bytes
+>   kept it, so an unguarded `JSON.parse` threw, `consume()` rejected
+>   unhandled and Node exited — a crash loop for anyone able to publish; now
+>   `ignoreBOM`, a guarded parse and a `.catch()` nack. `6c2470d`: nack before
+>   logging, so a throwing logger cannot strand a delivery.
+> - **Verification:** typecheck; vitest 138 files, 2092 passed, 1 pre-existing
+>   skip (proxy vars unset — the sandbox proxy otherwise breaks msw mocks);
+>   build, docs, bundle-grep, `npm audit`, `gen-management --check`, publish
+>   dry-run passed at the earlier rounds. **Not run:** `buf generate` as CI
+>   runs it (remote plugins blocked), the Node 26 leg, the publish job.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; three lows (consumer
+> still re-serializing; encoder edge cases against its own rules; the `\`
+> "may") and two nits — fixed in `5569edd`. Round 2: medium-clean; two lows
+> (re-serialization fallback for a non-trailing signature; Decision 7 rule 3
+> silent on byte strings) — fixed in `15ac1d9`. Alignment review: **not
+> medium-clean** (the BOM crash) → fixed and re-reviewed: medium-clean; two
+> lows (log before nack; the safety net untested) fixed in `6c2470d`. Nothing
+> open.
+
 **OI-11 — `axiam-python-sdk` (#110) · Sonnet 5.5.** PYT-R1-2 is the one with
 weight: an unexpected exception in `_handle` must fail the pending request and
 keep the requester alive (or close it loudly and fail every later call), never
@@ -585,6 +1000,49 @@ the cookie clear wins, and the README states the deviation. PYT-R1-5: exclude
 `binding_digest` from the repr. GLUE-R1-4 and GLUE-R1-5 as listed at the end of
 the issue. #882: `verify_hmac` must stop re-serializing.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `2806e8d`; review fixes `8f89e65`
+> (round 1), `f9267d0` (round 2); §8 alignment `6525c30` + `b1d3bc3`.**
+>
+> - **PYT-R1-1 / #883:** the A.2 event on every requester discard path.
+>   **PYT-R1-2:** an unexpected fault in `_consume` is logged by type, the
+>   delivery nacked, the requester keeps serving (a forged delivery cannot be
+>   attributed to a pending request, so none is failed); the surrogate-nonce
+>   crash fixed. **PYT-R1-3:** the mislabelled case renamed, a real
+>   "signature moved before nonce" case added. **PYT-R1-4:** cookie clear wins,
+>   README states the deviation. **PYT-R1-5:** `binding_digest` out of the
+>   repr. **PYT-R1-6:** stronger hook tests. **GLUE-R1-4:** pinned, not a
+>   defect. **GLUE-R1-5:** Django and FastAPI answer a generic 500 with the
+>   clearing cookie on any callback fault.
+> - **#880:** `reason` codes on the logout path (`unknown_kid`, `invalid_alg`,
+>   `token_expired`, `invalid_signature`; never `None` after round 1).
+>   **#881:** opt-out removed. **#882 (D-5):** received-bytes verification
+>   (`verify_and_decode`), plus the consumer layout check (round 1).
+>   **Decision 7:** was only partly conformant; shared
+>   `encode_redirect_location`; Django's scheme allow-list still applied (round
+>   1: a predicate-admitted `javascript:` target is refused).
+> - **JWKS (round 1, the review's medium F-1):** the forced re-fetch set
+>   `jwk_set_cache = None`, disabling PyJWT's cache for good — 50 unknown kids
+>   cost 200 fetches and every later token fetched; now a by-hand kid lookup
+>   with one forced refill per 60 s window (50 unknown kids → ≤1 fetch, valid
+>   tokens afterwards → 0); round 2 adds a cold-cache outage window (51 → 1
+>   fetch).
+> - **§8 alignment:** strict UTF-8 and no trailing whitespace in
+>   `strict_json_object`; required members checked before the HMAC; after-Close
+>   answers not decoded and not logged; `wire_json` and producer byte-for-byte
+>   tests (pins); a BOM-prefixed and a raw-surrogate signed body are refused
+>   (pinned in `b1d3bc3`).
+> - **Verification:** pytest 2562 passed (venv, proxy vars unset); ruff check,
+>   ruff format --check, `mypy --strict src`, interrogate 100%. **Not run:**
+>   pip-audit, build/twine, grpc-drift, the 3.11/3.15 matrix legs (local 3.13
+>   only).
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: **not medium-clean** — F-1 (medium,
+> the JWKS cache disabled after one unknown kid) plus F-2..F-7; all fixed in
+> `8f89e65`, together with the cross-SDK consumer layout check. Round 2
+> (re-review of the medium): medium-clean; F-4 and four new low/nit items
+> fixed in `f9267d0`. Alignment review: medium-clean; two nits fixed in
+> `b1d3bc3`. Nothing open.
+
 **OI-12 — `axiam-php-sdk` (#92) · Sonnet 5.5.** PHP-R1-1: make `#[RequireScope]`
 repeatable (`Attribute::IS_REPEATABLE`) with all-must-pass semantics and a test
 with two scopes. PHP-R1-2 with GLUE-R1-5: clear the binding cookie on every exit
@@ -594,12 +1052,96 @@ lost `\u` escapes so the two tests test what their names say (check they fail if
 the verification is broken). PHP-R1-6 and PHP-R1-7 are documentation. #882:
 `Consumer` / `Hmac::verify()`.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `cebe578`; review fixes `2f14de8`
+> (round 1), `6acf09f` (round 2); §8 alignment `ea870b2`.**
+>
+> - **PHP-R1-1:** `#[RequireScope]` is `IS_REPEATABLE`; Laravel middleware and
+>   Symfony listener enforce every instance. **PHP-R1-2 / GLUE-R1-5:**
+>   `OidcLoginFlow::complete()` turns any exception into `500 login_failed` with
+>   the clearing `Set-Cookie`, logging the class only; a non-Auth
+>   `AxiamException` from the exchange is the uniform 401 (branch reached by a
+>   409 → `AuthzError` test). **PHP-R1-3:** with #883. **PHP-R1-4:** NaN, ±INF,
+>   0, negative timeouts refused at construction and per call. **PHP-R1-5:** the
+>   `\u` escapes restored (mutation-checked). **PHP-R1-6/7:** docs, checked
+>   against `JwksVerifier::resolveJwksUriAsync` and the Laravel cookie setup.
+>   **GLUE-R1-4:** pinned, not a defect (retry with the right cookie also 401,
+>   no token request). **N1:** `MemoryOidcStateStore` bounded at 10 000.
+> - **#880:** pins only (already kid-selected). **#881:** opt-out removed per
+>   A.1. **#882:** received-bytes verification (`Hmac::verifiedCanonical`,
+>   `StrictJson` duplicate keys through escapes, trailing content, non-last /
+>   null signature) and the layout check `Hmac::hasSignedLayout()`.
+>   **#883:** the A.2 event on every discard path. **Decision 7:** was not
+>   conformant (raw `Location`); `OidcLoginOutcome::encodeLocation()` with
+>   maximal-subpart U+FFFD substitution of ill-formed UTF-8 (`scrubUtf8()`,
+>   compared by the reviewer against Python's `errors='replace'` on 200 015
+>   inputs: identical).
+> - **§8 alignment (`ea870b2`):** consumer and producer already conformant
+>   (pins: `wire_json` cut/verify/dispatch, producer emits `wire_json` byte for
+>   byte); requester fixed — required-member checks moved before the HMAC
+>   (unfixed: four rows "expected malformed, got signature") and after-Close
+>   answers nacked without decoding or an event (unfixed: "no discard event
+>   after close" failed).
+> - **Verification:** phpunit 2400 tests / 12 176 assertions OK (proxy vars
+>   unset); `composer validate --strict`; `gen_management.py --check` current;
+>   docblock coverage 2153/2153; TLS-bypass grep clean. **Not run:** phpstan
+>   (not installable here: composer's dist download is blocked; a newer phar
+>   reported 3 errors in the untouched `src/AxiamClient.php`), the PHP 8.6 leg,
+>   `composer audit`.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; four lows (an
+> exchange-error test that never reached the new branch; GLUE-R1-4 not
+> addressed in writing; the AuthzResponse layout case refused by the replay
+> gate, not the layout check; a stale vectors test) and five nits — all fixed in
+> `2f14de8`. Round 2: medium-clean; one nit (three more ill-formed UTF-8 rows)
+> fixed in `6acf09f`. Alignment review: medium-clean, nothing found (no
+> oracle: the reason stays in the local event; a forged body cannot complete
+> or fail a check). Nothing open.
+
 **OI-13 — `axiam-csharp-sdk` (#125) · Sonnet 5.5.** CSH-R5-1: correct the "a
 throw aborts the sign-in" wording to what `Response.Clear()` guarantees.
 CSH-R5-2: an `OperationCanceledException` that is not the client's abort must
 take the same catch (clear the cookie, write the 500); test with a hook that
 throws it while `RequestAborted` is not cancelled. #882: `Amqp/Hmac.cs`. #883:
 check the discard log against Appendix A.2.
+
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `47a538f`; review fixes `d002cac`
+> (round 1), `e07887f` (round 2); §8 alignment `e39107a`.**
+>
+> - **CSH-R5-1:** README, changelog and the catch comment say what
+>   `Response.Clear()` guarantees (headers set so far are dropped; state
+>   committed elsewhere or an `OnStarting` cookie is not undone). **CSH-R5-2:**
+>   the catch filter excludes only an `OperationCanceledException` while
+>   `RequestAborted` is cancelled; both branches tested from the server side
+>   (round 2), each mutation-checked.
+> - **#882:** received-bytes HMAC (trailing-signature cut, duplicates at any
+>   depth, case-variant top-level names, trailing content) — unfixed: the
+>   special-characters, case-variant, trailing-`\n` and non-last-signature tests
+>   failed; consumer layout check for `AuthzRequest`/`AuditEventMessage`
+>   (round 1; a signed cache-invalidation message reached the handler before);
+>   shared internal `SignedJson`. **#883:** was missing — the A.2 event on every
+>   discard path, exchange/routing key from the delivery when known.
+>   **#881:** opt-out removed. **#880:** pins. **Decision 7:** was not
+>   conformant (only non-ASCII encoded; CR/LF passed raw — header injection
+>   `"/a\r\nSet-Cookie: pwned=1"` observed on unfixed code); fixed.
+> - **§8 alignment (`e39107a`):** consumer already conformant (pins); exactly
+>   64-hex signature enforced (no behaviour change); requester fixed — no
+>   signature member → `unsigned` whatever else is missing, required members
+>   checked before the HMAC (unfixed: 5 of 9 order cases failed), after-Close
+>   answers nacked without decoding or an event.
+> - **Verification:** .NET 10 only (`-p:TargetFrameworks=net10.0`):
+>   `Axiam.Sdk.Tests` 1690, `Axiam.Sdk.AspNetCore.Tests` 138 passed;
+>   `gen_management.py --check` current. **Not run:** the net11.0 leg (no .NET
+>   11 SDK here), example builds, `dotnet pack`.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; two lows (no layout
+> check — any subkey-signed shape accepted by an event consumer; the abort
+> branch untested) and nits — fixed in `d002cac`. Round 2: medium-clean; the
+> abort test did not fail without its fix — rewritten in `e07887f`. Alignment
+> review: medium-clean; two nits left open, not security-relevant (a
+> no-signature body with a duplicate key, or with only `HMAC_SIGNATURE`, is
+> classified `malformed` rather than `unsigned`; the 64-hex test is a pin).
+> Out of scope, noted: `Reactor/ReactorProtocol.cs` still verifies reactor
+> events over a re-serialization (fails closed on `<`, `>`, `&`, non-ASCII).
 
 **OI-14 — `axiam-java-sdk` (#133) · Sonnet 5.5.** JAV-R1-1 is security-relevant:
 `AxiamUser.roles` must come from the `roles` claim only, never from `scope`;
@@ -610,6 +1152,47 @@ endpoint fails. JAV-R1-6: complete decisions off the RabbitMQ consumer thread
 (an executor the caller may supply) and document it. JAV-R1-8 with PYT-R1-5's
 approach: keep the digest out of `toString()`. #882: pin only (fixed in SA-24).
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `3f033c2`; review fixes `bf1c445`
+> (round 1), `fd5c1bb` (round 2), `d3e0380` (round 3); §8 alignment `325edbc`
+> + `53d8c91`.**
+>
+> - **JAV-R1-1 (security):** `roles` from the `roles` claim only — unfixed:
+>   `expected <[editor, auditor]> but was <[read, write, admin]>`.
+>   **JAV-R1-2 / GLUE-R1-1:** `encodeRedirectLocation` per Decision 7 (an
+>   unparseable `returnTo` such as `/a b` is followed encoded, never a 500 —
+>   unfixed: `IllegalArgumentException … index 2: /a b`). **JAV-R1-3 (D-4):**
+>   one fetch per 60 s window, failed attempts included (unfixed: 2 fetches cold,
+>   20 on a failing endpoint). **JAV-R1-4 / #883, JAV-R1-5 / #881 (A.1),
+>   JAV-R1-6** (decisions completed on a caller-supplied executor or an owned
+>   daemon pool; unfixed: the consumer thread stalled), **JAV-R1-7, JAV-R1-8**
+>   (digest out of `toString()`), GLUE-R1-4 (pinned), GLUE-R1-5 / N1 / N4.
+>   **#880:** pins.
+> - **#882:** the "pin only" assumption did not hold — server-shaped bodies
+>   (lower-case `\u001f`, non-ASCII, `1e21`) failed on the re-serializing
+>   `Hmac.verifiedCanonical`; fixed to received-bytes verification; the §8
+>   alignment added the layout check (unfixed: reordered, extra-member and
+>   cache-invalidation bodies reached the handler), the reason order, the
+>   after-Close rule, and (`53d8c91`) a leading-BOM refusal.
+> - **JWKS, from the gate:** round 1 replaced nimbus `RemoteJWKSet` by a
+>   self-managed cache with stale-if-error; **round 2 found it unbounded
+>   (medium)** — a rotated-out key kept verifying through an outage — now
+>   bounded at 600 s (TTL 300 + `JWKS_MAX_STALE` 300; unfixed: no refusal at
+>   t=601), lock-free fast path; round 3 publishes set and load time as one
+>   immutable holder.
+> - **Verification:** `/opt/maven/bin/mvn` (the wrapper cannot download),
+>   sequential: `mvn test` 1682 tests, 0 failures; javadoc; `gen_management.py
+>   --check`; TLS-bypass gate. **Not run:** `mvn verify` (gpg plugin not
+>   cached offline), signing/sigstore/central jobs, the Spring Boot example.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L-1 (one failed refresh
+> near TTL refused every token for 60 s), L-2, L-3, N-1..N-3 — fixed in
+> `bf1c445`. Round 2: **not medium-clean** — R2-1 (unbounded stale set), plus
+> R2-2, R2-3 — fixed in `fd5c1bb`. Round 3 (medium re-review): resolved;
+> R3-1 (two volatiles could pair an old set with a new timestamp) and R3-2
+> fixed in `d3e0380`. Alignment review: medium-clean; F-2, F-3 fixed in
+> `53d8c91`. **Open, low (cross-SDK, OI-30):** the generic event consumer
+> accepts either signed layout.
+
 **OI-15 — `axiam-kotlin-sdk` (#99) · Sonnet 5.5.** KOT-R1-1: add
 `@AxiamRequireScope` and its `enforce` support, repeatable. KOT-R1-2: narrow the
 two new public `JwksVerifier` members to what the contract allows (internal, or
@@ -619,6 +1202,53 @@ constructors or `@JvmOverloads`), and run the binary-compatibility check if the
 build has one; correct the migration note either way. KOT-R1-4 with the GLUE
 items: cookie clearing covers the paths where the hook throws or responds.
 KOT-R1-5 (D-4). KOT-R1-7: enforce the store bound under the lock. No AMQP work.
+
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `a89bda6`; review fixes `e146f0f`
+> (round 1), `069343b` (round 2).**
+>
+> - **KOT-R1-1:** repeatable `@AxiamRequireScope(vararg scopes)` (any scope
+>   within one annotation, every annotation must pass; the
+>   `AxiamRequireScopes` container is unwrapped in `enforce` — without the
+>   unwrap the repeated test answered 200, i.e. fail-open). **KOT-R1-2:**
+>   `verifyAccessTokenSignature`, `setClockForTesting` now `internal`.
+>   **KOT-R1-3:** 1.3.1 binary compatibility restored by `@JvmOverloads`
+>   (`AxiamUser`), secondary constructors (`OidcStateEntry` — incl. the 1.3.1
+>   default-argument bridge descriptor, `MemoryOidcStateStore(Long)`) and a
+>   HIDDEN-deprecated `axiamOidcLogin` overload; reflection tests pin the 1.3.1
+>   descriptors (no apiCheck plugin exists). Not restorable and documented:
+>   data-class `copy`/`copy$default`; Java *source* must pass `bindingDigest`.
+>   **KOT-R1-4 / GLUE:** the clearing `Set-Cookie` is appended before
+>   `completeOidcLogin`; a responding hook skips `respondOutcome`.
+>   **KOT-R1-5 (D-4):** `JwksVerifier` fetches and caches the set itself (nimbus
+>   `DefaultResourceRetriever`, honouring the nimbus timeout/size system
+>   properties): at most one fetch per 60 s window counted from the last
+>   attempt, a held set served up to 300 s when a refresh fails, then refused.
+>   **KOT-R1-6:** README rule table and KDoc. **KOT-R1-7:** one lock and an
+>   insertion-ordered map. GLUE-R1-4: pinned, not a defect. N4: a throwing
+>   predicate accepts nothing (`VirtualMachineError` rethrown).
+> - **Decision 7:** was not conformant (raw `Location`; CR/LF → 500); new
+>   `encodeRedirectLocation` at the header.
+> - **#880:** pins only (`verifyLogoutToken` already selected by `kid`);
+>   server-shaped two-key test, kid-less/unknown `unknown_kid`, rules 10/11 off.
+> - **Regression failures on unfixed code:** hook-throws "the 500 must carry the
+>   clearing Set-Cookie"; Decision 7 `/a b/café` and 500 on CR/LF; KOT-R1-7
+>   "held 51 entries, bound is 50"; cooldown "2 fetches" (cold) and "50
+>   fetches" (failing endpoint); repeated scope "403 expected, 200"; four
+>   `NoSuchMethodException`s for the 1.3.1 signatures.
+> - **Verification:** `./gradlew build test koverXmlReport koverVerify
+>   dokkaJavadocJar` green at `e146f0f` (1445 tests); at `069343b` one known
+>   load-sensitive flake (`OidcRefreshTest` "the refresh response's scope
+>   replaces the grant's") failed in the full run and passes alone;
+>   `gen_management.py --check` current. Not run: the Kotlin/JDK matrix legs.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L1 (nimbus timeout
+> system properties ignored), L2 (stale-if-error untested), L3 (lock taken on
+> every verification past 60 s), L4 (1.3.1 default-argument constructor
+> missing), N1, N2 — fixed in `e146f0f` (bytecode descriptor confirmed by the
+> reviewer with `javap`). Round 2: medium-clean; R2-N1 (Java-source note) fixed;
+> R2-N2 (pin the `isCommitted` guard) — test strengthened, but **the guard
+> cannot be pinned through the Ktor test host** (a second respond after commit
+> is silently ignored there); left open, not security-relevant.
 
 **OI-16 — `axiam-go-sdk` (#111) · Opus 5.5.** GO-R1-1: fold keys exactly as
 `encoding/json` does (the minimum of the `unicode.SimpleFold` orbit); test with
@@ -635,6 +1265,45 @@ reference the other six read, so apply Appendix A literally and report any place
 where A does not fit the code back to the orchestrator before the others port
 it.
 
+> **EXECUTED (2026-11-27, Opus 5.5), commit `ed8fb6d`; review fixes `a755444`
+> (round 1); §8 alignment `20b3be2`.**
+>
+> - **GO-R1-1:** keys folded exactly as `encoding/json` (`foldName`/`foldRune`,
+>   checked rune for rune against go1.26 `fold.go`); unfixed:
+>   `rejectAmbiguousKeys({"subject_id":…,"ſubject_id":…}) = false` (the Kelvin
+>   case already failed closed: pin). **GO-R1-2 (D-4):** one forced re-fetch
+>   per 60 s on both paths, window opened before the fetch; unfixed: "50
+>   unknown kids … caused 50 JWKS fetches". **GO-R1-3:** `["admin", null]` is
+>   not an array of strings (and, round 1, the same for `aud`). **GO-R1-4:**
+>   `Close` cancels the consumer by tag; in-flight and buffered deliveries are
+>   nacked; goroutine-leak test (round 1 added the drain test, mutation-checked).
+>   **GO-R1-5/6/9:** README rows 10–12, the `roles` snapshot, snippet and
+>   changelog. **GO-R1-7:** the assertion is now unconditional and expects
+>   *nacked* (`calls == 0`), not the issue's `calls == 1`, because under D-5 an
+>   unsigned extra member no longer verifies — accepted by the reviewer.
+>   **GO-R1-8:** single-space split.
+> - **#880:** pins. **#881:** opt-out removed (A.1). **#882 (D-5):**
+>   received-bytes verification (`cutTrailingSignature`) plus the declaration-
+>   order layout check `signedLayoutOf`, which became the contract's §8 step 2c.
+>   **#883:** the A.2 event with routing key from the delivery. Go's report of
+>   where 1.69 did not fit led to the OI-05 follow-up `df06a8b`.
+> - **§8 alignment:** the normative reason order (no signature member →
+>   `unsigned`, required members before the HMAC; unfixed: three "(2)" and four
+>   "(3)" cases failed) and the after-Close rule; `wire_json` and producer
+>   byte-for-byte tests (pins).
+> - **Verification:** gofmt, go vet, `go test ./...`, `go test -race` (the
+>   pre-existing UMA test race fixed with an atomic counter in round 1),
+>   genmanagement check, coverage 94.7 % (floor 94.4). **Not run:**
+>   govulncheck (`vuln.go.dev` blocked), the OPAQUE interop job, buf drift.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; three lows (layout
+> check untested; drain branch untested; wire-form docs) and four nits — fixed
+> in `a755444`. Round 2: medium-clean, nothing new. Alignment review:
+> medium-clean; **one low left open**: the event consumer's security event on a
+> failed verification carries no timestamp, exchange, routing key or tenant,
+> which §8 protocol rule 4 requires — pre-existing, outside #883 (requester
+> only); handled cross-SDK in OI-30.
+
 **OI-17 — `axiam-rust-sdk` (#152) · Sonnet 5.5.** RUS-R1-1 and RUS-R1-2 together:
 `AxiamUser` keeps an absent `roles` claim distinct from `[]` (an `Option`), and
 a malformed `roles` claim no longer fails token verification with 401; it makes
@@ -645,6 +1314,54 @@ documentation and the migration note (the new public field on `token::Claims`).
 RUS-R1-9: the stray blank lines. Style: clear and concise Rust, no new
 dependencies. #882: pin only.
 
+> **EXECUTED (2026-11-27, Sonnet 5.5), commit `b4db904`; review fixes `f6ce39d`
+> (round 1), `396fa8f` (round 2); §8 alignment `8546bfd` + `f515220`.**
+>
+> - **RUS-R1-1/2:** `AxiamUser::roles: Option<Vec<String>>`; a malformed
+>   `roles` claim reads as `None` (lenient deserializer, other claims still
+>   strict) and `require_role` answers 403 — unfixed: `invalid type: string
+>   "admin", expected a sequence` (401). Round 1 did the same for `scope`
+>   (unfixed: `invalid type: integer 7`). **RUS-R1-3:** stacked guards share one
+>   injected parameter (unfixed: E0415). **RUS-R1-5/6:** docs and migration
+>   note. **RUS-R1-7:** single-space split. **RUS-R1-8:** a broker Nack fails
+>   `check` at once on a confirm-enabled channel (`connect` now calls
+>   `confirm_select`); the error-kind half **rejected in writing**: CONTRACT §2
+>   allows exactly three error types and the SDK has no configuration variant.
+>   **RUS-R1-9:** done.
+> - **#880:** pins; logout fixture signer server-shaped. **#881:** opt-out
+>   removed. **#882:** the pin with a duplicate key signed over the
+>   de-duplicated form **failed** (the handler ran), so it was a finding: the
+>   consumer now uses the strict parse; the alignment then ported it to
+>   received-bytes verification with the §8 2c layout check (unfixed:
+>   trailing whitespace, a non-last signature and reordered members reached the
+>   handler). **#883:** the A.2 event, closed-requester rule (`biased` select).
+> - **JWKS (D-4 class, beyond the issue, security-relevant):** a failed forced
+>   unknown-kid refetch now opens the window (unfixed: 51 fetches for 50 tokens);
+>   a failing endpoint on a cold or expired cache costs one fetch per 10 s
+>   window (unfixed: every lookup fetched). No stale-if-error.
+> - **§8 alignment:** `AuditEventMessage.metadata` serialized with sorted keys
+>   at every depth (byte-identical to the server's serde_json without
+>   `preserve_order`); requester reason order (required members before the
+>   HMAC); the contract-required escaped/non-ASCII consumer test (`f515220`).
+> - **Verification:** `cargo fmt --check`; clippy `-D warnings` (all features
+>   and amqp-only); `cargo test --all-features` (1269+ passed, 0 failed);
+>   `cargo doc -D warnings`. Lean profile, `-j 2`, `cargo clean` after each run
+>   (the target dir reached 32 GB once). **Not run:** wasm32 check, cargo
+>   audit, publish dry-run, the MSRV 1.89 job, coverage, `cargo build
+>   --examples` (passed once before later edits).
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; five lows (the
+> rules-10/11 guard test passing for the wrong reason; RUS-R1-8 rejection not
+> written down; the Nack fast-fail needing confirms; a non-string `scope`
+> giving 401; a reply buffered at close logged) plus the orchestrator-added
+> JWKS window — fixed in `f6ce39d`. Round 2: medium-clean; the cold-cache
+> outage fetches and a doc nit — fixed in `396fa8f`. Alignment review:
+> medium-clean (hostile inputs — BOM, invalid UTF-8, deep nesting — refused
+> without panics); L-1 and a comment nit fixed in `f515220`. **Open, low:** the
+> consumer's refusal event lacks exchange/routing key/tenant (§8 rule 4,
+> pre-existing; handled cross-SDK in OI-30); a correctly signed `null`
+> optional member passes the layout check (nit).
+
 **OI-18 — `axiam-cplusplus-sdk` (#89) · Sonnet 5.5.** D-3: implement §11.2 rule
 11(b) (`require_role` refuses a `roles` claim that is not an array of strings,
 `["admin", 7]` and `["admin", null]` included; `AxiamUser` keeps absent distinct
@@ -654,6 +1371,48 @@ SOVERSION is already 6 for the unreleased 1.4.0; do not bump it again, but say
 so in the changelog. Remove the README carve-out. CPL-R5-1: delete the changelog
 bullet about the never-shipped test defect.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `e6978c0`; review fixes `672a621`
+> (round 1), `db4c05c` (round 2).**
+>
+> - **CPL-R1-6, 11(b):** `TokenAuthenticator` keeps `roles` only when it is an
+>   array of strings; `["admin",7]`, `["admin",null]`, a string, an object and
+>   `null` leave no partial list; new `AxiamUser::roles_claim_present` (absent
+>   or malformed → false; `[]` → true) appended with default `true` so existing
+>   `{id, tenant, {roles}}` aggregates still compile (a default identity still
+>   fails every `require_role`). Regression test `§11.2 rule 11(b): a roles
+>   claim that is not an array of strings fails require_role` — unfixed:
+>   `[FAIL] … !(role_guard_passes(",\"roles\":[\"admin\",7]"))` (and the `null`,
+>   `[7,"admin"]` rows). **11(d):** new `require_scope` / `AxiamUser::has_scope`
+>   (single-space split, whole-entry case-sensitive match, any-of; 401 without
+>   identity, 403 on a miss). **11(e)/(f)** documented in `guard.hpp` and the
+>   README (exclusion list per the contract: ID token, UserInfo, RPT, console
+>   sign-in token, mTLS device token; client-credentials `[]`). README
+>   carve-out removed; conformance §9–§13 in full at 1.69. ABI: `AxiamUser`
+>   layout changed, SOVERSION stays 6 (unreleased 1.4.0), stated in the
+>   changelog.
+> - **CPL-R5-1:** the bullet deleted.
+> - **#880:** not reproduced — `verify_logout_token` already selects by `kid`
+>   through `verify_with_reason` (C++ never had C's one-key fallback). Pins:
+>   server-shaped token against a two-key JWKS, kid-less and unknown kid →
+>   `unknown_kid`, rules 10 and 11 off the logout and ID-token paths (incl. a
+>   `purpose` claim, added in round 1) while `TokenAuthenticator` refuses all.
+> - **Verification:** CI configure (tests + examples) with g++ default
+>   standard, ctest 1694 cases / 0 failed; ASan+UBSan ctest pass;
+>   `gen_management.py --check` current. Not run: the g++-14/clang-18/g++-16/
+>   clang-23 matrix legs, gdb-repeat, coverage, docs. **Valgrind:** the first
+>   run aborted with `terminate called without an active exception` in
+>   `test_device_auth_tls.cpp`; the reviewer ran the full suite under valgrind at
+>   the baseline and at HEAD (0 errors each) and traced the abort to a
+>   pre-existing test defect (a joinable thread destroyed when the call under
+>   test throws), fixed test-only in rounds 1 and 2.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; low (the rules-10/11
+> test exercised rule 10 only), nits (11(e)/(f) label in the changelog;
+> exclusion list missing RPT and console token) — fixed in `672a621` together
+> with the TLS-test join. Round 2: medium-clean; one nit (client built after
+> the server thread started) — fixed in `db4c05c`. Commit-trailer nit not
+> changed (session-mandated). Nothing open.
+
 **OI-19 — `axiam-c-sdk` (#87) · Sonnet 5.5.** C-R3-1: narrow the "not retried"
 claim to what the code does and add the missing test for the management
 no-retry branch. C-R3-2: stop buffering a body the SDK will discard: enforce
@@ -661,6 +1420,55 @@ no-retry branch. C-R3-2: stop buffering a body the SDK will discard: enforce
 over the cap is refused without being held in memory. C-R3-3: move the
 narrowing refusal before the nonce is claimed and make it independent of
 `out != NULL`. Run the sanitizer build if the repository's CI has one.
+
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `764557b`; review fixes `5185925`
+> (round 1), `ac3a75d` (round 2).**
+>
+> - **C-R3-1:** the changelog and the `AXIAM_TRANSPORT_ERR_BODY_CAP` comment now
+>   say the management surface does not retry a capped response, while the §16
+>   authz check (idempotent POST) still does. New pin
+>   `test_a_capped_download_export_is_sent_once_and_reported_as_the_size_cap`
+>   (passed on unfixed code; removing the `!= BODY_CAP` condition makes it fail
+>   with "Expected 1 Was 3").
+> - **C-R3-2:** the defect was not the cap (already enforced in `write_cb`) but
+>   buffering and parsing a body nobody receives. New trailing member
+>   `discard_body` in `axiam_http_request_t`, set for `tenants.export_audit` and
+>   `privacy.download_export`: the transport counts the body against
+>   `max_response_bytes`, keeps a 64 KiB prefix for a non-2xx envelope, returns
+>   NULL on 2xx. `tests/test_transport_discard.c` (peak-RSS growth): unfixed, 3
+>   of 4 fail ("a refused discarded body was held in memory", "Expected 65536 Was
+>   41943040"). SOVERSION not bumped (the library allocates the struct; an old
+>   custom transport reads a prefix and is unaffected).
+> - **C-R3-3:** the narrowing check moved into `canonical_event()`, before the
+>   MAC and the nonce claim, independent of `out`; test seam
+>   `axiam_reactor_timeout_limit`. Unfixed: "Expected 1 Was 0" and the nonce was
+>   already recorded.
+> - **#880 and the OI-05 finding:** `find_key`'s one-key fallback removed (the
+>   ID-token and logout paths both go through `verify_core`/`lookup_key`).
+>   `tests/test_logout_kid.c`: the one-key kid-less logout and ID-token tests
+>   failed on unfixed code ("Expected 1 Was 0"); server-shaped two-key, unknown
+>   kid and rules-10/11-off-path tests are pins.
+>   `test_signature_only_path_keeps_kidless_fallback` pinned the old behaviour
+>   and was rewritten to `…_has_no_kidless_fallback`. The access-token path was
+>   unaffected (rule 12 refuses a kid-less token before any lookup). README
+>   conformance line 1.66 → 1.69.
+> - **Verification:** gcc 13 C11 Debug 87/87; ASan+UBSan (CI flags) 87/87;
+>   clang and gcc C23 87/87; valgrind on the five touched test binaries clean;
+>   `gen_management.py --check` current; TLS-bypass grep clean. Not run: the
+>   full valgrind sweep, gcc-16/clang-23 containers, conan/vcpkg, docs and
+>   coverage workflows.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L1 (a kid-less token
+> still forced a JWKS re-fetch and burned the §12.4 window), L2 (writable test
+> seam exported from `libaxiam.so`), L3 (no migration note for
+> `axiam_jwt_verify_ex` with `SIGNATURE_ONLY`), L4 (170 MiB test, 164 s under
+> ASan, made another test time out) — all fixed in `5185925` (NULL-kid early
+> return, seam only under `AXIAM_TESTING`, migration sentence, 3–8 MiB bodies:
+> 3 s under ASan). Round 2: medium-clean; low (no PR-time job compiled the
+> seam-free shipped configuration) and nit (one RSS check masked by the
+> previous test's peak) — fixed in `ac3a75d` (CI step building with
+> `AXIAM_BUILD_TESTS=OFF` and checking `nm -D`; 7 MiB body, mutation-checked).
+> Commit-trailer nit: not changed (session-mandated). Nothing open.
 
 **OI-20 — `axiam-swift-sdk` (#91) · Sonnet 5.5.** SWI-R1-1: rule 11 must refuse
 `purpose: null` (inspect the raw payload for the key, not a decoded optional).
@@ -674,11 +1482,489 @@ from `[]`, add `requireScope`. The sandbox has no Xcode: build and test with
 say so plainly in the `EXECUTED` block and rely on the repository's CI after the
 push. Do not claim a test run that did not happen.
 
+> **EXECUTED (2026-11-26, Sonnet 5.5), commit `fc21cb3`; review fixes `5d5f821`
+> (round 1) and `359a4aa` (round 2). NOT COMPILED, NOT RUN:** the sandbox has
+> no Swift toolchain (`which swift` empty; download.swift.org refused by the
+> proxy, 403), and the repository's CI runs only on pull requests, so the first
+> `swift build`/`swift test` is the PR's CI. Every "fails before the fix" below
+> is by inspection, not observed.
+>
+> - **SWI-R1-1:** `JwtClaims` no longer models `purpose`/`roles`;
+>   `VerifiedToken` reads `carriesPurpose` from the raw verified payload
+>   (`keys.contains("purpose")`), so `purpose: null` is refused
+>   (`GuardTests.testN14RefusesNullPurpose`). **SWI-R1-2:** README at 1.69, rows
+>   10–12. **SWI-R1-3:** changelog entry for `AuditLogEntry.organizationID`
+>   (checked against `ManagementModels.swift`). **SWI-R1-4/5:** new ID-token and
+>   logout fixtures (`makeIDToken`, `makeLogoutToken`), five ID-token mint sites
+>   moved to them; `assertRefused(reason:)` checks the reason.
+> - **O-1 (D-4):** `JwksVerifier` gets an injectable clock and
+>   `unknownKidCooldown` (60 s): one re-fetch per window, window opened before
+>   the fetch; `JwksUnknownKidCooldownTests` (fifty unknown kids → at most one
+>   fetch; rotated key accepted after one). **O-2 / #880:** kid-less and
+>   unknown-kid failures carry `unknown_kid` on the logout and ID-token paths;
+>   server-shaped two-key test, rules 10/11 off-path test. **O-3 (D-3):**
+>   `AxiamUser.rolesClaimPresent`, `scopes: [String]?`; `requireRole` 403 on an
+>   absent or non-string-array `roles` (was 401), never reads `scope`;
+>   `requireScope` (single-space split, any-of per contract, stacking = all).
+> - **Not anticipated:** the guard strips `unknown_kid` from its own 401 so
+>   §28.4's `invalid_token` stays uniform; the unknown-kid error no longer echoes
+>   the token's `kid`.
+> - **Verification run:** `cmp` of the three vendored files (identical);
+>   `python3 Scripts/gen_management.py --check` (current); TLS-bypass grep
+>   (clean). Nothing else.
+>
+> **Gate (Opus 5.5 reviewer).** Round 1: medium-clean; L-1 (rule 11(e)/(f)
+> docs missing), L-2 (rule 11(g) cases missing), L-3 (new-kid token arriving
+> during the window's in-flight re-fetch refused), L-4 (unbounded fetching on a
+> failing or empty JWKS), N-1 (payload parse failed open), N-2, N-3 — all fixed
+> in `5d5f821`; N-4 (trailer names a model) not changed: the session mandates
+> that attribution trailer. Round 2: medium-clean; L-5 (L-3's test did not
+> exercise the path), **L-6 (round 1's failure throttle refused every token for
+> 60 s after one failed refresh, even with keys cached)**, N-5 (11(e)/(f)
+> labels swapped), N-6 (bare `catch`) — all fixed in `359a4aa` (stale keys
+> served while a failure is throttled; gated-transport test; changelog
+> Security bullet). Round 2 was the last low/nit round. **Round 3 (medium,
+> found cross-SDK in the Java review):** the round-2 stale fallback had no age
+> bound — while every refresh failed, a key removed upstream kept verifying
+> indefinitely. Fixed in `3f91017` (`maxStale` 300 s: held keys served only
+> while younger than TTL + `maxStale` = 600 s; test
+> `testTheStaleFallbackIsBoundedToTtlPlusMaxStale`); re-reviewed: medium
+> resolved on every path, medium-clean; two nits (re-check the bound after the
+> awaited fetch; README sentence) fixed in `9c71d8b`. Nothing open. All of it
+> still uncompiled until the PR's CI.
+
+---
+
+## 5.3 Wave B2 — cross-SDK alignment decided by the owner (added 2026-11-27)
+
+The Wave B review gates left three cross-SDK questions open. The owner decided
+them on 2026-11-27; they are recorded here as decisions D-8 to D-10 and run
+before OI-30.
+
+| ID | Question | Decision |
+|---|---|---|
+| D-8 | The event consumer's discard/security event omits `exchange`, `routing_key` and `tenant_id` (§8 rule 4) — confirmed in Go and Rust | **Align every AMQP SDK** that omits them. |
+| D-9 | `AuthzRequest` and `AuditEventMessage` share the signing scheme and the tenant key, so a generic consumer verifies either on any queue (a signed audit event replayed onto an authz queue passes the signature check) | **Typed check in the SDKs:** the consumer is told the type it expects and refuses the other layout before decoding (discard event, reason `malformed`). One added MUST in CONTRACT §8, inside 1.69; no server change. |
+| D-10 | BOM body and JWKS stale-if-error, checked only in TS (BOM) and Java/Swift (JWKS) | **Check and align:** every AMQP consumer refuses a BOM-prefixed body cleanly (no crash, discard event `malformed`); every SDK's JWKS cache keeps cached keys after a failed refresh for at most 300 s beyond the TTL, then refuses (the Java/Swift bound). The bound becomes a §12.4 rule in CONTRACT 1.69. |
+
+- **OI-31 (Opus 5.5, `axiam`)** — the contract text for D-9 and D-10 (and a
+  check that §8 rule 4 already states D-8's fields normatively); re-vendor into
+  the eleven SDKs.
+- **OI-32 … OI-42 (one per SDK, the model of its Wave B task)** — test-first
+  alignment: D-8 and D-9 in the seven AMQP SDKs, D-10 BOM in the seven AMQP
+  SDKs, D-10 JWKS in all eleven (Java and Swift: pin only). One signed commit
+  each; one Opus 5.5 review gate each (§1.6).
+
+Task ↔ SDK: OI-32 TypeScript, OI-33 Python, OI-34 PHP, OI-35 C#, OI-36 Java,
+OI-37 Kotlin, OI-38 Go (Opus 5.5), OI-39 Rust, OI-40 C++, OI-41 C, OI-42 Swift.
+
+> **OI-31 — EXECUTED (2026-11-27)** · Opus 5.5 · `2e1572b`, round 1 `ae9ab5b`,
+> round 2 `3cb1c14` (`sdks/CONTRACT.md`, still 1.69;
+> `crates/axiam-amqp/tests/reference_vectors.rs`). No server code change.
+> - **D-8:** §8 rule 4 bound only the requester and had no `reason`; it now
+>   binds every SDK consumer to one warning event of exactly `timestamp`,
+>   `exchange`, `routing_key`, `tenant_id` (the consumer's own configured
+>   tenant, never read from the body) and `reason` (`malformed`, `unsigned`,
+>   `signature`, `key_version`, `stale`, `replay`), in a normative order:
+>   malformed · unsigned · layout/typed (malformed) · HMAC · decode (malformed)
+>   · key_version · stale · replay; the nonce is recorded only after every gate.
+>   An event-consumer API that took the key alone takes the tenant beside it.
+> - **D-9:** §8 step 2c "Typed: one configured type" (MUST). The three signed
+>   layouts are mutually exclusive by required members (`subject_id`;
+>   `actor_id`/`actor_type`/`outcome`; `allowed`). No new fixture vector: the
+>   two genuine vectors are the cross-type pair, pinned by
+>   `test_vectors_are_the_cross_type_negative_pair`, and the struct-level
+>   premise by `test_distinguishing_members_are_disjoint_across_the_three_types`
+>   (exact member lists, cross-deserialization fails in six directions).
+> - **D-10:** step 2a — first byte must be `{` (BOM refused, never stripped);
+>   "No body escapes the consumer" (no crash, no escaping error; event consumer
+>   ends in step g, the requester as obligation 4 prescribes). §12.4 rule 2 —
+>   TTL configured or from `max-age`, default and maximum 300 s (a clamped
+>   configured TTL emits §19 `config_clamped`); anchor = last successful fetch
+>   (200 with ≥ 1 key, or 304); an empty set is a failed refresh; held keys
+>   verify until exactly TTL + 300 s, never extended by a failed unknown-`kid`
+>   refresh; conformance test with an injected clock. C#'s `JwksCacheTtl`
+>   (clamped to 10 min today) and Java's adoption of an empty set must change.
+> - **Gate:** round 1 not medium-clean (requester "ends in step g" contradicted
+>   obligation 4 after `Close` and on direct reply-to; a "0 conforms" sentence
+>   contradicted the required test); both fixed with four low and four nits.
+>   Round 2 medium-clean; one low (`config_clamped`) and three nits fixed
+>   locally in `3cb1c14`. `cargo test -p axiam-amqp --test reference_vectors`
+>   5 passed (implementer and reviewer, separately); fmt, clippy, contract
+>   anchors (288 sections, unchanged) and conflict markers clean.
+> - **Re-vendored** into the eleven SDKs at `3cb1c14` (one chore commit each,
+>   pushed) before OI-32 … OI-42 started.
+
+> **OI-42 (Swift) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `c9aa412`, round 1
+> `0c355e1`. Item D only (no AMQP transport). **Nothing compiled or run: no
+> Swift toolchain in the sandbox; CI on the pull request is the first build.**
+> - `JwksVerifier` clamps `cacheTTL` to `maxCacheTTL` = 300 s (smaller values
+>   honoured); the stale margin is a fixed `static let maxStale = 300` (the
+>   internal parameter is gone); only a `200` is a successful fetch (any 2xx
+>   was, pre-existing; no conditional requests, so no `304`). No
+>   `config_clamped`: no caller can configure the TTL (`AxiamConfig` has no JWKS
+>   TTL; `AxiamClient` passes the default) — confirmed by the reviewer.
+> - Tests (`JwksStaleIfErrorTests`, injected clock): the §12.4 sequence, empty
+>   set, TTL clamp (fails on the unclamped code), TTL below 300 honoured,
+>   failed unknown-`kid` refresh never moves the anchor, 203/206 are failed
+>   refreshes (fails on the 2xx check). Failures on unfixed code are by
+>   reasoning only, traced by implementer and reviewer.
+> - **Gate:** round 1 medium-clean (three low: `maxStale` unclamped, missing
+>   unknown-`kid`-failure test, 2xx success) — fixed in `0c355e1`; round 2
+>   medium-clean, two cosmetic nits left (a long CHANGELOG line, re-wrapped in
+>   the OI-30 changelog pass; a commit-subject template deviation, not
+>   rewritten because pushed).
+> - **Not checked against readings 8–10 below** (settled after this gate
+>   closed): left to OI-30's cross-SDK check, with PHP.
+
+#### Settled cross-SDK readings (orchestrator, from the Wave B2 gates)
+
+The first gates showed the SDKs reading §12.4 rule 2 and §8 differently. Each
+reading below was settled once, sent to every running implementer and reviewer,
+and judged in every later gate. They interpret CONTRACT 1.69; they add no new
+obligation to the contract text. A candidate contract clarification for a
+later version is listed in OI-30.
+
+1. A `keys` array none of whose entries is a JWK object with a string `kty`
+   (`[{}]`, `[0]`, `[null]`) is not a JWKS document: a failed refresh. A set
+   of valid JWKs with no usable key (RSA-only) is a success, as the contract
+   says.
+2. The failed-refresh cooldown also applies after a failed *first* fetch: a
+   failing endpoint costs one fetch per window, cold cache included.
+3. Only a `200`, or a `304` answering a conditional request, is a success; a
+   `304` re-reads its `max-age`; the real transport, not only the test mock,
+   must expose `ETag`/`Cache-Control`; an `ETag` with control characters or
+   over 256 bytes is never stored or echoed.
+4. Commit trailer as §1.3.
+5. A configured TTL, when set, wins over an advertised `max-age` (both clamped
+   to 300 s); JWKS entries are parsed one by one, an unusable entry skipped.
+6. `exchange` and `routing_key` in the discard event exactly as the broker
+   reported them (`""` is a routing key).
+7. Negative age (clock stepped back): a refresh is due, and held keys are not
+   trusted while the age is negative; `keys` must be an array.
+8. No state lock held across network I/O; a usable held set never waits for
+   an in-flight fetch; single-flight fetch bounded by the SDK's own total
+   deadline on a scope detached from the caller; a caller's cancellation is
+   never recorded as a failed refresh and never opens a window.
+9. With a wall-clock time base, a window start more than one window in the
+   future means the clock stepped back: the window is over.
+10. Every TTL-driven refresh, successful or not, respects the 60 s window: an
+    advertised `max-age=0` never means one fetch per verification.
+
+> **OI-32 (TypeScript) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `034a08a`,
+> round 1 `7a387de`. Items A–D.
+> - `ConsumeOptions` requires `tenantId` and `eventType` (break inside the
+>   unreleased 1.4.0); one `refuse()` path logs exactly the five members; typed
+>   `EVENT_SPECS` replaces match-any layouts; step (5) decode of the verified
+>   bytes; first byte `{` in consumer and requester (the requester accepted a
+>   whitespace prefix signed over it; a throwing logger or `nack` escaped).
+> - JWKS: `jose`'s remote set (10 min, no stale-if-error) replaced by an own
+>   cache over `createLocalJWKSet`; background refresh while a held set is
+>   usable; own 5 s fetch timeout, no caller signal.
+> - **Gate:** round 1 not medium-clean (negative age trusted held keys); also
+>   a vacuous RSA-only pin, handler-error message on the security channel, an
+>   unguarded `ack` reported as `malformed`. Round 2 medium-clean; readings
+>   9 and 10 probed and met. Open nit: tests wait 40 ms of real time for
+>   background refreshes. 2131–2133 tests pass; `npm run build` not run (no
+>   `buf`), `npx tsup` used instead.
+
+> **OI-33 (Python) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `3bb4fbd`,
+> round 1 `3393478`, round 2 `31f7b5d`, round 3 `df15860`. Items A–D.
+> - `consume(..., *, tenant_id, message_type)`; shared `strict_json_object`
+>   requires first byte `{` (a validly signed whitespace-prefixed body was
+>   accepted); strict decode (required strings, canonical UUIDs, RFC 3339 with
+>   offset, `u8`), `NaN`/`Infinity` refused; routing key logged with `%r`.
+> - JWKS: own cache, fetch on a detached thread outside the lock; 10 s overall
+>   deadline from before `open()` with a socket-closing timer (covers TLS
+>   handshake and tunnel), 1 MiB cap; FastAPI, Django `__acall__` and the async
+>   client run the verifier off the event loop; redirects no longer followed
+>   (documented).
+> - **Gate:** round 1 not medium-clean (lock across I/O, `max-age=0`
+>   amplification, loose decode); round 2 not medium-clean (async adapters
+>   blocked the event loop); round 3 medium-clean, its lows fixed locally plus
+>   an HTTPS/proxy check (local TLS server: hostname verification, wrong-host
+>   refusal, header drip over TLS, CONNECT tunnel). 2665 tests pass. Not
+>   tested: a stall inside the TLS handshake or tunnel (fixed by reading). One
+>   unexplained single failure in an early full run never reproduced (three
+>   reviewers' runs clean).
+
+> **OI-34 (PHP) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `6275a61`, round 1
+> `bf2822b`, round 2 `5223087`. Items A–D.
+> - Typed `Consumer` (`SignedEventType`, `$tenantId`), `verifyAndDispatch()`
+>   takes exchange and routing key (required); `StrictJson` accepted a leading
+>   space signed over it (fixed); stricter decode.
+> - JWKS: TTL from configuration or `max-age` (configured wins), 300 s clamp
+>   with `ConfigClampedEvent`; conditional requests; per-entry parsing (an RSA
+>   key without `alg` no longer refuses the whole set); `keys` must be a list.
+> - **Gate:** round 1 not medium-clean (cold-cache cooldown missing, negative
+>   age read as fresh, ETag unvalidated); round 2 medium-clean, lows fixed
+>   locally in `5223087`. 2456 tests pass. **PHPStan level 6 not run**
+>   (`composer install` cannot reach github.com); reviewers read for it.
+>   Not checked against readings 8–10 (closed earlier): OI-30.
+
+> **OI-35 (C#) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `8c5af23`, round 1
+> `f07c9ae`, round 2 `7aab5b5`. Items A–D.
+> - `StartAsync` requires `AmqpEventType` and `tenantId`; one warning per
+>   discard; `ReplayGuard.Evaluate`; ordinal `hmac_signature` match; offset
+>   required on `issued_at`, `"D"` UUIDs.
+> - JWKS: `JwksCacheTtl` clamp 10 min → 300 s with `config_clamped` at
+>   construction (zero/negative = use `max-age`); single-flight `Task` replaces
+>   `_fetchLock`; detached fetch with a 30 s timeout; negative age refused;
+>   readings 9 and 10 (wall clock).
+> - **Gate:** round 1 not medium-clean (held key waited for the fetch; caller
+>   cancellation opened the unknown-`kid` window; negative age); round 2
+>   medium-clean, its low (a sub-60 s backward step locked out refresh) fixed
+>   locally. 1753 + 138 tests pass on net10.0; **net11.0 not built** (no SDK
+>   in the sandbox).
+
+> **OI-36 (Java) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `f739081`,
+> round 1 `90e8c9f`, round 2 `e17ef72`. Items A–D.
+> - `AmqpConsumer.consume(channel, queue, EventType, tenantId, …)`; the
+>   untyped overloads, released in 1.3.0/1.3.1, are removed (documented under
+>   Changed as a source-incompatible change forced by contract 1.69 D-9);
+>   `Hmac.verify(key, body)` deprecated, typed `verify(key, body, EventType)`.
+> - JWKS: empty set is a failed refresh; fetch moved to `java.net.http`
+>   (`Redirect.NEVER`, 2 s connect, 4 s total deadline on a copied future so
+>   cancellation reaches the exchange, bounded body subscriber enforcing
+>   50 KiB while reading); every failure counts; single-flight, held set never
+>   waits.
+> - **Gate:** round 1 not medium-clean (socket timeouts treated as caller
+>   cancellation → one fetch per token; no total deadline); round 2 not
+>   medium-clean (deadline did not cancel the exchange; cap applied after
+>   buffering — 400 MB probe peaked at 1.2 GB heap); round 3 medium-clean.
+>   Open nit: the static client captures `ProxySelector`/`Authenticator` at
+>   class load. 1708 tests pass.
+
+> **OI-37 (Kotlin) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `2e22a36`,
+> round 1 `7244486`, round 2 `1ab0fef`. Item D only.
+> - Nimbus retriever replaced by `HttpURLConnection` (no redirects, TLS
+>   unchanged, streamed size limit); TTL + 300 s bound, `max-age` clamp, 304,
+>   empty set, per-entry parsing; the 60 s refresh of known kids removed;
+>   detached single-flight `CompletableFuture` with a watchdog that disconnects
+>   at a 5 s total deadline (covers headers; DNS abandoned, not aborted).
+> - **Gate:** round 1 not medium-clean (fetch under the lock, no total
+>   deadline, interrupt opened the cooldown); round 2 not medium-clean (header
+>   phase unbounded — 12 s probe); round 3 medium-clean. Open lows (round
+>   limit): the shared watchdog disconnects before settling; slow DNS then a
+>   header drip leaves one orphan thread; an interrupt test relies on timing.
+>   Pre-existing: JWKS ignores `Builder.customCa`; `OidcRefreshTest` flake
+>   (C164-33).
+
+> **OI-38 (Go) — EXECUTED (2026-11-27)** · Opus 5.5 · `307650c`, round 1
+> `3728b6f`, round 2 `b59d9b7`. Items A–D.
+> - `Consume(ctx, ch, queue, msgType, tenantID, signingKey, handler, opts...)`
+>   (UUID tenant); `verifyEvent` checks the typed layout before the HMAC;
+>   requester refused a whitespace prefix it used to allow.
+> - JWKS: httprc cache replaced by an SDK-owned one; state lock never across
+>   I/O; single-flight fetch on `context.WithoutCancel` with a 10 s timeout;
+>   background refresh for a usable held set; separate TTL and forced windows.
+> - **Gate:** round 1 not medium-clean (lock across the fetch, caller
+>   cancellation recorded as failure, negative age); round 2 not medium-clean
+>   (reading 10: `max-age=0` gave 20 fetches); round 3 medium-clean, no
+>   findings. `-race` ×10 clean; coverage 94.7 % (floor 94.4 %). govulncheck
+>   not run (proxy).
+
+> **OI-39 (Rust) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `335347a`,
+> `4669a9d`, round 1 `28f4504`, round 2 `56f33b4`. Items A–D.
+> - `consume`/`consume_with_tls` take `ConsumerTarget{tenant_id, event_type}`;
+>   step (5) decode; first byte `{` in consumer and requester.
+> - JWKS: detached single-flight fetch (`tokio::spawn` + `watch` on native,
+>   `spawn_local` on wasm32), forced window opened at fetch start, SDK 10 s
+>   timeout on native, 60 s window after every failure, held set never waits.
+> - **Gate:** round 1 not medium-clean (fetch tied to the caller — 20 cancelled
+>   callers, 20 fetches; 10 s cold window; no SDK timeout with a caller-built
+>   client); round 2 not medium-clean (wasm32 build broken); round 3
+>   medium-clean. Open low: on wasm32 the fetch has no SDK timeout although
+>   reqwest's wasm `.timeout()` exists (follow-up issue at OI-30). The base
+>   commit came from a first agent that stalled repeatedly; a second agent
+>   added the addendum work on top. wasm-pack steps not run.
+
+> **OI-40 (C++) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `f2087f9`, round 1
+> `835b1ef`, round 2 `ef61260`. Item D only.
+> - TTL from `std::optional` configuration (wins) or `max-age`, 300 s clamp
+>   with an optional `TelemetryHook` emitting `config_clamped`; conditional
+>   304 only; fetch outside the state mutex, single-flight with a condition
+>   variable and an RAII in-flight guard.
+> - **Gate:** round 1 not medium-clean (`max-age` overrode the configured TTL;
+>   lock across the transport); round 2 medium-clean, mutation-verified (7 of
+>   8 mutations killed; the eighth explained the low fixed locally). 1713
+>   tests pass incl. ASan/UBSan; other compilers/standards not run. The
+>   constructor change is source- but not ABI-compatible (CHANGELOG).
+
+> **OI-41 (C) — EXECUTED (2026-11-27)** · Sonnet 5.5 · `d696f3f`, round 1
+> `7b551c8`, round 2 `e9baa28`, round 3 `d1c93e6`. Item D only.
+> - New `axiam_client_config_set_jwks_cache_ttl()` with `config_clamped`;
+>   libcurl transport now captures `ETag` and `Cache-Control`; conditional
+>   requests; `keys` must contain a JWK object; 200-only success; negative
+>   age refused; cooldown normalised after a backward step; single-flight
+>   flag + condition variable.
+> - **Gate:** four rounds (mediums in rounds 1–3: transport dropped the
+>   caching headers, `[{}]` adopted; negative age trusted, 2xx success;
+>   backward step stranded the cooldown, no in-flight guard); round 4
+>   medium-clean. 88/88 ctest incl. ASan/UBSan and a TSan run of the JWKS
+>   tests. Open nits: `CLOCK_REALTIME` timed wait, a cold-cache timeout
+>   message. Pre-existing, outside the diff: TSan reports a write-write race
+>   on cJSON's global error pointer, which nothing reads.
+
 ---
 
 ## 6. Wave C — close-out
 
 ### OI-30 — consistency, regression, pull requests · Sonnet 5.5
+
+> **OI-30 part 1 — EXECUTED (2026-11-27)** · Sonnet 5.5 · items 1 to 5 of this
+> section except the pull requests (6) and the #513 comment (7), and except the
+> status line, which the orchestrator changes after the PRs. Changelog commit
+> `22de309` (its `Claude-Session` trailer names a wrong session id; the
+> orchestrator rewords it). This block's commit follows it.
+>
+> **1. Vendored files.** All eleven SDK working trees (each at its last Wave B2
+> commit) were compared with `cmp` against `sdks/` and `diff -r` against
+> `proto/`: `CONTRACT.md`, `openapi.json` and `management-registry.json` are
+> byte-identical in all eleven; `proto/` is identical in the nine SDKs that
+> vendor it. **Zero differences.** The C and C++ SDKs have no `proto/`
+> directory (REST surface only, they vendor the three files alone).
+>
+> **2. Cross-SDK consistency.** The table below was built by reading each SDK
+> read-only (`git ls-files`, `git log`, grep), and every test identifier in it
+> was then grepped in its repository. **No cell is empty.** `n/a` means the SDK
+> has no §8 AMQP event consumer or authorization requester: Kotlin, Swift, C
+> and C++ have only the §22 reactor runtime, which Wave B2 did not touch
+> (D-8 to D-10 are stated for the §8 transport). "(pin)" marks a check that
+> passed on the code as it was. Paths are relative to the SDK's `src`/`Sources`
+> root unless they start with `tests/`, `test/` or name a test project. Java and
+> Swift JWKS were pinned rather than reimplemented (Java: empty set and fetch
+> path changed; Swift: TTL clamp added).
+>
+> | Item | Rust | TypeScript | Python | PHP | C# | Java | Kotlin | Go | Swift | C | C++ |
+> |---|---|---|---|---|---|---|---|---|---|---|---|
+> | #880 logout `kid` | `src/oidc/logout.rs` · `tests/logout_test.rs::a_server_shaped_logout_token_verifies_against_a_two_key_jwks` | `src/node/oidc.ts` (`verifyLogoutToken`) · `test/node/logoutServerShaped.test.ts` | `_oidc.py` (`_verify_logout_token_impl`) · `tests/test_logout_token_kid.py::test_a_server_shaped_logout_token_verifies_against_a_two_key_jwks` | `src/Oidc/OidcClient.php` · `tests/Contract169/LogoutTokenKidTest.php::testAServerShapedLogoutTokenVerifiesAgainstATwoKeyJwksWithTheSigningKeyNotFirst` | `AxiamClient.OidcDeviceExchangeLogout.cs` · `OidcLogoutTests.cs::AServerShapedLogoutToken_VerifiesAgainstATwoKeyJwks_…` | `AxiamClient.java` / `oidc/OidcOperations.java` · `AxiamClientLogoutServerShapedTest::aServerShapedLogoutTokenVerifiesAgainstATwoKeyJwks…` | `oidc/OidcSupport.kt` · `oidc/OidcLogoutServerShapedTest.kt` | `oidc_logout.go` · `oi16_logout_test.go::TestVerifyLogoutToken_880_ServerShapedTokenAgainstATwoKeyJWKS` | `Oidc/Logout.swift` · `TokenExchangeAndLogoutTests::testServerShapedLogoutTokenVerifiesAgainstATwoKeyJwks` | `src/oidc_logout.c` · `tests/test_logout_kid.c::test_a_server_shaped_logout_token_verifies_against_a_two_key_jwks` | `src/oidc.cpp` (`Client::verify_logout_token`) · `tests/test_oidc_grants.cpp` ("§12.7.3 rule 1 (1.69): a server-shaped logout token…") |
+> | #881 no unsigned opt-out | `src/amqp/authz_requester.rs` · `an_unsigned_response_is_discarded_and_the_check_keeps_waiting` | `src/amqp/authzRequester.ts` · `test/amqp/authzRequester.test.ts`, `authzResponse.test.ts` ("the opt-out no longer exists") | `amqp/_authz_requester.py` · `tests/test_amqp_authz_requester.py::test_unsigned_is_discarded_with_reason_unsigned…`, `test_the_requester_has_no_unsigned_response_option` | `src/Amqp/AuthzRequester.php` · `tests/Contract168/AuthzRequesterTest.php::testThereIsNoOptOutForUnsignedResponses` | `Amqp/AxiamAuthzRequester.cs` · `AxiamAuthzRequesterTests.cs::AnUnsignedResponse_IsDiscardedAsUnsigned_…` | `amqp/AuthzRequester.java` · `AuthzRequesterTest::theOptionsHaveNoUnsignedResponseSwitch` | n/a (no §8 AMQP transport) | `amqp/authz_requester.go` · `amqp/oi16_test.go::TestAuthzRequester_UnsignedResponseIsDiscardedAndTheCheckKeepsWaiting` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | #882 verify received bytes | `src/amqp/consumer.rs` · `genuine_message_with_characters_encoders_disagree_on_verifies`, `duplicate_key_or_trailing_content_is_nacked_and_the_handler_never_runs` (pin) | `src/amqp/consumer.ts` · `test/amqp/consumerReceivedBytes.test.ts` (pin) | `amqp/_consumer.py` · `tests/test_amqp_received_bytes.py::test_a_body_with_a_duplicate_key_or_trailing_content_is_nacked_and_never_dispatched` | `src/Amqp/Consumer.php`, `StrictJson.php` · `tests/Contract169/ConsumerReceivedBytesTest.php` | `Amqp/AxiamAmqpConsumer.cs`, `SignedJson.cs` · `AmqpConsumerTests.cs::ADuplicateKeyOrTrailingContent_IsNackedWithoutRequeue_…` | `amqp/AmqpConsumer.java` · `AmqpConsumerC2Test::pin882_*` (pin) | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/c2_forged_body_test.go::TestVerifyAndDispatch_C2_ForgedCaseVariantBodyIsNackedAndHandlerNeverRuns` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | #883 requester discard event | `src/amqp/authz_requester.rs` · `every_discard_path_logs_the_a2_event_without_secrets` | `src/amqp/authzRequester.ts` · `test/amqp/authzDiscardEvent.test.ts` | `amqp/_authz_requester.py` · `tests/test_amqp_authz_requester.py::test_the_discard_event_carries_exactly_the_a2_members_and_no_secret` | `src/Amqp/AuthzRequester.php` · `tests/Contract168/AuthzRequesterTest.php::testEveryDiscardPathLogsOneEventWithTheRoutingKeyTheOwnTenant…` | `Amqp/AxiamAuthzRequester.cs` · `AxiamAuthzRequesterTests.cs::EveryDiscard_LogsOneWarningWithTheRoutingKeyAndTheOwnTenant_…` | `amqp/AuthzRequester.java` · `AuthzRequesterTest::everyDiscardPathLogsTheEventWithRoutingKeyAndOwnTenant` | n/a (no §8 AMQP transport) | `amqp/authz_requester.go` · `amqp/oi16_test.go::TestAuthzRequester_A2_DiscardEventPerReason` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-8 consumer discard event fields | `src/amqp/consumer.rs` · `the_discard_event_carries_exchange_routing_key_and_the_configured_tenant_only` | `src/amqp/consumer.ts` · `test/amqp/consumerTyped.test.ts` ("malformed, unsigned and signature carry exactly the five members…") | `amqp/_consumer.py` · `tests/test_amqp_typed_consume.py::test_the_event_carries_exchange_routing_key_and_the_configured_tenant` | `src/Amqp/Consumer.php` · `tests/Contract169/TypedConsumerTest.php::testTheDiscardEventCarriesExactlyTheFixedFieldsAndNoSecret` | `Amqp/AxiamAmqpConsumer.cs` · `AmqpConsumerTests.cs::EveryDiscard_LogsOneEventWithTheFirstReasonThatApplies` | `amqp/AmqpConsumer.java` · `AmqpDiscardEventTest::theEventCarriesExchangeRoutingKeyAndTheConfiguredTenantAndNoSignatureOrNonce` | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/oi38_test.go::TestConsumer_D8_DiscardEventCarriesDeliveryAndConfiguredTenant` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-9 typed consume | `src/amqp/consumer.rs` (`ConsumerTarget`) · `each_vectors_wire_json_is_malformed_for_the_other_types_consumer` | `src/amqp/consumer.ts` (`EVENT_SPECS`) · `test/amqp/consumerTyped.test.ts` ("the handler is never given a body chosen by its layout…") | `amqp/_consumer.py` · `tests/test_amqp_typed_consume.py::test_the_other_types_vector_is_malformed_and_never_dispatched` | `src/Amqp/Consumer.php`, `SignedEventType.php` · `tests/Contract169/TypedConsumerTest.php::testAnotherTypesWireJsonIsMalformedAndNeverReachesTheHandler` | `Amqp/AxiamAmqpConsumer.cs`, `AmqpEventType.cs` · `AmqpConsumerTests.cs::TheOtherTypesGenuineSignedWireJson_IsRefusedAsMalformed_BeforeTheHmac_…` | `amqp/AmqpConsumer.java`, `EventType.java` · `AmqpDiscardEventTest::anotherTypesGenuineWireJsonIsMalformedAtTheTypedCheck_…` | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/oi38_test.go::TestTypedConsume_D9_OtherTypesVectorIsMalformedBeforeTheHMAC` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-10 BOM refused | `src/amqp/consumer.rs`, `authz_requester.rs` · `a_byte_order_mark_or_any_prefix_is_malformed_and_the_next_delivery_is_processed` | `src/amqp/consumer.ts`, `authzRequester.ts` · `test/amqp/consumerTyped.test.ts` ("BOM + a valid vector is malformed…") | `amqp/_consumer.py` · `tests/test_amqp_typed_consume.py::test_a_bom_prefixed_vector_is_malformed_and_the_next_delivery_is_served` | `src/Amqp/Consumer.php`, `StrictJson.php` · `tests/Contract169/TypedConsumerTest.php::testAByteOrderMarkedBodyIsMalformedAndTheNextDeliveryIsStillProcessed` | `Amqp/AxiamAmqpConsumer.cs` · `AmqpConsumerTests.cs::ABomPrefixedVector_IsRefusedAsMalformed_NeverStripped_…` | `amqp/AmqpConsumer.java` · `AmqpDiscardEventTest::aBomPrefixedValidVectorIsMalformedWithoutExceptionAndTheNextDeliveryIsProcessed` | n/a (no §8 AMQP transport) | `amqp/consumer.go` · `amqp/oi38_test.go::TestConsume_D10_BOMThenNextDeliveryIsProcessed` | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) | n/a (no §8 AMQP transport) |
+> | D-10 JWKS bounded stale-if-error | `src/token/jwks.rs` · `a_failed_refresh_keeps_the_held_keys_until_exactly_ttl_plus_300s` | `src/node/jwks.ts` · `test/node/jwksStaleIfError.test.ts` | `_jwks.py` · `tests/test_jwks_stale_if_error.py::test_conformance_failing_refresh_keeps_held_keys_until_ttl_plus_300` | `src/Auth/JwksVerifier.php` · `tests/Contract169/JwksStaleIfErrorTest.php::testTheBoundedStaleWindowConformanceSequence` | `Auth/JwksVerifier.cs` · `JwksStaleIfErrorTests.cs::ConformanceTest_HeldKeysRideOutAFailingEndpointForExactlyTtlPlus300Seconds` | `internal/JwksVerifier.java` · `JwksVerifierStaleBoundTest::conformance_failingRefresh_heldKidVerifiesUntilTtlPlus300ThenIsRefused_…` | `internal/JwksVerifier.kt` · `JwksStaleIfErrorTest.kt::conformance - failing refresh, bound at TTL plus 300 s, recovery after one fetch` | `internal/jwks/verifier.go` · `internal/jwks/oi38_stale_test.go::TestJWKS_StaleIfError_BoundedConformance` | `JWKS/JwksVerifier.swift` · `JwksStaleIfErrorTests::testHeldKeysServeUntilTtlPlus300ThenRefuseUntilAFetchSucceeds` (pin, plus the TTL clamp) | `src/jwks.c` · `tests/test_jwks_stale_bound.c::test_stale_bound_transport_error` (conformance run per failure mode) | `src/jwks.cpp` · `tests/test_jwks_stale.cpp` ("§12.4 rule 2 conformance: failing refresh serves held keys until TTL + 300 s, then refuses") |
+>
+> **3. Server regression** (sandbox, 4 CPUs; `cargo clean` first, swagger-ui
+> placeholder exported, `protoc` present, libxml2 present so default features
+> were used; every cargo run `-j 2`, exit code read from its log). Test files
+> touched by Wave A (`git diff --name-only 88fa1fa..HEAD`) and the lib tests of
+> the touched crates:
+>
+> | Command | Result |
+> |---|---|
+> | `-p axiam-amqp --test reference_vectors` | 5 passed |
+> | `-p axiam-api-grpc --test grpc_server_test` / `--test grpc_units` | 9 / 60 passed |
+> | `-p axiam-api-rest --test` `bearer_route_patterns_test` / `federation_first_time_sso_test` / `mcp_authorization_test` / `middleware_test` / `oauth2_flow_test` / `opaque_login_test` / `provider_id_token_test` / `resource_indicators_test` / `sec095_federated_login_gate_test` | 1 / 11 / 14 / 9 / 49 / 29 / 25 / 20 / 9 passed |
+> | `-p axiam-api-rest --lib` | 342 passed |
+> | `-p axiam-audit --test service_and_middleware` / `--lib` | 45 / 26 passed |
+> | `-p axiam-auth --test auth_service_test` / `--test directory_provisioning_test` / `--lib` | 94 / 27 / 296 passed (1 pre-existing ignored) |
+> | `-p axiam-core --lib` | 580 passed |
+> | `-p axiam-federation --lib` | 418 passed |
+> | `-p axiam-oauth2 --lib` | 678 passed |
+> | `-p axiam-server --lib` | 178 passed |
+>
+> All 23 invocations exited 0. Not run: the other integration tests of those
+> crates, `axiam-db`, `axiam-pki` and the rest of the workspace (not touched by
+> Wave A, and the disk does not hold a workspace test build). To stay inside the
+> disk quota the executables of finished test targets and `target/debug/incremental`
+> were deleted between invocations (never during one).
+>
+> `cargo clippy -j 2 --workspace --all-targets -- -D warnings` (default
+> features, the whole workspace in one run after a second `cargo clean`): exit 0,
+> 17 min.
+>
+> Other checks, all exit 0: `cargo fmt --all -- --check`;
+> `python3 scripts/check-crate-layering.py` (19 crates, 62 production edges, 4
+> declared test-only inversions); `python3 scripts/gen-management-registry.py
+> --check` (202 operations, in sync with openapi.json 1.3.1);
+> `python3 scripts/check-spec-digest.py`; `python3 scripts/check-conflict-markers.py`;
+> `bash scripts/check-doc-links.sh` (586 links). Website: `npm run
+> gen:contract-anchors` (288 sections at contract 1.69), `gen:threat-model` (529
+> threats) and `gen:api-index` each left the tree unchanged (`git status` clean);
+> `npm run build` and `npm run lint` pass (one pre-existing oxlint warning,
+> `src/lib/render.tsx`). `cargo clean` was run again at the end.
+>
+> **4. Server `CHANGELOG.md`.** One `## [Unreleased]` on top (Security, Added,
+> Changed, Fixed, Documentation) covering the 128 commits since `v1.3.1`:
+> the 2026-11-14 audit fixes (the Wave 1 code commits were squashed into the
+> review commit, so those entries come from the audit plan's EXECUTED blocks),
+> OI-01 to OI-07, the logout-token `kid`, contract 1.69 and OI-31. No version
+> bump, no tag, no date.
+>
+> **Open for the orchestrator (found, not changed here).** (a) The Wave A gate's
+> open point, the `docs/deployment/README.md` claim that an SDK-based relying
+> party verifies a `logout+jwt` token on the release it already runs, was checked
+> statically only: in every SDK at `v1.3.1`, `typ` is read on the DPoP and SSF
+> paths and not on the logout path (a grep of the tag, nothing was run for the
+> ten SDKs beyond Rust, which the gate covered). (b) Readings 8 to 10 for Swift
+> and PHP: the table shows the tests exist; their behaviour under readings 8 to
+> 10 was not re-judged here.
+
+> **OI-30 part 2 — EXECUTED (2026-11-27)** · orchestrator, with three Sonnet 5.5
+> agents for the SDK changelogs and one for the #893 changelog entries.
+>
+> **#893 merged into `main` during execution.** Per §0, `origin/main` was merged
+> into the branch (merge commit `2b517efb0`, no rebase, no conflicts).
+> `cargo clippy --workspace --all-targets -- -D warnings` on the merged tree:
+> exit 0 (whole workspace, `-j 2`). The fast scripts (`check-crate-layering.py`,
+> `gen-management-registry.py --check`, `check-spec-digest.py`,
+> `check-conflict-markers.py`) pass on the merged tree. #893 changed one
+> informative line of `sdks/CONTRACT.md` (the session-validation cache default,
+> now 5 s); `openapi.json`, `management-registry.json` and `proto/` are unchanged.
+> All eleven SDKs were re-vendored (`chore(contract): re-vendor CONTRACT.md after
+> the server merged ilpanich/axiam#893`), so item 1 holds again: zero differences.
+> Server `CHANGELOG.md` gained the #893 entries (`f8afc9ee5`).
+>
+> **Changelogs (owner's instruction: the top section is the unreleased one, with
+> everything the next tag will release).** Server: `d3ae7f117` (OI-30 part 1;
+> its first push carried a mistyped `Claude-Session` trailer and was rebuilt on
+> this branch with `--force-with-lease`, contents unchanged) and `f8afc9ee5`.
+> SDKs, one `docs(changelog): consolidate unreleased changes since v1.3.1` commit
+> each, every section above `[1.3.1]` merged into one `## [Unreleased]`, no
+> `## [1.4.0]` left, no version bump: rust `be96af1`, typescript `1518a425`,
+> python `a73c376`, java `07ed936`, kotlin `d033b1c`, csharp `0ef3d57a`, php
+> `1071ada`, go `6e4b096`, swift `e22c1a3`, c `211ba33`, cplusplus `8eebafe`.
+> Entries added for commits that had none: Rust (contract 1.69 re-sync;
+> `jsonwebtoken` 11 → 12), Python and Swift (contract 1.69 re-sync), Kotlin
+> (build-tool dependency floors for the Dependabot alerts). Rust, Python, PHP and
+> Swift made "in 1.4.0" phrases version-neutral; the other seven kept them, as
+> their manifests name 1.4.0 as the next version.
+>
+> **Follow-ups after the last gate records.** OI-42 (Swift) `c96fb83` and OI-34
+> (PHP) `7fd683a`, `a9373f0`, `667b81c` (`ext-curl` now required; JWKS requests
+> force `stream => false`; a stream handler handed directly is refused) were each
+> re-reviewed to medium-clean. On the OI-30 part 1 notes: the Swift and PHP tests
+> for readings 8–10 exist and were judged by those re-reviews, not by OI-30; the
+> `logout+jwt` claim holds (at v1.3.1 no SDK reads `typ` on the logout path, so
+> the `typ`-bearing token is accepted — checked by reading the code, not by
+> running it).
+>
+> **CI on the SDK pull requests** (opened as drafts so CI could start early,
+> then marked ready). Fixes, all test-only: C# `1af4f48` (the abort test raced
+> the server-side middleware: 15 failures in 40 local runs before, 0 in 40
+> after) and `ad7bddd` (CodeQL: the simulated application cookie now carries
+> `HttpOnly`/`Secure`); Rust `632e47a` (CodeQL: two no-leak assertions printed
+> the fixture secret in their failure message). The 15 CodeQL "hard-coded
+> cryptographic value" alerts on the Rust test fixtures (pre-existing on `main`,
+> re-reported because the lines moved) were left to the owner; the check later
+> went green.
+>
+> **Pull requests.** SDKs: rust #158, typescript #174, python #113, java #139,
+> kotlin #106, csharp #129, php #95, go #116, swift #94, c #90, cplusplus #92
+> (each closes its issue). The server pull request is the one that carries this
+> commit; it closes the fourteen server issues and states the merge order.
+> Subscribed to all twelve. Comments posted on #561 and #513 (left open).
+>
+> **Follow-up issues (low, security-relevant; owner's rule that low findings after
+> a medium-clean round become issues).** Each re-verified against the current
+> code before filing: rust #159 (no SDK timeout on the wasm32 JWKS fetch),
+> typescript #175, python #114, java #140, kotlin #107 (JWKS fetch ignores the
+> configured custom CA; Java's client is also static), kotlin #108 (suspend OIDC
+> APIs block a thread on the JWKS fetch), c #91 (vendored cJSON's process-global
+> error pointer races under concurrent parses). None for C#, PHP, Go, Swift, C++.
 
 1. **Vendored files.** In all eleven SDKs, `cmp` `CONTRACT.md`, `openapi.json`,
    `management-registry.json` and `diff -r proto/` against `axiam`. Zero
@@ -719,7 +2005,148 @@ push. Do not claim a test run that did not happen.
 
 ## Appendix A — cross-SDK rules (written by OI-05)
 
-> **A.1 — the unsigned-response opt-out (#881).** *To be written by OI-05.*
->
-> **A.2 — the discarded-response security event (#883).** *To be written by
-> OI-05.*
+Normative text: CONTRACT 1.69, §8 "Signed authorization responses" (consumer
+obligation 4 and "Against a server older than 1.68") and §34.13 (b), (c). The
+seven AMQP SDK tasks (OI-10 to OI-14, OI-16, OI-17) port what follows.
+
+### A.1 — the unsigned-response opt-out (#881): **remove it**
+
+**Verdict (D-2, second branch): no supported server configuration sends an
+unsigned `AuthzResponse` to a `reply_to` queue, so the opt-out is removed from
+all seven SDKs** (`AllowUnsignedResponses` in Go and the equivalents: Rust,
+TypeScript `acceptUnsignedResponses`, Python, Java, C#, PHP), together with its
+tests, its `unsigned` flag on the decision type where one exists, and its
+"accepted UNSIGNED" log line. 1.4.0 is unreleased, so nothing released breaks.
+
+Evidence, from the server code:
+
+1. **A 1.68+ server signs every response it publishes.** In
+   `crates/axiam-amqp/src/authz_consumer.rs`, `process_authz_request` has
+   exactly two outcomes: `AuthzOutcome::NackDrop` (no response at all: a bad
+   payload, a failed request signature, `key_version` below 2, a stale
+   `issued_at`, a replayed nonce, a nonce-store error) and
+   `AuthzOutcome::Publish`, which every answering branch — the engine's allow,
+   deny and `denied_by_rule`, the engine error, `tenant_suspended`, the tenant
+   read error — reaches only through `publish_signed`, which calls
+   `AuthzResponse::sign` (`crates/axiam-amqp/src/messages.rs`) unconditionally.
+   `AuthzResponse` is built nowhere else in the server. `start_authz_consumer`
+   publishes only that payload. There is no configuration that disables it:
+   `AmqpConfig::signing_key` is mandatory ("there is no unsigned code path",
+   D-05c; `resolve_signing_key` fails closed), and the minimal profile
+   (`AXIAM__AMQP__ENABLED=false`) consumes no authorization request at all.
+2. **A pre-1.68 server never answers on `reply_to`.** Before SA-15
+   (`2e5b126`, 2026-11-21) the consumer published every decision to
+   `queues::AUTHZ_RESPONSE` (`git show 2e5b126^:crates/axiam-amqp/src/authz_consumer.rs`,
+   the `basic_publish` with `queues::AUTHZ_RESPONSE.into()`); `reply_to` was not
+   read. No released server version contains SA-15 (the last release, 1.3.1, is
+   of 2026-11-11), so "1.68 server" means a server built from `main` after
+   SA-15.
+3. **The SDK requester never reads the shared queue.** All seven declare an
+   exclusive, broker-named reply queue and refuse one whose name starts with
+   `axiam.` (e.g. Go `NewAuthzRequester`: `strings.HasPrefix(queue,
+   serverQueuePrefix)`; the same `SERVER_QUEUE_PREFIX` constant in the other six).
+4. **A mixed-version rollout gains nothing from it either.** A request taken by
+   an old replica is answered unsigned on the shared queue, which the requester
+   does not read, so the check times out with or without the opt-out; a request
+   taken by a new replica is answered signed.
+
+So the only unsigned message that can arrive on a requester's reply queue is
+one published by something other than the server — and RabbitMQ lets any
+principal that may publish an authorization request publish to any queue whose
+name it knows (§8 trust boundary). The opt-out would have accepted such a forged
+`allowed: true` on its `correlation_id` alone. It is not a rolling-upgrade aid;
+it is the one path that admits the forgery the signature exists to refuse.
+
+**Canonical paragraph** for the README, the changelog entry and the doc comment
+of the requester (adapt the type and method names, keep the content):
+
+> The AMQP authorization requester requires an AXIAM server of 1.68 or later
+> (contract 1.68). Such a server signs every authorization response with the
+> tenant's AMQP subkey and answers on the requester's private `reply_to` queue.
+> A server older than 1.68 ignores `reply_to` and answers, unsigned, only on the
+> shared `axiam.authz.response` queue, which this requester never reads: against
+> it every check times out. There is no option to accept unsigned responses
+> (CONTRACT 1.69 §8): no AXIAM server sends one to a reply queue, so an unsigned
+> response can only have been published by someone else, and it is discarded and
+> logged. During a rolling upgrade from a pre-1.68 server, use REST or gRPC
+> authorization until every replica runs 1.68 or later.
+
+Changelog wording (under the 1.4.0 `[Unreleased]` section, "Removed" or
+"Changed"): *"The AMQP authz requester no longer offers an opt-out for unsigned
+responses (`<option name>`, added earlier in 1.4.0 and never released): no AXIAM
+server sends one to a reply queue, so the option could admit only a forged
+response (CONTRACT 1.69 §8, server #881). The requester requires a 1.68 server."*
+
+Tests: delete the opt-out's positive tests; keep (or add) one test that a
+well-formed **unsigned** response for an outstanding `correlation_id` is
+discarded with reason `unsigned`, the check keeps waiting, and the A.2 event is
+logged.
+
+### A.2 — the discarded-response security event (#883)
+
+CONTRACT §8 protocol rule 4 was written for a consumer and reads "tenant context
+(if available from other message fields)"; for a requester, whose discarded body
+is untrusted, that is ambiguous, so contract 1.69 fixes the event in §8 consumer
+obligation 4 (and points to it from protocol rule 4). Every SDK emits it on
+**every** discard path of the requester:
+
+| Discard (consumer obligation) | `reason` |
+|---|---|
+| rule 1: not JSON; `allowed` missing or not a boolean; `tenant_id`, `nonce` or `correlation_id` missing; the body does not end in the `hmac_signature` member, or it is not 64 hex digits | `malformed` |
+| rule 1: no `hmac_signature` member at all (an unsigned response; A.1) | `unsigned` |
+| rule 1: `hmac_signature` present but not a trailing 64-hex string (`null`, a number, not the last member) | `malformed` — **not** `unsigned`: the member exists, so the body is not an unsigned 1.67 answer, it is a broken one |
+| rule 2: the HMAC does not verify under the requester's own tenant subkey | `signature` |
+| rule 3: `tenant_id` is not the requester's tenant | `tenant` |
+| rule 3: no outstanding request has this `correlation_id` and `nonce` (a second answer to a retired request included) | `unknown_request` |
+
+One event per discard, at warning level, on the SDK's existing security-event
+channel (the logger the requester already uses for security warnings), carrying
+exactly:
+
+| Member | Meaning |
+|---|---|
+| `timestamp` | when the response was discarded, RFC 3339 UTC |
+| `exchange` | the exchange of the delivery as the broker reported it; `""` for the default exchange, where the server publishes every answer |
+| `routing_key` | the delivery's routing key: the requester's own reply queue name (the `amq.gen-…` queue it declared and sent as `reply_to`) |
+| `tenant_id` | the requester's **own** configured tenant, never the `tenant_id` the response claims |
+| `reason` | one of `malformed`, `unsigned`, `signature`, `tenant`, `unknown_request` |
+
+The canonical names are snake_case; an SDK MAY spell them in its language's case
+(`routingKey`, `tenantId` — TypeScript already does). **Confirmed (follow-up):** both are
+conformant — Go's snake_case `slog` keys and TypeScript's camelCase context keys are the same
+event. The `reason` values are not renamed: they are the closed vocabulary above, verbatim.
+
+**Classification order (follow-up decision, normative in CONTRACT 1.69 §8 obligation 4).** The
+reason is the first that applies: (1) not one JSON object → `malformed`; (2) no `hmac_signature`
+member → `unsigned`, whatever else is missing — so a body with neither `hmac_signature` nor
+`allowed` is `unsigned` (TypeScript, Python, PHP and Rust already do this; **Go changes**, it
+reports `malformed` today); (3) `hmac_signature` present but not a trailing 64-hex string, or
+`allowed` / `tenant_id` / `nonce` / `correlation_id` missing or ill-typed → `malformed`;
+(4) `signature`; (5) `tenant`; (6) `unknown_request`. Chosen because the presence of the
+signature member is the one test that needs no trust in the rest of the body, and four of the
+five ports already order it so.
+
+**After `Close` (follow-up decision).** Answers still buffered in, or arriving on, the reply queue
+after the requester was closed have no outstanding request to match. The requester MUST NOT
+decode, accept or dispatch them; it nacks them without requeue (or lets the exclusive,
+auto-delete queue go with its consumer). It does **not** emit the discard event for them: they
+are the expected tail of a shutdown, not evidence of a forgery, and logging them would turn every
+close under load into security noise. Go's behaviour (nack without requeue, no log) is the
+reference; an SDK MAY log them at debug level, without any member of the body. Where the transport seam
+cannot report a delivery's exchange or routing key, the requester supplies the
+values it consumes from (`""` and its reply queue name), which are the same for
+every delivery it can receive.
+
+**Never in the event, the message text or any other log line of the discard
+path:** a signature value (received or computed), a `nonce`, the subkey or
+master key, the body, or any member read from the body (`correlation_id`,
+`tenant_id` as claimed, `allowed`, `reason`, `reason_code`). The body is
+unauthenticated input, and `correlation_id` with `nonce` is what a same-tenant
+forger needs.
+
+**Log tests** (extend the existing ones): for at least the `signature`,
+`tenant` and `unsigned` paths, assert that `routing_key` equals the reply
+queue's name and `tenant_id` equals the requester's tenant, that `reason` is the
+expected code, and that neither the received `hmac_signature` hex, the computed
+one, nor the request's `nonce` appears anywhere in the emitted event (search the
+serialized event, message included).

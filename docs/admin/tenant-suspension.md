@@ -29,9 +29,12 @@ same request.
 and refresh tokens: the revocation runs only inside the status write, and no
 migration performs it. Before upgrading, set the organization's own tenant back
 to `Active` if it is suspended (it cannot be suspended any more, and while it is
-the organization's principals are refused). After upgrading, send
+the organization's principals are refused). Once the upgrade is complete
+(no replica of the previous release is still serving), send
 `{ "status": "Suspended" }` again for every tenant that should stay suspended;
-that write runs the revocation. See the
+that write runs the revocation, and an old replica's does not (it also still
+mints sessions for a suspended tenant, so a re-suspend sent mid-rollout can
+leave sessions that return when the suspension is lifted). See the
 [upgrade notes](../deployment/README.md#sa-13--tenant-suspension-is-enforced).
 
 ## What stops

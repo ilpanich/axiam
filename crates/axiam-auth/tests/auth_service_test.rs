@@ -3910,6 +3910,13 @@ async fn qr2_6_a_token_issued_after_the_epoch_in_the_same_second_is_accepted() {
         svc.decode_mfa_challenge_ids(&challenge_token).await.is_ok(),
         "a challenge issued after the epoch, in the same second, is not stale"
     );
+    // #872: the same holds for the unversioned copy, which the timestamp rule
+    // alone judges: whole-second comparison would refuse it.
+    let unversioned = without_version(&challenge_token, "axiam-mfa-challenge+jwt");
+    assert!(
+        svc.decode_mfa_challenge_ids(&unversioned).await.is_ok(),
+        "an unversioned challenge issued after the epoch, in the same second, is accepted"
+    );
 
     // A token issued *before* the epoch, in that same second, is still refused.
     let before = match iat_ns {
@@ -3917,7 +3924,6 @@ async fn qr2_6_a_token_issued_after_the_epoch_in_the_same_second_is_accepted() {
         None => chrono::DateTime::from_timestamp(iat + 1, 0).unwrap(),
     };
     set_alices_epoch(&db, user_id, before).await;
-    let unversioned = without_version(&challenge_token, "axiam-mfa-challenge+jwt");
     assert!(
         svc.decode_mfa_challenge_ids(&unversioned).await.is_err(),
         "an unversioned challenge issued before the epoch is refused"
@@ -3956,12 +3962,18 @@ async fn qr2_6_a_setup_token_issued_after_the_epoch_in_the_same_second_is_accept
         svc.decode_setup_token(&setup_token).await.is_ok(),
         "a setup token issued after the epoch, in the same second, is not stale"
     );
+    // #872: the unversioned copy is judged by the timestamp alone and must be
+    // accepted too.
+    let unversioned = without_version(&setup_token, "axiam-mfa-setup+jwt");
+    assert!(
+        svc.decode_setup_token(&unversioned).await.is_ok(),
+        "an unversioned setup token issued after the epoch, in the same second, is accepted"
+    );
     let before = match iat_ns {
         Some(ns) => chrono::DateTime::from_timestamp_nanos(ns + 1_000),
         None => chrono::DateTime::from_timestamp(iat + 1, 0).unwrap(),
     };
     set_alices_epoch(&db, user_id, before).await;
-    let unversioned = without_version(&setup_token, "axiam-mfa-setup+jwt");
     assert!(svc.decode_setup_token(&unversioned).await.is_err());
     assert!(
         svc.decode_setup_token(&setup_token).await.is_ok(),

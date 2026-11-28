@@ -893,7 +893,7 @@ impl<C: Connection + Clone> AppState<C> {
             // `NetworkWriteTasks::on` itself.
             network_writes: crate::network_gate::NetworkWriteTasks::default(),
             org_repo: SurrealOrganizationRepository::new(db.clone()),
-            tenant_repo,
+            tenant_repo: tenant_repo.clone(),
             tenant_org_cache,
             client_managed_by_cache: Arc::new(Default::default()),
             system_audit_org_cache: Arc::new(Default::default()),
@@ -1030,7 +1030,9 @@ impl<C: Connection + Clone> AppState<C> {
                 .with_crypto_gate(axiam_federation::saml_gate::CryptoGate::new(
                     Arc::clone(&crypto_semaphore),
                     std::time::Duration::from_secs(hash_acquire_timeout_secs),
-                )),
+                ))
+                // #877: as the composition root attaches it.
+                .with_tenant_admission(Arc::new(tenant_repo)),
             },
             // No encryption key in a test harness: the feature is then
             // unavailable, exactly as on a deployment without one, and a test

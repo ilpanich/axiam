@@ -254,9 +254,31 @@ impl User {
         iat_ns: Option<i64>,
         version: Option<i64>,
     ) -> bool {
+        self.superseded_by_version_or(version, || {
+            self.credential_changed_since_claims(iat_secs, iat_ns)
+        })
+    }
+
+    /// As [`Self::credential_superseded`], for an artefact whose issue time is
+    /// a full-precision `DateTime` (an OPAQUE sealed login) rather than
+    /// `iat`/`iat_ns` claims: the version alone when present, otherwise the
+    /// timestamp with ties refused ([`Self::credential_changed_since`]).
+    #[must_use]
+    pub fn credential_superseded_at(&self, issued_at: DateTime<Utc>, version: Option<i64>) -> bool {
+        self.superseded_by_version_or(version, || self.credential_changed_since(issued_at))
+    }
+
+    /// The one rule behind [`Self::credential_superseded`] and
+    /// [`Self::credential_superseded_at`]: a present `version` decides alone;
+    /// only an unversioned artefact runs `by_timestamp`.
+    fn superseded_by_version_or(
+        &self,
+        version: Option<i64>,
+        by_timestamp: impl FnOnce() -> bool,
+    ) -> bool {
         match version {
             Some(_) => self.credential_version_stale(version),
-            None => self.credential_changed_since_claims(iat_secs, iat_ns),
+            None => by_timestamp(),
         }
     }
 
@@ -703,8 +725,20 @@ mod tests {
         assert!(user.credential_superseded(epoch.timestamp() - 60, None, None));
         // Tie at full precision is refused.
         assert!(user.credential_superseded(epoch.timestamp(), Some(epoch_ns), None));
-        // Strictly after is accepted.
-        assert!(!user.credential_superseded(epoch.timestamp() + 60, Some(epoch_ns + 1), None));
+        // Strictly after, at full precision, is accepted.
+        assert!(!user.credential_superseded(epoch.timestamp(), Some(epoch_ns + 1), None));
+        // #872: same whole second as the epoch, after it, with a sub-second
+        // claim: accepted. A whole-second comparison would refuse it.
+        let second_start = DateTime::from_timestamp(epoch.timestamp(), 0).unwrap();
+        let user_at_second_start = user_with_epoch(Some(second_start), 3);
+        let start_ns = second_start.timestamp_nanos_opt().unwrap();
+        assert!(!user_at_second_start.credential_superseded(
+            second_start.timestamp(),
+            Some(start_ns + 500_000_000),
+            None
+        ));
+        // Without the sub-second claim the same second is refused (fallback).
+        assert!(user_at_second_start.credential_superseded(second_start.timestamp(), None, None));
         // No stored epoch: nothing refused.
         let never = user_with_epoch(None, 0);
         assert!(!never.credential_superseded(0, None, None));

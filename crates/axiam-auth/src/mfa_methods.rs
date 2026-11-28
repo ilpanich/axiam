@@ -361,8 +361,14 @@ impl<
         // otherwise still accept after the reset. Last (QR1-7): it is a
         // separate write, and a failure of it must not return before the
         // sessions and refresh tokens above are revoked. Confirming that
-        // enrolment needs a session or a setup token, both of which the reset
-        // has just ended or will refuse, and a retry clears it.
+        // enrolment needs a session or a setup token. The reset has just ended
+        // every session, but a pending secret that survived a failed clear is
+        // NOT refused later: the account has no factor now, so its next
+        // password sign-in is
+        // handed a fresh setup token, and `confirm_mfa_with_setup_token`
+        // checks the code against that pending secret (`verify_enrolment_code`).
+        // That costs nothing: such a sign-in already needs the password and
+        // could enrol a TOTP of its own. A retry of the reset clears it.
         self.user_repo
             .clear_pending_mfa_secret(tenant_id, user_id)
             .await?;

@@ -11,13 +11,21 @@
 > **Sourcing note.** Claims about Zitadel cite `github.com/zitadel/zitadel`:
 > release pages, protobuf definitions, `cmd/defaults.yaml` and the
 > documentation sources under `apps/docs/content/`, which zitadel.com/docs is
-> built from. Performance figures come from this repository's run-5
-> benchmark, which measured Zitadel v4.16.2. **Run 6 is the re-measurement:** it
-> measures Zitadel v4.19.4, Keycloak 26.8.0 and authentik 2026.8.3 against AXIAM
-> `1.0.0-beta18` on the same G-box with the run-5 caps (G-10; the authentik
-> target now exists in `benchmarks/targets/authentik/`). Its numbers follow the
-> run; until then every performance figure here is run 5's, taken against
-> Zitadel v4.16.2.
+> built from. **Performance figures come from the seventh benchmark draft**
+> (`benchmarks/PUBLIC_BENCH_ANALYSIS.md`, runs 6, 6b and 6c, G-10), which
+> measured **Zitadel v4.19.5** (the feature claims in this document stay at
+> v4.19.4, the baseline's release) against AXIAM **1.3.0** (run 6) and
+> **1.3.1** (run 6b) on **SurrealDB 4.0.1**, on one 16-vCPU AMD EPYC Genoa cloud
+> VM, 2026-11-20 to 2026-11-24 (§0). Head-to-head figures come from **run 6
+> (every server and database at 2 CPUs) and run 6b pass B (4 CPUs) only**, and
+> every figure below names its run. **Run 6 is not comparable with run 5** (host,
+> datastore and release all changed), so the run-5 multiples (about 6.5×
+> client credentials, 4.8× introspection) are replaced, not kept. Run 6c
+> (SurrealDB 3.3.5, unsupported, benchmark-only) enters this document only as
+> the size of the SurrealDB 4.0.1 regression (§4 of the draft, cited in §4 item
+> 4 of this document), never in a comparison with Zitadel. Rows of the
+> draft that failed its validity gate, which for Zitadel are password login and
+> the fallback refresh operation, support no claim in this document.
 
 ## 1. Overview
 
@@ -65,8 +73,10 @@ ahead on the polish of a mature hosted product.
 | Extension model | Reactors (external AMQP actors, any SDK language), HMAC-signed webhooks | Actions v2: signed webhook/call targets on request, response, function and event | [Z17] |
 | APIs | REST, gRPC, AMQP | gRPC, connectRPC and REST for every resource (management-oriented) | [Z1] |
 | Rate limiting | **On by default**, posture presets | No built-in limiter; lockout off by default (`MaxPasswordAttempts: 0`) | [Z18] |
-| Server RSS (run 5, v4.16.2; run 6 re-measures v4.19.4) | 88–119 MiB | 138–154 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5 |
-| Whole-stack RSS (run 5, under load) | 375–533 MiB (server + SurrealDB + RabbitMQ). *At rest, measured 2026-10-05 (G-8): **207 MiB** minimal (server + SurrealDB, no broker), 331 MiB full — a different metric, see the note in §5* | 281–457 MiB (server + PostgreSQL) | idem |
+| Server RSS (run 6, AXIAM 1.3.0, Zitadel v4.19.5, 2 CPUs, SurrealDB 4.0.1) | 54–75 MiB | 127–137 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §7 |
+| Whole-stack RSS at rest, freshly started (run 6, container method, median of 6–8 samples), **two views that disagree** | **373** MiB resident set (server 92 + SurrealDB 119 + RabbitMQ 162); cgroup working set 216 MiB | 593 MiB resident set (server 167 + PostgreSQL 427); cgroup working set **172** MiB | idem §7 |
+| Whole-stack memory under load (run 6, p0, 2 CPUs, MiB) | client credentials 359, introspection 414, JWKS 312 | client credentials 352, introspection 399, JWKS 263 | idem §10.1 |
+| Resting footprint, minimal profile (**not re-measured in run 6**) | *Measured 2026-10-05 (G-8, T23.8.3, native server binary, SurrealDB 3.2.5): **207.3 MiB** minimal (server + SurrealDB, no broker), 330.9 MiB full; a different method, not comparable cell for cell with the container figures above (§5 of the draft, Appendix A)* | — | idem Appendix A |
 | Licence | Apache-2.0 | AGPL-3.0 (since v3) | [Z4] |
 
 ## 3. AXIAM gaps, by priority
@@ -86,15 +96,18 @@ ahead on the polish of a mature hosted product.
 **P2 — valuable, not blocking**
 
 3. **Resting footprint of the whole stack.** AXIAM's server is lighter, but
-   its whole stack (SurrealDB and RabbitMQ) idles above Zitadel's server plus
-   PostgreSQL (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5, §10). A documented
+   by cgroup working set its whole stack (SurrealDB and RabbitMQ) idles above
+   Zitadel's server plus PostgreSQL (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5, §10). A documented
    "AMQP-less" profile, or a smaller broker footprint, would remove the one
    efficiency cell Zitadel wins. *Partly closed by G-8 (Phase 23, W5,
    2026-10-05): the minimal profile runs without RabbitMQ and its resting
    footprint is measured and published (207 MiB at rest against 331 MiB for the
-   full stack). Whether the cell flips is not claimed: Zitadel's 281–457 MiB is
-   an under-load, container-averaged figure and no Zitadel stack was measured at
-   rest by the same method.*
+   full stack). Run 6 (2026-11-20/21) then measured both stacks at rest with one
+   container method, and the answer depends on the measure: **by resident set
+   AXIAM's full stack is smaller (373 MiB against Zitadel's 593 MiB), by cgroup
+   working set Zitadel's is (172 MiB against 216 MiB)**, because PostgreSQL's
+   shared buffers count in its resident set (draft §7). The minimal profile was
+   not re-measured in run 6, so the cell is not claimed either way for it.*
 4. **RFC 7592 client management** — **closed (2026-10-03, G-4).** Zitadel
    added it next to RFC 7591 in v4.17.0 [Z9]. AXIAM now serves `GET`/`PUT`/`DELETE
    /oauth2/register/{client_id}` behind a per-client registration access
@@ -129,13 +142,22 @@ ahead on the polish of a mature hosted product.
 3. **Certificates and IoT.** AXIAM includes a per-organization CA,
    per-tenant issuance and in-process mTLS for devices (`crates/axiam-pki/`).
    Zitadel has no certificate-based client or user authentication [Z6].
-4. **Data-plane performance.** Run 5 measured about 6.5× Zitadel's
-   client-credentials throughput and 4.8× its introspection rate (against
-   v4.16.2; run 6 re-measures v4.19.4 on the same G-box with the run-5 caps, and
-   its numbers follow). AXIAM's gRPC userinfo served 12 307/s, against
-   Zitadel's 191–201/s on its own gRPC surface
-   (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1). Zitadel's gRPC is a management
-   API; AXIAM's is a data plane.
+4. **Data-plane performance.** Run 6 (AXIAM 1.3.0, Zitadel v4.19.5, SurrealDB
+   4.0.1, 2 CPUs per server and database, `benchmarks/PUBLIC_BENCH_ANALYSIS.md`
+   §1): machine-to-machine token issuance **3.8×** Zitadel's at 2 CPUs (1,610
+   against 425 req/s, p50 14.9 against 109.2 ms) and **4.6×** at 4 CPUs (run 6b
+   pass B, 3,234 against 704); introspection 1,582 against 827 req/s at 2 CPUs
+   and 3,272 against 1,522 at 4; JWKS **21×** (43,640 against 2,031 req/s);
+   REST userinfo 1.6–1.8× (1,411 against 859 and 2,963 against 1,677). AXIAM's
+   gRPC userinfo served 3,078 req/s at 2 CPUs and 6,369 at 4 CPUs — **12.6×
+   and 28×** Zitadel's gRPC userinfo, which held 245 and 226 req/s at a flat
+   200 ms p50 at both cap levels with neither of its containers busy, a fixed
+   floor the draft does not explain and does not quote as a product ceiling
+   (§1, §8). Zitadel's gRPC is a management API; AXIAM's is a data plane. These
+   are **database-bound** figures for AXIAM (SurrealDB at its cap, §5), not its
+   server's limit, and the SurrealDB 4.0.1 server costs AXIAM 13–38% of its
+   throughput at 2 CPUs and 8–37% at 4 (run 6c, §4). Zitadel's password login
+   and refresh cells failed the draft's validity gate and make no claim here.
 5. **Safe defaults.** AXIAM enables rate limiting by default. Zitadel ships
    no limiter and leaves lockout disabled (`MaxPasswordAttempts: 0`) [Z18].
    Zitadel's 4.16–4.19 line also fixed several critical account-takeover
@@ -152,6 +174,7 @@ ahead on the polish of a mature hosted product.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-11-26 | G-10 (benchmark currency, #561) closed for this comparison: the performance statements are rewritten from the seventh benchmark draft (`benchmarks/PUBLIC_BENCH_ANALYSIS.md`), which measured **Zitadel v4.19.5** against AXIAM **1.3.0** (run 6, 2 CPUs, 2026-11-20/21) and **1.3.1** (run 6b pass B, 4 CPUs, 2026-11-21/22) on **SurrealDB 4.0.1**, on one 16-vCPU AMD EPYC Genoa cloud VM; run 6c (2026-11-23/24, SurrealDB 3.3.5, unsupported, benchmark-only) is cited only as the size of the SurrealDB 4.0.1 regression. The run-5 figures (about 6.5× client credentials, 4.8× introspection, a 12 307/s gRPC userinfo path against 191–201/s, server RSS 88–119 against 138–154 MiB, whole-stack RSS 375–533 against 281–457 MiB) are **replaced, not kept**: run 6 is not comparable with run 5. The resting footprint is stated both ways (resident set: AXIAM smaller; cgroup working set: Zitadel smaller); the 207 MiB minimal-profile figure stays labelled as the 2026-10-05 measurement because it was not re-measured. Zitadel's login and fallback refresh cells failed the draft's validity gate and are not used. The header, the three RSS rows and §4 item 4 changed; the feature claims did not. | — |
 | 2026-10-09 | Outbound SCIM limit restated (1.0.0, #550, documentation only): the per-target breaker shipped — a target with five consecutive failures is not called again until its backoff has passed — so an unresponsive downstream no longer holds a replica's other targets back for every queued reference; more than one delivery in flight per replica is deferred to 1.0.x. | — |
 | 2026-10-06 | W6 comparison refresh (G-10, G-11). **G-10 (benchmark currency)**: the run-5 figures stay as they are, because they are still run 5's against Zitadel v4.16.2; the header, the RSS row and §4 item 4 now say that run 6 re-measures Zitadel v4.19.4, Keycloak 26.8.0 and authentik 2026.8.3 against AXIAM `1.0.0-beta18` on the same G-box with the run-5 caps, and that numbers follow. **G-11 (RADIUS)**: decided (D-77) to decline a native RADIUS front end for now; the G-11 spike's search found no Zitadel RADIUS feature, so no row here changes, and AXIAM publishes no CRL today (T-102 reopened), see [the record](radius-eap-tls-spike-2026-10-06.md). **Not-do statement:** outbound SCIM delivers one attempt at a time per replica, so a slow downstream can stall that replica's provisioning until #550 (P23W5-07) is decided. This comparison has no CIBA row. | [Z16] |
 | 2026-10-05 | G-8 (AMQP-less minimal profile and whole-stack footprint) complete on the Phase 23 W5 branch: `AXIAM__AMQP__ENABLED=false` runs AXIAM on SurrealDB alone (`docker-compose.minimal.yml`, single instance by definition), and the resting footprint is measured with one method for both stacks — **207.3 MiB** minimal (server + SurrealDB) against **330.9 MiB** full (+ RabbitMQ), at rest, server as a native release binary (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5). The whole-stack cell above gains a dated note rather than a changed Zitadel figure: that figure was taken under load and no Zitadel stack was measured at rest, so P2 item 3 is partly closed, not flipped. | — |

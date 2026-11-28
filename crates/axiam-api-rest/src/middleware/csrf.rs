@@ -35,7 +35,8 @@ pub const COOKIE_OP_SESSION: &str = "axiam_op_session";
 pub const HEADER_CSRF: &str = "X-CSRF-Token";
 
 // ---------------------------------------------------------------------------
-// Exempt path suffixes — no CSRF token needed on these endpoints
+// Exempt paths (CSRF_EXEMPT_PATHS, exact match; CSRF_EXEMPT_PREFIXES, prefix) —
+// no CSRF token needed on these endpoints
 // ---------------------------------------------------------------------------
 
 /// Full request paths that are exempt from CSRF validation (exact match).

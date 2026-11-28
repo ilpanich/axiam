@@ -336,7 +336,10 @@ async fn shared_rate_limit_layer_is_cloneable() {
 }
 
 /// SA-44: the inbound message cap is stated, not inherited from tonic. A pin
-/// of the constant only; the behaviour is proven by the test below.
+/// of the constant only. The test below checks that the running server refuses
+/// a message over 4 MiB, but it does not prove the `max_decoding_message_size`
+/// calls are what enforce it: it would also pass without them while tonic's own
+/// default is 4 MiB.
 #[test]
 fn inbound_message_cap_is_four_mib() {
     assert_eq!(

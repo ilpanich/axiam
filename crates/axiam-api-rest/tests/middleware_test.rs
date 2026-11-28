@@ -569,3 +569,72 @@ async fn scope_authorization_check() {
     let resp = actix_web::test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 }
+
+/// #880 (contract 1.69) pin: a back-channel logout token, now signed with the
+/// `kid` of its JWKS key, is not a bearer access token. Minted by the server's
+/// own `issue_logout_token`, issued by the root issuer, and addressed both to a
+/// client and to `axiam:user` (so the audience is not what refuses it), it is
+/// refused `401` by both extractors, strict and in the relaxed rolling-upgrade
+/// mode, while an ordinary access token on the same routes is admitted.
+#[actix_web::test]
+async fn a_logout_token_is_not_a_bearer_access_token() {
+    let strict = test_auth_config(900);
+    let mut relaxed = strict.clone();
+    relaxed.require_access_token_typ = false;
+
+    for config in [strict, relaxed] {
+        let control = issue_access_token(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            &config,
+            Uuid::new_v4().to_string(),
+            axiam_auth::token::AUD_USER,
+        )
+        .unwrap();
+        let logout_tokens: Vec<String> = ["oa_0123456789abcdef0123456789abcdef", "axiam:user"]
+            .into_iter()
+            .map(|aud| {
+                axiam_oauth2::logout::issue_logout_token(
+                    config.root_issuer(),
+                    aud,
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    &config,
+                )
+                .unwrap()
+            })
+            .collect();
+        let relaxed_mode = !config.require_access_token_typ;
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(web::Data::new(config))
+                .route("/me", web::get().to(echo_user))
+                .route("/tenant", web::get().to(echo_tenant)),
+        )
+        .await;
+
+        for path in ["/me", "/tenant"] {
+            let req = actix_web::test::TestRequest::get()
+                .uri(path)
+                .insert_header(("Authorization", format!("Bearer {control}")))
+                .to_request();
+            let resp = actix_web::test::call_service(&app, req).await;
+            assert_eq!(resp.status(), 200, "control on {path}");
+
+            for token in &logout_tokens {
+                let req = actix_web::test::TestRequest::get()
+                    .uri(path)
+                    .insert_header(("Authorization", format!("Bearer {token}")))
+                    .to_request();
+                let resp = actix_web::test::call_service(&app, req).await;
+                assert_eq!(
+                    resp.status(),
+                    401,
+                    "a logout token was admitted on {path} (relaxed: {relaxed_mode})"
+                );
+            }
+        }
+    }
+}

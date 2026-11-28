@@ -12,6 +12,7 @@ use axiam_core::models::federation::{
     CreateFederationLink, FederationConfig, FederationLink, FederationProtocol, ProviderKind,
 };
 use axiam_core::models::federation_claims::{MappedIdentity, map_identity};
+use axiam_core::models::tenant::SharedTenantAdmission;
 use axiam_core::models::user::{CreateUser, User};
 use axiam_core::repository::{
     FederationConfigRepository, FederationLinkRepository, UserRepository,
@@ -211,6 +212,36 @@ pub struct OidcFederationService<FC, FL, UR> {
     discovery_cache: Arc<DiscoveryCache>,
     /// AES-256-GCM key for decrypting the federation client_secret at use-time (SEC-045).
     encryption_key: [u8; 32],
+    /// SA-13 / #877 — whether the requesting tenant admits its principals,
+    /// asked by the browser callbacks once the provider's answer has verified
+    /// and before the user and the federation link are written. Attached with
+    /// [`Self::with_tenant_admission`]; see [`admit_tenant`].
+    tenant_admission: Option<SharedTenantAdmission>,
+}
+
+/// The tenant check of a federated browser callback (SA-13, #877).
+///
+/// Called **after** the upstream ID token, userinfo answer or SAML assertion
+/// has verified and **before** `provision_or_link_identity`: a suspended
+/// tenant must not gain users or federation links from whoever its provider
+/// will authenticate, and the `login.post_auth` reactor must not be asked
+/// about a sign-in that cannot complete. Never earlier — at the login-state
+/// read, say — because then a caller holding nothing the provider vouched for
+/// could tell a suspended tenant from an active one (SR1-8). The session step
+/// (`AuthService::create_session_and_tokens`) still asks too, as a backstop.
+///
+/// `None` (a harness that does not exercise tenant lifecycle) admits.
+pub(crate) async fn admit_tenant(
+    admission: Option<&SharedTenantAdmission>,
+    tenant_id: Uuid,
+) -> Result<(), FederationError> {
+    let Some(admission) = admission else {
+        return Ok(());
+    };
+    admission.admit(tenant_id).await.map_err(|e| match e {
+        AxiamError::TenantSuspended => FederationError::TenantSuspended,
+        other => FederationError::Internal(other.to_string()),
+    })
 }
 
 impl<FC, FL, UR> OidcFederationService<FC, FL, UR>
@@ -244,7 +275,27 @@ where
             cache,
             discovery_cache,
             encryption_key,
+            tenant_admission: None,
         }
+    }
+
+    /// Attach the tenant lifecycle check (SA-13, #877): a browser callback for
+    /// a tenant that does not admit its principals is refused
+    /// [`FederationError::TenantSuspended`] once the provider's answer has
+    /// verified, before any user or federation link is written. The
+    /// composition root always attaches the tenant repository.
+    #[must_use]
+    pub fn with_tenant_admission(mut self, admission: SharedTenantAdmission) -> Self {
+        self.tenant_admission = Some(admission);
+        self
+    }
+
+    /// The requesting tenant's admission; see [`admit_tenant`].
+    pub(crate) async fn admit_requesting_tenant(
+        &self,
+        tenant_id: Uuid,
+    ) -> Result<(), FederationError> {
+        admit_tenant(self.tenant_admission.as_ref(), tenant_id).await
     }
 
     // ------------------------------------------------------------------
@@ -617,6 +668,9 @@ where
                     "no external subject could be mapped from the ID token".into(),
                 )
             })?;
+
+        // #877 — the ID token has verified; nothing has been written yet.
+        self.admit_requesting_tenant(requesting_tenant_id).await?;
 
         // X7.2 — attached here, where the verified ID token is still in hand;
         // `provision_or_link_identity` links an identity and never sees one.

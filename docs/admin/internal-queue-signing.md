@@ -51,8 +51,10 @@ queue and a reason in its metadata: `malformed`, `unsigned`, `wrong_purpose`,
 - `bad_signature` or `key_version` outside a rollout means a replica holds a
   different `AXIAM__AMQP__SIGNING_KEY` than the others.
 - `stale` means a consumer was down longer than the age bound.
-- `replay` or `wrong_purpose` has no benign cause worth waiting for: check who
-  can publish on the vhost.
+- `wrong_purpose` has no benign cause worth waiting for: check who can publish
+  on the vhost. `replay` has one: an operator's own replay of a dead-lettered
+  message is refused as `replay` (see above), so a `replay` row that matches a
+  replay you sent is expected; one you cannot account for is the case to chase.
 
 ## Delivery rules that came with it
 

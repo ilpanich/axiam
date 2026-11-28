@@ -554,9 +554,11 @@ pub async fn login<C: Connection + Clone>(
     // here, before the password, it answered `403 tenant_suspended` to any
     // username and password, and faster (no Argon2): an anonymous oracle for
     // which tenants are suspended. A wrong password now gets the same `401`
-    // as on an active tenant; a right one is refused by
-    // `create_session_and_tokens` (a direct sign-in) or below (an MFA
-    // challenge or setup token, which the completion refuses again).
+    // as on an active tenant; a right one is refused by `AuthService::login`
+    // itself (QR3-1: its `admit_tenant` runs once the credential has verified,
+    // before an MFA challenge, a setup token or a session is produced). The
+    // check below the call is only a backstop, for a service built without a
+    // tenant admission.
     let tenant_accepts_principals = axiam_core::models::tenant::tenant_accepts_principals(&tenant);
     let org_id = tenant.organization_id;
 
@@ -618,10 +620,12 @@ pub async fn login<C: Connection + Clone>(
     let result = state.auth_service.login(input).await?;
 
     // The credential verified: only now may the caller learn the tenant is
-    // suspended. A direct success never gets here suspended —
-    // `create_session_and_tokens` refused it inside `login` — so this covers
-    // the MFA challenge and the setup token, which are refused rather than
-    // handed out for a sign-in that cannot complete.
+    // suspended. `AuthService::login` has already refused a suspended tenant
+    // (QR3-1: `admit_tenant` after the credential, before any challenge, setup
+    // token or session), so this is only a backstop: it keeps an MFA challenge
+    // or setup token from being handed out for a sign-in that cannot complete
+    // if the service was built without a tenant admission. A direct success
+    // is also refused again by `create_session_and_tokens`.
     if !tenant_accepts_principals && !matches!(result, axiam_auth::LoginResult::Success(_)) {
         return Err(AxiamError::TenantSuspended.into());
     }

@@ -1639,6 +1639,9 @@ where
             Arc::clone(&jwks_cache),
             enc_key,
         )
+        // #877 (SA-13): a suspended tenant's callback is refused once the
+        // provider's answer verifies, before a user or link is written.
+        .with_tenant_admission(Arc::new(tenant_repo.clone()))
     });
     // SamlFederationService::new needs no encryption key — constructed
     // unconditionally regardless of the saml Cargo feature's own gating
@@ -1658,7 +1661,9 @@ where
     .with_crypto_gate(axiam_federation::saml_gate::CryptoGate::new(
         Arc::clone(&crypto_semaphore),
         std::time::Duration::from_secs(config.auth.hash_acquire_timeout_secs),
-    ));
+    ))
+    // #877 (SA-13): as the OIDC service above.
+    .with_tenant_admission(Arc::new(tenant_repo.clone()));
     // T23.2.3 (G-2) — the SAML IdP: the SP registry, the pending-request store,
     // the tenant signing-credential service (D-21: its keys are sealed through
     // the database custodian of the same custodian set the CAs use) and the

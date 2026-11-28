@@ -1901,3 +1901,84 @@ async fn qr1_1_introspection_reads_a_sign_in_tokens_session_from_jti() {
         assert_eq!(resp.active, active, "{what}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// #880 (contract 1.69) — a logout token is not a bearer access token
+// ---------------------------------------------------------------------------
+
+/// A back-channel logout token exactly as the server signs it from contract
+/// 1.69 (`axiam_auth::token::sign_logout_token`: `typ: logout+jwt` and the
+/// JWKS `kid`), with the claim set `axiam_oauth2::logout` mints, issued by the
+/// root issuer and addressed to `aud`.
+fn logout_token(aud: &str, config: &AuthConfig) -> String {
+    let now = Utc::now().timestamp();
+    let claims = serde_json::json!({
+        "iss": config.root_issuer(),
+        "aud": aud,
+        "iat": now,
+        "exp": now + 120,
+        "jti": Uuid::new_v4().to_string(),
+        "sid": Uuid::new_v4().to_string(),
+        "sub": Uuid::new_v4().to_string(),
+        "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
+    });
+    axiam_auth::token::sign_logout_token(&claims, config).unwrap()
+}
+
+/// Pin: the interceptor refuses a logout token as a bearer (`UNAUTHENTICATED`),
+/// and `ValidateToken` / `IntrospectToken` report it invalid and inactive —
+/// strict and relaxed, addressed to a client or to `axiam:user`.
+#[tokio::test]
+async fn a_logout_token_is_not_a_bearer_access_token() {
+    let strict = auth_config();
+    let mut relaxed = strict.clone();
+    relaxed.require_access_token_typ = false;
+    let tenant = Uuid::new_v4();
+
+    for config in [strict, relaxed] {
+        let svc = TokenServiceImpl::new(
+            config.clone(),
+            MockUserRepo {
+                user: Some(active_user(Uuid::new_v4(), String::new())),
+            },
+        );
+        for aud in ["oa_0123456789abcdef0123456789abcdef", AUD_USER] {
+            let token = logout_token(aud, &config);
+            assert_eq!(
+                header_kid(&token),
+                axiam_auth::token::ed25519_jwk_kid(&config.jwt_public_key_pem),
+                "the pin must exercise the server's 1.69 shape, kid included"
+            );
+
+            let mut interceptor = AuthInterceptor::new(config.clone());
+            let mut req = Request::new(());
+            req.metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            let err = interceptor.call(req).unwrap_err();
+            assert_eq!(err.code(), tonic::Code::Unauthenticated, "aud {aud}");
+
+            let mut req = Request::new(ValidateTokenRequest {
+                access_token: token.clone(),
+            });
+            req.extensions_mut().insert(claims_for(tenant));
+            assert!(!svc.validate_token(req).await.unwrap().into_inner().valid);
+
+            let mut req = Request::new(IntrospectTokenRequest {
+                access_token: token,
+            });
+            req.extensions_mut().insert(claims_for(tenant));
+            assert!(!svc.introspect_token(req).await.unwrap().into_inner().active);
+        }
+    }
+}
+
+/// The `kid` member of a compact JWS header, read without verifying.
+fn header_kid(token: &str) -> Option<String> {
+    use base64::Engine;
+    let header = token.split('.').next()?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(header)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    v.get("kid")?.as_str().map(str::to_owned)
+}

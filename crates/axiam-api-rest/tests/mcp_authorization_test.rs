@@ -222,7 +222,7 @@ async fn make_tenant(db: &Surreal<TestDb>, org_id: Uuid, slug: &str, auth: &Auth
         })
         .await
         .unwrap();
-    // SA-41: introspection reports a token inactive once the session its `sid`
+    // SA-41: introspection reports a token inactive once the session its `jti`
     // names is gone, so the signed-in user needs a session row, as in production.
     let session = axiam_db::repository::SurrealSessionRepository::new(db.clone())
         .create(axiam_core::models::session::CreateSession {

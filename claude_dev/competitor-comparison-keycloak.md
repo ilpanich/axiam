@@ -12,13 +12,20 @@
 > **Sourcing note.** Claims about Keycloak cite its GitHub repository pinned at
 > tag `26.8.0`; the documentation on keycloak.org is built from the `docs/`
 > tree linked below. Feature maturity comes from `Profile.java` (the server's
-> own feature registry) and the specification table. Performance figures come
-> from this repository's run-5 benchmark, which measured Keycloak 26.7.0.
-> **Run 6 is the re-measurement:** it measures Keycloak 26.8.0, Zitadel
-> v4.19.4 and authentik 2026.8.3 against AXIAM `1.0.0-beta18` on the same G-box
-> with the run-5 caps (G-10; the authentik target now exists in
-> `benchmarks/targets/authentik/`). Its numbers follow the run; until then every
-> performance figure here is run 5's, taken against Keycloak 26.7.0.
+> own feature registry) and the specification table. **Performance figures come
+> from the seventh benchmark draft** (`benchmarks/PUBLIC_BENCH_ANALYSIS.md`,
+> runs 6, 6b and 6c, G-10), which measured **Keycloak 26.8.1** (the feature
+> claims in this document stay pinned to tag `26.8.0`) against AXIAM **1.3.0**
+> (run 6) and **1.3.1** (run 6b) on **SurrealDB 4.0.1**, on one 16-vCPU AMD EPYC
+> Genoa cloud VM, 2026-11-20 to 2026-11-24 (§0). Head-to-head figures come from
+> **run 6 (every server and database at 2 CPUs) and run 6b pass B (4 CPUs)
+> only**, and every figure below names its run. **Run 6 is not comparable with
+> run 5** (host, datastore and release all changed, §2), so the run-5 multiples
+> (about 8× client credentials, 2.4× introspection, a server RSS under 8% of
+> Keycloak's) are replaced, not kept beside the new ones. Run 6c (SurrealDB
+> 3.3.5, unsupported, benchmark-only) enters this document only as the size of
+> the SurrealDB 4.0.1 regression (§4 of the draft), never in a comparison with
+> Keycloak.
 
 ## 1. Overview
 
@@ -31,9 +38,38 @@ Authorization Services engine with UMA 2.0, and can be extended through
 Java SPIs [K4][K5].
 
 AXIAM does not try to out-breadth Keycloak. Its claim is **efficiency and a
-machine-first shape**. On identical hardware and caps, run 5 measured ~8× the
-client-credentials throughput, 2.4× the introspection rate and a server RSS
-under 8% of Keycloak's (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1, §5, §10).
+machine-first shape**, and the latest measurement shows both where it holds and
+where it does not. On identical caps, in run 6 (AXIAM 1.3.0 against Keycloak
+26.8.1, SurrealDB 4.0.1, every server and database at 2 CPUs, p0-plaintext,
+median-of-3; `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1):
+
+- **AXIAM leads on token issuance and JWKS.** Machine-to-machine token
+  issuance is **3.9× Keycloak's** at 2 CPUs (1,610 against 411 req/s, p50 14.9
+  against 99.5 ms) and **3.5×** at 4 CPUs (run 6b pass B, 3,234 against 934
+  req/s); JWKS is **7.9×** (43,640 against 5,529 req/s, §1). Password login is
+  **on par**: 49 against 47 logins/s at 2 CPUs and 93 against 98 at 4 CPUs,
+  inside Keycloak's ±4.3% spread (§1).
+- **Keycloak wins token introspection and REST userinfo**, head to head, at
+  both cap levels, and on whole-stack CPU per request for both (§1, §7):
+  introspection 1,940 against AXIAM's 1,582 req/s at 2 CPUs and 3,952 against
+  3,272 at 4 CPUs; REST userinfo 3,862 against 1,411 and 7,807 against 2,963
+  (Keycloak serves 2.7× AXIAM's REST userinfo). Whole-stack CPU per request:
+  1.30 against 1.86 cpu·ms for introspection and 0.52 against 2.01 for
+  userinfo. Server-only, AXIAM is the cheaper of the two on every row (0.42
+  against 1.04 cpu·ms per introspection, §7). Keycloak also leads the
+  protocol-variant refresh cell (435 against 347 req/s at 2 CPUs; AXIAM's is
+  a session-cookie refresh, Keycloak's the OAuth2 refresh-token grant, §1).
+- **AXIAM is database-bound on every cell that touches data** (SurrealDB at
+  its cap, 2.00–2.04 cores, on all 27 database-bound cells of run 6, §3, §5);
+  Keycloak answers userinfo from memory without touching PostgreSQL (§1,
+  §5.1). The
+  SurrealDB 4.0.1 server costs AXIAM 13–38% of its throughput at 2 CPUs and
+  8–37% at 4 CPUs (run 6c, §4, a controlled comparison against a 3.3.5
+  server).
+- **Memory.** AXIAM's server holds **54–75 MiB** across run 6 against
+  Keycloak's **708–941 MiB**; at 4 CPUs (run 6b) 89–133 MiB against 1,082–1,170
+  MiB (§7).
+
 On top of that come authorization decisions as a first-class API, gRPC and
 AMQP transports, deny-override RBAC, and safer defaults.
 
@@ -75,7 +111,7 @@ question.
 | Brute-force / abuse protection | Rate limits **on by default**, posture presets | Brute-force detection **disabled by default** | [K19] |
 | gRPC API | **Yes** (authz, userinfo data plane) | None found | [K5] |
 | Async (AMQP) authz | **Yes** | No | — |
-| Server RSS (run 5, 26.7.0; run 6 re-measures 26.8.0) | 88–119 MiB | 710–853 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §5 |
+| Server RSS (run 6, AXIAM 1.3.0, Keycloak 26.8.1, 2 CPUs, SurrealDB 4.0.1; at 4 CPUs, run 6b: AXIAM 89–133, Keycloak 1,082–1,170 MiB) | 54–75 MiB | 708–941 MiB | `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §7 |
 | Licence | Apache-2.0 | Apache-2.0 | [K1] |
 
 ## 3. AXIAM gaps, by priority
@@ -146,14 +182,22 @@ all shipped. They now appear in §2 as parity or advantage.
 
 ## 4. AXIAM advantages
 
-1. **Efficiency is the product.** Run 5 measured about 8× the tokens/s, 2.4×
-   the introspection rate and 6–13× the JWKS reads, in under 8% of Keycloak's
-   server memory (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1, §5). For
-   infrastructure that sits in front of every request, that is a cost and
-   latency floor, not a vanity number. Keycloak 26.8 reports reduced memory
-   usage [K15], so the figure is re-measured rather than assumed: run 6
-   measures Keycloak 26.8.0 against AXIAM `1.0.0-beta18` on the same G-box with
-   the run-5 caps. Until its numbers land, this paragraph is run 5's.
+1. **Efficiency is the product, with one measured exception.** Run 6 (AXIAM
+   1.3.0, Keycloak 26.8.1, SurrealDB 4.0.1, 2 CPUs per server and database,
+   `benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1): **3.9×** Keycloak's token
+   issuance (3.5× at 4 CPUs, run 6b pass B), **7.9×** its JWKS reads, password
+   login on par, from a server that holds **54–75 MiB** against Keycloak's
+   **708–941 MiB** (§7), and server-only the lowest CPU per request on every
+   row (§7). For infrastructure that sits in front of every request, that is a
+   cost and latency floor, not a vanity number. **The exception is
+   introspection and REST userinfo, where Keycloak wins head to head** — and,
+   whole stack, on CPU per request — because AXIAM re-reads the session and the
+   user from SurrealDB on every call and Keycloak serves them from memory (§1,
+   §5.1, §7); the database tier, not the server, is the measured priority.
+   **Keycloak 26.8 reports reduced memory usage [K15]; run 6 observed no
+   reduction** against the 710–853 MiB Keycloak 26.7.0 averaged in run 5 (§7) —
+   on a different host, so a direction, not a measurement of its release-note
+   claim.
 2. **Deny that means deny.** AXIAM's explicit deny overrides every allow at any
    depth (`claude_dev/deny-override-design.md`). Keycloak instead combines
    per-policy NEGATIVE logic with per-permission decision strategies, and its
@@ -161,7 +205,9 @@ all shipped. They now appear in §2 as parity or advantage.
    expressive, but harder to audit, which is exactly the property a security
    reviewer cares about.
 3. **Authorization as a data plane.** Single and batch checks run over REST,
-   gRPC and AMQP, with a 12 000+/s gRPC userinfo path. Keycloak's evaluation
+   gRPC and AMQP, with a gRPC userinfo path that served 3,078 req/s at 2 CPUs
+   (run 6) and 6,369 at 4 CPUs (run 6b pass B), 2.2× AXIAM's own REST path
+   (`benchmarks/PUBLIC_BENCH_ANALYSIS.md` §1). Keycloak's evaluation
    API is HTTP-only, and AuthZEN is still experimental [K3].
 4. **Safe by default.** Rate limits ship enabled, while Keycloak's brute-force
    detection is disabled by default [K19]. The 26.7.x patch series fixed
@@ -183,6 +229,7 @@ all shipped. They now appear in §2 as parity or advantage.
 
 | Date | Change | Sources |
 |---|---|---|
+| 2026-11-26 | G-10 (benchmark currency, #561) closed for this comparison: the performance statements are rewritten from the seventh benchmark draft (`benchmarks/PUBLIC_BENCH_ANALYSIS.md`), which measured **Keycloak 26.8.1** against AXIAM **1.3.0** (run 6, 2 CPUs, 2026-11-20/21) and **1.3.1** (run 6b pass B, 4 CPUs, 2026-11-21/22) on **SurrealDB 4.0.1**, on one 16-vCPU AMD EPYC Genoa cloud VM; run 6c (2026-11-23/24, SurrealDB 3.3.5, unsupported, benchmark-only) is cited only as the size of the SurrealDB 4.0.1 regression. The run-5 figures (about 8× client credentials, 2.4× introspection, 6–13× JWKS, a server RSS under 8% of Keycloak's, a 12 000+/s gRPC userinfo path) are **replaced, not kept**: run 6 is not comparable with run 5. New in the summary: Keycloak wins introspection and REST userinfo head to head. The header, the overview, the *Server RSS* row and §4 item 1 changed; the feature claims and the `26.8.0` source pins did not. | — |
 | 2026-11-01 | Release 1.2.0 closes the social-login gap (plan [`social-login-gap-plan-2026-10-30.md`](social-login-gap-plan-2026-10-30.md)): three rows are added in §2 and read *Yes* for AXIAM: native social sign-in with a provider ID token (G-A), the provider hint and per-client default provider (G-B), and refresh-token reuse detection that revokes the session by default (G-C, a behaviour change with an opt-out). The Keycloak cells restate the plan's §1.1 and §1.2 reading of Keycloak 26.8 and were not re-pinned to a source line in this pass, which is why only the hint row carries a source tag ([K17], the identity-broker tree) and the other two read *see change log*. The baseline version stays 26.8.0. | — |
 | 2026-10-10 | CIBA limit restated (1.0.0, #566, documentation only): a federated account, which D-74 sends no approval mail, can now approve a request, because the console lists the signed-in user's own pending requests (`GET /api/v1/ciba/requests?status=pending`, a badge on the user menu); the "waits on a page nobody can reach" statement in the CIBA row and item 6 is withdrawn. The compared Keycloak surface is unchanged. | — |
 | 2026-10-09 | Outbound SCIM limit restated (1.0.0, #550, documentation only): the per-target breaker shipped — a target with five consecutive failures is not called again until its backoff has passed — so an unresponsive downstream no longer holds a replica's other targets back for every queued reference; more than one delivery in flight per replica is deferred to 1.0.x. | — |

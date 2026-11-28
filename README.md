@@ -180,7 +180,7 @@ The project follows a structured roadmap of **179 tasks across 24 phases** ([`cl
 | Phase 20 | Public website and documentation site | Done |
 | Phase 21 | MCP authorization-server support (RFC 8414 path, public clients, RFC 8707, RFC 7591, CIMD, per-tenant issuers, SDK fan-out) | Done |
 | Phase 22 | Dogfooding remediation from `axiam-domo-demo` | Done |
-| Phase 23 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) | Done — the run-6 benchmark report is pending ([#561](https://github.com/ilpanich/axiam/issues/561)) |
+| Phase 23 | Competitor gap closure (Basic OP and FAPI 2.0 certification, SAML IdP, LDAP/AD, RFC 7592, SSF, outbound SCIM, CIBA, AMQP-less profile, benchmarks) | Done — the seventh benchmark draft (runs 6, 6b and 6c, `benchmarks/PUBLIC_BENCH_ANALYSIS.md`) is written ([#561](https://github.com/ilpanich/axiam/issues/561)) |
 
 ## Documentation
 

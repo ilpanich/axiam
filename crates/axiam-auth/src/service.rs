@@ -414,6 +414,34 @@ impl<
         }
     }
 
+    /// QR5-1 / SR5-2: the read-only lock re-check that runs **before**
+    /// [`Self::admit_tenant`] once a credential has verified.
+    ///
+    /// On a suspended tenant the admission answers `tenant_suspended`, which
+    /// is only safe to say to a guess that was *wrong*-looking until now. A
+    /// lock committed by a concurrent wrong guess while this one verified
+    /// would otherwise lose the race to the admission and let the correct
+    /// password be told apart from a wrong one. So the lock is consulted
+    /// first, without writing (`clear_failures = false`: a refused sign-in on
+    /// a suspended tenant must not reset the counter), and a lock in force is
+    /// the uniform wrong-password answer. The writing check stays at step 4 of
+    /// [`Self::complete_authenticated_login`], after the admission.
+    async fn refuse_if_locked_now(&self, tenant_id: Uuid, user_id: Uuid) -> AxiamResult<()> {
+        if self.tenant_admission.is_none() {
+            // No admission to precede: step 4 is the only lock check needed.
+            return Ok(());
+        }
+        if self
+            .user_repo
+            .admit_unless_locked(tenant_id, user_id, false)
+            .await?
+        {
+            Ok(())
+        } else {
+            Err(AuthError::InvalidCredentials.into())
+        }
+    }
+
     /// Attach the directory authenticator (G-3, T23.3.2) — the
     /// [`axiam_core::models::directory::DirectoryAuthenticator`] port, which
     /// `axiam-directory` implements and the composition root injects, so this
@@ -717,6 +745,12 @@ impl<
             Ok(identity) if identity.external_id.eq_ignore_ascii_case(marker) => {
                 // QR3-1 (SA-13, N16): the credential has verified; a suspended
                 // tenant is refused now, before its memberships are rewritten.
+                //
+                // Deliberately repeated by `complete_authenticated_login`
+                // below: this pair must run before `apply_directory_group_mapping`
+                // writes, which that later call cannot guard. The cost is one
+                // lock read and one tenant read per directory sign-in.
+                self.refuse_if_locked_now(input.tenant_id, user.id).await?;
                 self.admit_tenant(input.tenant_id).await?;
                 // G-3 (T23.3.4): the directory's groups become AXIAM memberships
                 // *before* anything is issued — so a removal in the directory
@@ -798,6 +832,7 @@ impl<
         //     before the side effects, because a suspended tenant admits no
         //     writes from its principals. The directory paths run the same
         //     check before their own writes (JIT provisioning, group mapping).
+        self.refuse_if_locked_now(tenant_id, user.id).await?;
         self.admit_tenant(tenant_id).await?;
 
         // 4. Admit the sign-in unless a lockout is in force *now*, resetting

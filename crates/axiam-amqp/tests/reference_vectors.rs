@@ -14,8 +14,8 @@
 //! then review and commit `tests/fixtures/v2_reference_vectors.json`.
 
 use axiam_amqp::messages::{
-    AuditEventMessage, AuthzRequest, CURRENT_KEY_VERSION, derive_tenant_key, sign_payload,
-    verify_tenant_signature,
+    AuditEventMessage, AuthzRequest, AuthzResponse, CURRENT_KEY_VERSION, derive_tenant_key,
+    sign_payload, verify_tenant_signature,
 };
 use chrono::{TimeZone, Utc};
 use uuid::Uuid;
@@ -89,6 +89,10 @@ fn build_fixture() -> serde_json::Value {
     let authz_sig = sign(&authz_canonical);
     authz.hmac_signature = Some(authz_sig.clone());
     let authz_full: serde_json::Value = serde_json::to_value(&authz).unwrap();
+    // The exact bytes a producer puts on the wire: declaration order, compact,
+    // the signature member last. `message` above is the same value as a JSON
+    // object, which this fixture's writer key-sorts, so it is NOT wire bytes.
+    let authz_wire = String::from_utf8(serde_json::to_vec(&authz).unwrap()).unwrap();
 
     // --- AuditEventMessage ---
     let mut audit = sample_audit_event();
@@ -97,6 +101,7 @@ fn build_fixture() -> serde_json::Value {
     let audit_sig = sign(&audit_canonical);
     audit.hmac_signature = Some(audit_sig.clone());
     let audit_full: serde_json::Value = serde_json::to_value(&audit).unwrap();
+    let audit_wire = String::from_utf8(serde_json::to_vec(&audit).unwrap()).unwrap();
 
     let subkey = derive_tenant_key(&master_key(), tenant_id(), KEY_VERSION);
 
@@ -105,7 +110,10 @@ fn build_fixture() -> serde_json::Value {
             (axiam-amqp::messages). The 7 SDKs MUST reproduce `canonical_signed_json` byte-for-byte \
             (serialize the message in the exact declared field order with hmac_signature ABSENT) and \
             recompute the same `hmac_signature_hex` = HMAC-SHA256(derived_subkey, canonical_signed_json_bytes). \
-            The subkey is HKDF-SHA256(salt=APP_SALT, ikm=master_key, info=DOMAIN_TAG || key_version(1 byte) || tenant_id(16 raw bytes)).",
+            The subkey is HKDF-SHA256(salt=APP_SALT, ikm=master_key, info=DOMAIN_TAG || key_version(1 byte) || tenant_id(16 raw bytes)). \
+            `wire_json` is the exact delivered body (canonical_signed_json with `,\"hmac_signature\":\"<hex>\"` \
+            as its last member): an SDK consumer verifies over it as received (CONTRACT 1.69 §8). \
+            `message` is the same value as a key-sorted JSON object, for reading only; it is not wire bytes.",
         "hkdf": {
             "app_salt_utf8": "axiam-amqp-hkdf-salt-v1",
             "domain_tag_utf8": "axiam-amqp-v1",
@@ -129,11 +137,13 @@ fn build_fixture() -> serde_json::Value {
         },
         "authz_request": {
             "message": authz_full,
+            "wire_json": authz_wire,
             "canonical_signed_json": authz_canonical_str,
             "hmac_signature_hex": authz_sig,
         },
         "audit_event": {
             "message": audit_full,
+            "wire_json": audit_wire,
             "canonical_signed_json": audit_canonical_str,
             "hmac_signature_hex": audit_sig,
         }
@@ -175,6 +185,10 @@ fn test_reference_vectors_match() {
         assert_eq!(
             fixture[kind]["message"], computed[kind]["message"],
             "{kind}: full example message drifted"
+        );
+        assert_eq!(
+            fixture[kind]["wire_json"], computed[kind]["wire_json"],
+            "{kind}: wire bytes drifted"
         );
     }
     assert_eq!(
@@ -229,4 +243,240 @@ fn test_authz_round_trip_reproduces_canonical_bytes() {
             .as_str()
             .unwrap()
     );
+}
+
+/// CONTRACT 1.69 §8 (D-5, #882): an SDK consumer verifies over the RECEIVED
+/// bytes. `wire_json` is what the producer sends; cutting its trailing
+/// signature member must give back exactly `canonical_signed_json` and the
+/// signature, and the cut bytes must verify. `message` (key-sorted, signature
+/// in the middle) must NOT pass the cut: it is not wire bytes.
+#[test]
+fn test_wire_bytes_cut_to_the_canonical_bytes() {
+    use axiam_amqp::messages::split_trailing_signature;
+    let raw = std::fs::read_to_string(fixture_path()).expect("fixture exists");
+    let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    for kind in ["authz_request", "audit_event"] {
+        let wire = fixture[kind]["wire_json"].as_str().unwrap();
+        let (canonical, sig) =
+            split_trailing_signature(wire.as_bytes()).expect("wire ends in the signature");
+        assert_eq!(
+            std::str::from_utf8(&canonical).unwrap(),
+            fixture[kind]["canonical_signed_json"].as_str().unwrap(),
+            "{kind}"
+        );
+        assert_eq!(sig, fixture[kind]["hmac_signature_hex"].as_str().unwrap());
+        assert!(verify_tenant_signature(
+            &master_key(),
+            tenant_id(),
+            KEY_VERSION,
+            &canonical,
+            Some(sig),
+        ));
+        let sorted = serde_json::to_vec(&fixture[kind]["message"]).unwrap();
+        assert!(
+            split_trailing_signature(&sorted).is_none(),
+            "{kind}: the key-sorted `message` must not pass for wire bytes"
+        );
+    }
+}
+
+/// CONTRACT 1.69 §8 step 2c, typed consume (D-9): the two vectors are the
+/// cross-type negative pair the SDKs test against. Both verify under the SAME
+/// tenant subkey — which is the threat: a genuine signed message of one type
+/// replayed onto the other type's queue passes the signature check — and each
+/// carries the required members that tell its layout apart (the contract's
+/// table), none of the other's, and no `allowed` (the `AuthzResponse` one).
+#[test]
+fn test_vectors_are_the_cross_type_negative_pair() {
+    use axiam_amqp::messages::split_trailing_signature;
+    let raw = std::fs::read_to_string(fixture_path()).expect("fixture exists");
+    let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    let subkey = derive_tenant_key(&master_key(), tenant_id(), KEY_VERSION);
+    let top_level = |kind: &str| -> Vec<String> {
+        let wire = fixture[kind]["wire_json"].as_str().unwrap();
+        let (canonical, sig) =
+            split_trailing_signature(wire.as_bytes()).expect("wire ends in the signature");
+        assert_eq!(
+            sign_payload(&subkey, &canonical),
+            sig,
+            "{kind}: signed under the one tenant subkey both vectors share"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        value.as_object().unwrap().keys().cloned().collect()
+    };
+    let request = top_level("authz_request");
+    let audit = top_level("audit_event");
+    let has = |keys: &[String], name: &str| keys.iter().any(|k| k == name);
+
+    assert!(has(&request, "subject_id"));
+    for name in ["actor_id", "actor_type", "outcome", "allowed"] {
+        assert!(!has(&request, name), "authz_request must not carry {name}");
+    }
+    for name in ["actor_id", "actor_type", "outcome"] {
+        assert!(has(&audit, name), "audit_event must carry {name}");
+    }
+    for name in ["subject_id", "allowed"] {
+        assert!(!has(&audit, name), "audit_event must not carry {name}");
+    }
+}
+
+/// CONTRACT 1.69 §8 step 2c, typed consume (D-9), at the struct level: each of
+/// the three tenant-subkey-signed types, serialized with EVERY optional member
+/// populated (the widest layout it can have), carries its distinguishing
+/// members, and none of them appears in either other type's full member set.
+/// A body of one type also never deserializes as another.
+#[test]
+fn test_distinguishing_members_are_disjoint_across_the_three_types() {
+    let mut request = sample_authz_request();
+    request.hmac_signature = Some("00".repeat(32));
+    let mut audit = sample_audit_event();
+    audit.hmac_signature = Some("00".repeat(32));
+    let mut response = AuthzResponse {
+        correlation_id: request.correlation_id,
+        allowed: true,
+        reason: Some("r".to_string()),
+        reason_code: Some("allowed".to_string()),
+        tenant_id: tenant_id(),
+        nonce: request.nonce,
+        hmac_signature: None,
+    };
+    response.sign(&master_key(), KEY_VERSION);
+    assert!(request.scope.is_some() && audit.resource_id.is_some());
+    assert!(audit.ip_address.is_some() && audit.metadata.is_some());
+
+    let members = |value: serde_json::Value| -> Vec<String> {
+        value.as_object().unwrap().keys().cloned().collect()
+    };
+    let request_json = serde_json::to_value(&request).unwrap();
+    let audit_json = serde_json::to_value(&audit).unwrap();
+    let response_json = serde_json::to_value(&response).unwrap();
+    // The full member set of each type, every optional member included, listed
+    // explicitly. A member added to one of the structs fails this assertion
+    // until it is listed here — and classified against CONTRACT §8 step 2c's
+    // table (is it a distinguishing member? does it collide with another
+    // type's?) — so a new field left `None` above cannot slip past the
+    // disjointness check below.
+    let expected: [(&str, &serde_json::Value, &[&str]); 3] = [
+        (
+            "AuthzRequest",
+            &request_json,
+            &[
+                "correlation_id",
+                "tenant_id",
+                "subject_id",
+                "action",
+                "resource_id",
+                "scope",
+                "key_version",
+                "nonce",
+                "issued_at",
+                "hmac_signature",
+            ],
+        ),
+        (
+            "AuditEventMessage",
+            &audit_json,
+            &[
+                "tenant_id",
+                "actor_id",
+                "actor_type",
+                "action",
+                "resource_id",
+                "outcome",
+                "ip_address",
+                "metadata",
+                "key_version",
+                "nonce",
+                "issued_at",
+                "hmac_signature",
+            ],
+        ),
+        (
+            "AuthzResponse",
+            &response_json,
+            &[
+                "correlation_id",
+                "allowed",
+                "reason",
+                "reason_code",
+                "tenant_id",
+                "nonce",
+                "hmac_signature",
+            ],
+        ),
+    ];
+    for (name, json, list) in &expected {
+        let mut actual = members((*json).clone());
+        actual.sort();
+        let mut want: Vec<String> = list.iter().map(|m| (*m).to_string()).collect();
+        want.sort();
+        assert_eq!(
+            actual, want,
+            "{name}: member set changed — list and classify the new member"
+        );
+    }
+
+    let types: [(&str, Vec<String>, &[&str]); 3] = [
+        (
+            "AuthzRequest",
+            members(request_json.clone()),
+            &["subject_id"],
+        ),
+        (
+            "AuditEventMessage",
+            members(audit_json.clone()),
+            &["actor_id", "actor_type", "outcome"],
+        ),
+        (
+            "AuthzResponse",
+            members(response_json.clone()),
+            &["allowed"],
+        ),
+    ];
+    for (name, own, distinguishing) in &types {
+        for member in *distinguishing {
+            assert!(
+                own.iter().any(|m| m == member),
+                "{name} must carry {member}"
+            );
+            for (other, other_members, _) in &types {
+                if other != name {
+                    assert!(
+                        !other_members.iter().any(|m| m == member),
+                        "{other} must not carry {name}'s distinguishing member {member}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Cross-deserialization fails in every direction.
+    for (name, json) in [
+        ("AuditEventMessage", &audit_json),
+        ("AuthzResponse", &response_json),
+    ] {
+        assert!(
+            serde_json::from_value::<AuthzRequest>(json.clone()).is_err(),
+            "{name} must not decode as AuthzRequest"
+        );
+    }
+    for (name, json) in [
+        ("AuthzRequest", &request_json),
+        ("AuthzResponse", &response_json),
+    ] {
+        assert!(
+            serde_json::from_value::<AuditEventMessage>(json.clone()).is_err(),
+            "{name} must not decode as AuditEventMessage"
+        );
+    }
+    for (name, json) in [
+        ("AuthzRequest", &request_json),
+        ("AuditEventMessage", &audit_json),
+    ] {
+        assert!(
+            serde_json::from_value::<AuthzResponse>(json.clone()).is_err(),
+            "{name} must not decode as AuthzResponse"
+        );
+    }
 }

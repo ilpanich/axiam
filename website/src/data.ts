@@ -1843,8 +1843,8 @@ export const BENCH_MEMORY_CAP = 2048;
  * rest on a freshly started stack. authentik has no valid cell under load.
  */
 export const BENCH_STACK_MEMORY: [string, string, string, string, string][] = [
-  ["AXIAM", "288–415", "373", "216", "server + SurrealDB + RabbitMQ"],
-  ["Keycloak", "853–1,105", "1,074", "934", "server + PostgreSQL"],
+  ["AXIAM", "287–415", "373", "216", "server + SurrealDB + RabbitMQ"],
+  ["Keycloak", "853–1,107", "1,074", "934", "server + PostgreSQL"],
   ["Zitadel", "263–412", "593", "172", "server + PostgreSQL"],
   ["authentik", "—", "1,668", "819", "server + worker + PostgreSQL"],
 ];

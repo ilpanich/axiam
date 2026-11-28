@@ -326,11 +326,7 @@ pub async fn opaque_login_finish<C: Connection + Clone>(
     // SR3-1 / QR21-1: a sealed login that carries a credential version is
     // judged by it alone (no ordering of two clocks); one without it (sealed by
     // a release that predates the counter) by the timestamp, ties refused.
-    let superseded = match verified.credential_version {
-        Some(_) => user.credential_version_stale(verified.credential_version),
-        None => user.credential_changed_since(verified.issued_at),
-    };
-    if superseded {
+    if user.credential_superseded_at(verified.issued_at, verified.credential_version) {
         return Err(AxiamApiError(AxiamError::AuthenticationFailed {
             reason: "invalid credentials".into(),
         }));

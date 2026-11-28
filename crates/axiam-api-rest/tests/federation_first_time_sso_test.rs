@@ -43,7 +43,7 @@
 //! `federation_test.rs::saml_metadata_returns_xml`.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use actix_web::{App, test, web};
 use axiam_api_rest::RateLimitConfig;
@@ -53,6 +53,7 @@ use axiam_api_rest::state::AppState;
 use axiam_auth::config::AuthConfig;
 use axiam_auth::token::issue_access_token;
 use axiam_core::models::organization::CreateOrganization;
+use axiam_core::models::reactor::{DynReactorGate, ReactorOutcome, SharedReactorGate};
 use axiam_core::models::tenant::{CreateTenant, TenantKind};
 use axiam_core::models::user::CreateUser;
 use axiam_core::repository::{OrganizationRepository, TenantRepository, UserRepository};
@@ -234,6 +235,12 @@ fn mint_token(auth: &AuthConfig, user_id: Uuid, tenant_id: Uuid, org_id: Uuid) -
 
 macro_rules! test_app {
     ($db:expr, $auth:expr, $jwks_cache:expr) => {
+        test_app!($db, $auth, $jwks_cache, None)
+    };
+    // `$gate`: a reactor gate installed on `AuthService` exactly as the
+    // composition root installs one, so a test can see whether
+    // `login.post_auth` was asked.
+    ($db:expr, $auth:expr, $jwks_cache:expr, $gate:expr) => {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($auth.clone()))
@@ -258,7 +265,13 @@ macro_rules! test_app {
                         state.http_client.clone(),
                         std::sync::Arc::clone(&state.jwks_cache),
                         TEST_FED_ENC_KEY,
-                    ));
+                    )
+                    // #877: as the composition root attaches it.
+                    .with_tenant_admission(Arc::new(state.tenant_repo.clone())));
+                    let gate: Option<SharedReactorGate> = $gate;
+                    if let Some(gate) = gate {
+                        state.auth_service = state.auth_service.clone().with_reactor_gate(gate);
+                    }
                     state
                 }))
                 // Note: no `Arc<dyn SessionValidator>` app_data registered
@@ -930,16 +943,145 @@ async fn oidc_authorize_authenticated_rejects_cross_tenant_config() {
 }
 
 // ---------------------------------------------------------------------------
-// SA-13 (N16, D-3): the OIDC federation door refuses a suspended tenant
+// SA-13 (N16, D-3) and #877: the federated doors refuse a suspended tenant
+// before anything is written
 // ---------------------------------------------------------------------------
+//
+// The refusal itself (`403 tenant_suspended`, no session) predates #877; what
+// #877 adds is *where* it happens. The callbacks used to provision the user
+// and the federation link, and ask the `login.post_auth` reactor, before the
+// session step refused — so anyone the tenant's provider would authenticate
+// could create accounts in a suspended tenant. These tests count what a
+// refused callback left behind. The `*_answers_alike_*` tests pin the other
+// half of the constraint: the check runs only once the provider's answer has
+// verified, so a caller without one learns nothing about the suspension
+// (SR1-8).
 
-/// An OIDC federated sign-in whose callback arrives while the tenant is
-/// suspended is refused `403 tenant_suspended`, with a valid ID token from the
-/// IdP, and sets no session cookie.
-#[actix_rt::test]
-async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
+/// Every reactor event the gate was asked about.
+type GateLog = Arc<Mutex<Vec<&'static str>>>;
+
+/// A gate that allows everything and records what it was asked.
+struct RecordingGate {
+    seen: GateLog,
+}
+
+impl DynReactorGate for RecordingGate {
+    fn intercept_dyn<'a>(
+        &'a self,
+        _tenant_id: Uuid,
+        event: &'static str,
+        _payload: serde_json::Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ReactorOutcome> + Send + 'a>> {
+        self.seen.lock().unwrap().push(event);
+        Box::pin(std::future::ready(ReactorOutcome::Allow))
+    }
+
+    // A scripted double stands in for a working transport.
+    fn can_dispatch_dyn(&self) -> bool {
+        true
+    }
+}
+
+fn recording_gate() -> (SharedReactorGate, GateLog) {
+    let seen: GateLog = Arc::new(Mutex::new(Vec::new()));
+    (Arc::new(RecordingGate { seen: seen.clone() }), seen)
+}
+
+/// How often the gate was asked `login.post_auth`.
+fn post_auth_calls(seen: &GateLog) -> usize {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|event| **event == "login.post_auth")
+        .count()
+}
+
+/// Suspend `tenant_id`, as an operator does while the user is at the provider.
+async fn suspend(db: &Surreal<TestDb>, tenant_id: Uuid) {
     use axiam_core::models::tenant::{TenantStatus, UpdateTenant};
+    SurrealTenantRepository::new(db.clone())
+        .update(
+            tenant_id,
+            UpdateTenant {
+                status: Some(TenantStatus::Suspended),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
 
+async fn count_in_tenant(db: &Surreal<TestDb>, query: &str, tenant_id: Uuid) -> u64 {
+    let mut result = db
+        .query(query)
+        .bind(("tenant", tenant_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    let rows: Vec<axiam_db::CountRow> = result.take(0).unwrap();
+    rows.first().map_or(0, |r| r.total)
+}
+
+/// What a federated callback answered, and what it left behind in the tenant.
+struct CallbackOutcome {
+    status: u16,
+    body: serde_json::Value,
+    sets_session: bool,
+    /// Users other than the administrator the fixture creates.
+    users: u64,
+    federation_links: u64,
+    post_auth_calls: usize,
+}
+
+async fn outcome_of(
+    resp: actix_web::dev::ServiceResponse,
+    db: &Surreal<TestDb>,
+    tenant_id: Uuid,
+    seen: &GateLog,
+) -> CallbackOutcome {
+    let status = resp.status().as_u16();
+    let sets_session = resp
+        .response()
+        .cookies()
+        .any(|c| c.name() == "axiam_access");
+    let body =
+        serde_json::from_slice(&test::read_body(resp).await).unwrap_or(serde_json::Value::Null);
+    CallbackOutcome {
+        status,
+        body,
+        sets_session,
+        users: count_in_tenant(
+            db,
+            "SELECT count() AS total FROM user \
+             WHERE tenant_id = $tenant AND username != 'admin' GROUP ALL",
+            tenant_id,
+        )
+        .await,
+        federation_links: count_in_tenant(
+            db,
+            "SELECT count() AS total FROM federation_link WHERE tenant_id = $tenant GROUP ALL",
+            tenant_id,
+        )
+        .await,
+        post_auth_calls: post_auth_calls(seen),
+    }
+}
+
+/// Which key signs the ID token the mock IdP returns.
+#[derive(Clone, Copy)]
+enum IdTokenSigner {
+    /// The key the IdP's JWKS publishes: a genuine sign-in.
+    Idp,
+    /// A key the IdP never published, under the published `kid`: an ID token
+    /// nobody but its forger vouches for.
+    Forger,
+}
+
+/// A public OIDC sign-in — config, `/oidc/start`, the IdP's token answer,
+/// `/oidc/callback` — with the tenant suspended between start and callback
+/// when `suspended`.
+async fn run_oidc_callback(suspended: bool, signer: IdTokenSigner) -> CallbackOutcome {
     let (db, org_id, tenant_id) = setup_db().await;
     let auth = test_auth_config();
     let admin_token = mint_token(
@@ -968,7 +1110,13 @@ async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
         })))
         .mount(&idp)
         .await;
-    let app = test_app!(db, auth, Arc::new(JwksCache::new_allow_private_networks()));
+    let (gate, seen) = recording_gate();
+    let app = test_app!(
+        db,
+        auth,
+        Arc::new(JwksCache::new_allow_private_networks()),
+        Some(gate)
+    );
 
     let create_resp = test::call_service(
         &app,
@@ -1020,6 +1168,10 @@ async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
         .map(|(_, v)| v.into_owned())
         .unwrap();
     let now = now_secs();
+    let signing_key = match signer {
+        IdTokenSigner::Idp => keys.encoding_key(),
+        IdTokenSigner::Forger => TestKeys::generate("mock-idp-kid").encoding_key(),
+    };
     let id_token = sign_jwt(
         &json!({
             "sub": "suspended-tenant-subject",
@@ -1030,7 +1182,7 @@ async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
             "nonce": nonce,
             "email": "suspended-sso-user@example.com",
         }),
-        &keys.encoding_key(),
+        &signing_key,
         "mock-idp-kid",
     );
     Mock::given(method("POST"))
@@ -1044,17 +1196,9 @@ async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
         .mount(&idp)
         .await;
 
-    // The operator suspends the tenant while the user is at the IdP.
-    SurrealTenantRepository::new(db.clone())
-        .update(
-            tenant_id,
-            UpdateTenant {
-                status: Some(TenantStatus::Suspended),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    if suspended {
+        suspend(&db, tenant_id).await;
+    }
 
     let resp = test::call_service(
         &app,
@@ -1066,16 +1210,265 @@ async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
             .to_request(),
     )
     .await;
-    let status = resp.status().as_u16();
-    let sets_session = resp
+    outcome_of(resp, &db, tenant_id, &seen).await
+}
+
+/// A public social sign-in through a GitHub-shaped plain-OAuth2 provider —
+/// config, `/oauth2/start`, token exchange, userinfo, `/oauth2/callback` —
+/// with the tenant suspended between start and callback when `suspended`.
+/// `provider_accepts_code: false` has the provider refuse the code, so the
+/// callback holds no verified identity at all.
+async fn run_oauth2_callback(suspended: bool, provider_accepts_code: bool) -> CallbackOutcome {
+    let (db, org_id, tenant_id) = setup_db().await;
+    let auth = test_auth_config();
+    let admin_token = mint_token(
+        &auth,
+        create_admin_user(&db, tenant_id).await,
+        tenant_id,
+        org_id,
+    );
+
+    let idp = MockServer::start().await;
+    let base = idp.uri();
+    let token_answer = if provider_accepts_code {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "gho_test_access_token",
+            "token_type": "bearer",
+            "scope": "read:user,user:email",
+        }))
+    } else {
+        ResponseTemplate::new(400).set_body_json(json!({ "error": "bad_verification_code" }))
+    };
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(token_answer)
+        .mount(&idp)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 583231,
+            "login": "octocat",
+            "name": "The Octocat",
+            "email": "octocat@users.noreply.github.com",
+        })))
+        .mount(&idp)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user/emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"email": "octocat@users.noreply.github.com", "verified": true, "primary": true},
+        ])))
+        .mount(&idp)
+        .await;
+    let (gate, seen) = recording_gate();
+    let app = test_app!(
+        db,
+        auth,
+        Arc::new(JwksCache::new_allow_private_networks()),
+        Some(gate)
+    );
+
+    let create_resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/federation-configs")
+            .insert_header(("Authorization", format!("Bearer {admin_token}")))
+            .insert_header(("Cookie", format!("axiam_csrf={CSRF_TOKEN}")))
+            .insert_header(("X-CSRF-Token", CSRF_TOKEN))
+            .set_json(json!({
+                "provider": "GitHub",
+                "provider_kind": "github",
+                "protocol": "OAuth2",
+                "client_id": "gh-client",
+                "client_secret": "gh-secret",
+                "authorization_endpoint": format!("{base}/login/oauth/authorize"),
+                "token_endpoint": format!("{base}/token"),
+                "userinfo_endpoint": format!("{base}/user"),
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(create_resp.status().as_u16(), 201);
+    let config: serde_json::Value = test::read_body_json(create_resp).await;
+
+    let start_resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oauth2/start")
+            .set_json(json!({
+                "org_id": org_id,
+                "tenant_id": tenant_id,
+                "federation_config_id": config["id"],
+                "redirect_uri": "https://spa.example.com/callback",
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(start_resp.status().as_u16(), 200);
+    let binding = start_resp
         .response()
         .cookies()
-        .any(|c| c.name() == "axiam_access");
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert!(
-        !sets_session,
-        "no session cookie for a suspended tenant: {body}"
+        .find(|c| c.name() == "axiam_fed_bind" || c.name() == "__Host-axiam_fed_bind")
+        .map(|c| c.into_owned())
+        .unwrap();
+    let start: serde_json::Value = test::read_body_json(start_resp).await;
+
+    if suspended {
+        suspend(&db, tenant_id).await;
+    }
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .peer_addr(TEST_PEER.parse::<SocketAddr>().unwrap())
+            .uri("/api/v1/auth/federation/oauth2/callback")
+            .cookie(binding)
+            .set_json(json!({ "state": start["state"], "code": "provider-code" }))
+            .to_request(),
+    )
+    .await;
+    outcome_of(resp, &db, tenant_id, &seen).await
+}
+
+/// The counts below mean something only if they see what a sign-in writes:
+/// on an active tenant the same two flows provision one user and one link and
+/// ask the reactor once.
+#[actix_rt::test]
+async fn an_active_tenants_federated_sign_in_writes_what_the_counts_measure() {
+    let out = run_oidc_callback(false, IdTokenSigner::Idp).await;
+    assert!(out.status == 200, "expected status 200");
+    assert!(out.sets_session);
+    assert_eq!(
+        (out.users, out.federation_links, out.post_auth_calls),
+        (1, 1, 1)
     );
-    assert_eq!(status, 403, "{body}");
-    assert_eq!(body["error"], "tenant_suspended", "{body}");
+
+    let out = run_oauth2_callback(false, true).await;
+    assert!(out.status == 200, "expected status 200");
+    assert!(out.sets_session);
+    assert_eq!(
+        (out.users, out.federation_links, out.post_auth_calls),
+        (1, 1, 1)
+    );
+}
+
+/// An OIDC federated sign-in whose callback arrives while the tenant is
+/// suspended is refused `403 tenant_suspended`, with a valid ID token from the
+/// IdP, and sets no session cookie.
+///
+/// #877: and it writes nothing first — no user, no federation link — and does
+/// not ask the `login.post_auth` reactor about a sign-in that cannot complete.
+/// Before the fix the refusal came from the session step, after the user and
+/// the link had been created and the reactor asked.
+#[actix_rt::test]
+async fn an_oidc_sign_in_to_a_suspended_tenant_is_refused() {
+    let out = run_oidc_callback(true, IdTokenSigner::Idp).await;
+    let body = &out.body;
+    assert!(
+        !out.sets_session,
+        "no session cookie for a suspended tenant"
+    );
+    assert!(out.status == 403, "expected status 403");
+    assert!(
+        body["error"] == "tenant_suspended",
+        "expected error tenant_suspended"
+    );
+    assert_eq!(
+        out.users, 0,
+        "no user may be provisioned in a suspended tenant"
+    );
+    assert_eq!(
+        out.federation_links, 0,
+        "no federation link may be written in a suspended tenant"
+    );
+    assert_eq!(
+        out.post_auth_calls, 0,
+        "the post-auth reactor must not be asked about a refused sign-in"
+    );
+}
+
+/// #877, the plain-OAuth2 ("Sign in with GitHub") callback: refused
+/// `403 tenant_suspended` with no user, no federation link and no reactor
+/// call, however genuine the provider's answer.
+#[actix_rt::test]
+async fn a_social_sign_in_to_a_suspended_tenant_provisions_nothing() {
+    let out = run_oauth2_callback(true, true).await;
+    let body = &out.body;
+    assert!(
+        !out.sets_session,
+        "no session cookie for a suspended tenant"
+    );
+    assert!(out.status == 403, "expected status 403");
+    assert!(
+        body["error"] == "tenant_suspended",
+        "expected error tenant_suspended"
+    );
+    assert_eq!(
+        out.users, 0,
+        "no user may be provisioned in a suspended tenant"
+    );
+    assert_eq!(
+        out.federation_links, 0,
+        "no federation link may be written in a suspended tenant"
+    );
+    assert_eq!(
+        out.post_auth_calls, 0,
+        "the post-auth reactor must not be asked about a refused sign-in"
+    );
+}
+
+/// SR1-8, kept closed by #877: the admission runs only once the provider's ID
+/// token has verified. A callback carrying a forged one answers a suspended
+/// tenant exactly as it answers an active one, so it cannot be used to learn
+/// which tenants are suspended.
+#[actix_rt::test]
+async fn an_unverified_oidc_callback_answers_alike_for_a_suspended_and_an_active_tenant() {
+    let active = run_oidc_callback(false, IdTokenSigner::Forger).await;
+    let suspended = run_oidc_callback(true, IdTokenSigner::Forger).await;
+
+    assert!(active.status == 401, "expected status 401");
+    assert!(
+        suspended.body["error"] != "tenant_suspended",
+        "an unverified callback must not reveal the suspension"
+    );
+    assert!(
+        (suspended.status, &suspended.body) == (active.status, &active.body),
+        "a forged ID token must get the same answer whatever the tenant's status"
+    );
+    for out in [&active, &suspended] {
+        assert!(!out.sets_session);
+        assert_eq!(
+            (out.users, out.federation_links, out.post_auth_calls),
+            (0, 0, 0)
+        );
+    }
+}
+
+/// SR1-8 on the plain-OAuth2 callback: a code the provider refuses yields no
+/// identity, and the answer is the same for a suspended tenant as for an
+/// active one.
+#[actix_rt::test]
+async fn an_unverified_social_callback_answers_alike_for_a_suspended_and_an_active_tenant() {
+    let active = run_oauth2_callback(false, false).await;
+    let suspended = run_oauth2_callback(true, false).await;
+
+    assert!(active.status != 200, "a refused code must not succeed");
+    assert!(
+        suspended.body["error"] != "tenant_suspended",
+        "an unverified callback must not reveal the suspension"
+    );
+    assert!(
+        (suspended.status, &suspended.body) == (active.status, &active.body),
+        "a refused code must get the same answer whatever the tenant's status"
+    );
+    for out in [&active, &suspended] {
+        assert!(!out.sets_session);
+        assert_eq!(
+            (out.users, out.federation_links, out.post_auth_calls),
+            (0, 0, 0)
+        );
+    }
 }

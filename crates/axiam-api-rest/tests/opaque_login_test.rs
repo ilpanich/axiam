@@ -1300,6 +1300,30 @@ async fn sr3_1_an_exchange_built_from_the_replaced_record_is_refused() {
     assert!(!session, "no session cookie may be issued");
 }
 
+/// #873: a login of the current credential version is judged by the version
+/// alone. With the epoch moved an hour ahead of the sealed `issued_at` (a
+/// replica whose clock trails the datastore's) and the version NOT bumped, the
+/// old `||` rule refused it; the shared rule accepts it.
+#[actix_web::test]
+async fn qr22_2_a_current_version_login_is_accepted_when_the_epoch_is_ahead_of_issued_at() {
+    let (db, org_id, tenant_id, user_id, app) = enrolled_app!("qr22-2-skew");
+
+    let held = start_and_hold(&app, org_id, tenant_id, new_password()).await;
+    db.query("UPDATE type::record('user', $id) SET credential_changed_at = time::now() + 1h")
+        .bind(("id", user_id.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (finish, session) = finish_held(&app, &held).await;
+    assert_eq!(
+        finish, 200,
+        "a sealed login of the current version is not refused for its timestamp"
+    );
+    assert!(session, "the session cookie is issued");
+}
+
 /// S-1 control: enrolment wrote a record and so stamped the credential epoch;
 /// a login started after it is not refused.
 #[actix_web::test]

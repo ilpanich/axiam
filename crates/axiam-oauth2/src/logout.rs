@@ -23,7 +23,7 @@
 use axiam_auth::config::AuthConfig;
 use axiam_auth::error::AuthError;
 use chrono::Utc;
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use jsonwebtoken::Algorithm;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -94,20 +94,11 @@ pub fn issue_logout_token(
         events: logout_events(),
     };
 
-    let owned;
-    let key: &EncodingKey = if let Some(ref cached) = config.jwt_encoding_key {
-        cached.as_ref()
-    } else {
-        owned = EncodingKey::from_ed_pem(config.jwt_private_key_pem.as_bytes())
-            .map_err(|e| AuthError::Crypto(format!("bad private key: {e}")))?;
-        &owned
-    };
-    // SA-03 — explicitly typed, as Back-Channel Logout 1.0 §2.4 recommends,
-    // so no verifier of another AXIAM token kind can mistake it for its own.
-    let mut header = Header::new(Algorithm::EdDSA);
-    header.typ = Some(axiam_auth::token::TYP_LOGOUT_TOKEN.to_owned());
-    jsonwebtoken::encode(&header, &claims, key)
-        .map_err(|e| AuthError::Crypto(format!("logout token encode: {e}")))
+    // SA-03 — explicitly typed (`logout+jwt`), as Back-Channel Logout 1.0 §2.4
+    // recommends, so no verifier of another AXIAM token kind can mistake it
+    // for its own. #880 (contract 1.69) — and naming its JWKS `kid`, because a
+    // relying party selects the verification key by it.
+    axiam_auth::token::sign_logout_token(&claims, config)
 }
 
 /// The parts of an `id_token_hint` the end-session endpoint acts on.
@@ -207,7 +198,7 @@ pub fn resolve_post_logout_redirect(
 mod tests {
     use super::*;
     use axiam_auth::token::validate_access_token;
-    use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 
     // Test-only Ed25519 keypair with no real-world value; the same fixed pair
     // the crate's other suites use, so no dev-dependency on a key generator.
@@ -220,6 +211,12 @@ mod tests {
     const TEST_PUBLIC_KEY_PEM: &str = concat!(
         "-----BEGIN PUBLIC KEY-----\n",
         "MCowBQYDK2VwAyEAcweT2rPwpUxadO56wIhW1XBoMF63aWOE2UMAVsRudhs=\n",
+        "-----END PUBLIC KEY-----"
+    );
+    /// A second Ed25519 public key: the other half of a key rotation.
+    const OTHER_PUBLIC_KEY_PEM: &str = concat!(
+        "-----BEGIN PUBLIC KEY-----\n",
+        "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n",
         "-----END PUBLIC KEY-----"
     );
 
@@ -275,6 +272,128 @@ mod tests {
         let header = jsonwebtoken::decode_header(&t).unwrap();
         assert_eq!(header.typ.as_deref(), Some("logout+jwt"));
         assert!(axiam_auth::token::decode_access_token(&t, &cfg).is_err());
+    }
+
+    /// #880 (D-1, contract 1.69): the header names the JWKS key that signed
+    /// the token, and is exactly the server shape an SDK's logout test
+    /// fixture must reproduce — `alg`, `typ` and `kid`, nothing else.
+    #[test]
+    fn logout_token_header_names_its_jwks_key() {
+        let cfg = test_config();
+        let t = issue_logout_token(
+            "https://id.test.example",
+            "rp-1",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &cfg,
+        )
+        .unwrap();
+        let header = jsonwebtoken::decode_header(&t).unwrap();
+        let published = crate::oidc::build_jwks(&cfg.jwt_public_key_pem).unwrap();
+        assert_eq!(
+            header.kid.as_deref(),
+            Some(published.keys[0].kid.as_str()),
+            "a logout token must name the kid /oauth2/jwks publishes for its key"
+        );
+        assert_eq!(header.typ.as_deref(), Some("logout+jwt"));
+        assert_eq!(header.alg, Algorithm::EdDSA);
+
+        use base64::Engine;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(t.split('.').next().unwrap())
+            .unwrap();
+        let members: Map<String, Value> = serde_json::from_slice(&raw).unwrap();
+        let mut names: Vec<&str> = members.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["alg", "kid", "typ"], "header {members:?}");
+    }
+
+    /// #880: verify the way a relying party does — read the JWKS as
+    /// `/oauth2/jwks` serves it, during a rotation (two keys), select the key
+    /// **by `kid`** and nothing else, then verify. Before contract 1.69 the
+    /// token named no key, so a strictly-by-`kid` verifier found none.
+    #[test]
+    fn a_relying_party_selects_the_logout_key_by_kid() {
+        let cfg = test_config();
+        let sid = Uuid::new_v4();
+        let t = issue_logout_token("https://id.test.example", "rp-1", sid, Uuid::new_v4(), &cfg)
+            .unwrap();
+
+        // What the endpoint serves, plus the next key of a rotation.
+        let mut served =
+            serde_json::to_value(crate::oidc::build_jwks(&cfg.jwt_public_key_pem).unwrap())
+                .unwrap();
+        let next = crate::oidc::build_jwks(OTHER_PUBLIC_KEY_PEM).unwrap();
+        served["keys"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, serde_json::to_value(&next.keys[0]).unwrap());
+        let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(served).unwrap();
+        assert_eq!(jwks.keys.len(), 2);
+
+        let header = jsonwebtoken::decode_header(&t).unwrap();
+        let kid = header.kid.expect("a logout token must carry a kid");
+        let jwk = jwks.find(&kid).expect("the kid must name a published key");
+        let key = DecodingKey::from_jwk(jwk).unwrap();
+        let mut v = Validation::new(Algorithm::EdDSA);
+        v.set_audience(&["rp-1"]);
+        v.set_issuer(&["https://id.test.example"]);
+        let claims = jsonwebtoken::decode::<LogoutTokenClaims>(&t, &key, &v)
+            .expect("the key the kid names verifies the token")
+            .claims;
+        assert_eq!(claims.sid, sid.to_string());
+
+        // The other key of the rotation does not.
+        let other = jwks
+            .keys
+            .iter()
+            .find(|k| k.common.key_id.as_deref() != Some(kid.as_str()))
+            .unwrap();
+        let other = DecodingKey::from_jwk(other).unwrap();
+        assert!(jsonwebtoken::decode::<LogoutTokenClaims>(&t, &other, &v).is_err());
+    }
+
+    /// #880 security argument, the claim half: with a `kid`, a logout token is
+    /// a token a strictly-by-`kid` verifier finds a key for, so what must keep
+    /// it from being an access token is not the key lookup. The header refuses
+    /// it (`typ`), and so — independently — does its claim set, which lacks
+    /// the `tenant_id` and `org_id` every access token carries. Re-signed as
+    /// `at+jwt`, addressed to `axiam:user` and issued by the root issuer (so
+    /// neither `typ`, `aud` nor `iss` can be what refuses it), it is still
+    /// refused by both decoders, strict and relaxed.
+    #[test]
+    fn a_logout_token_is_refused_as_an_access_token_by_its_claims_alone() {
+        let cfg = test_config();
+        let mut relaxed = cfg.clone();
+        relaxed.require_access_token_typ = false;
+        let t = issue_logout_token(
+            cfg.root_issuer(),
+            axiam_auth::token::AUD_USER,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &cfg,
+        )
+        .unwrap();
+        for typ in [Some("at+jwt"), Some("JWT"), None] {
+            let reshaped = resign_with_typ(&t, typ, &cfg);
+            for c in [&cfg, &relaxed] {
+                assert!(
+                    axiam_auth::token::decode_access_token(&reshaped, c).is_err(),
+                    "typ {typ:?}, relaxed {}",
+                    !c.require_access_token_typ
+                );
+                assert!(
+                    axiam_auth::token::decode_access_token_any_audience(&reshaped, c).is_err(),
+                    "typ {typ:?}, relaxed {}",
+                    !c.require_access_token_typ
+                );
+            }
+        }
+        // And as minted, kid and all: refused in both modes.
+        for c in [&cfg, &relaxed] {
+            assert!(axiam_auth::token::decode_access_token(&t, c).is_err());
+            assert!(axiam_auth::token::decode_access_token_any_audience(&t, c).is_err());
+        }
     }
 
     #[test]

@@ -12,6 +12,9 @@
   from 2 to 4 CPUs, on AXIAM 1.3.1 with the competitors and SurrealDB 4.0.1 pinned to run 6's digests.
 - **Run 6c** (§14, added 2026-11-23): AXIAM 1.3.1 against a SurrealDB **3.3.5** server, at both
   run-6b cap settings — how much of AXIAM's database cost is the 4.x server. Benchmark-only, unsupported.
+- **Run 7** (§15, added 2026-11-28): AXIAM **1.4.0** — the query optimisations, the read caches on
+  by default and the 1.4.0 fixes — against the same pinned competitors and SurrealDB 4.0.1, on a VM
+  booted from the snapshot. **Driven end to end by one script, `infra/bench-vm/scripts/run7.sh`.**
 - **Relationship to the run-6 runbook**: this file covers *the machine*.
   [`run6-runbook.md`](run6-runbook.md) remains the reference for *the run* — what each cell
   measures, the labels, the reporting rules. Where this file says "run6 §12.x", the commands
@@ -233,7 +236,11 @@ at the first step that fails**, printing `STOPPED … at line N` with the failin
 Go. Its full output is in `~/bench/logs/02-sdk-toolchains.log`; re-running it skips what is
 already installed.
 
-### 5.1 Known blocker: the C# bench targets `net8.0`, the SDK `net10.0`
+### 5.1 Known blocker (fixed 2026-11-28): the C# bench targets `net8.0`, the SDK `net10.0`
+
+**Fixed in the harness for run 7:** `axiam-sdk-bench.csproj` now targets `net10.0`, so the
+retarget below is no longer needed and the checkout stays clean through the SDK pass. The rest
+of this section records what runs 6–6c had to do.
 
 `benchmarks/sdk/csharp/axiam-sdk-bench.csproj` declares `<TargetFramework>net8.0</TargetFramework>`
 and a `ProjectReference` to the sibling `Axiam.Sdk.csproj`, which now targets **`net10.0`**.
@@ -1154,3 +1161,157 @@ The archive from `just bench-pack` (it now carries `results/run6c/**`), and thes
 ```
 
 I will then write the per-cell comparison of §14.7 from it.
+
+---
+
+## 15. Run 7 — AXIAM 1.4.0: query optimisations, caches on, fixes — one script
+
+Written 2026-11-28. **The whole round is `infra/bench-vm/scripts/run7.sh`**, started once in
+`tmux` on a VM booted from the snapshot; nothing else is typed on the VM except the registry
+logins. Same scope as runs 6–6c (the comparison), plus the passes that isolate what 1.4.0
+changed.
+
+### 15.1 What changed in AXIAM, and what run 7 must separate
+
+1.4.0 (`CHANGELOG.md` `[1.4.0]`) changes the request path in three ways at once:
+
+1. **Fewer database round trips, same behaviour**: one round trip per uncached authorization
+   check (was three); client, tenant and account read together on the token endpoints; REST
+   userinfo's session and account read together; the request-audit worker writes batches of up
+   to 64 rows and no longer sheds rows under load.
+2. **Read caches on by default (5 s)**: the session-validation cache, the decision cache, and
+   new tenant/client/user record caches (`AXIAM__DB__RECORD_CACHE_TTL_SECS`). The harness
+   declares the posture per target: `just caches=default|strict|on` (`benchmarks/README.md`,
+   "Caches and fairness"); every cell records `cache_profile` in its `meta.json`.
+3. **An opt-in WebSocket datastore engine** (`AXIAM__DB__ENGINE=ws`, default `http`).
+
+So the passes are chosen to separate them: the run of record (as shipped: 1 + 2) against
+`strict` (1 alone, caches off) against run 6b pass A (1.3.1, neither) at equal caps; and `ws`
+as its own labelled cell.
+
+### 15.2 The rule: only AXIAM moves
+
+Every other image is pinned to the digest runs 6–6c recorded (`run7-pins.env`): Keycloak 26.8.1,
+Zitadel v4.19.5, authentik 2026.8.5, PostgreSQL 16, RabbitMQ 4, **SurrealDB 4.0.1** (still the
+newest release on 2026-11-28; surrealdb/surrealdb#7667 and #7716 still open). The AXIAM image is
+`ghcr.io/ilpanich/axiam/server:1.4.0`, by the digest `pull-pinned-images.sh` records.
+
+**The harness is `main`, not the tag.** The changes the round needs — `oauth2_refresh_grant.js`,
+`run7.sh`, the C# retarget — landed after `v1.4.0`. `03-checkouts.sh` therefore checks out
+`AXIAM_REF=origin/main` and refuses it unless `v1.4.0` is its ancestor **and** no product source
+differs (`crates/`, `proto/`, `Cargo.toml`, `Cargo.lock`): the image measured is exactly the tag's.
+This is run 5's precedent (harness on `main`, image by tag). **Merge the harness branch into
+`main` before starting**, or every AXIAM cell is refused (`build_ref` not on `origin/main`).
+
+### 15.3 The passes
+
+| Pass | What | Tree | Cells / repeat | Estimate (REPEAT=3) |
+|---|---|---|---|---|
+| `setup` | move older results aside (`~/bench/archive/`), `03` at `origin/main`, `04`, `05` | — | — | 25 min |
+| `preflight` | certificates, pinned pulls, provenance, steal log | `results/provenance/` | — | 30 min |
+| `dryrun` | **gate**: CORE, 4 targets × p0/p2/p3; then `oauth2_refresh_grant` (axiam, keycloak); then the SDK rehearsal | `results/dry-run/run7-*` (not packed; summaries copied to the logs) | — | 2 h |
+| `resting` | memory at rest, four stacks, fresh and fixture | `results/resting/` | — | 50 min |
+| `matrix` | **run of record**: 4 targets × p0/p2/p3, 2/2, shipped caches | `results/run-{1..3}` | 95 | ~17.5 h |
+| `strict-2x2` | AXIAM, caches OFF, p0, 2/2 | `results/run7/axiam-strict-caps-2x2` | 12 | 2.4 h |
+| `caps-4x4` | 4 targets, p0, 4/4, shipped caches | `results/run7/caps-4x4` | 34 | 6.3 h |
+| `strict-4x4` | AXIAM, caches OFF, p0, 4/4 | `results/run7/axiam-strict-caps-4x4` | 12 | 2.4 h |
+| `sdk` | the eleven SDKs, p0, median of 3 | `results/sdk/` | — | 1.5 h |
+| `ws-2x2` | AXIAM on the WebSocket engine, p0, 2/2 | `results/run7/axiam-ws-caps-2x2` | 12 | 2.4 h |
+| `zitadel-on` | Zitadel with its object caches ON (`caches=on`), p0, 2/2 | `results/run7/zitadel-caches-on-caps-2x2` | 8 | 1.6 h |
+| `surreal335` | AXIAM 1.4.0 on SurrealDB 3.3.5 (unsupported, benchmark-only), p0, 2/2 and 4/4 | `results/run7/axiam-surreal-3.3.5-caps-{2x2,4x4}` | 24 | 4.7 h |
+| `close` | stop the steal log, provenance `-after`, `bench-report`, `bench-pack`, `results/RUN-NOTES.md` | — | — | 10 min |
+
+About **42 hours** in total; `run7.sh --list` prints the plan, the state of each pass and the time
+left. The CORE set is run 6's twelve scenarios plus `oauth2_refresh_grant.js`.
+
+**What stops the round, and what does not.** Only `setup` (a FAIL in `04-verify.sh`, or `05` saying
+recreate), `preflight` (an image that cannot be pulled, or a pin that does not match) and the CORE
+dry run stop it: without them there is no comparison. Everything else **skips with the reason
+recorded and carries on**: `oauth2_refresh_grant` failing its dry run is dropped from every pass (it
+has never run on a live stack); a failed SDK rehearsal skips the SDK pass; each optional AXIAM pass
+(`strict-*`, `ws-2x2`, `zitadel-on`, `surreal335`) has its own dry run and is skipped if it fails —
+for `surreal335` that is a **finding** (1.4.0's merged queries may need 4.x), not a fault.
+
+**Restart-safe.** A finished pass is recorded in `~/bench/run7/state/` and skipped next time; an
+interrupted pass is moved to `results/run7/_aborted/` and re-run from its start. `run7.sh --redo
+PASS` runs one again; `PASSES="matrix sdk" run7.sh` limits a start to those passes.
+
+**Fetch at any time.** Every pass ends with `just bench-pack`, so `./run.sh fetch` returns everything
+finished so far.
+
+### 15.4 Commands
+
+From your PC: pull, boot the snapshot (§8), push the scripts.
+
+```bash
+git pull
+```
+
+In `infra/bench-vm/tofu/bench-vm.auto.tfvars`, set the snapshot image (the name you gave
+`./run.sh snapshot`; `axiam-bench-provisioned` by default):
+
+```text
+image_name = "axiam-bench-provisioned"
+```
+
+```bash
+source ~/Downloads/<project>-openrc.sh
+```
+
+```bash
+./run.sh apply && ./run.sh push && ./run.sh ssh
+```
+
+On the VM, once: the registry logins (§4; never scripted), and `gh auth login` only if the
+repositories are private.
+
+```bash
+docker login ghcr.io && docker login
+```
+
+```bash
+tmux new -s bench
+```
+
+```bash
+~/bench-vm/scripts/run7.sh
+```
+
+Detach with `Ctrl-b d`. Progress: `tail -f ~/bench/logs/run7/run7.log` (one line per pass event)
+or `~/bench-vm/scripts/run7.sh --list`. Reattach with `tmux attach -t bench`.
+
+When it prints `Run 7 complete`, from your PC:
+
+```bash
+./run.sh fetch ~/axiam-results-run7
+```
+
+Then §11: `docker logout ghcr.io; docker logout` on the VM, `./run.sh snapshot` if you want a
+newer image, `./run.sh destroy`.
+
+### 15.5 Reading run 7 — what the report must say
+
+1. **Three AXIAM variables, three comparisons at equal caps**, each named: shipped 1.4.0 (run of
+   record) against `strict` 1.4.0 = **the caches**; `strict` 1.4.0 against run 6b pass A (1.3.1) =
+   **the query work and fixes** (a different instance: quote the competitors' run-6 → run-7 drift
+   as the host control, and the 1.3.0 → 1.3.1 delta of §13 as unexplained); shipped 1.4.0 against
+   run 6 = the release as a user sees it.
+2. **The cache posture on every head-to-head number** (`cache_profile` in `meta.json`; the report's
+   "Read-cache posture" section): AXIAM's caches are on by default from 1.4.0, Keycloak's and
+   authentik's always were, Zitadel's ship off — `zitadel-on` is the fairness reference.
+3. **Revocation latency under the default posture is part of the result**: a revoked session or a
+   changed grant is seen at once on the replica that handles the write, within 5 s elsewhere
+   (CHANGELOG `[1.4.0]`). State it wherever a cached figure is quoted.
+4. **`oauth2_refresh_grant`** is the like-for-like OAuth2 refresh grant against Keycloak (no
+   `protocol-variant` label); `token_refresh` keeps its label.
+5. **SurrealDB**: 4.0.1 with #7667 and #7716 open; `surreal335`, if it ran, sizes #7667 on 1.4.0's
+   reduced query count, under the run-6c label (unsupported, benchmark-only).
+6. **Labels carried from run 6**: authentik's login `protocol-variant`, authentik's and Zitadel's
+   refresh `fallback-op`, Zitadel's userinfo `cc-token-setup`, authentik has no p3.
+
+### 15.6 What to send back
+
+The archive (`results-<date>.tar.xz`, the latest one) and `~/bench/logs/` — both come with
+`./run.sh fetch`. `results/RUN-NOTES.md` is written by `run7.sh` (host, qualification, steal, tag
+and harness commit, pinned versions, every pass done or skipped with its reason); add only what
+the files cannot say: start and end, interruptions, anything you re-ran by hand.

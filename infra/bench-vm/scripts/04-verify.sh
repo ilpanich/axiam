@@ -125,12 +125,17 @@ if [[ -d "$AX/.git" ]]; then
     # By commit, not by `git describe`: the release commit carries other tags too
     # (axiam-opaque-v1.3.0), and describe may name any of them.
     want="$(git -C "$AX" rev-parse -q --verify "refs/tags/$AXIAM_TAG^{commit}" 2>/dev/null)"
-    if [[ -n "$want" && "$(git -C "$AX" rev-parse HEAD)" == "$want" ]]; then
+    head="$(git -C "$AX" rev-parse HEAD)"
+    if [[ -n "$want" && "$head" == "$want" ]]; then
         row PASS "axiam checkout" "$AXIAM_TAG @ $(git -C "$AX" rev-parse --short=12 HEAD)"
+    elif [[ -n "$want" && "$AXIAM_REF" != "$AXIAM_TAG" ]] \
+         && git -C "$AX" merge-base --is-ancestor "$want" "$head" \
+         && git -C "$AX" diff --quiet "$want" "$head" -- crates proto Cargo.toml Cargo.lock; then
+        row PASS "axiam checkout" "harness $AXIAM_REF @ $(git -C "$AX" rev-parse --short=12 HEAD); product source = $AXIAM_TAG"
     else
-        row FAIL "axiam checkout" "HEAD is not $AXIAM_TAG (03-checkouts.sh)"
+        row FAIL "axiam checkout" "HEAD is not $AXIAM_TAG, nor a harness-only descendant of it (03-checkouts.sh)"
     fi
-    git -C "$AX" diff --quiet && row PASS "axiam tree clean" "" || row WARN "axiam tree clean" "local changes: build_ref no longer describes the tag alone (fine only for runbook §5.1, during the SDK pass)"
+    git -C "$AX" diff --quiet && row PASS "axiam tree clean" "" || row WARN "axiam tree clean" "local changes: build_ref no longer describes the checkout alone"
     csproj="$AX/benchmarks/sdk/csharp/axiam-sdk-bench.csproj"
     if grep -q '<TargetFramework>net8.0</TargetFramework>' "$csproj" 2>/dev/null \
        && grep -rqs '<TargetFramework>net10.0</TargetFramework>' "$BENCH_DIR/axiam-csharp-sdk" --include=*.csproj; then

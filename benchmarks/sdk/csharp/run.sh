@@ -24,12 +24,12 @@ source "$HERE/../_tlspaths.sh"; absolutize_tls_paths
 # fail the whole sdk-bench-all run.
 if ! command -v dotnet >/dev/null 2>&1; then
   cat >&2 <<'EOF'
-[csharp] dotnet SDK not found on PATH — this bench needs .NET SDK 8.0 (net8.0
+[csharp] dotnet SDK not found on PATH — this bench needs .NET SDK 10.0 (net10.0
 target) to build/run. Install it with ONE of:
 
   # Option A — Microsoft's install script (no root, no apt repo needed):
   curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
-  bash /tmp/dotnet-install.sh --channel 8.0
+  bash /tmp/dotnet-install.sh --channel 10.0
   export PATH="$HOME/.dotnet:$PATH"   # add to your shell profile to persist
 
   # Option B — apt (Ubuntu/Debian, requires the dotnet-install feed or the
@@ -37,7 +37,7 @@ target) to build/run. Install it with ONE of:
   # dotnet-sdk packages):
   wget https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
   sudo dpkg -i /tmp/packages-microsoft-prod.deb
-  sudo apt-get update && sudo apt-get install -y dotnet-sdk-8.0
+  sudo apt-get update && sudo apt-get install -y dotnet-sdk-10.0
 
 After installing, re-run: cd benchmarks && just sdk=csharp sdk-bench
 EOF

@@ -10,7 +10,10 @@
 # or a fine-grained PAT with Contents: read on these twelve repositories in a
 # git credential helper). This script never asks for or stores a token.
 #
-#   AXIAM_TAG=v1.3.0   the release (default: versions.env)
+#   AXIAM_TAG=v1.4.0   the release (default: versions.env)
+#   AXIAM_REF=<ref>    the harness checkout (default: the tag). Another ref is
+#                      accepted only if the tag is its ancestor and no product
+#                      source differs (crates/, proto/, Cargo.toml, Cargo.lock).
 #   SDK_REF=<ref>      check every SDK out at this ref; default: leave the
 #                      default branch. Every SDK record carries the version it
 #                      built either way (benchmarks/sdk/_sdkversion.sh).
@@ -53,13 +56,24 @@ git -C axiam fetch --quiet origin main
 # shellcheck disable=SC2015  # die when either diff is non-empty
 git -C axiam diff --quiet && git -C axiam diff --cached --quiet \
     || die "axiam has local changes; the run's build_ref must describe a clean tag. Stash or discard them first."
-git -C axiam checkout --quiet "$AXIAM_TAG"
+if [[ "$AXIAM_REF" != "$AXIAM_TAG" ]]; then
+    ref_commit="$(git -C axiam rev-parse -q --verify "$AXIAM_REF^{commit}")" \
+        || die "AXIAM_REF=$AXIAM_REF does not resolve in the axiam checkout."
+    git -C axiam merge-base --is-ancestor "$AXIAM_TAG" "$ref_commit" \
+        || die "$AXIAM_TAG is not an ancestor of $AXIAM_REF: the harness would not contain the release."
+    git -C axiam diff --quiet "$AXIAM_TAG" "$ref_commit" -- crates proto Cargo.toml Cargo.lock \
+        || die "Product source differs between $AXIAM_TAG and $AXIAM_REF (crates/, proto/, Cargo.toml or Cargo.lock): the image measured would not match the harness. Use a ref that changes only harness and docs."
+    git -C axiam checkout --quiet --detach "$ref_commit"
+    ok "harness at $AXIAM_REF ($(git -C axiam rev-parse --short=12 HEAD)); product source identical to $AXIAM_TAG"
+else
+    git -C axiam checkout --quiet "$AXIAM_TAG"
+fi
 git -C axiam merge-base --is-ancestor HEAD origin/main \
-    || die "$AXIAM_TAG is not on origin/main; run-benchmark.sh would refuse every AXIAM cell."
+    || die "$(git -C axiam rev-parse --short=12 HEAD) is not on origin/main; run-benchmark.sh would refuse every AXIAM cell."
 version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' axiam/Cargo.toml | head -1)"
-[[ "$version" == "${AXIAM_TAG#v}" ]] || die "Cargo.toml at $AXIAM_TAG says version $version, not ${AXIAM_TAG#v}."
+[[ "$version" == "${AXIAM_TAG#v}" ]] || die "Cargo.toml at $AXIAM_REF says version $version, not ${AXIAM_TAG#v}."
 surreal="$(sed -n 's/.*BENCH_SURREALDB_IMAGE:-\([^}]*\)}.*/\1/p' axiam/benchmarks/targets/axiam/docker-compose.yml | head -1)"
-ok "axiam $AXIAM_TAG @ $(git -C axiam rev-parse --short=12 HEAD) (version $version; harness SurrealDB default: $surreal)"
+ok "axiam $AXIAM_TAG, harness @ $(git -C axiam rev-parse --short=12 HEAD) (version $version; harness SurrealDB default: $surreal)"
 
 # ---------------------------------------------------------------------------
 # The eleven SDKs
@@ -70,7 +84,7 @@ for lang in $SDK_REPOS; do
 done
 {
     echo "# $(date -u +%FT%TZ)  checkouts under $BENCH_DIR"
-    printf '%-24s %s\n' axiam "$AXIAM_TAG $(git -C axiam rev-parse HEAD)"
+    printf '%-24s %s\n' axiam "$AXIAM_TAG (harness $AXIAM_REF) $(git -C axiam rev-parse HEAD)"
     for lang in $SDK_REPOS; do
         printf '%-24s %s\n' "axiam-$lang-sdk" "$(git -C "axiam-$lang-sdk" describe --tags --always) $(git -C "axiam-$lang-sdk" rev-parse HEAD)"
     done

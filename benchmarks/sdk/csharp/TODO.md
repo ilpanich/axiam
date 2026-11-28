@@ -27,12 +27,12 @@ sibling `axiam-csharp-sdk` checkout via the `ProjectReference` above — it has
 not been compiled or run here because the toolchain isn't present, not
 because of a code defect.
 
-### Installing the .NET SDK (net8.0)
+### Installing the .NET SDK (net10.0)
 
 Option A — Microsoft's install script (no root, no apt repo needed):
 ```
 curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
-bash /tmp/dotnet-install.sh --channel 8.0
+bash /tmp/dotnet-install.sh --channel 10.0
 export PATH="$HOME/.dotnet:$PATH"   # add to your shell profile to persist
 ```
 
@@ -41,7 +41,7 @@ Option B — apt (Ubuntu/Debian; 24.04's default repos dropped the standalone
 ```
 wget https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
 sudo dpkg -i /tmp/packages-microsoft-prod.deb
-sudo apt-get update && sudo apt-get install -y dotnet-sdk-8.0
+sudo apt-get update && sudo apt-get install -y dotnet-sdk-10.0
 ```
 
 After either option, re-run `cd benchmarks && just sdk=csharp sdk-bench` — it

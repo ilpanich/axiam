@@ -26,7 +26,9 @@ infra/bench-vm/
     ├── pin-images-from-run.py  export lines pinning a past run's images by digest (run 6b, runbook §13)
     ├── 03-checkouts.sh       axiam at the release tag, the eleven SDKs beside it
     ├── 04-verify.sh          read-only PASS/WARN/FAIL table; exit status = number of FAILs
-    └── 05-qualify.sh         sysbench consistency and steal under load; go / watch / recreate
+    ├── 05-qualify.sh         sysbench consistency and steal under load; go / watch / recreate
+    ├── run7.sh               run 7 end to end, unattended, restart-safe (runbook §15)
+    └── run7-pins.env         run 7's image pins: every image but AXIAM's, at run 6's digests
 ```
 
 ## The order
@@ -57,8 +59,10 @@ infra/bench-vm/
 2. **Judgement.** `05-qualify.sh` prints a verdict from operator heuristics; deciding to
    recreate the VM, and deciding the dry run is all-PASS before a 17-hour matrix, stay with
    the operator.
-3. **The run.** `bench-matrix` and friends already orchestrate the cells; a wrapper around
-   them would hide which step failed in a run that lasts a day.
+3. **The run — until run 7.** Runs 6–6c were typed pass by pass. Run 7's `run7.sh` drives the
+   whole round from a VM booted from the snapshot: it runs `03`–`05` itself, gates on the dry
+   run, logs every pass to `~/bench/logs/run7/`, records each finished pass so a restart resumes,
+   and skips an optional pass with its reason instead of stopping (runbook §15).
 4. **The snapshot as a resource.** OpenStack has no Tofu resource that images a running
    instance, so `run.sh snapshot` calls the OpenStack CLI.
 

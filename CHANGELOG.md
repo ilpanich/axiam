@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check out the release and its SDKs, verify the result and qualify the VM's
   CPU (consistency and steal time). `claude_dev/bench-vm-runbook.md` is the
   operator guide; the comparison round itself stays by hand.
+- `infra/bench-vm/scripts/run7.sh`: benchmark run 7 (AXIAM 1.4.0) end to end and
+  unattended, from a VM booted from the provisioned snapshot: checkouts, verify,
+  qualify, pinned pulls (`run7-pins.env`, run 6's digests for every image but
+  AXIAM's), a gating dry run, the run of record and the passes that separate the
+  query work, the caches and the WebSocket engine, the SDK pass, report and pack.
+  Restart-safe; an optional pass that fails its own dry run is skipped with the
+  reason recorded. `03-checkouts.sh` accepts a harness ref after the tag
+  (`AXIAM_REF`) only when no product source differs (runbook §15).
+- `benchmarks/scenarios/oauth2_refresh_grant.js`: the OAuth2 refresh-token grant,
+  like for like on every target; AXIAM's first refresh token comes from the
+  authorization-code flow with PKCE.
+
+### Fixed
+
+- The C# SDK bench targets `net10.0`, as the SDK does; the per-run retarget of
+  runbook §5.1 is no longer needed.
 
 ## [1.4.0] - 2026-11-28
 

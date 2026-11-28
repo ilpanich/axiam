@@ -116,7 +116,7 @@ services:
     profiles: ["full-stack"]
     # A released version, not a floating tag, from the namespace release.yml
     # publishes to (ghcr.io/${github.repository}). Override with AXIAM_IMAGE_TAG.
-    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:-1.3.1}
+    image: ghcr.io/ilpanich/axiam/server:${AXIAM_IMAGE_TAG:-1.4.0}
     container_name: axiam-server
     depends_on:
       surrealdb:

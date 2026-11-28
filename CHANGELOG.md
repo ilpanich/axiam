@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-28
+
 ### Security
 
 This section collects the fixes of the 2026-11-14 security audit
@@ -182,6 +184,208 @@ for the changes that need an action are in `docs/deployment/README.md`.
   rows in batches of up to 64 and no longer drops rows under load (5bd3b363d,
   3107b0c, 007602af9, a2d6de9ed, 025aea26d, 8a143491f, eb6a32c45).
 
+- Print nothing derived from a callback response in a failed assertion
+
+- Never print a callback response body in a failed assertion
+
+- Rule 7 wording follow-ups (contract 1.69)
+
+- Rule 7 tenant normalisation and test precision (contract 1.69)
+
+- Rule 7 review follow-ups (contract 1.69)
+
+- The oidc_refresh single-flight is per refresh token (contract 1.69)
+
+- Record OI-30 part 2 and mark the plan executed
+
+- Record OI-30 part 1
+
+- Record Wave B2 (OI-32 to OI-41) and the settled cross-SDK readings
+
+- Record OI-42 and its review gate
+
+- Record OI-31 and its review gate
+
+- OI-31 review round 2 (#883)
+
+- Record the Wave A review gate
+
+- OI-31 review round 1 (#883)
+
+- Typed consume, BOM refusal and bounded JWKS stale-if-error (OI-31, #883)
+
+- wire-form paragraph no longer claims the server enforces it (OI-05 review, #883)
+
+- Record OI-14 and its review gate
+
+- Record OI-17 and its review gate
+
+- Record OI-10 and OI-16 with their review gates
+
+- Record OI-11 and its review gate
+
+- Record OI-13 and its review gate
+
+- Record OI-12 and its review gate
+
+- Record the OI-05 contract follow-up
+
+- Record OI-15 and its review gate
+
+- Record OI-20 review round 3
+
+- Record OI-18 and its review gate
+
+- Record OI-07 as executed
+
+- Runs 6, 6b and 6c in the three competitor comparisons, website sentence and figures (OI-07, #561)
+
+- Record OI-06 as executed
+
+- Correct stale statements and comments from the audit review gates (OI-06, #874, #879, #890, #891)
+
+- Record OI-19 and its review gate
+
+- Record OI-20 and its review gate
+
+- Record OI-05 and the contract re-vendoring
+
+- Drop the MCP stub's mock server off the tokio task
+
+- Record OI-04 as executed
+
+- Record OI-03 as executed
+
+- Record OI-02 as executed
+
+- Record OI-01 as executed
+
+- Rewrite OI-07 (#561) against benchmark runs 6, 6b and 6c
+
+- Fix plan for the 26 open issues across the twelve repositories
+
+- Generate the two remaining literal test passwords
+
+- Document the datastore engine, request deadline and record caches
+
+- pool-probe through DbPool; record WS vs HTTP across restarts
+
+- Back the prefetch introspection test's token with a live session
+
+- Give main's new AppDeps literal the request deadline
+
+- Follow main's AuditLogRepository changes in the batching double
+
+- Pin advisories.unmaintained = "all" for cargo-deny 0.22
+
+- Refresh db-query-bench's Cargo.lock copy after the main merge
+
+- Benchmarks: declare the read-cache posture and keep competitors comparable
+
+- Add an opt-in WebSocket datastore engine with a REST request deadline
+
+- Cache tenant, OAuth2 client and user records for 5 s on hot read paths
+
+- Turn the session-validation and decision caches on by default (5 s)
+
+- Rustfmt webauthn_single_use_test
+
+- Clear the CodeQL alerts PR #875 raised in test code
+
+- Record decisions A–F with measurements
+
+- Measure the merged token-endpoint reads; WebSocket reconnect probe
+
+- userinfo's session check reads the account in the same round trip
+
+- Read the client, its tenant and the token's account in one round trip
+
+- Suppress RUSTSEC-2026-0594 (cookie 0.16.2), unreachable
+
+- Give /oauth2/revoke its own row in the rate-limit table
+
+- Database work per request — measurements, changes, options
+
+- Build the role-assignment read from the shared column list
+
+- db-query-bench — SurrealDB server CPU per query, per round trip
+
+- One database round trip per uncached authorization check
+
+- Write queued request rows in batches, one statement per batch
+
+- Check the tenant of the session and user reads in the repository
+
+- Record the Wave 5 review gate
+
+- Threat model, upgrade notes, admin pages and final regression gate (SA-50, close-out)
+
+- Record the Wave 4 review gate
+
+- Correct the refresh comparability wording
+
+- Seventh draft of PUBLIC_BENCH_ANALYSIS — runs 6, 6b and 6c
+
+- State that the SurrealDB 3.3.5 figures represent AXIAM
+
+- Add benchmark run 6c and size the SurrealDB 4.0.1 cost
+
+- Bump github/codeql-action/upload-sarif
+
+- Bump EmbarkStudios/cargo-deny-action from 2.1.1 to 2.1.3
+
+- Record the Wave 3 review gate
+
+- EXECUTED blocks for the Wave 3 SDK tasks (SA-20…SA-30)
+
+- Add benchmark run 6b (4-CPU caps) to the Benchmarks page
+
+- Record the Wave 2 review gate
+
+- Drop the stale npm audit allowlist entry
+
+- Drop the stale picomatch npm-audit allowlist entry
+
+- Monthly dependency and toolchain update (2026-11)
+
+- Highlight the SurrealDB 4 write-statement bug on Benchmarks
+
+- Publish benchmark run 6 and drop the preliminary banner
+
+- Restore the delete-MFA-method summary ahead of the SR4-1 note
+
+- The system-audit scope switch needs an unrestricted organization principal (SA-02, N1)
+
+- Record the wave 1 review gate (wave 1, round 41)
+
+- Add a documented allow-list to the npm audit gate
+
+- Suppress unmaintained chrono and humantime advisories
+
+- Record surrealdb 4.0.1 race-probe results
+
+- re-pin surreal-race-probe to surrealdb 4.0.1
+
+- Bump the minor-patch group with 7 updates
+
+- Bump the base-images group in /docker with 2 updates
+
+- Bump the minor-patch group in /frontend with 9 updates
+
+- Finalize the audit fix plan with the owner's decisions
+
+- Add fix plan for the 2026-11-14 security audit
+
+- Add full security audit of server and SDKs (2026-11-14)
+
+- Bump hono
+
+- Find test executables in Cargo 1.100's build-dir layout
+
+- Bump ammonia 4.2.4 -> 4.2.5 (RUSTSEC-2026-0533)
+
+- Bump @hono/node-server
+
 ### Fixed
 
 - The lost migration lease is parked on `pending::<()>()`, which behaves as
@@ -190,6 +394,150 @@ for the changes that need an action are in `docs/deployment/README.md`.
 - Tests and CI: tests that minted a user token without a session now create a
   live one; CI finds test executables in Cargo 1.100's build layout; two
   CodeQL alerts raised in test code are cleared.
+
+- Wave A review gate round 2 (OI-03, #889)
+
+- Wave A review gate follow-ups (OI-03 #889, OI-04 #873, OI-06, OI-07 #561)
+
+- Align contract 1.69 §8 with A.1 and D-5 (OI wave A, OI-05 follow-up)
+
+- Refuse a suspended tenant on the prefetched client-auth path
+
+- Sign back-channel logout tokens with their JWKS kid; contract 1.69 (OI-05, #880, #881, #883)
+
+- One credential-superseded rule for OPAQUE login/finish; pin same-second acceptance (OI-04, #872, #873)
+
+- Redact the bearer segment of an unmatched path over non-empty segments (OI-03, #889)
+
+- Refuse a suspended tenant before federated provisioning (OI-02, #877)
+
+- Answer a lock in force uniformly before the suspended-tenant refusal (OI-01, #878)
+
+- Log the requested user count, not one read from the id list
+
+- Keep only user ids in the bench seed, not whole User records
+
+- Read the audit row's organization before its fields move
+
+- Suspension upgrade steps, sid/jti introspection wording, queue-signing caveats (wave 5, round 1)
+
+- uma_test user token names a live session (wave 4 follow-up, QR1-1)
+
+- Bounded dot-segment decoding, session-aware introspection, spend-before-store TOTP setup (wave 4, round 1)
+
+- Compare run 6c at plaintext, not under mutual TLS
+
+- No automounted SA tokens, controller-scoped ingress policy, loopback-only dev/e2e service ports (SA-45, h15-supply-deploy)
+
+- Redact path-borne tokens from audit, explicit gRPC decode cap, error category on /health/jobs (SA-44, h12-directory-audit-gdpr)
+
+- Pending TOTP secret, single-use setup tokens, MFA lockout and second-factor sign-in gate (SA-43, h08-authn-recovery)
+
+- CI regressions from SA-40/41/42 and SA-06 (wave 4 follow-up)
+
+- Accept RUSTSEC-2026-0594 (cookie 0.16.2) with reason, no upgrade path
+
+- SSRF guard never reaches metadata, safe DCR host glob, SIIT prefix special-purpose (SA-42, h05-ssrf-dcr)
+
+- PKCE downgrade, PAR pre-consume client check, session-aware introspection (SA-41, h04-oauth2-as)
+
+- Exact REST edge matchers for dot segments, CSRF exemption and tenant selector (SA-40, h01-rest-authn)
+
+- Take url 2.5.9 for RUSTSEC-2026-0592
+
+- Address wave 2 round 3 findings (wave 2, round 4)
+
+- Address wave 2 round 1 findings (wave 2, round 2)
+
+- Contract 1.68 for the Wave 2 server changes (SA-17, C5/C6/C7/N2/N12/N14/N15)
+
+- Add the roles scope and claim to access tokens (SA-18, N15)
+
+- Pass toolchain explicitly to the pinned rust-toolchain steps (SA-16, N17)
+
+- Pin release-opaque actions, fix dev image, keep DB passwords off command lines (SA-16, N17/N18/N19)
+
+- Sign authz responses per tenant and honour reply_to (SA-15, N2)
+
+- Document amqp.internal_queues.require_signature on the docs site (SA-14, N3)
+
+- Sign and verify the server-internal mail and outbound queues (SA-14, N3)
+
+- Enforce tenant suspension at every door (SA-13, N16)
+
+- Enforce RBAC on gRPC UserService GetUser and ValidateCredentials (SA-12, N4)
+
+- Bind SAML assertions to this SP's audience and ACS Recipient (SA-11, N21)
+
+- The SSRF-pinned client never uses an environment proxy (SA-10, N13)
+
+- Erasure cancel restores the account's prior status (SA-09, N11)
+
+- Raise the b7 org baseline as the organization admin (SA-02, N8)
+
+- Resolve wave 1 review round 39 findings (wave 1, round 40)
+
+- Resolve wave 1 review round 37 findings (wave 1, round 38)
+
+- Resolve wave 1 review round 35 findings (wave 1, round 36)
+
+- Resolve wave 1 review round 33 findings (wave 1, round 34)
+
+- Resolve wave 1 review round 31 findings (wave 1, round 32)
+
+- Resolve wave 1 review round 29 findings (wave 1, round 30)
+
+- Resolve wave 1 review round 27 findings (wave 1, round 28)
+
+- Resolve wave 1 review round 25 findings (wave 1, round 26)
+
+- Resolve wave 1 review round 23 findings (wave 1, round 24)
+
+- Resolve wave 1 review round 21 findings (wave 1, round 22)
+
+- Resolve wave 1 review round 19 findings (wave 1, round 20)
+
+- Resolve wave 1 review round 17 findings (wave 1, round 18)
+
+- Resolve wave 1 review round 15 findings (wave 1, round 16)
+
+- Resolve wave 1 review round 13 findings (wave 1, round 14)
+
+- Resolve wave 1 review round 11 findings (wave 1, round 12)
+
+- Resolve wave 1 review round 9 findings (wave 1, round 10)
+
+- Bump actix-http and lettre for new RUSTSEC advisories
+
+- Resolve wave 1 review round 7 findings (wave 1, round 8)
+
+- Resolve wave 1 review round 5 findings (wave 1, round 6)
+
+- Resolve wave 1 review round 3 findings (wave 1, round 4)
+
+- Resolve wave 1 review round 2 findings (wave 1, round 2)
+
+- Resolve wave 1 review findings (wave 1, round 1)
+
+- Scope group member counts to the caller's tenant (SA-08, N20)
+
+- Derive the timing-equalising dummy hash from production Argon2 params (SA-07, C3)
+
+- Retire the stale OPAQUE record on every password hash write (SA-06, N7)
+
+- mTLS device login refuses a non-active service account (SA-05, N5)
+
+- /oauth2/authorize treats client-minted tokens as anonymous (SA-04, N6)
+
+- Typed access tokens; purpose JWTs rejected (SA-03, N10)
+
+- organization-level guard on system audit, org settings and audit export (SA-02, N1, N8, N9)
+
+- Bootstrap always requires the setup token (SA-01, C1)
+
+- Cancel the org settings 'Saved' timer on unmount
+
+- Park the lost migration lease on pending::<()>
 
 ### Documentation
 

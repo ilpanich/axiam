@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["PasswordResetService"]};
+window.SIDEBAR_ITEMS = {"struct":["ConfirmedReset","PasswordResetService"]};

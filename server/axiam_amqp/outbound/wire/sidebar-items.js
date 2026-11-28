@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["decode","encode"]};
+window.SIDEBAR_ITEMS = {"fn":["decode_body","encode_body","seal"]};

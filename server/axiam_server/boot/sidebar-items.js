@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["LEASE_LOSS_STOP","ORDERLY_STOP"],"fn":["compose_app","directory_client","email_egress","serve"],"struct":["AppConfig","AppDeps","AuditCollectionConfig","ServeOptions","ShutdownBudget"]};
+window.SIDEBAR_ITEMS = {"constant":["LEASE_LOSS_STOP","ORDERLY_STOP"],"fn":["allow_missing_aud_override","compose_app","directory_client","email_egress","serve"],"struct":["AppConfig","AppDeps","AuditCollectionConfig","ServeOptions","ShutdownBudget"]};

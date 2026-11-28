@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["GrpcTls"],"fn":["start_grpc_server"]};
+window.SIDEBAR_ITEMS = {"constant":["MAX_DECODING_MESSAGE_BYTES"],"enum":["GrpcTls"],"fn":["start_grpc_server"]};

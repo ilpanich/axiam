@@ -1,0 +1,82 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The organization a system-partition request row concerns (SA-02, N1)."><title>axiam_api_rest::audit_organization - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.100.1 (20ddd0171 2026-11-25)" data-channel="1.100.1" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module audit_organization</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../axiam_api_rest/index.html">axiam_<wbr>api_<wbr>rest</a><span class="version">1.4.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module audit_<wbr>organization</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-the-lookup-costs-review-qr2-8--sr2-4" title="What the lookup costs (review QR2-8 / SR2-4)">What the lookup costs (review QR2-8 / SR2-4)</a></li><li><a href="#how-many-lookups-run-at-once-review-sr15-1" title="How many lookups run at once (review SR15-1)">How many lookups run at once (review SR15-1)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate axiam_<wbr>api_<wbr>rest</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">axiam_api_rest</a></div><h1>Module <span>audit_<wbr>organization</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/axiam_api_rest/audit_organization.rs.html#1-909">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The organization a <strong>system-partition</strong> request row concerns (SA-02, N1).</p>
+<p>The request audit middleware (<code>axiam_audit::AuditMiddleware</code>) writes a row
+with a nil tenant for every request it cannot attribute to a tenant: no
+verifiable access token, no handler-proven [<code>axiam_audit::AuditAttribution</code>].
+That partition is deployment-wide, and <code>GET /api/v1/audit-logs/system</code>
+returns an organization only the rows whose recorded organization is its
+own. This module is where a request row’s organization is decided.</p>
+<p><a href="fn.system_audit_organization.html" title="fn axiam_api_rest::audit_organization::system_audit_organization"><code>system_audit_organization</code></a> runs inside the audit middleware (the
+composition root wraps it there). After the request has been served, and
+only for a request the middleware will record in the system partition, it
+starts the lookup of the organization <strong>on a task of its own</strong> and lets the
+response go (review SR4-3): the audit worker waits for the answer, through
+an [<code>axiam_audit::PendingAuditOrganization</code>], before it writes the row. No
+response waits on the datastore, so a response’s latency says nothing about
+whether the id its path names exists, whatever the cache below holds. The
+organization is resolved from something the server has verified, never
+from a value the client merely sent:</p>
+<ol>
+<li>a <a href="struct.VerifiedAuditTenant.html" title="struct axiam_api_rest::audit_organization::VerifiedAuditTenant"><code>VerifiedAuditTenant</code></a> an extractor inserted after verifying a
+credential that names the tenant — a SCIM provisioning token — gives that
+tenant’s organization;</li>
+<li>otherwise a path <code>/api/v1/organizations/{org_id}/…</code> naming an
+organization that exists gives that organization;</li>
+<li>otherwise a path <code>/saml/v2/{tenant_id}/…</code> or <code>/t/{tenant_id}/…</code> naming a
+live tenant gives its organization.</li>
+</ol>
+<p>Anything else records no organization, and the row is then returned by the
+system endpoint to nobody: a request that names no organization in its path
+(<code>/oauth2/token?tenant_id=…</code>, <code>/api/v1/users</code> without a token), or one that
+names an organization or tenant that does not exist. A datastore failure
+during the lookup counts as unresolved: the row is still written, without
+an organization. A path segment says which organization a request was
+addressed to, not who sent it; that is exactly what the row records (the
+traffic aimed at that organization’s routes), and it can only ever be shown
+to that organization.</p>
+<h2 id="what-the-lookup-costs-review-qr2-8--sr2-4"><a class="doc-anchor" href="#what-the-lookup-costs-review-qr2-8--sr2-4">§</a>What the lookup costs (review QR2-8 / SR2-4)</h2>
+<p>The resolver runs for every request the middleware writes to the system
+partition — every token-less request among them, a cheap <code>401</code> included —
+and outside every scope-level rate limiter. A path naming an organization or
+tenant would therefore cost one datastore point read per request, and a
+client looping an invented id could turn each <code>401</code> into one.
+<a href="struct.SystemAuditOrgCache.html" title="struct axiam_api_rest::audit_organization::SystemAuditOrgCache"><code>SystemAuditOrgCache</code></a> bounds that: an id that resolved is remembered for
+<a href="constant.RESOLVED_TTL.html" title="constant axiam_api_rest::audit_organization::RESOLVED_TTL"><code>RESOLVED_TTL</code></a>, an id the datastore says does not exist for the shorter
+<a href="constant.UNRESOLVED_TTL.html" title="constant axiam_api_rest::audit_organization::UNRESOLVED_TTL"><code>UNRESOLVED_TTL</code></a>, so a repeated id costs one read per TTL, not per
+request. A datastore failure is not remembered. What it cannot bound is a
+client sending a <em>different</em> invented id every time: each still costs one
+indexed record-id read, limited by the deployment’s edge and
+unauthenticated rate limits and, in how many run at once, by the bound
+below. Do not add a lookup here that is dearer than that.</p>
+<h2 id="how-many-lookups-run-at-once-review-sr15-1"><a class="doc-anchor" href="#how-many-lookups-run-at-once-review-sr15-1">§</a>How many lookups run at once (review SR15-1)</h2>
+<p>Since SR4-3 nothing makes the client wait for its lookup, so the cache alone
+would leave a client sending a fresh invented id per request free to pile
+up detached reads, each outliving the audit worker’s wait for it. The
+datastore reads are therefore bounded process-wide: a lookup that misses
+the caches takes one of <a href="constant.MAX_CONCURRENT_LOOKUPS.html" title="constant axiam_api_rest::audit_organization::MAX_CONCURRENT_LOOKUPS"><code>MAX_CONCURRENT_LOOKUPS</code></a> permits of a semaphore
+held beside the cache (<code>try_acquire_owned</code>, which never waits) immediately
+before its read, and keeps it until the read has finished. A lookup the
+caches answer — this module’s own, or <a href="../tenant_org_cache/index.html" title="mod axiam_api_rest::tenant_org_cache"><code>crate::tenant_org_cache</code></a> — reads
+nothing and takes no permit (review QR16-2), so a known organization’s rows
+keep recording it however many invented ids hold the permits. A lookup that
+must read while every permit is taken reads nothing and answers no
+organization: its row is written without one — returned by the system
+endpoint to nobody, the same fail-safe answer as an id that names nothing.
+Either way its response was served exactly as any other.</p>
+<p>The cache is an optimisation of the lookup’s cost, not of any response’s
+latency (review SR4-3): the lookup, cached or not, runs on its own task
+after the response has gone, so the two TTLs differing — a known id served
+from memory where an unknown one is read again — cannot be timed by the
+client. The response path does the same work for every id: it reads the
+path and spawns the task. Whether a permit is free is decided inside the
+task, after the caches, so it cannot change the response either.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SystemAuditOrgCache.html" title="struct axiam_api_rest::audit_organization::SystemAuditOrgCache">System<wbr>Audit<wbr>OrgCache</a></dt><dd>What a path id resolved to, remembered for <a href="constant.RESOLVED_TTL.html" title="constant axiam_api_rest::audit_organization::RESOLVED_TTL"><code>RESOLVED_TTL</code></a> when it named
+something and for <a href="constant.UNRESOLVED_TTL.html" title="constant axiam_api_rest::audit_organization::UNRESOLVED_TTL"><code>UNRESOLVED_TTL</code></a> when the datastore said it does not
+exist. A datastore failure is never remembered.</dd><dt><a class="struct" href="struct.VerifiedAuditTenant.html" title="struct axiam_api_rest::audit_organization::VerifiedAuditTenant">Verified<wbr>Audit<wbr>Tenant</a></dt><dd>A tenant an extractor has <strong>verified</strong> a request concerns, for a request
+that carries no access token: the SCIM provisioning token’s tenant, once
+the token resolved.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_CONCURRENT_LOOKUPS.html" title="constant axiam_api_rest::audit_organization::MAX_CONCURRENT_LOOKUPS">MAX_<wbr>CONCURRENT_<wbr>LOOKUPS</a></dt><dd>How many organization lookups may be in flight at once, process-wide
+(review SR15-1).</dd><dt><a class="constant" href="constant.RESOLVED_TTL.html" title="constant axiam_api_rest::audit_organization::RESOLVED_TTL">RESOLVED_<wbr>TTL</a></dt><dd>How long an organization or tenant the path names, once found, is served
+from <a href="struct.SystemAuditOrgCache.html" title="struct axiam_api_rest::audit_organization::SystemAuditOrgCache"><code>SystemAuditOrgCache</code></a> before it is read again.</dd><dt><a class="constant" href="constant.UNRESOLVED_TTL.html" title="constant axiam_api_rest::audit_organization::UNRESOLVED_TTL">UNRESOLVED_<wbr>TTL</a></dt><dd>How long a path id that named <strong>no</strong> organization or tenant is remembered
+as unresolved (QR2-8 / SR2-4).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.system_audit_organization.html" title="fn axiam_api_rest::audit_organization::system_audit_organization">system_<wbr>audit_<wbr>organization</a></dt><dd>Record, for a request the audit middleware writes to the system partition,
+the organization it concerns, when that can be resolved with certainty (see
+the module documentation). Wrapped inside the audit middleware with
+<code>actix_web::middleware::from_fn(system_audit_organization::&lt;C, _&gt;)</code>.</dd></dl></section></div></main></body></html>

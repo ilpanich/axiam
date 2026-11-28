@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-federation/src/error.rs`."><title>error.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_federation" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_federation/</div>error.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Error types for federation operations (OIDC and SAML).
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-federation/src/error.rs`."><title>error.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_federation" data-themes="" data-resource-suffix="" data-rustdoc-version="1.100.1 (20ddd0171 2026-11-25)" data-channel="1.100.1" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_federation/</div>error.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Error types for federation operations (OIDC and SAML).
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a>/// Errors that can occur during federation operations.
 <a href=#4 id=4 data-nosnippet>4</a></span><span class="attr">#[derive(Debug, thiserror::Error)]
@@ -136,82 +136,95 @@
 <a href=#136 id=136 data-nosnippet>136</a>        <span class="string">"the identity provider tenant that issued this token is not accepted by this configuration"
 <a href=#137 id=137 data-nosnippet>137</a>    </span>)]
 <a href=#138 id=138 data-nosnippet>138</a>    </span>IssuerTenantNotAllowed,
-<a href=#139 id=139 data-nosnippet>139</a>}
-<a href=#140 id=140 data-nosnippet>140</a>
-<a href=#141 id=141 data-nosnippet>141</a><span class="kw">impl </span>From&lt;FederationError&gt; <span class="kw">for </span>axiam_core::error::AxiamError {
-<a href=#142 id=142 data-nosnippet>142</a>    <span class="kw">fn </span>from(err: FederationError) -&gt; <span class="self">Self </span>{
-<a href=#143 id=143 data-nosnippet>143</a>        <span class="kw">match </span>err {
-<a href=#144 id=144 data-nosnippet>144</a>            FederationError::ConfigNotFound(id) =&gt; axiam_core::error::AxiamError::NotFound {
-<a href=#145 id=145 data-nosnippet>145</a>                entity: <span class="string">"federation_config"</span>.into(),
-<a href=#146 id=146 data-nosnippet>146</a>                id,
-<a href=#147 id=147 data-nosnippet>147</a>            },
-<a href=#148 id=148 data-nosnippet>148</a>            FederationError::ConfigDisabled
-<a href=#149 id=149 data-nosnippet>149</a>            | FederationError::ProtocolMismatch(<span class="kw">_</span>)
-<a href=#150 id=150 data-nosnippet>150</a>            | FederationError::InvalidMetadataUrl(<span class="kw">_</span>) =&gt; axiam_core::error::AxiamError::Validation {
-<a href=#151 id=151 data-nosnippet>151</a>                message: err.to_string(),
-<a href=#152 id=152 data-nosnippet>152</a>            },
-<a href=#153 id=153 data-nosnippet>153</a>            FederationError::IdTokenValidationFailed(reason)
-<a href=#154 id=154 data-nosnippet>154</a>            | FederationError::SamlResponseFailed(reason) =&gt; {
-<a href=#155 id=155 data-nosnippet>155</a>                axiam_core::error::AxiamError::AuthenticationFailed { reason }
-<a href=#156 id=156 data-nosnippet>156</a>            }
-<a href=#157 id=157 data-nosnippet>157</a>            <span class="comment">// OIDC signature / claim errors → 401
-<a href=#158 id=158 data-nosnippet>158</a>            </span>FederationError::JwtSignatureInvalid
-<a href=#159 id=159 data-nosnippet>159</a>            | FederationError::JwtClaimRejected(<span class="kw">_</span>)
-<a href=#160 id=160 data-nosnippet>160</a>            | FederationError::AlgorithmNotAllowed(<span class="kw">_</span>)
-<a href=#161 id=161 data-nosnippet>161</a>            | FederationError::JwksKidUnknown =&gt; {
-<a href=#162 id=162 data-nosnippet>162</a>                axiam_core::error::AxiamError::AuthenticationFailed {
-<a href=#163 id=163 data-nosnippet>163</a>                    reason: err.to_string(),
-<a href=#164 id=164 data-nosnippet>164</a>                }
-<a href=#165 id=165 data-nosnippet>165</a>            }
-<a href=#166 id=166 data-nosnippet>166</a>            <span class="comment">// SAML signature / replay errors → 401
-<a href=#167 id=167 data-nosnippet>167</a>            </span>FederationError::SamlSignatureInvalid(reason) =&gt; {
-<a href=#168 id=168 data-nosnippet>168</a>                axiam_core::error::AxiamError::AuthenticationFailed { reason }
-<a href=#169 id=169 data-nosnippet>169</a>            }
-<a href=#170 id=170 data-nosnippet>170</a>            FederationError::AssertionReplay =&gt; {
-<a href=#171 id=171 data-nosnippet>171</a>                axiam_core::error::AxiamError::AuthenticationFailed {
-<a href=#172 id=172 data-nosnippet>172</a>                    reason: <span class="string">"assertion replay"</span>.into(),
-<a href=#173 id=173 data-nosnippet>173</a>                }
-<a href=#174 id=174 data-nosnippet>174</a>            }
-<a href=#175 id=175 data-nosnippet>175</a>            <span class="comment">// IdP cert validation error → admin-facing 400 (Validation)
-<a href=#176 id=176 data-nosnippet>176</a>            </span>FederationError::InvalidIdpCert(msg) =&gt; {
-<a href=#177 id=177 data-nosnippet>177</a>                axiam_core::error::AxiamError::Validation { message: msg }
-<a href=#178 id=178 data-nosnippet>178</a>            }
-<a href=#179 id=179 data-nosnippet>179</a>            <span class="comment">// A config the operator has to fix → 400, with the reason. These
-<a href=#180 id=180 data-nosnippet>180</a>            // are not authentication failures: nothing about the end user is
-<a href=#181 id=181 data-nosnippet>181</a>            // wrong, and telling them "invalid credentials" would send the
-<a href=#182 id=182 data-nosnippet>182</a>            // wrong person looking.
-<a href=#183 id=183 data-nosnippet>183</a>            </span>FederationError::ConfigInvalid(msg) =&gt; {
-<a href=#184 id=184 data-nosnippet>184</a>                axiam_core::error::AxiamError::Validation { message: msg }
-<a href=#185 id=185 data-nosnippet>185</a>            }
-<a href=#186 id=186 data-nosnippet>186</a>            <span class="comment">// Refusals that ARE about this sign-in attempt → 401. The
-<a href=#187 id=187 data-nosnippet>187</a>            // unverified-email message is deliberately specific: a user who
-<a href=#188 id=188 data-nosnippet>188</a>            // cannot sign in with GitHub needs to be told to verify their
-<a href=#189 id=189 data-nosnippet>189</a>            // GitHub email, not to try a different password.
-<a href=#190 id=190 data-nosnippet>190</a>            </span>FederationError::UnverifiedExternalEmail
-<a href=#191 id=191 data-nosnippet>191</a>            | FederationError::IssuerTenantNotAllowed
-<a href=#192 id=192 data-nosnippet>192</a>            | FederationError::UserinfoUnusable(<span class="kw">_</span>) =&gt; {
-<a href=#193 id=193 data-nosnippet>193</a>                axiam_core::error::AxiamError::AuthenticationFailed {
-<a href=#194 id=194 data-nosnippet>194</a>                    reason: err.to_string(),
-<a href=#195 id=195 data-nosnippet>195</a>                }
-<a href=#196 id=196 data-nosnippet>196</a>            }
-<a href=#197 id=197 data-nosnippet>197</a>            <span class="comment">// CQ-B23: upstream-IdP failures (discovery fetch/parse, token
-<a href=#198 id=198 data-nosnippet>198</a>            // exchange, JWKS fetch) are NOT our bug — the local server did
-<a href=#199 id=199 data-nosnippet>199</a>            // nothing wrong, but the external IdP is unreachable, timed out,
-<a href=#200 id=200 data-nosnippet>200</a>            // misconfigured, or returned a malformed/erroring response.
-<a href=#201 id=201 data-nosnippet>201</a>            // Mapping these to the generic `Internal` (500) catch-all
-<a href=#202 id=202 data-nosnippet>202</a>            // mislabels an upstream dependency failure as a server bug.
-<a href=#203 id=203 data-nosnippet>203</a>            // `AxiamError` has no dedicated 502 Bad Gateway variant; the
-<a href=#204 id=204 data-nosnippet>204</a>            // closest existing variant is `ServiceUnavailable` (503), which
-<a href=#205 id=205 data-nosnippet>205</a>            // — like a 502 — signals "an upstream dependency failed" rather
-<a href=#206 id=206 data-nosnippet>206</a>            // than "the server itself is broken", so it is used here instead
-<a href=#207 id=207 data-nosnippet>207</a>            // of inventing a new status/variant.
-<a href=#208 id=208 data-nosnippet>208</a>            </span>FederationError::DiscoveryFailed(msg)
-<a href=#209 id=209 data-nosnippet>209</a>            | FederationError::TokenExchangeFailed(msg)
-<a href=#210 id=210 data-nosnippet>210</a>            | FederationError::JwksFetchFailed(msg) =&gt; {
-<a href=#211 id=211 data-nosnippet>211</a>                axiam_core::error::AxiamError::ServiceUnavailable(msg)
-<a href=#212 id=212 data-nosnippet>212</a>            }
-<a href=#213 id=213 data-nosnippet>213</a>            other =&gt; axiam_core::error::AxiamError::Internal(other.to_string()),
-<a href=#214 id=214 data-nosnippet>214</a>        }
-<a href=#215 id=215 data-nosnippet>215</a>    }
-<a href=#216 id=216 data-nosnippet>216</a>}
+<a href=#139 id=139 data-nosnippet>139</a>
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="doccomment">/// The tenant the sign-in is for does not admit its principals (SA-13):
+<a href=#141 id=141 data-nosnippet>141</a>    /// the provider's answer verified, but the tenant is suspended.
+<a href=#142 id=142 data-nosnippet>142</a>    ///
+<a href=#143 id=143 data-nosnippet>143</a>    /// Raised by the browser callbacks after the upstream token or assertion
+<a href=#144 id=144 data-nosnippet>144</a>    /// has verified and before any user or federation link is written (#877),
+<a href=#145 id=145 data-nosnippet>145</a>    /// so only a caller the provider has just authenticated learns it; maps to
+<a href=#146 id=146 data-nosnippet>146</a>    /// [`axiam_core::error::AxiamError::TenantSuspended`] (`403`).
+<a href=#147 id=147 data-nosnippet>147</a>    </span><span class="attr">#[error(<span class="string">"tenant is suspended"</span>)]
+<a href=#148 id=148 data-nosnippet>148</a>    </span>TenantSuspended,
+<a href=#149 id=149 data-nosnippet>149</a>}
+<a href=#150 id=150 data-nosnippet>150</a>
+<a href=#151 id=151 data-nosnippet>151</a><span class="kw">impl </span>From&lt;FederationError&gt; <span class="kw">for </span>axiam_core::error::AxiamError {
+<a href=#152 id=152 data-nosnippet>152</a>    <span class="kw">fn </span>from(err: FederationError) -&gt; <span class="self">Self </span>{
+<a href=#153 id=153 data-nosnippet>153</a>        <span class="kw">match </span>err {
+<a href=#154 id=154 data-nosnippet>154</a>            FederationError::ConfigNotFound(id) =&gt; axiam_core::error::AxiamError::NotFound {
+<a href=#155 id=155 data-nosnippet>155</a>                entity: <span class="string">"federation_config"</span>.into(),
+<a href=#156 id=156 data-nosnippet>156</a>                id,
+<a href=#157 id=157 data-nosnippet>157</a>            },
+<a href=#158 id=158 data-nosnippet>158</a>            FederationError::ConfigDisabled
+<a href=#159 id=159 data-nosnippet>159</a>            | FederationError::ProtocolMismatch(<span class="kw">_</span>)
+<a href=#160 id=160 data-nosnippet>160</a>            | FederationError::InvalidMetadataUrl(<span class="kw">_</span>) =&gt; axiam_core::error::AxiamError::Validation {
+<a href=#161 id=161 data-nosnippet>161</a>                message: err.to_string(),
+<a href=#162 id=162 data-nosnippet>162</a>            },
+<a href=#163 id=163 data-nosnippet>163</a>            FederationError::IdTokenValidationFailed(reason)
+<a href=#164 id=164 data-nosnippet>164</a>            | FederationError::SamlResponseFailed(reason) =&gt; {
+<a href=#165 id=165 data-nosnippet>165</a>                axiam_core::error::AxiamError::AuthenticationFailed { reason }
+<a href=#166 id=166 data-nosnippet>166</a>            }
+<a href=#167 id=167 data-nosnippet>167</a>            <span class="comment">// OIDC signature / claim errors → 401
+<a href=#168 id=168 data-nosnippet>168</a>            </span>FederationError::JwtSignatureInvalid
+<a href=#169 id=169 data-nosnippet>169</a>            | FederationError::JwtClaimRejected(<span class="kw">_</span>)
+<a href=#170 id=170 data-nosnippet>170</a>            | FederationError::AlgorithmNotAllowed(<span class="kw">_</span>)
+<a href=#171 id=171 data-nosnippet>171</a>            | FederationError::JwksKidUnknown =&gt; {
+<a href=#172 id=172 data-nosnippet>172</a>                axiam_core::error::AxiamError::AuthenticationFailed {
+<a href=#173 id=173 data-nosnippet>173</a>                    reason: err.to_string(),
+<a href=#174 id=174 data-nosnippet>174</a>                }
+<a href=#175 id=175 data-nosnippet>175</a>            }
+<a href=#176 id=176 data-nosnippet>176</a>            <span class="comment">// SAML signature / replay errors → 401
+<a href=#177 id=177 data-nosnippet>177</a>            </span>FederationError::SamlSignatureInvalid(reason) =&gt; {
+<a href=#178 id=178 data-nosnippet>178</a>                axiam_core::error::AxiamError::AuthenticationFailed { reason }
+<a href=#179 id=179 data-nosnippet>179</a>            }
+<a href=#180 id=180 data-nosnippet>180</a>            FederationError::AssertionReplay =&gt; {
+<a href=#181 id=181 data-nosnippet>181</a>                axiam_core::error::AxiamError::AuthenticationFailed {
+<a href=#182 id=182 data-nosnippet>182</a>                    reason: <span class="string">"assertion replay"</span>.into(),
+<a href=#183 id=183 data-nosnippet>183</a>                }
+<a href=#184 id=184 data-nosnippet>184</a>            }
+<a href=#185 id=185 data-nosnippet>185</a>            <span class="comment">// IdP cert validation error → admin-facing 400 (Validation)
+<a href=#186 id=186 data-nosnippet>186</a>            </span>FederationError::InvalidIdpCert(msg) =&gt; {
+<a href=#187 id=187 data-nosnippet>187</a>                axiam_core::error::AxiamError::Validation { message: msg }
+<a href=#188 id=188 data-nosnippet>188</a>            }
+<a href=#189 id=189 data-nosnippet>189</a>            <span class="comment">// A config the operator has to fix → 400, with the reason. These
+<a href=#190 id=190 data-nosnippet>190</a>            // are not authentication failures: nothing about the end user is
+<a href=#191 id=191 data-nosnippet>191</a>            // wrong, and telling them "invalid credentials" would send the
+<a href=#192 id=192 data-nosnippet>192</a>            // wrong person looking.
+<a href=#193 id=193 data-nosnippet>193</a>            </span>FederationError::ConfigInvalid(msg) =&gt; {
+<a href=#194 id=194 data-nosnippet>194</a>                axiam_core::error::AxiamError::Validation { message: msg }
+<a href=#195 id=195 data-nosnippet>195</a>            }
+<a href=#196 id=196 data-nosnippet>196</a>            <span class="comment">// Refusals that ARE about this sign-in attempt → 401. The
+<a href=#197 id=197 data-nosnippet>197</a>            // unverified-email message is deliberately specific: a user who
+<a href=#198 id=198 data-nosnippet>198</a>            // cannot sign in with GitHub needs to be told to verify their
+<a href=#199 id=199 data-nosnippet>199</a>            // GitHub email, not to try a different password.
+<a href=#200 id=200 data-nosnippet>200</a>            </span>FederationError::UnverifiedExternalEmail
+<a href=#201 id=201 data-nosnippet>201</a>            | FederationError::IssuerTenantNotAllowed
+<a href=#202 id=202 data-nosnippet>202</a>            | FederationError::UserinfoUnusable(<span class="kw">_</span>) =&gt; {
+<a href=#203 id=203 data-nosnippet>203</a>                axiam_core::error::AxiamError::AuthenticationFailed {
+<a href=#204 id=204 data-nosnippet>204</a>                    reason: err.to_string(),
+<a href=#205 id=205 data-nosnippet>205</a>                }
+<a href=#206 id=206 data-nosnippet>206</a>            }
+<a href=#207 id=207 data-nosnippet>207</a>            <span class="comment">// CQ-B23: upstream-IdP failures (discovery fetch/parse, token
+<a href=#208 id=208 data-nosnippet>208</a>            // exchange, JWKS fetch) are NOT our bug — the local server did
+<a href=#209 id=209 data-nosnippet>209</a>            // nothing wrong, but the external IdP is unreachable, timed out,
+<a href=#210 id=210 data-nosnippet>210</a>            // misconfigured, or returned a malformed/erroring response.
+<a href=#211 id=211 data-nosnippet>211</a>            // Mapping these to the generic `Internal` (500) catch-all
+<a href=#212 id=212 data-nosnippet>212</a>            // mislabels an upstream dependency failure as a server bug.
+<a href=#213 id=213 data-nosnippet>213</a>            // `AxiamError` has no dedicated 502 Bad Gateway variant; the
+<a href=#214 id=214 data-nosnippet>214</a>            // closest existing variant is `ServiceUnavailable` (503), which
+<a href=#215 id=215 data-nosnippet>215</a>            // — like a 502 — signals "an upstream dependency failed" rather
+<a href=#216 id=216 data-nosnippet>216</a>            // than "the server itself is broken", so it is used here instead
+<a href=#217 id=217 data-nosnippet>217</a>            // of inventing a new status/variant.
+<a href=#218 id=218 data-nosnippet>218</a>            </span>FederationError::DiscoveryFailed(msg)
+<a href=#219 id=219 data-nosnippet>219</a>            | FederationError::TokenExchangeFailed(msg)
+<a href=#220 id=220 data-nosnippet>220</a>            | FederationError::JwksFetchFailed(msg) =&gt; {
+<a href=#221 id=221 data-nosnippet>221</a>                axiam_core::error::AxiamError::ServiceUnavailable(msg)
+<a href=#222 id=222 data-nosnippet>222</a>            }
+<a href=#223 id=223 data-nosnippet>223</a>            <span class="comment">// The refusal the session step gives, so the answer does not
+<a href=#224 id=224 data-nosnippet>224</a>            // depend on which of the two checks saw the suspension first.
+<a href=#225 id=225 data-nosnippet>225</a>            </span>FederationError::TenantSuspended =&gt; axiam_core::error::AxiamError::TenantSuspended,
+<a href=#226 id=226 data-nosnippet>226</a>            other =&gt; axiam_core::error::AxiamError::Internal(other.to_string()),
+<a href=#227 id=227 data-nosnippet>227</a>        }
+<a href=#228 id=228 data-nosnippet>228</a>    }
+<a href=#229 id=229 data-nosnippet>229</a>}
 </code></pre></div></section></main></body></html>

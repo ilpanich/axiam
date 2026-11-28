@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/server.rs`."><title>server.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/</div>server.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Actix-Web application factory — composable route and middleware builders.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/server.rs`."><title>server.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.100.1 (20ddd0171 2026-11-25)" data-channel="1.100.1" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/</div>server.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Actix-Web application factory — composable route and middleware builders.
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>actix_cors::Cors;
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>actix_governor::Governor;
@@ -2550,29 +2550,32 @@
 <a href=#2550 id=2550 data-nosnippet>2550</a>            // its own token because RFC 6750 §2.2 puts one carrier in the body.
 <a href=#2551 id=2551 data-nosnippet>2551</a>            </span>.service(
 <a href=#2552 id=2552 data-nosnippet>2552</a>                web::resource(<span class="string">"/userinfo"</span>)
-<a href=#2553 id=2553 data-nosnippet>2553</a>                    .route(web::get().to(handlers::oauth2::userinfo::&lt;C&gt;))
-<a href=#2554 id=2554 data-nosnippet>2554</a>                    .route(web::post().to(handlers::oauth2::userinfo_post::&lt;C&gt;)),
-<a href=#2555 id=2555 data-nosnippet>2555</a>            );
-<a href=#2556 id=2556 data-nosnippet>2556</a>    <span class="kw">if </span>revocation_feed_enabled {
-<a href=#2557 id=2557 data-nosnippet>2557</a>        <span class="comment">// Beside the JWKS, and served exactly as the JWKS is: a plain route
-<a href=#2558 id=2558 data-nosnippet>2558</a>        // with `Cache-Control` and an `ETag`, and **no** rate-limit wrap.
-<a href=#2559 id=2559 data-nosnippet>2559</a>        //
-<a href=#2560 id=2560 data-nosnippet>2560</a>        // The plan for this item said "rate-limited like `jwks`", and checking
-<a href=#2561 id=2561 data-nosnippet>2561</a>        // what that meant is the reason this comment exists: `/oauth2/jwks`
-<a href=#2562 id=2562 data-nosnippet>2562</a>        // carries no limiter. Nor should this. Every wrapped endpoint in this
-<a href=#2563 id=2563 data-nosnippet>2563</a>        // scope is unauthenticated AND allocates or terminates state; the feed
-<a href=#2564 id=2564 data-nosnippet>2564</a>        // does neither, it answers one indexed read of a set bounded by the
-<a href=#2565 id=2565 data-nosnippet>2565</a>        // revocation rate over one access-token lifetime, and the caching
-<a href=#2566 id=2566 data-nosnippet>2566</a>        // headers are what a conformant poller actually costs. Adding a
-<a href=#2567 id=2567 data-nosnippet>2567</a>        // limiter would also make the feed fail *differently* under load, and
-<a href=#2568 id=2568 data-nosnippet>2568</a>        // a guard that gets a 429 must behave as though the feed were
-<a href=#2569 id=2569 data-nosnippet>2569</a>        // unreachable — which it does, but that is a subtlety worth not
-<a href=#2570 id=2570 data-nosnippet>2570</a>        // introducing for an endpoint shaped like the JWKS.
-<a href=#2571 id=2571 data-nosnippet>2571</a>        </span>oauth2_scope = oauth2_scope.route(
-<a href=#2572 id=2572 data-nosnippet>2572</a>            <span class="string">"/revocations"</span>,
-<a href=#2573 id=2573 data-nosnippet>2573</a>            web::get().to(handlers::oauth2::revocations::&lt;C&gt;),
-<a href=#2574 id=2574 data-nosnippet>2574</a>        );
-<a href=#2575 id=2575 data-nosnippet>2575</a>    }
-<a href=#2576 id=2576 data-nosnippet>2576</a>    oauth2_scope
-<a href=#2577 id=2577 data-nosnippet>2577</a>}
+<a href=#2553 id=2553 data-nosnippet>2553</a>                    <span class="comment">// The handler reads the principal's own account; let the
+<a href=#2554 id=2554 data-nosnippet>2554</a>                    // session check read it in the same round trip.
+<a href=#2555 id=2555 data-nosnippet>2555</a>                    </span>.app_data(<span class="kw">crate</span>::extractors::auth::PrefetchAccount)
+<a href=#2556 id=2556 data-nosnippet>2556</a>                    .route(web::get().to(handlers::oauth2::userinfo::&lt;C&gt;))
+<a href=#2557 id=2557 data-nosnippet>2557</a>                    .route(web::post().to(handlers::oauth2::userinfo_post::&lt;C&gt;)),
+<a href=#2558 id=2558 data-nosnippet>2558</a>            );
+<a href=#2559 id=2559 data-nosnippet>2559</a>    <span class="kw">if </span>revocation_feed_enabled {
+<a href=#2560 id=2560 data-nosnippet>2560</a>        <span class="comment">// Beside the JWKS, and served exactly as the JWKS is: a plain route
+<a href=#2561 id=2561 data-nosnippet>2561</a>        // with `Cache-Control` and an `ETag`, and **no** rate-limit wrap.
+<a href=#2562 id=2562 data-nosnippet>2562</a>        //
+<a href=#2563 id=2563 data-nosnippet>2563</a>        // The plan for this item said "rate-limited like `jwks`", and checking
+<a href=#2564 id=2564 data-nosnippet>2564</a>        // what that meant is the reason this comment exists: `/oauth2/jwks`
+<a href=#2565 id=2565 data-nosnippet>2565</a>        // carries no limiter. Nor should this. Every wrapped endpoint in this
+<a href=#2566 id=2566 data-nosnippet>2566</a>        // scope is unauthenticated AND allocates or terminates state; the feed
+<a href=#2567 id=2567 data-nosnippet>2567</a>        // does neither, it answers one indexed read of a set bounded by the
+<a href=#2568 id=2568 data-nosnippet>2568</a>        // revocation rate over one access-token lifetime, and the caching
+<a href=#2569 id=2569 data-nosnippet>2569</a>        // headers are what a conformant poller actually costs. Adding a
+<a href=#2570 id=2570 data-nosnippet>2570</a>        // limiter would also make the feed fail *differently* under load, and
+<a href=#2571 id=2571 data-nosnippet>2571</a>        // a guard that gets a 429 must behave as though the feed were
+<a href=#2572 id=2572 data-nosnippet>2572</a>        // unreachable — which it does, but that is a subtlety worth not
+<a href=#2573 id=2573 data-nosnippet>2573</a>        // introducing for an endpoint shaped like the JWKS.
+<a href=#2574 id=2574 data-nosnippet>2574</a>        </span>oauth2_scope = oauth2_scope.route(
+<a href=#2575 id=2575 data-nosnippet>2575</a>            <span class="string">"/revocations"</span>,
+<a href=#2576 id=2576 data-nosnippet>2576</a>            web::get().to(handlers::oauth2::revocations::&lt;C&gt;),
+<a href=#2577 id=2577 data-nosnippet>2577</a>        );
+<a href=#2578 id=2578 data-nosnippet>2578</a>    }
+<a href=#2579 id=2579 data-nosnippet>2579</a>    oauth2_scope
+<a href=#2580 id=2580 data-nosnippet>2580</a>}
 </code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ROLES_CLAIM","ROLES_SCOPE"],"enum":["RolesSubject"],"fn":["global_role_names","grants_roles","roles_claim","unwired"],"struct":["RepositoryRoleSource","UnwiredRoleSource"],"trait":["GlobalRoleSource"],"type":["SharedRoleSource"]};

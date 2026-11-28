@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["UserServiceImpl"]};
+window.SIDEBAR_ITEMS = {"constant":["CREDENTIALS_VALIDATED_ACTION","GET_USER_PERMISSION","VALIDATE_CREDENTIALS_PERMISSION"],"struct":["UserServiceImpl"],"trait":["CredentialAuditSink","UserServiceAuthorizer"],"type":["BoxFuture"]};

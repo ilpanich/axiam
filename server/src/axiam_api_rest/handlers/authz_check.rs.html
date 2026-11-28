@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/handlers/authz_check.rs`."><title>authz_check.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/handlers/</div>authz_check.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Authorization check endpoints (FND-04).
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-api-rest/src/handlers/authz_check.rs`."><title>authz_check.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="axiam_api_rest" data-themes="" data-resource-suffix="" data-rustdoc-version="1.100.1 (20ddd0171 2026-11-25)" data-channel="1.100.1" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_api_rest/handlers/</div>authz_check.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Authorization check endpoints (FND-04).
 <a href=#2 id=2 data-nosnippet>2</a>//!
 <a href=#3 id=3 data-nosnippet>3</a>//! Exposes `POST /api/v1/authz/check` (single) and
 <a href=#4 id=4 data-nosnippet>4</a>//! `POST /api/v1/authz/check/batch` so the TypeScript browser SDK and
@@ -131,210 +131,211 @@
 <a href=#131 id=131 data-nosnippet>131</a>            metadata: <span class="prelude-val">Some</span>(<span class="macro">serde_json::json!</span>({
 <a href=#132 id=132 data-nosnippet>132</a>                <span class="string">"queried_subject"</span>: queried_subject.to_string()
 <a href=#133 id=133 data-nosnippet>133</a>            })),
-<a href=#134 id=134 data-nosnippet>134</a>        })
-<a href=#135 id=135 data-nosnippet>135</a>        .<span class="kw">await
-<a href=#136 id=136 data-nosnippet>136</a>    </span>{
-<a href=#137 id=137 data-nosnippet>137</a>        <span class="macro">tracing::error!</span>(
-<a href=#138 id=138 data-nosnippet>138</a>            error = %e,
-<a href=#139 id=139 data-nosnippet>139</a>            %tenant_id,
-<a href=#140 id=140 data-nosnippet>140</a>            %actor_id,
-<a href=#141 id=141 data-nosnippet>141</a>            %queried_subject,
-<a href=#142 id=142 data-nosnippet>142</a>            <span class="string">"authz_check: failed to write authz.check_as audit log (legally significant)"
-<a href=#143 id=143 data-nosnippet>143</a>        </span>);
-<a href=#144 id=144 data-nosnippet>144</a>    }
-<a href=#145 id=145 data-nosnippet>145</a>}
-<a href=#146 id=146 data-nosnippet>146</a>
-<a href=#147 id=147 data-nosnippet>147</a><span class="comment">// ---------------------------------------------------------------------------
-<a href=#148 id=148 data-nosnippet>148</a>// Handlers
-<a href=#149 id=149 data-nosnippet>149</a>// ---------------------------------------------------------------------------
-<a href=#150 id=150 data-nosnippet>150</a>
-<a href=#151 id=151 data-nosnippet>151</a></span><span class="doccomment">/// `POST /api/v1/authz/check`
-<a href=#152 id=152 data-nosnippet>152</a>///
-<a href=#153 id=153 data-nosnippet>153</a>/// Evaluate a single authorization check for the authenticated caller (or, if
-<a href=#154 id=154 data-nosnippet>154</a>/// the caller holds `authz:check_as`, for an arbitrary subject).
-<a href=#155 id=155 data-nosnippet>155</a>///
-<a href=#156 id=156 data-nosnippet>156</a>/// `tenant_id` is always taken from the JWT — it cannot be supplied in the body.
-<a href=#157 id=157 data-nosnippet>157</a></span><span class="attr">#[utoipa::path(
-<a href=#158 id=158 data-nosnippet>158</a>    post,
-<a href=#159 id=159 data-nosnippet>159</a>    path = <span class="string">"/api/v1/authz/check"</span>,
-<a href=#160 id=160 data-nosnippet>160</a>    tag = <span class="string">"authz"</span>,
-<a href=#161 id=161 data-nosnippet>161</a>    request_body = CheckAccessBody,
-<a href=#162 id=162 data-nosnippet>162</a>    responses(
-<a href=#163 id=163 data-nosnippet>163</a>        (status = <span class="number">200</span>, description = <span class="string">"Authorization decision"</span>, body = CheckAccessResponse),
-<a href=#164 id=164 data-nosnippet>164</a>        (status = <span class="number">403</span>, description = <span class="string">"Forbidden — caller lacks authz:check_as for subject_id override"</span>),
-<a href=#165 id=165 data-nosnippet>165</a>        (status = <span class="number">401</span>, description = <span class="string">"Unauthenticated"</span>),
-<a href=#166 id=166 data-nosnippet>166</a>    ),
-<a href=#167 id=167 data-nosnippet>167</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
-<a href=#168 id=168 data-nosnippet>168</a>)]
-<a href=#169 id=169 data-nosnippet>169</a><span class="kw">pub async fn </span>check_access&lt;C: Connection + Clone&gt;(
-<a href=#170 id=170 data-nosnippet>170</a>    user: AuthenticatedPrincipal,
-<a href=#171 id=171 data-nosnippet>171</a>    authz: AuthzData,
-<a href=#172 id=172 data-nosnippet>172</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#173 id=173 data-nosnippet>173</a>    body: web::Json&lt;CheckAccessBody&gt;,
-<a href=#174 id=174 data-nosnippet>174</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#175 id=175 data-nosnippet>175</a>    <span class="kw">let </span>body = body.into_inner();
-<a href=#176 id=176 data-nosnippet>176</a>    <span class="kw">let </span>resource_id = body.resource_id;
-<a href=#177 id=177 data-nosnippet>177</a>
-<a href=#178 id=178 data-nosnippet>178</a>    <span class="comment">// T-15-01: subject_id override requires authz:check_as; T-15-03: tenant_id
-<a href=#179 id=179 data-nosnippet>179</a>    // is always resolved from the caller's token and the active-tenant header,
-<a href=#180 id=180 data-nosnippet>180</a>    // never from the body.
-<a href=#181 id=181 data-nosnippet>181</a>    //
-<a href=#182 id=182 data-nosnippet>182</a>    // The guard reads the caller's OWN grants, so it goes through
-<a href=#183 id=183 data-nosnippet>183</a>    // `subject_scope()` — an organization-level administrator's roles live in
-<a href=#184 id=184 data-nosnippet>184</a>    // the organization's tenant, not in the one being acted upon, and
-<a href=#185 id=185 data-nosnippet>185</a>    // `check_subject`'s fixed `SubjectScope::Tenant` would look for them in the
-<a href=#186 id=186 data-nosnippet>186</a>    // wrong place and refuse a caller that does hold the permission.
-<a href=#187 id=187 data-nosnippet>187</a>    </span><span class="kw">let </span>effective_subject = <span class="kw">if let </span><span class="prelude-val">Some</span>(sid) = body.subject_id {
-<a href=#188 id=188 data-nosnippet>188</a>        RequirePermission::new(<span class="string">"authz:check_as"</span>, user.tenant_id)
-<a href=#189 id=189 data-nosnippet>189</a>            .check_subject_from(
-<a href=#190 id=190 data-nosnippet>190</a>                user.tenant_id,
-<a href=#191 id=191 data-nosnippet>191</a>                user.subject_scope(),
-<a href=#192 id=192 data-nosnippet>192</a>                user.subject_id,
-<a href=#193 id=193 data-nosnippet>193</a>                authz.get_ref().as_ref(),
-<a href=#194 id=194 data-nosnippet>194</a>            )
-<a href=#195 id=195 data-nosnippet>195</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#196 id=196 data-nosnippet>196</a>        <span class="comment">// T-15-04: audit every cross-subject query before returning.
-<a href=#197 id=197 data-nosnippet>197</a>        </span>append_check_as_audit(
-<a href=#198 id=198 data-nosnippet>198</a>            <span class="kw-2">&amp;</span>state.audit_repo,
-<a href=#199 id=199 data-nosnippet>199</a>            user.tenant_id,
-<a href=#200 id=200 data-nosnippet>200</a>            user.subject_id,
-<a href=#201 id=201 data-nosnippet>201</a>            user.actor_type(),
-<a href=#202 id=202 data-nosnippet>202</a>            sid,
-<a href=#203 id=203 data-nosnippet>203</a>            resource_id,
-<a href=#204 id=204 data-nosnippet>204</a>        )
-<a href=#205 id=205 data-nosnippet>205</a>        .<span class="kw">await</span>;
-<a href=#206 id=206 data-nosnippet>206</a>        sid
-<a href=#207 id=207 data-nosnippet>207</a>    } <span class="kw">else </span>{
-<a href=#208 id=208 data-nosnippet>208</a>        user.subject_id
-<a href=#209 id=209 data-nosnippet>209</a>    };
-<a href=#210 id=210 data-nosnippet>210</a>
-<a href=#211 id=211 data-nosnippet>211</a>    <span class="kw">let </span>access_req = AccessRequest {
-<a href=#212 id=212 data-nosnippet>212</a>        <span class="comment">// The tenant being acted upon — the one the admin UI has selected, for
-<a href=#213 id=213 data-nosnippet>213</a>        // an organization-level caller. Reading the caller's own tenant here
-<a href=#214 id=214 data-nosnippet>214</a>        // evaluated every preview against the organization's tenant, where the
-<a href=#215 id=215 data-nosnippet>215</a>        // subject has no assignments at all: the answer was `no roles assigned`
-<a href=#216 id=216 data-nosnippet>216</a>        // however correct the rule set was.
-<a href=#217 id=217 data-nosnippet>217</a>        </span>tenant_id: user.tenant_id,
-<a href=#218 id=218 data-nosnippet>218</a>        <span class="comment">// Whose grants to read, and from where. A checked-as subject is an
-<a href=#219 id=219 data-nosnippet>219</a>        // ordinary member of the tenant being acted upon, so `Tenant`. The
-<a href=#220 id=220 data-nosnippet>220</a>        // caller checking their own access keeps their own scope, which for an
-<a href=#221 id=221 data-nosnippet>221</a>        // organization-level principal names the tenant their roles live in.
-<a href=#222 id=222 data-nosnippet>222</a>        </span>subject_scope: <span class="kw">if </span>body.subject_id.is_some() {
-<a href=#223 id=223 data-nosnippet>223</a>            SubjectScope::Tenant
-<a href=#224 id=224 data-nosnippet>224</a>        } <span class="kw">else </span>{
-<a href=#225 id=225 data-nosnippet>225</a>            user.subject_scope()
-<a href=#226 id=226 data-nosnippet>226</a>        },
-<a href=#227 id=227 data-nosnippet>227</a>        subject_id: effective_subject,
-<a href=#228 id=228 data-nosnippet>228</a>        action: body.action,
-<a href=#229 id=229 data-nosnippet>229</a>        resource_id,
-<a href=#230 id=230 data-nosnippet>230</a>        scope: body.scope,
-<a href=#231 id=231 data-nosnippet>231</a>    };
-<a href=#232 id=232 data-nosnippet>232</a>
-<a href=#233 id=233 data-nosnippet>233</a>    <span class="kw">let </span>decision = authz
-<a href=#234 id=234 data-nosnippet>234</a>        .check_access(<span class="kw-2">&amp;</span>access_req)
-<a href=#235 id=235 data-nosnippet>235</a>        .<span class="kw">await
-<a href=#236 id=236 data-nosnippet>236</a>        </span>.map_err(AxiamApiError::from)<span class="question-mark">?</span>;
-<a href=#237 id=237 data-nosnippet>237</a>
-<a href=#238 id=238 data-nosnippet>238</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(decision_to_response(decision)))
-<a href=#239 id=239 data-nosnippet>239</a>}
-<a href=#240 id=240 data-nosnippet>240</a>
-<a href=#241 id=241 data-nosnippet>241</a><span class="doccomment">/// `POST /api/v1/authz/check/batch`
-<a href=#242 id=242 data-nosnippet>242</a>///
-<a href=#243 id=243 data-nosnippet>243</a>/// Evaluate an ordered list of authorization checks.  Returns results in the
-<a href=#244 id=244 data-nosnippet>244</a>/// same order and length as the input `checks` array.
-<a href=#245 id=245 data-nosnippet>245</a>///
-<a href=#246 id=246 data-nosnippet>246</a>/// If **any** check in the batch includes a `subject_id`, the caller must hold
-<a href=#247 id=247 data-nosnippet>247</a>/// `authz:check_as` — the permission is verified once up front (not per item).
-<a href=#248 id=248 data-nosnippet>248</a></span><span class="attr">#[utoipa::path(
-<a href=#249 id=249 data-nosnippet>249</a>    post,
-<a href=#250 id=250 data-nosnippet>250</a>    path = <span class="string">"/api/v1/authz/check/batch"</span>,
-<a href=#251 id=251 data-nosnippet>251</a>    tag = <span class="string">"authz"</span>,
-<a href=#252 id=252 data-nosnippet>252</a>    request_body = BatchCheckAccessBody,
-<a href=#253 id=253 data-nosnippet>253</a>    responses(
-<a href=#254 id=254 data-nosnippet>254</a>        (status = <span class="number">200</span>, description = <span class="string">"Ordered batch of authorization decisions"</span>, body = BatchCheckAccessResponse),
-<a href=#255 id=255 data-nosnippet>255</a>        (status = <span class="number">403</span>, description = <span class="string">"Forbidden — caller lacks authz:check_as for subject_id override"</span>),
-<a href=#256 id=256 data-nosnippet>256</a>        (status = <span class="number">401</span>, description = <span class="string">"Unauthenticated"</span>),
-<a href=#257 id=257 data-nosnippet>257</a>    ),
-<a href=#258 id=258 data-nosnippet>258</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
-<a href=#259 id=259 data-nosnippet>259</a>)]
-<a href=#260 id=260 data-nosnippet>260</a><span class="kw">pub async fn </span>batch_check_access&lt;C: Connection + Clone&gt;(
-<a href=#261 id=261 data-nosnippet>261</a>    user: AuthenticatedPrincipal,
-<a href=#262 id=262 data-nosnippet>262</a>    authz: AuthzData,
-<a href=#263 id=263 data-nosnippet>263</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
-<a href=#264 id=264 data-nosnippet>264</a>    body: web::Json&lt;BatchCheckAccessBody&gt;,
-<a href=#265 id=265 data-nosnippet>265</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
-<a href=#266 id=266 data-nosnippet>266</a>    <span class="kw">let </span>body = body.into_inner();
-<a href=#267 id=267 data-nosnippet>267</a>
-<a href=#268 id=268 data-nosnippet>268</a>    <span class="comment">// T-15-01: validate authz:check_as ONCE up front if any check uses subject_id override.
-<a href=#269 id=269 data-nosnippet>269</a>    // This is the batch's "reject the whole thing on a single bad item" gate
-<a href=#270 id=270 data-nosnippet>270</a>    // (T-27-12 analog) — it runs synchronously before any check_access fires.
-<a href=#271 id=271 data-nosnippet>271</a>    </span><span class="kw">let </span>has_override = body.checks.iter().any(|c| c.subject_id.is_some());
-<a href=#272 id=272 data-nosnippet>272</a>    <span class="kw">if </span>has_override {
-<a href=#273 id=273 data-nosnippet>273</a>        RequirePermission::new(<span class="string">"authz:check_as"</span>, user.tenant_id)
-<a href=#274 id=274 data-nosnippet>274</a>            .check_subject_from(
-<a href=#275 id=275 data-nosnippet>275</a>                user.tenant_id,
-<a href=#276 id=276 data-nosnippet>276</a>                user.subject_scope(),
-<a href=#277 id=277 data-nosnippet>277</a>                user.subject_id,
-<a href=#278 id=278 data-nosnippet>278</a>                authz.get_ref().as_ref(),
-<a href=#279 id=279 data-nosnippet>279</a>            )
-<a href=#280 id=280 data-nosnippet>280</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
-<a href=#281 id=281 data-nosnippet>281</a>    }
-<a href=#282 id=282 data-nosnippet>282</a>
-<a href=#283 id=283 data-nosnippet>283</a>    <span class="comment">// D1: build the ordered AccessRequest list (resolving each item's effective
-<a href=#284 id=284 data-nosnippet>284</a>    // subject and writing the per-item check_as audit entry), then hand the
-<a href=#285 id=285 data-nosnippet>285</a>    // WHOLE batch to the engine's coalesced path in a single call. Same-subject
-<a href=#286 id=286 data-nosnippet>286</a>    // / same-resource items share their role-assignment + ancestor + grant
-<a href=#287 id=287 data-nosnippet>287</a>    // lookups instead of re-issuing them per item (the bench's batch shape).
-<a href=#288 id=288 data-nosnippet>288</a>    </span><span class="kw">let </span>checker: <span class="kw-2">&amp;</span><span class="kw">dyn </span>AuthzChecker = authz.get_ref().as_ref();
-<a href=#289 id=289 data-nosnippet>289</a>    <span class="kw">let </span>audit_repo_ref: <span class="kw-2">&amp;</span>SurrealAuditLogRepository&lt;C&gt; = <span class="kw-2">&amp;</span>state.audit_repo;
-<a href=#290 id=290 data-nosnippet>290</a>    <span class="kw">let </span>tenant_id = user.tenant_id;
-<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">let </span>actor_id = user.subject_id;
-<a href=#292 id=292 data-nosnippet>292</a>    <span class="kw">let </span>actor_kind = user.actor_type();
-<a href=#293 id=293 data-nosnippet>293</a>    <span class="comment">// Same rule as the single check: a checked-as subject belongs to the tenant
-<a href=#294 id=294 data-nosnippet>294</a>    // being acted upon; the caller checking their own access keeps their own
-<a href=#295 id=295 data-nosnippet>295</a>    // scope.
-<a href=#296 id=296 data-nosnippet>296</a>    </span><span class="kw">let </span>caller_scope = user.subject_scope();
-<a href=#297 id=297 data-nosnippet>297</a>
-<a href=#298 id=298 data-nosnippet>298</a>    <span class="kw">let </span><span class="kw-2">mut </span>access_requests = Vec::with_capacity(body.checks.len());
-<a href=#299 id=299 data-nosnippet>299</a>    <span class="kw">for </span>check <span class="kw">in </span>body.checks {
-<a href=#300 id=300 data-nosnippet>300</a>        <span class="kw">let </span>resource_id = check.resource_id;
-<a href=#301 id=301 data-nosnippet>301</a>        <span class="kw">let </span>effective_subject = <span class="kw">if let </span><span class="prelude-val">Some</span>(sid) = check.subject_id {
-<a href=#302 id=302 data-nosnippet>302</a>            <span class="comment">// T-15-04: audit each cross-subject item individually.
-<a href=#303 id=303 data-nosnippet>303</a>            </span>append_check_as_audit(
-<a href=#304 id=304 data-nosnippet>304</a>                audit_repo_ref,
-<a href=#305 id=305 data-nosnippet>305</a>                tenant_id,
-<a href=#306 id=306 data-nosnippet>306</a>                actor_id,
-<a href=#307 id=307 data-nosnippet>307</a>                actor_kind.clone(),
-<a href=#308 id=308 data-nosnippet>308</a>                sid,
-<a href=#309 id=309 data-nosnippet>309</a>                resource_id,
-<a href=#310 id=310 data-nosnippet>310</a>            )
-<a href=#311 id=311 data-nosnippet>311</a>            .<span class="kw">await</span>;
-<a href=#312 id=312 data-nosnippet>312</a>            sid
-<a href=#313 id=313 data-nosnippet>313</a>        } <span class="kw">else </span>{
-<a href=#314 id=314 data-nosnippet>314</a>            actor_id
-<a href=#315 id=315 data-nosnippet>315</a>        };
-<a href=#316 id=316 data-nosnippet>316</a>
-<a href=#317 id=317 data-nosnippet>317</a>        access_requests.push(AccessRequest {
-<a href=#318 id=318 data-nosnippet>318</a>            tenant_id,
-<a href=#319 id=319 data-nosnippet>319</a>            subject_scope: <span class="kw">if </span>check.subject_id.is_some() {
-<a href=#320 id=320 data-nosnippet>320</a>                SubjectScope::Tenant
-<a href=#321 id=321 data-nosnippet>321</a>            } <span class="kw">else </span>{
-<a href=#322 id=322 data-nosnippet>322</a>                caller_scope
-<a href=#323 id=323 data-nosnippet>323</a>            },
-<a href=#324 id=324 data-nosnippet>324</a>            subject_id: effective_subject,
-<a href=#325 id=325 data-nosnippet>325</a>            action: check.action,
-<a href=#326 id=326 data-nosnippet>326</a>            resource_id,
-<a href=#327 id=327 data-nosnippet>327</a>            scope: check.scope,
-<a href=#328 id=328 data-nosnippet>328</a>        });
-<a href=#329 id=329 data-nosnippet>329</a>    }
-<a href=#330 id=330 data-nosnippet>330</a>
-<a href=#331 id=331 data-nosnippet>331</a>    <span class="kw">let </span>decisions = checker
-<a href=#332 id=332 data-nosnippet>332</a>        .check_access_batch(<span class="kw-2">&amp;</span>access_requests)
-<a href=#333 id=333 data-nosnippet>333</a>        .<span class="kw">await
-<a href=#334 id=334 data-nosnippet>334</a>        </span>.map_err(AxiamApiError::from)<span class="question-mark">?</span>;
-<a href=#335 id=335 data-nosnippet>335</a>
-<a href=#336 id=336 data-nosnippet>336</a>    <span class="kw">let </span>results = decisions.into_iter().map(decision_to_response).collect();
-<a href=#337 id=337 data-nosnippet>337</a>
-<a href=#338 id=338 data-nosnippet>338</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(BatchCheckAccessResponse { results }))
-<a href=#339 id=339 data-nosnippet>339</a>}
+<a href=#134 id=134 data-nosnippet>134</a>            organization_id: <span class="prelude-val">None</span>,
+<a href=#135 id=135 data-nosnippet>135</a>        })
+<a href=#136 id=136 data-nosnippet>136</a>        .<span class="kw">await
+<a href=#137 id=137 data-nosnippet>137</a>    </span>{
+<a href=#138 id=138 data-nosnippet>138</a>        <span class="macro">tracing::error!</span>(
+<a href=#139 id=139 data-nosnippet>139</a>            error = %e,
+<a href=#140 id=140 data-nosnippet>140</a>            %tenant_id,
+<a href=#141 id=141 data-nosnippet>141</a>            %actor_id,
+<a href=#142 id=142 data-nosnippet>142</a>            %queried_subject,
+<a href=#143 id=143 data-nosnippet>143</a>            <span class="string">"authz_check: failed to write authz.check_as audit log (legally significant)"
+<a href=#144 id=144 data-nosnippet>144</a>        </span>);
+<a href=#145 id=145 data-nosnippet>145</a>    }
+<a href=#146 id=146 data-nosnippet>146</a>}
+<a href=#147 id=147 data-nosnippet>147</a>
+<a href=#148 id=148 data-nosnippet>148</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#149 id=149 data-nosnippet>149</a>// Handlers
+<a href=#150 id=150 data-nosnippet>150</a>// ---------------------------------------------------------------------------
+<a href=#151 id=151 data-nosnippet>151</a>
+<a href=#152 id=152 data-nosnippet>152</a></span><span class="doccomment">/// `POST /api/v1/authz/check`
+<a href=#153 id=153 data-nosnippet>153</a>///
+<a href=#154 id=154 data-nosnippet>154</a>/// Evaluate a single authorization check for the authenticated caller (or, if
+<a href=#155 id=155 data-nosnippet>155</a>/// the caller holds `authz:check_as`, for an arbitrary subject).
+<a href=#156 id=156 data-nosnippet>156</a>///
+<a href=#157 id=157 data-nosnippet>157</a>/// `tenant_id` is always taken from the JWT — it cannot be supplied in the body.
+<a href=#158 id=158 data-nosnippet>158</a></span><span class="attr">#[utoipa::path(
+<a href=#159 id=159 data-nosnippet>159</a>    post,
+<a href=#160 id=160 data-nosnippet>160</a>    path = <span class="string">"/api/v1/authz/check"</span>,
+<a href=#161 id=161 data-nosnippet>161</a>    tag = <span class="string">"authz"</span>,
+<a href=#162 id=162 data-nosnippet>162</a>    request_body = CheckAccessBody,
+<a href=#163 id=163 data-nosnippet>163</a>    responses(
+<a href=#164 id=164 data-nosnippet>164</a>        (status = <span class="number">200</span>, description = <span class="string">"Authorization decision"</span>, body = CheckAccessResponse),
+<a href=#165 id=165 data-nosnippet>165</a>        (status = <span class="number">403</span>, description = <span class="string">"Forbidden — caller lacks authz:check_as for subject_id override"</span>),
+<a href=#166 id=166 data-nosnippet>166</a>        (status = <span class="number">401</span>, description = <span class="string">"Unauthenticated"</span>),
+<a href=#167 id=167 data-nosnippet>167</a>    ),
+<a href=#168 id=168 data-nosnippet>168</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
+<a href=#169 id=169 data-nosnippet>169</a>)]
+<a href=#170 id=170 data-nosnippet>170</a><span class="kw">pub async fn </span>check_access&lt;C: Connection + Clone&gt;(
+<a href=#171 id=171 data-nosnippet>171</a>    user: AuthenticatedPrincipal,
+<a href=#172 id=172 data-nosnippet>172</a>    authz: AuthzData,
+<a href=#173 id=173 data-nosnippet>173</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#174 id=174 data-nosnippet>174</a>    body: web::Json&lt;CheckAccessBody&gt;,
+<a href=#175 id=175 data-nosnippet>175</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#176 id=176 data-nosnippet>176</a>    <span class="kw">let </span>body = body.into_inner();
+<a href=#177 id=177 data-nosnippet>177</a>    <span class="kw">let </span>resource_id = body.resource_id;
+<a href=#178 id=178 data-nosnippet>178</a>
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="comment">// T-15-01: subject_id override requires authz:check_as; T-15-03: tenant_id
+<a href=#180 id=180 data-nosnippet>180</a>    // is always resolved from the caller's token and the active-tenant header,
+<a href=#181 id=181 data-nosnippet>181</a>    // never from the body.
+<a href=#182 id=182 data-nosnippet>182</a>    //
+<a href=#183 id=183 data-nosnippet>183</a>    // The guard reads the caller's OWN grants, so it goes through
+<a href=#184 id=184 data-nosnippet>184</a>    // `subject_scope()` — an organization-level administrator's roles live in
+<a href=#185 id=185 data-nosnippet>185</a>    // the organization's tenant, not in the one being acted upon, and
+<a href=#186 id=186 data-nosnippet>186</a>    // `check_subject`'s fixed `SubjectScope::Tenant` would look for them in the
+<a href=#187 id=187 data-nosnippet>187</a>    // wrong place and refuse a caller that does hold the permission.
+<a href=#188 id=188 data-nosnippet>188</a>    </span><span class="kw">let </span>effective_subject = <span class="kw">if let </span><span class="prelude-val">Some</span>(sid) = body.subject_id {
+<a href=#189 id=189 data-nosnippet>189</a>        RequirePermission::new(<span class="string">"authz:check_as"</span>, user.tenant_id)
+<a href=#190 id=190 data-nosnippet>190</a>            .check_subject_from(
+<a href=#191 id=191 data-nosnippet>191</a>                user.tenant_id,
+<a href=#192 id=192 data-nosnippet>192</a>                user.subject_scope(),
+<a href=#193 id=193 data-nosnippet>193</a>                user.subject_id,
+<a href=#194 id=194 data-nosnippet>194</a>                authz.get_ref().as_ref(),
+<a href=#195 id=195 data-nosnippet>195</a>            )
+<a href=#196 id=196 data-nosnippet>196</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="comment">// T-15-04: audit every cross-subject query before returning.
+<a href=#198 id=198 data-nosnippet>198</a>        </span>append_check_as_audit(
+<a href=#199 id=199 data-nosnippet>199</a>            <span class="kw-2">&amp;</span>state.audit_repo,
+<a href=#200 id=200 data-nosnippet>200</a>            user.tenant_id,
+<a href=#201 id=201 data-nosnippet>201</a>            user.subject_id,
+<a href=#202 id=202 data-nosnippet>202</a>            user.actor_type(),
+<a href=#203 id=203 data-nosnippet>203</a>            sid,
+<a href=#204 id=204 data-nosnippet>204</a>            resource_id,
+<a href=#205 id=205 data-nosnippet>205</a>        )
+<a href=#206 id=206 data-nosnippet>206</a>        .<span class="kw">await</span>;
+<a href=#207 id=207 data-nosnippet>207</a>        sid
+<a href=#208 id=208 data-nosnippet>208</a>    } <span class="kw">else </span>{
+<a href=#209 id=209 data-nosnippet>209</a>        user.subject_id
+<a href=#210 id=210 data-nosnippet>210</a>    };
+<a href=#211 id=211 data-nosnippet>211</a>
+<a href=#212 id=212 data-nosnippet>212</a>    <span class="kw">let </span>access_req = AccessRequest {
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="comment">// The tenant being acted upon — the one the admin UI has selected, for
+<a href=#214 id=214 data-nosnippet>214</a>        // an organization-level caller. Reading the caller's own tenant here
+<a href=#215 id=215 data-nosnippet>215</a>        // evaluated every preview against the organization's tenant, where the
+<a href=#216 id=216 data-nosnippet>216</a>        // subject has no assignments at all: the answer was `no roles assigned`
+<a href=#217 id=217 data-nosnippet>217</a>        // however correct the rule set was.
+<a href=#218 id=218 data-nosnippet>218</a>        </span>tenant_id: user.tenant_id,
+<a href=#219 id=219 data-nosnippet>219</a>        <span class="comment">// Whose grants to read, and from where. A checked-as subject is an
+<a href=#220 id=220 data-nosnippet>220</a>        // ordinary member of the tenant being acted upon, so `Tenant`. The
+<a href=#221 id=221 data-nosnippet>221</a>        // caller checking their own access keeps their own scope, which for an
+<a href=#222 id=222 data-nosnippet>222</a>        // organization-level principal names the tenant their roles live in.
+<a href=#223 id=223 data-nosnippet>223</a>        </span>subject_scope: <span class="kw">if </span>body.subject_id.is_some() {
+<a href=#224 id=224 data-nosnippet>224</a>            SubjectScope::Tenant
+<a href=#225 id=225 data-nosnippet>225</a>        } <span class="kw">else </span>{
+<a href=#226 id=226 data-nosnippet>226</a>            user.subject_scope()
+<a href=#227 id=227 data-nosnippet>227</a>        },
+<a href=#228 id=228 data-nosnippet>228</a>        subject_id: effective_subject,
+<a href=#229 id=229 data-nosnippet>229</a>        action: body.action,
+<a href=#230 id=230 data-nosnippet>230</a>        resource_id,
+<a href=#231 id=231 data-nosnippet>231</a>        scope: body.scope,
+<a href=#232 id=232 data-nosnippet>232</a>    };
+<a href=#233 id=233 data-nosnippet>233</a>
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="kw">let </span>decision = authz
+<a href=#235 id=235 data-nosnippet>235</a>        .check_access(<span class="kw-2">&amp;</span>access_req)
+<a href=#236 id=236 data-nosnippet>236</a>        .<span class="kw">await
+<a href=#237 id=237 data-nosnippet>237</a>        </span>.map_err(AxiamApiError::from)<span class="question-mark">?</span>;
+<a href=#238 id=238 data-nosnippet>238</a>
+<a href=#239 id=239 data-nosnippet>239</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(decision_to_response(decision)))
+<a href=#240 id=240 data-nosnippet>240</a>}
+<a href=#241 id=241 data-nosnippet>241</a>
+<a href=#242 id=242 data-nosnippet>242</a><span class="doccomment">/// `POST /api/v1/authz/check/batch`
+<a href=#243 id=243 data-nosnippet>243</a>///
+<a href=#244 id=244 data-nosnippet>244</a>/// Evaluate an ordered list of authorization checks.  Returns results in the
+<a href=#245 id=245 data-nosnippet>245</a>/// same order and length as the input `checks` array.
+<a href=#246 id=246 data-nosnippet>246</a>///
+<a href=#247 id=247 data-nosnippet>247</a>/// If **any** check in the batch includes a `subject_id`, the caller must hold
+<a href=#248 id=248 data-nosnippet>248</a>/// `authz:check_as` — the permission is verified once up front (not per item).
+<a href=#249 id=249 data-nosnippet>249</a></span><span class="attr">#[utoipa::path(
+<a href=#250 id=250 data-nosnippet>250</a>    post,
+<a href=#251 id=251 data-nosnippet>251</a>    path = <span class="string">"/api/v1/authz/check/batch"</span>,
+<a href=#252 id=252 data-nosnippet>252</a>    tag = <span class="string">"authz"</span>,
+<a href=#253 id=253 data-nosnippet>253</a>    request_body = BatchCheckAccessBody,
+<a href=#254 id=254 data-nosnippet>254</a>    responses(
+<a href=#255 id=255 data-nosnippet>255</a>        (status = <span class="number">200</span>, description = <span class="string">"Ordered batch of authorization decisions"</span>, body = BatchCheckAccessResponse),
+<a href=#256 id=256 data-nosnippet>256</a>        (status = <span class="number">403</span>, description = <span class="string">"Forbidden — caller lacks authz:check_as for subject_id override"</span>),
+<a href=#257 id=257 data-nosnippet>257</a>        (status = <span class="number">401</span>, description = <span class="string">"Unauthenticated"</span>),
+<a href=#258 id=258 data-nosnippet>258</a>    ),
+<a href=#259 id=259 data-nosnippet>259</a>    security((<span class="string">"bearer" </span>= []</span>), (<span class="string">"service_account" </span>= []))
+<a href=#260 id=260 data-nosnippet>260</a>)]
+<a href=#261 id=261 data-nosnippet>261</a><span class="kw">pub async fn </span>batch_check_access&lt;C: Connection + Clone&gt;(
+<a href=#262 id=262 data-nosnippet>262</a>    user: AuthenticatedPrincipal,
+<a href=#263 id=263 data-nosnippet>263</a>    authz: AuthzData,
+<a href=#264 id=264 data-nosnippet>264</a>    state: web::Data&lt;AppState&lt;C&gt;&gt;,
+<a href=#265 id=265 data-nosnippet>265</a>    body: web::Json&lt;BatchCheckAccessBody&gt;,
+<a href=#266 id=266 data-nosnippet>266</a>) -&gt; <span class="prelude-ty">Result</span>&lt;HttpResponse, AxiamApiError&gt; {
+<a href=#267 id=267 data-nosnippet>267</a>    <span class="kw">let </span>body = body.into_inner();
+<a href=#268 id=268 data-nosnippet>268</a>
+<a href=#269 id=269 data-nosnippet>269</a>    <span class="comment">// T-15-01: validate authz:check_as ONCE up front if any check uses subject_id override.
+<a href=#270 id=270 data-nosnippet>270</a>    // This is the batch's "reject the whole thing on a single bad item" gate
+<a href=#271 id=271 data-nosnippet>271</a>    // (T-27-12 analog) — it runs synchronously before any check_access fires.
+<a href=#272 id=272 data-nosnippet>272</a>    </span><span class="kw">let </span>has_override = body.checks.iter().any(|c| c.subject_id.is_some());
+<a href=#273 id=273 data-nosnippet>273</a>    <span class="kw">if </span>has_override {
+<a href=#274 id=274 data-nosnippet>274</a>        RequirePermission::new(<span class="string">"authz:check_as"</span>, user.tenant_id)
+<a href=#275 id=275 data-nosnippet>275</a>            .check_subject_from(
+<a href=#276 id=276 data-nosnippet>276</a>                user.tenant_id,
+<a href=#277 id=277 data-nosnippet>277</a>                user.subject_scope(),
+<a href=#278 id=278 data-nosnippet>278</a>                user.subject_id,
+<a href=#279 id=279 data-nosnippet>279</a>                authz.get_ref().as_ref(),
+<a href=#280 id=280 data-nosnippet>280</a>            )
+<a href=#281 id=281 data-nosnippet>281</a>            .<span class="kw">await</span><span class="question-mark">?</span>;
+<a href=#282 id=282 data-nosnippet>282</a>    }
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="comment">// D1: build the ordered AccessRequest list (resolving each item's effective
+<a href=#285 id=285 data-nosnippet>285</a>    // subject and writing the per-item check_as audit entry), then hand the
+<a href=#286 id=286 data-nosnippet>286</a>    // WHOLE batch to the engine's coalesced path in a single call. Same-subject
+<a href=#287 id=287 data-nosnippet>287</a>    // / same-resource items share their role-assignment + ancestor + grant
+<a href=#288 id=288 data-nosnippet>288</a>    // lookups instead of re-issuing them per item (the bench's batch shape).
+<a href=#289 id=289 data-nosnippet>289</a>    </span><span class="kw">let </span>checker: <span class="kw-2">&amp;</span><span class="kw">dyn </span>AuthzChecker = authz.get_ref().as_ref();
+<a href=#290 id=290 data-nosnippet>290</a>    <span class="kw">let </span>audit_repo_ref: <span class="kw-2">&amp;</span>SurrealAuditLogRepository&lt;C&gt; = <span class="kw-2">&amp;</span>state.audit_repo;
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">let </span>tenant_id = user.tenant_id;
+<a href=#292 id=292 data-nosnippet>292</a>    <span class="kw">let </span>actor_id = user.subject_id;
+<a href=#293 id=293 data-nosnippet>293</a>    <span class="kw">let </span>actor_kind = user.actor_type();
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="comment">// Same rule as the single check: a checked-as subject belongs to the tenant
+<a href=#295 id=295 data-nosnippet>295</a>    // being acted upon; the caller checking their own access keeps their own
+<a href=#296 id=296 data-nosnippet>296</a>    // scope.
+<a href=#297 id=297 data-nosnippet>297</a>    </span><span class="kw">let </span>caller_scope = user.subject_scope();
+<a href=#298 id=298 data-nosnippet>298</a>
+<a href=#299 id=299 data-nosnippet>299</a>    <span class="kw">let </span><span class="kw-2">mut </span>access_requests = Vec::with_capacity(body.checks.len());
+<a href=#300 id=300 data-nosnippet>300</a>    <span class="kw">for </span>check <span class="kw">in </span>body.checks {
+<a href=#301 id=301 data-nosnippet>301</a>        <span class="kw">let </span>resource_id = check.resource_id;
+<a href=#302 id=302 data-nosnippet>302</a>        <span class="kw">let </span>effective_subject = <span class="kw">if let </span><span class="prelude-val">Some</span>(sid) = check.subject_id {
+<a href=#303 id=303 data-nosnippet>303</a>            <span class="comment">// T-15-04: audit each cross-subject item individually.
+<a href=#304 id=304 data-nosnippet>304</a>            </span>append_check_as_audit(
+<a href=#305 id=305 data-nosnippet>305</a>                audit_repo_ref,
+<a href=#306 id=306 data-nosnippet>306</a>                tenant_id,
+<a href=#307 id=307 data-nosnippet>307</a>                actor_id,
+<a href=#308 id=308 data-nosnippet>308</a>                actor_kind.clone(),
+<a href=#309 id=309 data-nosnippet>309</a>                sid,
+<a href=#310 id=310 data-nosnippet>310</a>                resource_id,
+<a href=#311 id=311 data-nosnippet>311</a>            )
+<a href=#312 id=312 data-nosnippet>312</a>            .<span class="kw">await</span>;
+<a href=#313 id=313 data-nosnippet>313</a>            sid
+<a href=#314 id=314 data-nosnippet>314</a>        } <span class="kw">else </span>{
+<a href=#315 id=315 data-nosnippet>315</a>            actor_id
+<a href=#316 id=316 data-nosnippet>316</a>        };
+<a href=#317 id=317 data-nosnippet>317</a>
+<a href=#318 id=318 data-nosnippet>318</a>        access_requests.push(AccessRequest {
+<a href=#319 id=319 data-nosnippet>319</a>            tenant_id,
+<a href=#320 id=320 data-nosnippet>320</a>            subject_scope: <span class="kw">if </span>check.subject_id.is_some() {
+<a href=#321 id=321 data-nosnippet>321</a>                SubjectScope::Tenant
+<a href=#322 id=322 data-nosnippet>322</a>            } <span class="kw">else </span>{
+<a href=#323 id=323 data-nosnippet>323</a>                caller_scope
+<a href=#324 id=324 data-nosnippet>324</a>            },
+<a href=#325 id=325 data-nosnippet>325</a>            subject_id: effective_subject,
+<a href=#326 id=326 data-nosnippet>326</a>            action: check.action,
+<a href=#327 id=327 data-nosnippet>327</a>            resource_id,
+<a href=#328 id=328 data-nosnippet>328</a>            scope: check.scope,
+<a href=#329 id=329 data-nosnippet>329</a>        });
+<a href=#330 id=330 data-nosnippet>330</a>    }
+<a href=#331 id=331 data-nosnippet>331</a>
+<a href=#332 id=332 data-nosnippet>332</a>    <span class="kw">let </span>decisions = checker
+<a href=#333 id=333 data-nosnippet>333</a>        .check_access_batch(<span class="kw-2">&amp;</span>access_requests)
+<a href=#334 id=334 data-nosnippet>334</a>        .<span class="kw">await
+<a href=#335 id=335 data-nosnippet>335</a>        </span>.map_err(AxiamApiError::from)<span class="question-mark">?</span>;
+<a href=#336 id=336 data-nosnippet>336</a>
+<a href=#337 id=337 data-nosnippet>337</a>    <span class="kw">let </span>results = decisions.into_iter().map(decision_to_response).collect();
+<a href=#338 id=338 data-nosnippet>338</a>
+<a href=#339 id=339 data-nosnippet>339</a>    <span class="prelude-val">Ok</span>(HttpResponse::Ok().json(BatchCheckAccessResponse { results }))
+<a href=#340 id=340 data-nosnippet>340</a>}
 </code></pre></div></section></main></body></html>

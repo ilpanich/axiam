@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["AmqpConfig","AmqpTlsConfig"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_INTERNAL_QUEUE_MAX_AGE_SECS"],"struct":["AmqpConfig","AmqpTlsConfig","InternalQueuesConfig"]};

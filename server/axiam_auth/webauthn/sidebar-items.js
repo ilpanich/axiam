@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["WebauthnService"]};
+window.SIDEBAR_ITEMS = {"struct":["StateIssue","WebauthnService"]};

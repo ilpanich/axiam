@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-amqp/src/audit_consumer.rs`."><title>audit_consumer.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-0c87338a.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_amqp" data-themes="" data-resource-suffix="" data-rustdoc-version="1.99.1 (58cf8f9c3 2026-10-13)" data-channel="1.99.1" data-search-js="search-cf4fc35e.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-417ebf0a.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_amqp/</div>audit_consumer.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! AMQP consumer for audit event ingestion from external services.
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/axiam-amqp/src/audit_consumer.rs`."><title>audit_consumer.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="axiam_amqp" data-themes="" data-resource-suffix="" data-rustdoc-version="1.100.1 (20ddd0171 2026-11-25)" data-channel="1.100.1" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">axiam_amqp/</div>audit_consumer.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! AMQP consumer for audit event ingestion from external services.
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>axiam_core::error::AxiamError;
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>axiam_core::models::audit::{
@@ -257,132 +257,133 @@
 <a href=#257 id=257 data-nosnippet>257</a>        ip_address: msg.ip_address,
 <a href=#258 id=258 data-nosnippet>258</a>        <span class="comment">// #741: stamped after the producer's metadata, so it cannot override.
 <a href=#259 id=259 data-nosnippet>259</a>        </span>metadata: <span class="prelude-val">Some</span>(stamp_ingested(msg.metadata)),
-<a href=#260 id=260 data-nosnippet>260</a>    };
-<a href=#261 id=261 data-nosnippet>261</a>
-<a href=#262 id=262 data-nosnippet>262</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = audit_repo.append(entry).<span class="kw">await </span>{
-<a href=#263 id=263 data-nosnippet>263</a>        <span class="macro">error!</span>(
-<a href=#264 id=264 data-nosnippet>264</a>            error = %e,
-<a href=#265 id=265 data-nosnippet>265</a>            <span class="string">"Failed to persist audit event, nacking (dead-letter)"
-<a href=#266 id=266 data-nosnippet>266</a>        </span>);
-<a href=#267 id=267 data-nosnippet>267</a>        <span class="comment">// requeue: false — dead-letter the message instead of silently
-<a href=#268 id=268 data-nosnippet>268</a>        // dropping it or requeuing (CQ-B05 / REQ-14 AC-5).
-<a href=#269 id=269 data-nosnippet>269</a>        </span><span class="kw">return </span>AuditIngestOutcome::NackDrop;
-<a href=#270 id=270 data-nosnippet>270</a>    }
-<a href=#271 id=271 data-nosnippet>271</a>
-<a href=#272 id=272 data-nosnippet>272</a>    AuditIngestOutcome::Ack
-<a href=#273 id=273 data-nosnippet>273</a>}
-<a href=#274 id=274 data-nosnippet>274</a>
-<a href=#275 id=275 data-nosnippet>275</a><span class="doccomment">/// Start consuming audit events from `axiam.audit.events` and persisting them.
-<a href=#276 id=276 data-nosnippet>276</a>///
-<a href=#277 id=277 data-nosnippet>277</a>/// SEC-022/055/SECHRD-08: Every `AuditEventMessage` is verified before
-<a href=#278 id=278 data-nosnippet>278</a>/// processing — the per-tenant subkey is derived from `master_signing_key` +
-<a href=#279 id=279 data-nosnippet>279</a>/// the message's `tenant_id` + `key_version`, then the `hmac_signature` is
-<a href=#280 id=280 data-nosnippet>280</a>/// checked against it. Messages with an invalid or missing signature are
-<a href=#281 id=281 data-nosnippet>281</a>/// nacked and never processed; there is no fail-open path (D-05c).
-<a href=#282 id=282 data-nosnippet>282</a>///
-<a href=#283 id=283 data-nosnippet>283</a>/// NEW-4 (hard cutover): after a valid signature, the message is additionally
-<a href=#284 id=284 data-nosnippet>284</a>/// rejected (nack, requeue:false) when its `key_version` is below
-<a href=#285 id=285 data-nosnippet>285</a>/// [`MIN_ACCEPTED_KEY_VERSION`], its `issued_at` is outside the ±`replay_skew`
-<a href=#286 id=286 data-nosnippet>286</a>/// freshness window, or its `nonce` has already been consumed (a duplicate in
-<a href=#287 id=287 data-nosnippet>287</a>/// the durable `nonce_repo` store is a replay). There is no v1 grace path.
-<a href=#288 id=288 data-nosnippet>288</a></span><span class="kw">pub async fn </span>start_audit_consumer&lt;A, N&gt;(
-<a href=#289 id=289 data-nosnippet>289</a>    channel: Channel,
-<a href=#290 id=290 data-nosnippet>290</a>    audit_repo: A,
-<a href=#291 id=291 data-nosnippet>291</a>    master_signing_key: Vec&lt;u8&gt;,
-<a href=#292 id=292 data-nosnippet>292</a>    nonce_repo: N,
-<a href=#293 id=293 data-nosnippet>293</a>    replay_skew: chrono::Duration,
-<a href=#294 id=294 data-nosnippet>294</a>) <span class="kw">where
-<a href=#295 id=295 data-nosnippet>295</a>    </span>A: AuditLogRepository + <span class="lifetime">'static</span>,
-<a href=#296 id=296 data-nosnippet>296</a>    N: AmqpNonceRepository + <span class="lifetime">'static</span>,
-<a href=#297 id=297 data-nosnippet>297</a>{
-<a href=#298 id=298 data-nosnippet>298</a>    <span class="macro">info!</span>(<span class="string">"Starting audit event AMQP consumer"</span>);
-<a href=#299 id=299 data-nosnippet>299</a>
-<a href=#300 id=300 data-nosnippet>300</a>    <span class="kw">let </span><span class="kw-2">mut </span>consumer = <span class="kw">match </span>channel
-<a href=#301 id=301 data-nosnippet>301</a>        .basic_consume(
-<a href=#302 id=302 data-nosnippet>302</a>            queues::AUDIT_EVENTS.into(),
-<a href=#303 id=303 data-nosnippet>303</a>            <span class="string">"axiam-audit-consumer"</span>.into(),
-<a href=#304 id=304 data-nosnippet>304</a>            BasicConsumeOptions::default(),
-<a href=#305 id=305 data-nosnippet>305</a>            FieldTable::default(),
-<a href=#306 id=306 data-nosnippet>306</a>        )
-<a href=#307 id=307 data-nosnippet>307</a>        .<span class="kw">await
-<a href=#308 id=308 data-nosnippet>308</a>    </span>{
-<a href=#309 id=309 data-nosnippet>309</a>        <span class="prelude-val">Ok</span>(c) =&gt; c,
-<a href=#310 id=310 data-nosnippet>310</a>        <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#311 id=311 data-nosnippet>311</a>            <span class="macro">error!</span>(error = %e, <span class="string">"Failed to start audit event consumer"</span>);
-<a href=#312 id=312 data-nosnippet>312</a>            <span class="kw">return</span>;
-<a href=#313 id=313 data-nosnippet>313</a>        }
-<a href=#314 id=314 data-nosnippet>314</a>    };
-<a href=#315 id=315 data-nosnippet>315</a>
-<a href=#316 id=316 data-nosnippet>316</a>    <span class="kw">while let </span><span class="prelude-val">Some</span>(delivery_result) = consumer.next().<span class="kw">await </span>{
-<a href=#317 id=317 data-nosnippet>317</a>        <span class="kw">let </span>delivery = <span class="kw">match </span>delivery_result {
-<a href=#318 id=318 data-nosnippet>318</a>            <span class="prelude-val">Ok</span>(d) =&gt; d,
-<a href=#319 id=319 data-nosnippet>319</a>            <span class="prelude-val">Err</span>(e) =&gt; {
-<a href=#320 id=320 data-nosnippet>320</a>                <span class="macro">error!</span>(error = %e, <span class="string">"Error receiving audit event delivery"</span>);
-<a href=#321 id=321 data-nosnippet>321</a>                <span class="kw">continue</span>;
-<a href=#322 id=322 data-nosnippet>322</a>            }
-<a href=#323 id=323 data-nosnippet>323</a>        };
-<a href=#324 id=324 data-nosnippet>324</a>
-<a href=#325 id=325 data-nosnippet>325</a>        <span class="kw">let </span>tag = delivery.delivery_tag;
-<a href=#326 id=326 data-nosnippet>326</a>
-<a href=#327 id=327 data-nosnippet>327</a>        <span class="comment">// Decode/verify/replay-check/parse/persist off the channel (broker-free,
-<a href=#328 id=328 data-nosnippet>328</a>        // unit-tested via `process_audit_event`). The loop only translates the
-<a href=#329 id=329 data-nosnippet>329</a>        // returned outcome into channel I/O below.
-<a href=#330 id=330 data-nosnippet>330</a>        </span><span class="kw">match </span>process_audit_event(
-<a href=#331 id=331 data-nosnippet>331</a>            <span class="kw-2">&amp;</span>delivery.data,
-<a href=#332 id=332 data-nosnippet>332</a>            <span class="kw-2">&amp;</span>audit_repo,
-<a href=#333 id=333 data-nosnippet>333</a>            <span class="kw-2">&amp;</span>master_signing_key,
-<a href=#334 id=334 data-nosnippet>334</a>            <span class="kw-2">&amp;</span>nonce_repo,
-<a href=#335 id=335 data-nosnippet>335</a>            replay_skew,
-<a href=#336 id=336 data-nosnippet>336</a>            Utc::now(),
-<a href=#337 id=337 data-nosnippet>337</a>        )
-<a href=#338 id=338 data-nosnippet>338</a>        .<span class="kw">await
-<a href=#339 id=339 data-nosnippet>339</a>        </span>{
-<a href=#340 id=340 data-nosnippet>340</a>            AuditIngestOutcome::Ack =&gt; {
-<a href=#341 id=341 data-nosnippet>341</a>                <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = delivery.acker.ack(BasicAckOptions::default()).<span class="kw">await </span>{
-<a href=#342 id=342 data-nosnippet>342</a>                    <span class="macro">error!</span>(error = %e, delivery_tag = tag, <span class="string">"Failed to ack audit delivery"</span>);
-<a href=#343 id=343 data-nosnippet>343</a>                }
-<a href=#344 id=344 data-nosnippet>344</a>            }
-<a href=#345 id=345 data-nosnippet>345</a>            AuditIngestOutcome::NackDrop =&gt; {
-<a href=#346 id=346 data-nosnippet>346</a>                <span class="kw">let _ </span>= delivery
-<a href=#347 id=347 data-nosnippet>347</a>                    .acker
-<a href=#348 id=348 data-nosnippet>348</a>                    .nack(BasicNackOptions {
-<a href=#349 id=349 data-nosnippet>349</a>                        requeue: <span class="bool-val">false</span>,
-<a href=#350 id=350 data-nosnippet>350</a>                        ..BasicNackOptions::default()
-<a href=#351 id=351 data-nosnippet>351</a>                    })
-<a href=#352 id=352 data-nosnippet>352</a>                    .<span class="kw">await</span>;
-<a href=#353 id=353 data-nosnippet>353</a>            }
-<a href=#354 id=354 data-nosnippet>354</a>        }
-<a href=#355 id=355 data-nosnippet>355</a>    }
-<a href=#356 id=356 data-nosnippet>356</a>
-<a href=#357 id=357 data-nosnippet>357</a>    <span class="macro">warn!</span>(<span class="string">"Audit event AMQP consumer stream ended"</span>);
-<a href=#358 id=358 data-nosnippet>358</a>}
-<a href=#359 id=359 data-nosnippet>359</a>
-<a href=#360 id=360 data-nosnippet>360</a><span class="attr">#[cfg(test)]
-<a href=#361 id=361 data-nosnippet>361</a></span><span class="kw">mod </span>tests {
-<a href=#362 id=362 data-nosnippet>362</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
-<a href=#363 id=363 data-nosnippet>363</a>    <span class="kw">use </span>serde_json::json;
-<a href=#364 id=364 data-nosnippet>364</a>
-<a href=#365 id=365 data-nosnippet>365</a>    <span class="attr">#[test]
-<a href=#366 id=366 data-nosnippet>366</a>    </span><span class="kw">fn </span>the_stamp_overwrites_a_producer_supplied_key() {
-<a href=#367 id=367 data-nosnippet>367</a>        <span class="kw">let </span>out = stamp_ingested(<span class="prelude-val">Some</span>(<span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"server"</span>, <span class="string">"k"</span>: <span class="number">1</span>})));
-<a href=#368 id=368 data-nosnippet>368</a>        <span class="macro">assert_eq!</span>(out, <span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>, <span class="string">"k"</span>: <span class="number">1</span>}));
-<a href=#369 id=369 data-nosnippet>369</a>    }
-<a href=#370 id=370 data-nosnippet>370</a>
-<a href=#371 id=371 data-nosnippet>371</a>    <span class="attr">#[test]
-<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">fn </span>absent_and_null_metadata_become_the_stamp_alone() {
-<a href=#373 id=373 data-nosnippet>373</a>        <span class="macro">assert_eq!</span>(stamp_ingested(<span class="prelude-val">None</span>), <span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>}));
-<a href=#374 id=374 data-nosnippet>374</a>        <span class="macro">assert_eq!</span>(
-<a href=#375 id=375 data-nosnippet>375</a>            stamp_ingested(<span class="prelude-val">Some</span>(<span class="macro">json!</span>(null))),
-<a href=#376 id=376 data-nosnippet>376</a>            <span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>})
-<a href=#377 id=377 data-nosnippet>377</a>        );
-<a href=#378 id=378 data-nosnippet>378</a>    }
-<a href=#379 id=379 data-nosnippet>379</a>
-<a href=#380 id=380 data-nosnippet>380</a>    <span class="attr">#[test]
-<a href=#381 id=381 data-nosnippet>381</a>    </span><span class="kw">fn </span>non_object_metadata_is_kept_under_producer_metadata() {
-<a href=#382 id=382 data-nosnippet>382</a>        <span class="macro">assert_eq!</span>(
-<a href=#383 id=383 data-nosnippet>383</a>            stamp_ingested(<span class="prelude-val">Some</span>(<span class="macro">json!</span>([<span class="number">1</span>, <span class="number">2</span>]))),
-<a href=#384 id=384 data-nosnippet>384</a>            <span class="macro">json!</span>({<span class="string">"producer_metadata"</span>: [<span class="number">1</span>, <span class="number">2</span>], <span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>})
-<a href=#385 id=385 data-nosnippet>385</a>        );
-<a href=#386 id=386 data-nosnippet>386</a>    }
-<a href=#387 id=387 data-nosnippet>387</a>}
+<a href=#260 id=260 data-nosnippet>260</a>        organization_id: <span class="prelude-val">None</span>,
+<a href=#261 id=261 data-nosnippet>261</a>    };
+<a href=#262 id=262 data-nosnippet>262</a>
+<a href=#263 id=263 data-nosnippet>263</a>    <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = audit_repo.append(entry).<span class="kw">await </span>{
+<a href=#264 id=264 data-nosnippet>264</a>        <span class="macro">error!</span>(
+<a href=#265 id=265 data-nosnippet>265</a>            error = %e,
+<a href=#266 id=266 data-nosnippet>266</a>            <span class="string">"Failed to persist audit event, nacking (dead-letter)"
+<a href=#267 id=267 data-nosnippet>267</a>        </span>);
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="comment">// requeue: false — dead-letter the message instead of silently
+<a href=#269 id=269 data-nosnippet>269</a>        // dropping it or requeuing (CQ-B05 / REQ-14 AC-5).
+<a href=#270 id=270 data-nosnippet>270</a>        </span><span class="kw">return </span>AuditIngestOutcome::NackDrop;
+<a href=#271 id=271 data-nosnippet>271</a>    }
+<a href=#272 id=272 data-nosnippet>272</a>
+<a href=#273 id=273 data-nosnippet>273</a>    AuditIngestOutcome::Ack
+<a href=#274 id=274 data-nosnippet>274</a>}
+<a href=#275 id=275 data-nosnippet>275</a>
+<a href=#276 id=276 data-nosnippet>276</a><span class="doccomment">/// Start consuming audit events from `axiam.audit.events` and persisting them.
+<a href=#277 id=277 data-nosnippet>277</a>///
+<a href=#278 id=278 data-nosnippet>278</a>/// SEC-022/055/SECHRD-08: Every `AuditEventMessage` is verified before
+<a href=#279 id=279 data-nosnippet>279</a>/// processing — the per-tenant subkey is derived from `master_signing_key` +
+<a href=#280 id=280 data-nosnippet>280</a>/// the message's `tenant_id` + `key_version`, then the `hmac_signature` is
+<a href=#281 id=281 data-nosnippet>281</a>/// checked against it. Messages with an invalid or missing signature are
+<a href=#282 id=282 data-nosnippet>282</a>/// nacked and never processed; there is no fail-open path (D-05c).
+<a href=#283 id=283 data-nosnippet>283</a>///
+<a href=#284 id=284 data-nosnippet>284</a>/// NEW-4 (hard cutover): after a valid signature, the message is additionally
+<a href=#285 id=285 data-nosnippet>285</a>/// rejected (nack, requeue:false) when its `key_version` is below
+<a href=#286 id=286 data-nosnippet>286</a>/// [`MIN_ACCEPTED_KEY_VERSION`], its `issued_at` is outside the ±`replay_skew`
+<a href=#287 id=287 data-nosnippet>287</a>/// freshness window, or its `nonce` has already been consumed (a duplicate in
+<a href=#288 id=288 data-nosnippet>288</a>/// the durable `nonce_repo` store is a replay). There is no v1 grace path.
+<a href=#289 id=289 data-nosnippet>289</a></span><span class="kw">pub async fn </span>start_audit_consumer&lt;A, N&gt;(
+<a href=#290 id=290 data-nosnippet>290</a>    channel: Channel,
+<a href=#291 id=291 data-nosnippet>291</a>    audit_repo: A,
+<a href=#292 id=292 data-nosnippet>292</a>    master_signing_key: Vec&lt;u8&gt;,
+<a href=#293 id=293 data-nosnippet>293</a>    nonce_repo: N,
+<a href=#294 id=294 data-nosnippet>294</a>    replay_skew: chrono::Duration,
+<a href=#295 id=295 data-nosnippet>295</a>) <span class="kw">where
+<a href=#296 id=296 data-nosnippet>296</a>    </span>A: AuditLogRepository + <span class="lifetime">'static</span>,
+<a href=#297 id=297 data-nosnippet>297</a>    N: AmqpNonceRepository + <span class="lifetime">'static</span>,
+<a href=#298 id=298 data-nosnippet>298</a>{
+<a href=#299 id=299 data-nosnippet>299</a>    <span class="macro">info!</span>(<span class="string">"Starting audit event AMQP consumer"</span>);
+<a href=#300 id=300 data-nosnippet>300</a>
+<a href=#301 id=301 data-nosnippet>301</a>    <span class="kw">let </span><span class="kw-2">mut </span>consumer = <span class="kw">match </span>channel
+<a href=#302 id=302 data-nosnippet>302</a>        .basic_consume(
+<a href=#303 id=303 data-nosnippet>303</a>            queues::AUDIT_EVENTS.into(),
+<a href=#304 id=304 data-nosnippet>304</a>            <span class="string">"axiam-audit-consumer"</span>.into(),
+<a href=#305 id=305 data-nosnippet>305</a>            BasicConsumeOptions::default(),
+<a href=#306 id=306 data-nosnippet>306</a>            FieldTable::default(),
+<a href=#307 id=307 data-nosnippet>307</a>        )
+<a href=#308 id=308 data-nosnippet>308</a>        .<span class="kw">await
+<a href=#309 id=309 data-nosnippet>309</a>    </span>{
+<a href=#310 id=310 data-nosnippet>310</a>        <span class="prelude-val">Ok</span>(c) =&gt; c,
+<a href=#311 id=311 data-nosnippet>311</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#312 id=312 data-nosnippet>312</a>            <span class="macro">error!</span>(error = %e, <span class="string">"Failed to start audit event consumer"</span>);
+<a href=#313 id=313 data-nosnippet>313</a>            <span class="kw">return</span>;
+<a href=#314 id=314 data-nosnippet>314</a>        }
+<a href=#315 id=315 data-nosnippet>315</a>    };
+<a href=#316 id=316 data-nosnippet>316</a>
+<a href=#317 id=317 data-nosnippet>317</a>    <span class="kw">while let </span><span class="prelude-val">Some</span>(delivery_result) = consumer.next().<span class="kw">await </span>{
+<a href=#318 id=318 data-nosnippet>318</a>        <span class="kw">let </span>delivery = <span class="kw">match </span>delivery_result {
+<a href=#319 id=319 data-nosnippet>319</a>            <span class="prelude-val">Ok</span>(d) =&gt; d,
+<a href=#320 id=320 data-nosnippet>320</a>            <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#321 id=321 data-nosnippet>321</a>                <span class="macro">error!</span>(error = %e, <span class="string">"Error receiving audit event delivery"</span>);
+<a href=#322 id=322 data-nosnippet>322</a>                <span class="kw">continue</span>;
+<a href=#323 id=323 data-nosnippet>323</a>            }
+<a href=#324 id=324 data-nosnippet>324</a>        };
+<a href=#325 id=325 data-nosnippet>325</a>
+<a href=#326 id=326 data-nosnippet>326</a>        <span class="kw">let </span>tag = delivery.delivery_tag;
+<a href=#327 id=327 data-nosnippet>327</a>
+<a href=#328 id=328 data-nosnippet>328</a>        <span class="comment">// Decode/verify/replay-check/parse/persist off the channel (broker-free,
+<a href=#329 id=329 data-nosnippet>329</a>        // unit-tested via `process_audit_event`). The loop only translates the
+<a href=#330 id=330 data-nosnippet>330</a>        // returned outcome into channel I/O below.
+<a href=#331 id=331 data-nosnippet>331</a>        </span><span class="kw">match </span>process_audit_event(
+<a href=#332 id=332 data-nosnippet>332</a>            <span class="kw-2">&amp;</span>delivery.data,
+<a href=#333 id=333 data-nosnippet>333</a>            <span class="kw-2">&amp;</span>audit_repo,
+<a href=#334 id=334 data-nosnippet>334</a>            <span class="kw-2">&amp;</span>master_signing_key,
+<a href=#335 id=335 data-nosnippet>335</a>            <span class="kw-2">&amp;</span>nonce_repo,
+<a href=#336 id=336 data-nosnippet>336</a>            replay_skew,
+<a href=#337 id=337 data-nosnippet>337</a>            Utc::now(),
+<a href=#338 id=338 data-nosnippet>338</a>        )
+<a href=#339 id=339 data-nosnippet>339</a>        .<span class="kw">await
+<a href=#340 id=340 data-nosnippet>340</a>        </span>{
+<a href=#341 id=341 data-nosnippet>341</a>            AuditIngestOutcome::Ack =&gt; {
+<a href=#342 id=342 data-nosnippet>342</a>                <span class="kw">if let </span><span class="prelude-val">Err</span>(e) = delivery.acker.ack(BasicAckOptions::default()).<span class="kw">await </span>{
+<a href=#343 id=343 data-nosnippet>343</a>                    <span class="macro">error!</span>(error = %e, delivery_tag = tag, <span class="string">"Failed to ack audit delivery"</span>);
+<a href=#344 id=344 data-nosnippet>344</a>                }
+<a href=#345 id=345 data-nosnippet>345</a>            }
+<a href=#346 id=346 data-nosnippet>346</a>            AuditIngestOutcome::NackDrop =&gt; {
+<a href=#347 id=347 data-nosnippet>347</a>                <span class="kw">let _ </span>= delivery
+<a href=#348 id=348 data-nosnippet>348</a>                    .acker
+<a href=#349 id=349 data-nosnippet>349</a>                    .nack(BasicNackOptions {
+<a href=#350 id=350 data-nosnippet>350</a>                        requeue: <span class="bool-val">false</span>,
+<a href=#351 id=351 data-nosnippet>351</a>                        ..BasicNackOptions::default()
+<a href=#352 id=352 data-nosnippet>352</a>                    })
+<a href=#353 id=353 data-nosnippet>353</a>                    .<span class="kw">await</span>;
+<a href=#354 id=354 data-nosnippet>354</a>            }
+<a href=#355 id=355 data-nosnippet>355</a>        }
+<a href=#356 id=356 data-nosnippet>356</a>    }
+<a href=#357 id=357 data-nosnippet>357</a>
+<a href=#358 id=358 data-nosnippet>358</a>    <span class="macro">warn!</span>(<span class="string">"Audit event AMQP consumer stream ended"</span>);
+<a href=#359 id=359 data-nosnippet>359</a>}
+<a href=#360 id=360 data-nosnippet>360</a>
+<a href=#361 id=361 data-nosnippet>361</a><span class="attr">#[cfg(test)]
+<a href=#362 id=362 data-nosnippet>362</a></span><span class="kw">mod </span>tests {
+<a href=#363 id=363 data-nosnippet>363</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#364 id=364 data-nosnippet>364</a>    <span class="kw">use </span>serde_json::json;
+<a href=#365 id=365 data-nosnippet>365</a>
+<a href=#366 id=366 data-nosnippet>366</a>    <span class="attr">#[test]
+<a href=#367 id=367 data-nosnippet>367</a>    </span><span class="kw">fn </span>the_stamp_overwrites_a_producer_supplied_key() {
+<a href=#368 id=368 data-nosnippet>368</a>        <span class="kw">let </span>out = stamp_ingested(<span class="prelude-val">Some</span>(<span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"server"</span>, <span class="string">"k"</span>: <span class="number">1</span>})));
+<a href=#369 id=369 data-nosnippet>369</a>        <span class="macro">assert_eq!</span>(out, <span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>, <span class="string">"k"</span>: <span class="number">1</span>}));
+<a href=#370 id=370 data-nosnippet>370</a>    }
+<a href=#371 id=371 data-nosnippet>371</a>
+<a href=#372 id=372 data-nosnippet>372</a>    <span class="attr">#[test]
+<a href=#373 id=373 data-nosnippet>373</a>    </span><span class="kw">fn </span>absent_and_null_metadata_become_the_stamp_alone() {
+<a href=#374 id=374 data-nosnippet>374</a>        <span class="macro">assert_eq!</span>(stamp_ingested(<span class="prelude-val">None</span>), <span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>}));
+<a href=#375 id=375 data-nosnippet>375</a>        <span class="macro">assert_eq!</span>(
+<a href=#376 id=376 data-nosnippet>376</a>            stamp_ingested(<span class="prelude-val">Some</span>(<span class="macro">json!</span>(null))),
+<a href=#377 id=377 data-nosnippet>377</a>            <span class="macro">json!</span>({<span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>})
+<a href=#378 id=378 data-nosnippet>378</a>        );
+<a href=#379 id=379 data-nosnippet>379</a>    }
+<a href=#380 id=380 data-nosnippet>380</a>
+<a href=#381 id=381 data-nosnippet>381</a>    <span class="attr">#[test]
+<a href=#382 id=382 data-nosnippet>382</a>    </span><span class="kw">fn </span>non_object_metadata_is_kept_under_producer_metadata() {
+<a href=#383 id=383 data-nosnippet>383</a>        <span class="macro">assert_eq!</span>(
+<a href=#384 id=384 data-nosnippet>384</a>            stamp_ingested(<span class="prelude-val">Some</span>(<span class="macro">json!</span>([<span class="number">1</span>, <span class="number">2</span>]))),
+<a href=#385 id=385 data-nosnippet>385</a>            <span class="macro">json!</span>({<span class="string">"producer_metadata"</span>: [<span class="number">1</span>, <span class="number">2</span>], <span class="string">"ingested_via"</span>: <span class="string">"amqp"</span>})
+<a href=#386 id=386 data-nosnippet>386</a>        );
+<a href=#387 id=387 data-nosnippet>387</a>    }
+<a href=#388 id=388 data-nosnippet>388</a>}
 </code></pre></div></section></main></body></html>

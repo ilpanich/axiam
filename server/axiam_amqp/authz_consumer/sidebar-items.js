@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["AuthzOutcome"],"fn":["process_authz_request","start_authz_consumer"]};
+window.SIDEBAR_ITEMS = {"enum":["AuthzOutcome"],"fn":["is_server_internal_queue","process_authz_request","response_routing_key","start_authz_consumer"]};

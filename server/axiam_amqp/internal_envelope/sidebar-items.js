@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INTERNAL_SCOPE","MAIL_PURPOSE","REJECTED_ACTION"],"enum":["Opened","Rejection"],"fn":["derive_internal_key","outbound_purpose","rejection_audit_entry"],"struct":["InternalEnvelope","InternalQueueGate","InternalSigner"]};

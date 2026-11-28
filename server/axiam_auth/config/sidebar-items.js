@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"constant":["TENANT_PATH_PREFIX"],"struct":["AuthConfig","DefaultTenantProblem"]};
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_SESSION_VALIDATION_CACHE_TTL_SECS","TENANT_PATH_PREFIX"],"struct":["AuthConfig","DefaultTenantProblem"]};

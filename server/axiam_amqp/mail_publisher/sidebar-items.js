@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["MailOutboundPublisher"]};
+window.SIDEBAR_ITEMS = {"fn":["seal_mail"],"struct":["MailOutboundPublisher"]};
